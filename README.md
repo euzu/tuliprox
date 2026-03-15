@@ -521,7 +521,8 @@ metadata_update:
 - `probe.backoff_jitter_percent` (default `20`): Random jitter percentage applied to resolve/probe retry backoff to avoid synchronized retries.
 - `probe.user_priority` (default `127`): Connection priority assigned to probe tasks. Uses the same nice-style scale as user priorities
   (lower value = higher priority). At `127` (lowest priority), probe connections are always the first to be evicted when a regular user connects.
-  Reduce this value (e.g. `64`) to give probes more access to provider slots.
+  Reduce this value (e.g. `64`) to give probes more access to provider slots. When a higher-priority request preempts a probe, the probe is
+  cancelled immediately and its provider capacity is released right away.
 - `tmdb.cooldown` (default `7d`): Cooldown duration after a TMDB lookup completed successfully but returned no match.
 - `tmdb.enabled` / `tmdb.api_key` / `tmdb.rate_limit_ms` / `tmdb.cache_duration_days` / `tmdb.language`: TMDB resolver settings.
 - `tmdb.match_threshold` (default `86`): TMDB match threshold for search results for TMDB ID resolution.
@@ -718,6 +719,8 @@ Attributes:
 - `grace_period_timeout_secs` default set to 4 seconds.
 - `grace_period_hold_stream` if set to `true`, the stream will only start after the grace period check has completed. Default is `true`.
 - `shared_burst_buffer_mb` optional (default `12`). Minimum burst buffer size (in MB) used for shared streams.
+- `hls_session_ttl_secs` optional (default `15`). Keeps a short-lived provider-account reservation for HLS between playlist and segment requests.
+- `catchup_session_ttl_secs` optional (default `45`). Keeps a short-lived provider-account reservation for catchup playback and seek/reconnect flows.
 
 ##### 1.7.1.1 `retry`
 
@@ -779,6 +782,30 @@ client.
 This is useful for players that might time out or error if they receive data and then a "connections exhausted" stream switch occurs. Default is
 `true`.
 
+##### 1.7.1.6 `hls_session_ttl_secs`
+
+HLS clients repeatedly connect, fetch a playlist or segment, disconnect, play for a while, and reconnect for the next request. Tuliprox therefore
+cannot know the exact moment when playback has ended.
+
+To keep the upstream account stable without holding a real provider slot open all the time, Tuliprox uses a short-lived reservation:
+
+- The real provider slot is held only during the active playlist or segment request.
+- Between requests, only the provider-account reservation is kept alive for the configured TTL.
+- Requests from the same client/session try to reuse the same provider account.
+- Channel switches from the same client can immediately take over the reservation and do not have to wait for the TTL to expire.
+
+This is useful for providers that abort HLS playback if the account changes in the middle of a session.
+
+##### 1.7.1.7 `catchup_session_ttl_secs`
+
+Catchup playback has the same account-affinity problem as HLS, especially during seeking, reconnects, and short gaps between requests.
+
+Tuliprox therefore keeps a short-lived reservation for catchup sessions:
+
+- The provider slot is released after the active request finishes.
+- The reservation remains alive for the configured TTL so follow-up requests can stay on the same provider account.
+- If the user switches to another stream, the new session from the same client can replace the old reservation immediately.
+
 #### 1.7.2 `cache`
 
 LRU-Cache is for resources. If it is `enabled`, the resources/images are persisted in the given `directory`. If the cache size exceeds `size`,
@@ -796,6 +823,8 @@ reverse_proxy:
   stream:
     throttle_kbps: 12500
     retry: true
+    hls_session_ttl_secs: 15
+    catchup_session_ttl_secs: 45
     buffer:
       enabled: true
       size: 1024

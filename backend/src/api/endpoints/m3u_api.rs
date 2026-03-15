@@ -1,9 +1,10 @@
 use crate::{
     api::{
         api_utils::{
-            create_session_fingerprint, force_provider_stream_response, get_user_target,
-            get_user_target_by_credentials, is_seek_request, local_stream_response, redirect, redirect_response,
-            resource_response, separate_number_and_remainder, stream_response, try_option_bad_request,
+            create_catchup_session_key, create_session_fingerprint, force_provider_stream_response,
+            get_catchup_session_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
+            local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
+            stream_response, try_option_bad_request,
             try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
         },
         endpoints::{
@@ -142,7 +143,11 @@ async fn m3u_api_stream(
     debug_if_enabled!(
         "ID chain for m3u endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
-    let session_key = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+    let session_key = if pli.item_type == PlaylistItemType::Catchup {
+        create_catchup_session_key(&user.username, virtual_id)
+    } else {
+        create_session_fingerprint(fingerprint, &user.username, virtual_id)
+    };
     let user_session = app_state.active_users.get_and_update_user_session(&user.username, &session_key).await;
 
     let session_url = if let Some(session) = &user_session {
@@ -170,9 +175,16 @@ async fn m3u_api_stream(
                 app_state,
                 session,
                 pli.to_stream_channel(target.id),
-                req_headers,
-                &input,
-                &user,
+                crate::api::api_utils::ForceStreamRequestContext {
+                    req_headers,
+                    input: &input,
+                    user: &user,
+                    session_reservation_ttl_secs: if pli.item_type == PlaylistItemType::Catchup {
+                        get_catchup_session_ttl_secs(app_state)
+                    } else {
+                        0
+                    },
+                },
             )
             .await
             .into_response();

@@ -166,9 +166,25 @@ active URL of the specified provider.
   item now stores retry/cooldown state for `resolve`, `probe`, and `tmdb`.
 - **TMDB No-Match Cooldown**: Added explicit TMDB cooldown handling. When TMDB resolve completes successfully but returns no match, TMDB reasons are
   suppressed for that item during cooldown to prevent endless requeue loops.
+- **HLS/Catchup Provider Reservations**: Added short-lived provider-account reservations for HLS and catchup playback so follow-up requests can stay
+  on the same provider account without holding a real provider slot open between requests. New config fields:
+  `reverse_proxy.stream.hls_session_ttl_secs` (default `15`) and `reverse_proxy.stream.catchup_session_ttl_secs` (default `45`).
+- **Channel Switch Friendly Reservations**: HLS/catchup reservations can now be taken over immediately by a new stream from the same client identity,
+  so channel switching does not have to wait for the reservation TTL to expire.
 - **Custom Stream Response Timeout**: Added support to limit how long custom fallback stream responses are served.
-  Set `config.custom_stream_response_timeout_secs` to a value `> 0` to auto-stop these streams after N seconds.
-  If unset or `0`, custom responses are streamed without timeout.
+  Set `config.custom_stream_response_timeout_secs` to a value `> 0` to auto-stop these streams after N seconds. If unset or `0`, custom responses
+  are streamed without timeout.
+
+## 🐛 Fixes
+
+- **Resolve Task Cooldown Persistence**: Resolve retry exhaustion is now persisted and consulted before enqueueing, so unresolved VOD/Series entries
+  are no longer recreated on every playlist refresh only to be skipped later in the worker.
+- **Probe Handle Capacity Leak**: Fixed provider-slot leaks when internal probe tasks timed out, were dropped, or were preempted. Capacity is now
+  released reliably even when the underlying probe task does not complete normally.
+- **Immediate Probe Preemption**: Higher-priority stream requests now cancel lower-priority probe tasks immediately instead of leaving a grace window
+  where the probe could continue holding upstream resources.
+- **Anonymous Socket Cleanup**: Tracked anonymous incoming sockets are now pruned automatically after a TTL so stale UI/API keepalive registrations do
+  not remain visible forever in active-socket statistics.
 
 ## ⚙️ New Settings
 
@@ -191,6 +207,9 @@ active URL of the specified provider.
   - FFprobe settings are configured under `metadata_update.ffprobe` (not under `video`).
   - Added `metadata_update.probe_fairness_resolve_burst` (default `200`) to control fairness between resolve and probe tasks.
     After N consecutive resolve-domain tasks, one pending probe-domain task is prioritized to avoid probe starvation.
+  - Added `reverse_proxy.stream.hls_session_ttl_secs` (`u64`, default `15`): keeps a short-lived provider-account reservation for HLS sessions.
+  - Added `reverse_proxy.stream.catchup_session_ttl_secs` (`u64`, default `45`): keeps a short-lived provider-account reservation for catchup
+    sessions and seek/reconnect flows.
   - Added `template_path` (optional): path to a template file (`template.yml`) or directory (`template.d` style).
 - **source.yml (input options)**:
   - Added `resolve_tmdb`: Triggers TMDB lookup if ID is missing.

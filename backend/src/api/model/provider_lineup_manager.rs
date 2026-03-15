@@ -160,6 +160,13 @@ impl fmt::Display for ProviderLineup {
 }
 
 impl ProviderLineup {
+    fn provider_names(&self) -> Vec<Arc<str>> {
+        match self {
+            ProviderLineup::Single(lineup) => vec![lineup.provider.name.clone()],
+            ProviderLineup::Multi(lineup) => lineup.provider_names(),
+        }
+    }
+
     async fn get_next(&self, grace_period_timeout_secs: u64) -> Option<Arc<ProviderConfig>> {
         match self {
             ProviderLineup::Single(lineup) => lineup.get_next(grace_period_timeout_secs).await,
@@ -281,6 +288,19 @@ impl MultiProviderLineup {
             .collect();
 
         Self { name: cfg_input.name.clone(), providers }
+    }
+
+    fn provider_names(&self) -> Vec<Arc<str>> {
+        let mut names = Vec::new();
+        for group in &self.providers {
+            match group {
+                ProviderPriorityGroup::SingleProviderGroup(provider) => names.push(provider.name.clone()),
+                ProviderPriorityGroup::MultiProviderGroup(_, providers) => {
+                    names.extend(providers.iter().map(|provider| provider.name.clone()));
+                }
+            }
+        }
+        names
     }
 
     /// Attempts to acquire the next available provider from a specific priority group.
@@ -777,11 +797,6 @@ impl ProviderLineupManager {
         allocation
     }
 
-    // Returns the next available provider connection
-    pub(crate) async fn acquire_connection(&self, input_name: &Arc<str>) -> ProviderAllocation {
-        self.acquire_connection_with_grace_override(input_name, true).await
-    }
-
     /// Acquire a provider connection, optionally allowing provider-side grace allocations.
     ///
     /// When `allow_grace` is `false`, the lineup will not allocate providers in `GracePeriod`,
@@ -865,6 +880,12 @@ impl ProviderLineupManager {
                 cfg
             }
         }
+    }
+
+    pub fn provider_names_for_input(&self, input_name: &Arc<str>) -> Vec<Arc<str>> {
+        let snapshot = self.snapshot.load_full();
+        Self::get_provider_config_by_name(input_name, &snapshot.providers)
+            .map_or_else(Vec::new, |(lineup, _)| lineup.provider_names())
     }
 
     pub async fn active_connections(&self) -> Option<HashMap<Arc<str>, usize>> {

@@ -511,6 +511,7 @@ impl ActiveUserManager {
         for session in &mut connection_data.sessions {
             if session.token == session_token {
                 session.ts = current_time_secs();
+                session.addr = *addr;
                 if &*session.stream_url != stream_url {
                     session.stream_url = stream_url.intern();
                 }

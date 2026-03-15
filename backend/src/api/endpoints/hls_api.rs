@@ -2,6 +2,7 @@ use crate::{
     api::{
         api_utils::{
             create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
+            get_hls_session_ttl_secs,
             get_stream_alternative_url, is_seek_request, local_stream_response, try_option_bad_request,
             try_unwrap_body, HeaderFilter,
         },
@@ -103,73 +104,103 @@ pub(in crate::api) async fn handle_hls_stream_request(
     let url = replace_url_extension(&normalized_hls_url, HLS_EXT);
     let server_info = app_state.app_config.get_user_server_info(user);
 
-    let (request_url, session_token) = match user_session {
-        Some(session) => {
-            let handle = if let Some(handle) = app_state
-                .active_provider
-                .acquire_exact_connection_with_grace(&session.provider, &fingerprint.addr, false, user.priority)
-                .await
-            {
-                Some(handle)
-            } else {
-                debug_if_enabled!(
-                    "HLS pinned provider {} unavailable for {}; falling back to lineup allocation",
-                    sanitize_sensitive_info(&session.provider),
-                    sanitize_sensitive_info(&fingerprint.addr.to_string())
-                );
-                app_state.active_provider.acquire_connection_with_grace(&input.name, &fingerprint.addr, false, user.priority).await
-            };
+    let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
+    let (request_url, session_token, provider_handle) = if let Some(session) = user_session {
+        let provider_handle = if let Some(handle) = app_state
+            .active_provider
+            .acquire_connection_with_grace_for_session(
+                &input.name,
+                &fingerprint.addr,
+                false,
+                user.priority,
+                Some(session.token.as_str()),
+            )
+            .await
+        {
+            Some(handle)
+        } else {
+            debug_if_enabled!(
+                "HLS pinned provider {} unavailable for {}; falling back to lineup allocation",
+                sanitize_sensitive_info(&session.provider),
+                sanitize_sensitive_info(&fingerprint.addr.to_string())
+            );
+            app_state.active_provider.acquire_connection_with_grace(&input.name, &fingerprint.addr, false, user.priority).await
+        };
 
-            match handle {
-                Some(provider_handle) => match provider_handle.allocation {
-                    ProviderAllocation::Exhausted => (url, None),
-                    ProviderAllocation::Available(cfg) | ProviderAllocation::GracePeriod(cfg) => {
-                        let stream_url = get_stream_alternative_url(&url, input, &cfg);
-                        let session_token = app_state
-                            .active_users
-                            .create_user_session(
-                                user,
-                                &session.token,
-                                virtual_id,
-                                &cfg.name,
-                                &stream_url,
-                                &fingerprint.addr,
-                                connection_permission,
-                            )
-                            .await;
-                        (stream_url, Some(session_token))
-                    }
-                },
-                None => (url, None),
-            }
-        }
-        None => match app_state.active_provider.get_next_provider(&input.name).await {
-            Some(provider_cfg) => {
-                let stream_url = get_stream_alternative_url(&url, input, &provider_cfg);
-                debug_if_enabled!(
-                        "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
-                        sanitize_sensitive_info(&user.username),
-                        provider_cfg.name,
-                        sanitize_sensitive_info(&stream_url)
-                    );
-                let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+        match provider_handle.as_ref().map(|handle| &handle.allocation) {
+            Some(ProviderAllocation::Exhausted) => (url, None, provider_handle),
+            Some(ProviderAllocation::Available(cfg) | ProviderAllocation::GracePeriod(cfg)) => {
+                let stream_url = get_stream_alternative_url(&url, input, cfg);
                 let session_token = app_state
                     .active_users
                     .create_user_session(
                         user,
-                        &user_session_token,
+                        &session.token,
                         virtual_id,
-                        &provider_cfg.name,
+                        &cfg.name,
                         &stream_url,
                         &fingerprint.addr,
                         connection_permission,
                     )
                     .await;
-                (stream_url, Some(session_token))
+                app_state
+                    .active_provider
+                    .refresh_provider_reservation(&cfg.name, &session_token, hls_session_ttl_secs)
+                    .await;
+                (stream_url, Some(session_token), provider_handle)
             }
-            None => (url, None),
-        },
+            None => (url, None, None),
+        }
+    } else {
+        let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+        match app_state
+            .active_provider
+            .acquire_connection_with_grace_for_session(
+                &input.name,
+                &fingerprint.addr,
+                false,
+                user.priority,
+                Some(&user_session_token),
+            )
+            .await
+        {
+            Some(provider_handle) => match provider_handle.allocation.get_provider_config() {
+                Some(provider_cfg) => {
+                    let stream_url = get_stream_alternative_url(&url, input, &provider_cfg);
+                    debug_if_enabled!(
+                            "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
+                            sanitize_sensitive_info(&user.username),
+                            provider_cfg.name,
+                            sanitize_sensitive_info(&stream_url)
+                        );
+                    let session_token = app_state
+                        .active_users
+                        .create_user_session(
+                            user,
+                            &user_session_token,
+                            virtual_id,
+                            &provider_cfg.name,
+                            &stream_url,
+                            &fingerprint.addr,
+                            connection_permission,
+                        )
+                        .await;
+                    app_state
+                        .active_provider
+                        .refresh_provider_reservation(&provider_cfg.name, &session_token, hls_session_ttl_secs)
+                        .await;
+                    (stream_url, Some(session_token), Some(provider_handle))
+                }
+                None => (url, None, Some(provider_handle)),
+            },
+            None => (url, None, None),
+        }
     };
+
+    // Playlist requests only need the chosen provider account to derive the URL and pin the session.
+    // Holding the provider slot until the first segment request causes stale active connections and
+    // breaks forced same-account reuse on the next HLS/Catchup stream request.
+    app_state.connection_manager.release_provider_handle(provider_handle).await;
 
     // Don't forward Range on playlist fetch; segments use original headers in provider path
     let filter_header: HeaderFilter = Some(Box::new(|name: &str| !name.eq_ignore_ascii_case("range")));
@@ -314,9 +345,18 @@ async fn hls_api_stream(
     );
 
     debug_if_enabled!("ID chain for hls endpoint: request_stream_id={} -> virtual_id={virtual_id}", params.stream_id);
-    let user_session_token = create_session_fingerprint(&fingerprint, &user.username, virtual_id);
-    let mut user_session =
-        app_state.active_users.get_and_update_user_session(&user.username, &user_session_token).await;
+    let encrypt_secret = app_state.get_encrypt_secret();
+    let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, &params.token) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    let lookup_session_token = decoded_hls_token
+        .0
+        .clone()
+        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id));
+    let mut user_session = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, &lookup_session_token)
+        .await;
 
     if let Some(session) = &mut user_session {
         if session.permission == UserConnectionPermission::Exhausted {
@@ -337,10 +377,9 @@ async fn hls_api_stream(
             .into_response();
         }
 
-        let encrypt_secret = app_state.get_encrypt_secret();
-        let hls_url = match get_hls_session_token_and_url_from_token(&encrypt_secret, &params.token) {
-            Some((Some(session_token), hls_url)) if session.token.eq(&session_token) => hls_url,
-            Some((None, hls_url)) => hls_url,
+        let hls_url = match decoded_hls_token {
+            (Some(session_token), hls_url) if session.token.eq(&session_token) => hls_url,
+            (None, hls_url) => hls_url,
             _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
         };
         let hls_url = hls_url.intern();
@@ -354,9 +393,12 @@ async fn hls_api_stream(
                     &app_state,
                     session,
                     stream_channel,
-                    &req_headers,
-                    &input,
-                    &user,
+                    crate::api::api_utils::ForceStreamRequestContext {
+                        req_headers: &req_headers,
+                        input: &input,
+                        user: &user,
+                        session_reservation_ttl_secs: get_hls_session_ttl_secs(&app_state),
+                    },
                 )
                 .await
                 .into_response();
@@ -409,7 +451,18 @@ async fn hls_api_stream(
         }
 
         let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
-        force_provider_stream_response(&fingerprint, &app_state, session, stream_channel, &req_headers, &input, &user)
+        force_provider_stream_response(
+            &fingerprint,
+            &app_state,
+            session,
+            stream_channel,
+            crate::api::api_utils::ForceStreamRequestContext {
+                req_headers: &req_headers,
+                input: &input,
+                user: &user,
+                session_reservation_ttl_secs: get_hls_session_ttl_secs(&app_state),
+            },
+        )
             .await
             .into_response()
     } else {

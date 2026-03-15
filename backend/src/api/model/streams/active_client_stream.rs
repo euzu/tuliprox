@@ -13,7 +13,7 @@ use crate::{
 use axum::http::{header::USER_AGENT, HeaderMap};
 use bytes::Bytes;
 use futures::{task::AtomicWaker, Future, Stream, StreamExt};
-use log::{debug, error, info};
+use log::{error, info, trace};
 use shared::{
     model::{StreamChannel, UserConnectionPermission, VirtualId},
     utils::sanitize_sensitive_info,
@@ -661,7 +661,7 @@ fn stream_grace_period(
         None
     };
 
-    debug!("grace hold stream {hold_stream}");
+    trace!("grace hold stream {hold_stream}");
 
     if provider_grace_check.is_some() || user_grace_check.is_some() {
         let stream_strategy_flag = Arc::new(AtomicU8::new(
