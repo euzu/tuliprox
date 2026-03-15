@@ -10,43 +10,6 @@ die() {
   exit 1
 }
 
-maybe_optimize_wasm() {
-  local wasm_opt_version
-  local wasm_file
-  local tmp_file
-  local -a wasm_files
-
-  if ! command -v wasm-opt >/dev/null 2>&1; then
-    die "'wasm-opt' is required for frontend builds. Install the wasm tools with './bin/install_wasm_tools.sh 128' and add the returned bin path to PATH."
-  fi
-
-  wasm_opt_version="$(wasm-opt --version 2>/dev/null || echo "unknown")"
-
-  shopt -s nullglob
-  wasm_files=(dist/*_bg.wasm)
-  shopt -u nullglob
-
-  if [ "${#wasm_files[@]}" -eq 0 ]; then
-    die "No frontend wasm artifact found for wasm-opt."
-  fi
-
-  for wasm_file in "${wasm_files[@]}"; do
-    tmp_file="$(mktemp "${TMPDIR:-/tmp}/tuliprox-wasm-opt.XXXXXX.wasm")"
-    if wasm-opt -O --all-features --output="${tmp_file}" "${wasm_file}"; then
-      if mv "${tmp_file}" "${wasm_file}"; then
-        echo "✅ Optimized $(basename "${wasm_file}") with ${wasm_opt_version}"
-        continue
-      fi
-
-      rm -f "${tmp_file}"
-      die "Failed to replace $(basename "${wasm_file}") with the optimized wasm artifact."
-    fi
-
-    rm -f "${tmp_file}"
-    die "wasm-opt failed for $(basename "${wasm_file}") with ${wasm_opt_version}. Install the wasm tools with './bin/install_wasm_tools.sh 128' and add the returned bin path to PATH."
-  done
-}
-
 MODE="${1:-release}"
 case "${MODE}" in
   release)
@@ -69,7 +32,6 @@ fi
 cd "${WORKING_DIR}/frontend"
 rm -rf dist
 env -u NO_COLOR RUSTFLAGS="--remap-path-prefix $HOME=~" trunk "${TRUNK_ARGS[@]}"
-maybe_optimize_wasm
 
 if [ ! -d build/docs ]; then
   die "Documentation output directory 'frontend/build/docs' does not exist."
