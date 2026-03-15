@@ -1084,21 +1084,7 @@ impl MetadataUpdateManager {
             (
                 UpdateTask::ResolveVod { reason: r1, delay: d1, source_last_modified: lm1, .. },
                 UpdateTask::ResolveVod { reason: r2, delay: d2, source_last_modified: lm2, .. },
-            ) => {
-                let previous_reason = *r1;
-                let previous_delay = *d1;
-                let previous_last_modified = *lm1;
-                *r1 |= r2;
-                *d1 = min(*d1, d2);
-                *lm1 = match (*lm1, lm2) {
-                    (Some(left), Some(right)) => Some(left.max(right)),
-                    (None, some @ Some(_)) => some,
-                    (some @ Some(_), None) => some,
-                    (None, None) => None,
-                };
-                changed = *r1 != previous_reason || *d1 != previous_delay || *lm1 != previous_last_modified;
-            }
-            (
+            ) | (
                 UpdateTask::ResolveSeries { reason: r1, delay: d1, source_last_modified: lm1, .. },
                 UpdateTask::ResolveSeries { reason: r2, delay: d2, source_last_modified: lm2, .. },
             ) => {
@@ -1109,8 +1095,7 @@ impl MetadataUpdateManager {
                 *d1 = min(*d1, d2);
                 *lm1 = match (*lm1, lm2) {
                     (Some(left), Some(right)) => Some(left.max(right)),
-                    (None, some @ Some(_)) => some,
-                    (some @ Some(_), None) => some,
+                    (None, some @ Some(_)) | (some @ Some(_), None) => some,
                     (None, None) => None,
                 };
                 changed = *r1 != previous_reason || *d1 != previous_delay || *lm1 != previous_last_modified;
