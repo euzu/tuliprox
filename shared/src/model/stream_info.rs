@@ -165,8 +165,7 @@ fn normalize_container(raw: &str) -> Option<String> {
         "ts" => "mpegts",
         "m3u8" => "hls",
         "mpd" => "dash",
-        "mp4" | "mkv" | "avi" | "flv" | "mov" | "wmv" | "webm"
-        | "mpegts" | "mpeg" | "mpg" | "ogg" | "ogv" | "3gp"
+        "mp4" | "mkv" | "avi" | "flv" | "mov" | "wmv" | "webm" | "mpegts" | "mpeg" | "mpg" | "ogg" | "ogv" | "3gp"
         | "hls" | "dash" | "m4v" | "asf" | "vob" | "mts" | "m2ts" => &value,
         _ => return None,
     };
