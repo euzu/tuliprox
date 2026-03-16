@@ -157,17 +157,19 @@ fn get_u64(value: &Value, keys: &[&str]) -> Option<u64> {
 }
 
 fn normalize_container(raw: &str) -> Option<String> {
-    let value = raw.trim().to_ascii_lowercase();
+    let value = raw.trim().trim_start_matches('.').to_ascii_lowercase();
     if value.is_empty() {
         return None;
     }
     let normalized = match value.as_str() {
-        "ts" => "mpegts".to_string(),
-        "m3u8" => "hls".to_string(),
-        "mpd" => "dash".to_string(),
-        _ => value,
+        "ts" => "mpegts",
+        "m3u8" => "hls",
+        "mpd" => "dash",
+        "mp4" | "mkv" | "avi" | "flv" | "mov" | "wmv" | "webm" | "mpegts" | "mpeg" | "mpg" | "ogg" | "ogv" | "3gp"
+        | "hls" | "dash" | "m4v" | "asf" | "vob" | "mts" | "m2ts" => &value,
+        _ => return None,
     };
-    Some(normalized)
+    Some(normalized.to_string())
 }
 
 fn normalize_video_codec(raw: &str) -> String {
