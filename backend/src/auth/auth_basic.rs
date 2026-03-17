@@ -28,9 +28,9 @@ impl AuthBasic {
         let authorization = req
             .headers
             .get(axum::http::header::AUTHORIZATION)
-            .ok_or((StatusCode::BAD_REQUEST, "Authorization header is missing"))?
+            .ok_or((StatusCode::FORBIDDEN, "Authorization header is missing"))?
             .to_str()
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Authorization header contains invalid characters"))?;
+            .map_err(|_| (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
 
         let split = authorization.split_once(' ');
         match split {
@@ -38,7 +38,7 @@ impl AuthBasic {
                 let decoded = decode(contents)?;
                 Ok(Self::from_header(decoded))
             },
-            _ => Err((StatusCode::BAD_REQUEST, "`Authorization` header must be a basic auth")),
+            _ => Err((StatusCode::FORBIDDEN, "`Authorization` header must be a basic auth")),
         }
     }
 }
@@ -46,14 +46,14 @@ impl AuthBasic {
 /// Decodes the two parts of basic auth using the colon
 fn decode(input: &str) -> Result<(String, String), Rejection> {
     // Decode from base64 into a string
-    let decoded = general_purpose::STANDARD.decode(input).map_err(|_|  (StatusCode::BAD_REQUEST, "Authorization header contains invalid characters"))?;
-    let decoded = String::from_utf8(decoded).map_err(|_| (StatusCode::BAD_REQUEST, "Authorization header contains invalid characters"))?;
+    let decoded = general_purpose::STANDARD.decode(input).map_err(|_|  (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
+    let decoded = String::from_utf8(decoded).map_err(|_| (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
 
 
     // Return depending on if password is present
     if let Some((username, password)) = decoded.split_once(':') {
         Ok((username.trim().to_string(), password.trim().to_string()))
     } else {
-        Err((StatusCode::BAD_REQUEST, "Authorization header contains no password"))
+        Err((StatusCode::FORBIDDEN, "Authorization header contains no password"))
     }
 }

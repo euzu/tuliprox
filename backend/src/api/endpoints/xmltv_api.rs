@@ -2,7 +2,7 @@ use crate::{
     api::{
         api_utils::{
             empty_json_response_as_array, get_user_target, get_user_target_by_credentials, internal_server_error,
-            resource_response, stream_json_or_bin_response_stream, try_unwrap_body,
+            resource_response, stream_json_or_bin_response_stream, try_option_forbidden, try_unwrap_body,
         },
         model::{AppState, UserApiRequest},
     },
@@ -19,7 +19,7 @@ use crate::{
 };
 use axum::response::IntoResponse;
 use chrono::{DateTime, TimeZone};
-use log::{error, trace};
+use log::{debug, error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
@@ -463,9 +463,13 @@ async fn xmltv_api(
     axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let Some((user, target)) = get_user_target(&api_req, &app_state) else {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
-    };
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
+        get_user_target(&api_req, &app_state),
+        auth_status,
+        false,
+        format!("Could not find any user for xmltv api {}", api_req.username)
+    );
 
     if user.permission_denied(&app_state) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
@@ -487,9 +491,13 @@ async fn epg_api_resource(
     axum::extract::Path((username, password, resource)): axum::extract::Path<(String, String, String)>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let Some((user, _target)) = get_user_target_by_credentials(&username, &password, &api_req, &app_state) else {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
-    };
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, _target) = try_option_forbidden!(
+        get_user_target_by_credentials(&username, &password, &api_req, &app_state),
+        auth_status,
+        false,
+        format!("Could not find any user for epg resource {username}")
+    );
     if user.permission_denied(&app_state) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }

@@ -209,6 +209,15 @@ impl AppConfig {
         self.api_proxy.load().as_ref().as_ref().and_then(|api_proxy| api_proxy.get_user_credentials(username))
     }
 
+    pub fn get_auth_error_status(&self) -> axum::http::StatusCode {
+        let status = self
+            .api_proxy
+            .load()
+            .as_ref()
+            .map_or(shared::utils::default_auth_error_status(), |api_proxy| api_proxy.auth_error_status);
+        axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::FORBIDDEN)
+    }
+
     pub fn get_input_by_name(&self, input_name: &Arc<str>) -> Option<Arc<ConfigInput>> {
         let sources = self.sources.load();
         for input in &sources.inputs {

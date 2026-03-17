@@ -201,6 +201,7 @@ fn create_default_draft(home_path: &str) -> AppConfigDto {
             server: vec![create_default_api_proxy_server()],
             user: vec![],
             use_user_db: false,
+            auth_error_status: shared::utils::default_auth_error_status(),
         }),
     }
 }
@@ -243,6 +244,7 @@ async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
             server: vec![create_default_api_proxy_server()],
             user: vec![],
             use_user_db: false,
+            auth_error_status: shared::utils::default_auth_error_status(),
         });
     }
     draft
@@ -323,6 +325,7 @@ fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
         server: vec![create_default_api_proxy_server()],
         user: vec![],
         use_user_db: false,
+        auth_error_status: 0,
     })
 }
 

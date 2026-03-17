@@ -1,7 +1,7 @@
 use crate::{
     error::{info_err_res, TuliproxError},
     model::ProxyUserCredentialsDto,
-    utils::{is_blank_optional_string, is_false},
+    utils::{default_auth_error_status, is_blank_optional_string, is_default_auth_error_status, is_false},
 };
 use std::collections::HashSet;
 
@@ -34,6 +34,9 @@ pub struct ApiProxyConfigDto {
     pub user: Vec<TargetUserDto>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub use_user_db: bool,
+    /// HTTP status code returned for authentication failures (default: 403).
+    #[serde(default = "default_auth_error_status", skip_serializing_if = "is_default_auth_error_status")]
+    pub auth_error_status: u16,
 }
 
 impl ApiProxyServerInfoDto {

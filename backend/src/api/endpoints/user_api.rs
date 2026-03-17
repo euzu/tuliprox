@@ -114,7 +114,7 @@ async fn playlist_categories(
                 .body(axum::body::Body::from_stream(json_stream)));
         }
     }
-    axum::http::StatusCode::BAD_REQUEST.into_response()
+    axum::http::StatusCode::FORBIDDEN.into_response()
 }
 
 async fn save_playlist_bouquet(
@@ -138,7 +138,7 @@ async fn save_playlist_bouquet(
             }
         }
     }
-    axum::http::StatusCode::BAD_REQUEST.into_response()
+    axum::http::StatusCode::FORBIDDEN.into_response()
 }
 
 async fn playlist_bouquet(

@@ -303,6 +303,7 @@ async fn save_config_api_proxy_config(
     let updated_api_proxy = ApiProxyConfig {
         use_user_db: req_api_proxy.use_user_db,
         server: req_api_proxy.server.iter().map(Into::into).collect(),
+        auth_error_status: req_api_proxy.auth_error_status,
         ..base
     };
 

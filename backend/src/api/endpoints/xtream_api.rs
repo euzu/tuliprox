@@ -8,7 +8,7 @@ use crate::{
             empty_json_response_as_object, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request,
             local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder, stream_response,
-            try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::handle_hls_stream_request,
@@ -220,9 +220,11 @@ async fn xtream_player_api_stream(
     //     debug!("{}", sanitize_sensitive_info(&message));
     // }
 
+    let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = match user_target {
-        None => try_option_bad_request!(
+        None => try_option_forbidden!(
             get_user_target_by_credentials(stream_req.username, stream_req.password, api_req, app_state),
+            auth_status,
             false,
             format!("Could not find any user for xc stream {}", stream_req.username)
         ),
@@ -572,8 +574,10 @@ async fn xtream_player_api_resource(
     app_state: &Arc<AppState>,
     resource_req: ApiStreamRequest<'_>,
 ) -> impl IntoResponse {
-    let (user, target) = try_option_bad_request!(
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
         get_user_target_by_credentials(resource_req.username, resource_req.password, api_req, app_state),
+        auth_status,
         false,
         format!("Could not find any user xc resource {}", resource_req.username)
     );
@@ -700,8 +704,10 @@ async fn xtream_player_api_timeshift_stream(
     let duration = get_non_empty(&timeshift_request.duration, &api_req.duration, &api_form_req.duration);
     let start_time = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
 
-    let (user, target) = try_option_bad_request!(
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
         get_user_target_by_credentials(&username, &password, &api_form_req, &app_state),
+        auth_status,
         false,
         format!("Could not find any user {username}")
     );
@@ -748,8 +754,10 @@ async fn xtream_player_api_timeshift_query_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let (user, target) = try_option_bad_request!(
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
         get_user_target_by_credentials(username, password, &api_query_req, &app_state),
+        auth_status,
         false,
         format!("Could not find any user {username}")
     );
@@ -1113,8 +1121,14 @@ macro_rules! skip_flag_optional {
 
 #[allow(clippy::too_many_lines)]
 async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
-    let user_target = get_user_target(&api_req, app_state);
-    if let Some((user, target)) = user_target {
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
+        get_user_target(&api_req, app_state),
+        auth_status,
+        false,
+        format!("Could not find any user for xc player api {}", api_req.username)
+    );
+    {
         if !target.has_output(TargetType::Xtream) {
             return axum::response::Json(get_user_info(&user, app_state).await).into_response();
         }
@@ -1250,15 +1264,6 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
                 api_utils::empty_json_list_response().into_response()
             }
         }
-    } else {
-        match (user_target.is_none(), api_req.action.is_empty()) {
-            (true, _) => debug!("Can't find user!"),
-            (_, true) => debug!("Parameter action is empty!"),
-            _ => debug!("Bad request!"),
-        }
-
-
-        axum::http::StatusCode::BAD_REQUEST.into_response()
     }
 }
 

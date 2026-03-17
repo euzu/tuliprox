@@ -35,6 +35,7 @@ const LABEL_PATH: &str = "LABEL.PATH";
 const LABEL_WEB_ROOT: &str = "LABEL.WEB_ROOT";
 const LABEL_API_PROXY_CONFIG: &str = "LABEL.API_PROXY_CONFIG";
 const LABEL_USE_USER_DB: &str = "LABEL.USE_USER_DB";
+const LABEL_AUTH_ERROR_STATUS: &str = "LABEL.AUTH_ERROR_STATUS";
 const LABEL_SERVER: &str = "LABEL.SERVER";
 const LABEL_ADD_SERVER: &str = "LABEL.ADD_SERVER";
 const MSG_NON_UNIQUE_SERVER_NAME: &str = "MESSAGES.SAVE.API_PROXY_CONFIG.NON_UNIQUE_SERVER_NAME";
@@ -137,6 +138,7 @@ generate_form_reducer!(
     fields {
         Server => server: Vec<ApiProxyServerInfoDto>,
         UseUserDb => use_user_db: bool,
+        AuthErrorStatus => auth_error_status: u16,
     }
 );
 
@@ -459,11 +461,12 @@ pub fn ApiConfigView() -> Html {
         html! {
             <Card class="tp__api-config-card">
                 <div class="tp__config-view-page__title tp__api-config-view__section-title">{translate.t(LABEL_API_PROXY_CONFIG)}</div>
-                <div class="tp__api-config-section">
+                <div class="tp__api-config-view__section">
                     { edit_field_bool!(form_state_api_proxy_config, translate.t(LABEL_USE_USER_DB), use_user_db, ApiProxyConfigFormAction::UseUserDb) }
+                    { edit_field_number_u16!(form_state_api_proxy_config, translate.t(LABEL_AUTH_ERROR_STATUS), auth_error_status, ApiProxyConfigFormAction::AuthErrorStatus) }
                 </div>
 
-                <div class="tp__api-config-section-header tp__list-list__header">
+                <div class="tp__api-config-view__section-header tp__list-list__header">
                     <div class="tp__api-config-view__section-title">{translate.t(LABEL_SERVER)}</div>
                     <TextButton class="primary" name="add_server" icon="Add" title={translate.t(LABEL_ADD_SERVER)} onclick={handle_add_server.clone()} />
                 </div>
@@ -493,8 +496,9 @@ pub fn ApiConfigView() -> Html {
         html! {
             <Card class="tp__api-config-card">
                 <div class="tp__config-view-page__title tp__api-config-view__section-title">{translate.t(LABEL_API_PROXY_CONFIG)}</div>
-                <div class="tp__api-config-section">
+                <div class="tp__api-config-view__section">
                     { config_field_bool!(form_state_api_proxy_config.form, translate.t(LABEL_USE_USER_DB), use_user_db) }
+                    { config_field!(form_state_api_proxy_config.form, translate.t(LABEL_AUTH_ERROR_STATUS), auth_error_status) }
                 </div>
                 <div class="tp__api-config-view__section-title">{translate.t(LABEL_SERVER)}</div>
                 <div class="tp__api-config-view__proxy-server tp__api-config-view__proxy-server__view">
