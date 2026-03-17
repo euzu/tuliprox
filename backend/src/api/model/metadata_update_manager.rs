@@ -1610,6 +1610,11 @@ impl InputWorker {
                                 input_name, task_for_execution, reasons, runtime_settings.no_change_cache_ttl_secs
                             );
                             self.recently_completed_no_change.insert(current_key.clone(), (Instant::now(), reasons));
+                            // Set producer-side enqueue suppression so that future playlist
+                            // processing cycles do not re-queue this task during the TTL.
+                            let suppressed_until_ts =
+                                now_ts.saturating_add(i64::try_from(runtime_settings.no_change_cache_ttl_secs).unwrap_or(i64::MAX));
+                            self.set_resolve_enqueue_suppression(&current_key, suppressed_until_ts);
                         } else {
                             self.recently_completed_no_change.remove(&current_key);
                         }

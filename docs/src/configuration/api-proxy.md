@@ -7,6 +7,7 @@
 - `server`
 - `user`
 - `use_user_db`
+- `auth_error_status`
 
 ## `server`
 
@@ -126,6 +127,20 @@ If `use_user_db: true` is enabled, users are stored in the user database instead
 The Web UI should then be used to add, edit or remove users.
 
 Tuliprox migrates users automatically when switching between YAML and DB mode.
+
+## `auth_error_status`
+
+HTTP status code returned when authentication fails (invalid or missing credentials).
+Defaults to `403` (Forbidden).
+
+```yaml
+auth_error_status: 403
+```
+
+This setting applies to the streaming and playlist API endpoints
+(`player_api.php`, `get.php`, `xmltv.php`, stream paths, resource paths).
+It does **not** affect the Web UI / REST API (`/api/v1/…`) or HDHomeRun endpoints,
+which always use their own fixed status codes.
 
 ## Access URLs
 

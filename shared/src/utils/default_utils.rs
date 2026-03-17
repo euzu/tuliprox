@@ -97,6 +97,9 @@ pub const fn is_default_kick_secs(v: &u64) -> bool { *v == default_kick_secs() }
 pub const fn default_token_ttl_mins() -> u32 { 30 }
 pub const fn is_default_token_ttl_mins(v: &u32) -> bool { *v == default_token_ttl_mins() }
 
+pub const fn default_auth_error_status() -> u16 { 403 }
+pub const fn is_default_auth_error_status(v: &u16) -> bool { *v == default_auth_error_status() }
+
 pub const fn default_epg_match_threshold() -> u16 { 80 }
 pub const fn is_default_epg_match_threshold(v: &u16) -> bool { *v == default_epg_match_threshold() }
 pub const fn default_epg_best_match_threshold() -> u16 { 95 }

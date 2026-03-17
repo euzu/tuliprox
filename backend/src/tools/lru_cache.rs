@@ -6,6 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 use crate::utils::{trace_if_enabled};
 
+const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
+
 #[inline]
 fn encode_cache_key(key: &str) -> String {
     encode_base64_hash(key)
@@ -40,9 +42,22 @@ impl LRUResourceCache {
     pub fn new(capacity: usize, cache_dir: &str) -> Self {
         // Estimate: assume average file size of 256KB
         let estimated_entries = (capacity / (256 * 1024)).clamp(64, 16384);
+        let cache_dir = PathBuf::from(cache_dir);
+        let cache_dir_clone = cache_dir.clone();
+        tokio::task::spawn(async move {
+            if tokio::fs::create_dir_all(&cache_dir_clone).await.is_ok() {
+                let tag_path = cache_dir_clone.join(CACHEDIR_TAG);
+                if !tag_path.exists() {
+                    let _ = tokio::fs::write(
+                        &tag_path,
+                        "Signature: 8a477f597d28d172789f06886806bc55\n# This file marks the directory as a cache directory for backup programs.\n",
+                    ).await;
+                }
+            }
+        });
         Self {
             capacity,
-            cache_dir: PathBuf::from(cache_dir),
+            cache_dir,
             current_size: 0,
             cache: HashMap::<String, (PathBuf, Option<String>, usize)>::with_capacity(estimated_entries),
             usage_order: VecDeque::new(),
@@ -62,6 +77,9 @@ impl LRUResourceCache {
             let path = entry.path();
             if let Some(os_file_name) = path.file_name() {
                 let file_name = String::from(os_file_name.to_string_lossy());
+                if file_name == CACHEDIR_TAG {
+                    return;
+                }
                 let (key, mime_type) = if let Some((part1, part2)) = file_name.split_once('.') {
                     (part1.to_string(), String::from_utf8(decode_base64_string(part2)).ok())
                 } else {

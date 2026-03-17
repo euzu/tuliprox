@@ -197,11 +197,7 @@ fn create_default_draft(home_path: &str) -> AppConfigDto {
         sources: SourcesConfigDto::default(),
         mappings: None,
         templates: None,
-        api_proxy: Some(ApiProxyConfigDto {
-            server: vec![create_default_api_proxy_server()],
-            user: vec![],
-            use_user_db: false,
-        }),
+        api_proxy: Some(default_api_proxy_config()),
     }
 }
 
@@ -239,11 +235,7 @@ async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
     }
 
     if draft.api_proxy.as_ref().is_some_and(|a| a.server.is_empty()) {
-        draft.api_proxy = Some(ApiProxyConfigDto {
-            server: vec![create_default_api_proxy_server()],
-            user: vec![],
-            use_user_db: false,
-        });
+        draft.api_proxy = Some(default_api_proxy_config());
     }
     draft
 }
@@ -318,12 +310,15 @@ fn resolve_setup_web_dir(web_root: &FsPath, home_path: &str) -> Option<PathBuf> 
     None
 }
 
-fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
-    draft.api_proxy.clone().unwrap_or_else(|| ApiProxyConfigDto {
+fn default_api_proxy_config() -> ApiProxyConfigDto {
+    ApiProxyConfigDto {
         server: vec![create_default_api_proxy_server()],
-        user: vec![],
-        use_user_db: false,
-    })
+        ..ApiProxyConfigDto::default()
+    }
+}
+
+fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
+    draft.api_proxy.clone().unwrap_or_else(default_api_proxy_config)
 }
 
 fn setup_templates_from_request(app_config: &AppConfigDto) -> Option<Vec<PatternTemplate>> {

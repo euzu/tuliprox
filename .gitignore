@@ -1,3 +1,4 @@
+.tools
 dist
 /resources/*.ts
 /release
