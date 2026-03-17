@@ -39,40 +39,43 @@
   }
 
   &__tech-chip {
+    font-weight: bold;
+    padding: var(--padding-micro) var(--padding-small) !important;
+
     &--container {
-      color: var(--stream-tech-chip-container-color);
-      background-color: var(--stream-tech-chip-container-background-color);
-      border-color: var(--stream-tech-chip-container-border-color);
+      color: var(--stream-tech-chip-container-color) !important;
+      background-color: var(--stream-tech-chip-container-background-color) !important;
+      border-color: var(--stream-tech-chip-container-border-color) !important;
     }
 
     &--video-codec {
-      color: var(--stream-tech-chip-video-codec-color);
-      background-color: var(--stream-tech-chip-video-codec-background-color);
-      border-color: var(--stream-tech-chip-video-codec-border-color);
+      color: var(--stream-tech-chip-video-codec-color) !important;
+      background-color: var(--stream-tech-chip-video-codec-background-color) !important;
+      border-color: var(--stream-tech-chip-video-codec-border-color) !important;
     }
 
     &--resolution {
-      color: var(--stream-tech-chip-resolution-color);
-      background-color: var(--stream-tech-chip-resolution-background-color);
-      border-color: var(--stream-tech-chip-resolution-border-color);
+      color: var(--stream-tech-chip-resolution-color) !important;
+      background-color: var(--stream-tech-chip-resolution-background-color) !important;
+      border-color: var(--stream-tech-chip-resolution-border-color) !important;
     }
 
     &--fps {
-      color: var(--stream-tech-chip-fps-color);
-      background-color: var(--stream-tech-chip-fps-background-color);
-      border-color: var(--stream-tech-chip-fps-border-color);
+      color: var(--stream-tech-chip-fps-color) !important;
+      background-color: var(--stream-tech-chip-fps-background-color) !important;
+      border-color: var(--stream-tech-chip-fps-border-color) !important;
     }
 
     &--audio-codec {
-      color: var(--stream-tech-chip-audio-codec-color);
-      background-color: var(--stream-tech-chip-audio-codec-background-color);
-      border-color: var(--stream-tech-chip-audio-codec-border-color);
+      color: var(--stream-tech-chip-audio-codec-color) !important;
+      background-color: var(--stream-tech-chip-audio-codec-background-color) !important;
+      border-color: var(--stream-tech-chip-audio-codec-border-color) !important;
     }
 
     &--audio-channels {
-      color: var(--stream-tech-chip-audio-channels-color);
-      background-color: var(--stream-tech-chip-audio-channels-background-color);
-      border-color: var(--stream-tech-chip-audio-channels-border-color);
+      color: var(--stream-tech-chip-audio-channels-color) !important;
+      background-color: var(--stream-tech-chip-audio-channels-background-color) !important;
+      border-color: var(--stream-tech-chip-audio-channels-border-color) !important;
     }
   }
 

@@ -245,8 +245,8 @@ fn parse_audio_codec(audio: &Value) -> Option<String> { get_str(audio, &["codec_
 fn parse_audio_channels(audio: &Value) -> Option<String> {
     let channels = get_u64(audio, &["channels"])?;
     let mapped = match channels {
-        1 => "1.0".to_string(),
-        2 => "2.0".to_string(),
+        1 => "MONO".to_string(),
+        2 => "STEREO".to_string(),
         6 => "5.1".to_string(),
         8 => "7.1".to_string(),
         _ => channels.to_string(),
