@@ -65,6 +65,18 @@ fn apply_proxy_to_ffprobe(command: &mut Command, proxy_cfg: Option<&ProxyConfig>
     }
 }
 
+/// Returns `true` when the stream is an embedded thumbnail / cover art
+/// (e.g. PNG or MJPEG poster images inside MKV containers).
+/// ffprobe reports these as `codec_type: "video"` but with
+/// `disposition.attached_pic: 1`.
+fn is_attached_pic(stream: &Value) -> bool {
+    stream
+        .get("disposition")
+        .and_then(|d| d.get("attached_pic"))
+        .and_then(Value::as_u64)
+        == Some(1)
+}
+
 fn is_not_found_probe_error(stderr: &str) -> bool {
     let normalized = stderr.to_ascii_lowercase();
     normalized.contains("404") || normalized.contains("not found")
@@ -130,6 +142,7 @@ pub async fn probe_url(
                             && (codec_type == Some("video")
                                 || (codec_type.is_none()
                                     && (stream.get("width").is_some() || stream.get("height").is_some())))
+                            && !is_attached_pic(stream)
                         {
                             video_stream = Some(stream);
                         } else if audio_stream.is_none()
