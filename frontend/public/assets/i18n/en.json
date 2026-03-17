@@ -257,7 +257,8 @@
   },
   "EXPLANATION": {
     "API_PROXY_CONFIG": {
-      "USE_USER_DB": "If enabled, API proxy users are loaded from the user database."
+      "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",
+      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden)."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Upstream host that this proxy server profile points to.",
@@ -1143,6 +1144,7 @@
     "USE_MEMORY_CACHE": "Mem-Cache",
     "USE_OUTPUT": "Use output",
     "USE_USER_DB": "Use User DB",
+    "AUTH_ERROR_STATUS": "Auth Error Status",
     "VALIDATION": "Validation",
     "VERSION": "Version",
     "VIDEO": "Video",

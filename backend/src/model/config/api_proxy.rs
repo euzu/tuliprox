@@ -73,6 +73,8 @@ pub struct ApiProxyConfig {
     pub server: Vec<ApiProxyServerInfo>,
     pub user: Vec<TargetUser>,
     pub use_user_db: bool,
+    /// HTTP status code for auth failures. 0 means default (403).
+    pub auth_error_status: u16,
 }
 
 macros::from_impl!(ApiProxyConfig);
@@ -82,6 +84,7 @@ impl From<&ApiProxyConfigDto> for ApiProxyConfig {
             server: dto.server.iter().map(ApiProxyServerInfo::from).collect(),
             user: dto.user.iter().map(TargetUser::from).collect(),
             use_user_db: dto.use_user_db,
+            auth_error_status: dto.auth_error_status,
         }
     }
 }
@@ -92,6 +95,7 @@ impl From<&ApiProxyConfig> for ApiProxyConfigDto {
             server: instance.server.iter().map(ApiProxyServerInfoDto::from).collect(),
             user: instance.user.iter().map(TargetUserDto::from).collect(),
             use_user_db: instance.use_user_db,
+            auth_error_status: instance.auth_error_status,
         }
     }
 }

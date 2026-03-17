@@ -26,14 +26,14 @@ impl AuthBearer {
         let authorization = req
             .headers
             .get(axum::http::header::AUTHORIZATION)
-            .ok_or((StatusCode::BAD_REQUEST, "Authorization header is missing"))?
+            .ok_or((StatusCode::FORBIDDEN, "Authorization header is missing"))?
             .to_str()
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Authorization header contains invalid characters"))?;
+            .map_err(|_| (StatusCode::FORBIDDEN, "Authorization header contains invalid characters"))?;
 
         let split = authorization.split_once(' ');
         match split {
             Some(("Bearer", contents)) => Ok(Self::from_header(contents)),
-            _ => Err((StatusCode::BAD_REQUEST, "`Authorization` header must be a bearer token")),
+            _ => Err((StatusCode::FORBIDDEN, "`Authorization` header must be a bearer token")),
         }
     }
 }

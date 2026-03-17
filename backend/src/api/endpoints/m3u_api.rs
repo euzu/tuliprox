@@ -4,7 +4,7 @@ use crate::{
             create_catchup_session_key, create_session_fingerprint, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
             local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
-            stream_response, try_option_bad_request,
+            stream_response, try_option_bad_request, try_option_forbidden,
             try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
         },
         endpoints::{
@@ -28,31 +28,34 @@ use shared::{
 use std::sync::Arc;
 
 async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoResponse + Send {
-    match get_user_target(api_req, app_state) {
-        Some((user, target)) => {
-            match m3u_load_rewrite_playlist(&app_state.app_config, &target, &user).await {
-                Ok(m3u_iter) => {
-                    // Convert the stream into a stream of `Bytes`
-                    let content_stream = m3u_iter.map(|mut line| {
-                        line.push('\n');
-                        Ok::<Bytes, String>(Bytes::from(line))
-                    });
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
+        get_user_target(api_req, app_state),
+        auth_status,
+        false,
+        format!("Could not find any user for m3u api {}", api_req.username)
+    );
 
-                    let mut builder = axum::response::Response::builder()
-                        .status(axum::http::StatusCode::OK)
-                        .header(axum::http::header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string());
-                    if api_req.content_type == "m3u_plus" {
-                        builder = builder.header("Content-Disposition", "attachment; filename=\"playlist.m3u\"");
-                    }
-                    try_unwrap_body!(builder.body(axum::body::Body::from_stream(content_stream)))
-                }
-                Err(err) => {
-                    error!("{}", sanitize_sensitive_info(err.to_string().as_str()));
-                    axum::http::StatusCode::NO_CONTENT.into_response()
-                }
+    match m3u_load_rewrite_playlist(&app_state.app_config, &target, &user).await {
+        Ok(m3u_iter) => {
+            // Convert the stream into a stream of `Bytes`
+            let content_stream = m3u_iter.map(|mut line| {
+                line.push('\n');
+                Ok::<Bytes, String>(Bytes::from(line))
+            });
+
+            let mut builder = axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string());
+            if api_req.content_type == "m3u_plus" {
+                builder = builder.header("Content-Disposition", "attachment; filename=\"playlist.m3u\"");
             }
+            try_unwrap_body!(builder.body(axum::body::Body::from_stream(content_stream)))
         }
-        None => axum::http::StatusCode::BAD_REQUEST.into_response(),
+        Err(err) => {
+            error!("{}", sanitize_sensitive_info(err.to_string().as_str()));
+            axum::http::StatusCode::NO_CONTENT.into_response()
+        }
     }
 }
 
@@ -79,8 +82,10 @@ async fn m3u_api_stream(
     stream_req: ApiStreamRequest<'_>,
     // _addr: &std::net::SocketAddr,
 ) -> impl IntoResponse + Send {
-    let (user, target) = try_option_bad_request!(
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
         get_user_target_by_credentials(stream_req.username, stream_req.password, api_req, app_state),
+        auth_status,
         false,
         format!("Could not find any user for m3u stream {}", stream_req.username)
     );
@@ -271,9 +276,13 @@ async fn m3u_api_resource(
     let Ok(m3u_stream_id) = stream_id.parse::<u32>() else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-    let Some((user, target)) = get_user_target_by_credentials(&username, &password, &api_req, &app_state) else {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
-    };
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = try_option_forbidden!(
+        get_user_target_by_credentials(&username, &password, &api_req, &app_state),
+        auth_status,
+        false,
+        format!("Could not find any user for m3u resource {username}")
+    );
     if user.permission_denied(&app_state) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }

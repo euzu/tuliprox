@@ -17,7 +17,7 @@ async fn cvs_api(
     };
 
     let Some((user, _target)) = app_state.app_config.get_target_for_user(&username, &password) else {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
+        return app_state.app_config.get_auth_error_status().into_response();
     };
 
     if user.permission_denied(&app_state) {

@@ -103,6 +103,42 @@ macro_rules! try_option_bad_request {
 }
 
 #[macro_export]
+macro_rules! try_option_forbidden {
+    ($option:expr, $status:expr, $msg_is_error:expr, $msg:expr) => {
+        match $option {
+            Some(value) => value,
+            None => {
+                if $msg_is_error {
+                    error!("{}", $msg);
+                } else {
+                    debug!("{}", $msg);
+                }
+                return $status.into_response();
+            }
+        }
+    };
+    ($option:expr, $msg_is_error:expr, $msg:expr) => {
+        match $option {
+            Some(value) => value,
+            None => {
+                if $msg_is_error {
+                    error!("{}", $msg);
+                } else {
+                    debug!("{}", $msg);
+                }
+                return axum::http::StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    };
+    ($option:expr) => {
+        match $option {
+            Some(value) => value,
+            None => return axum::http::StatusCode::FORBIDDEN.into_response(),
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! internal_server_error {
     () => {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -164,6 +200,7 @@ use crate::api::panel_api::{can_provision_on_exhausted, create_panel_api_provisi
 pub use internal_server_error;
 use shared::error::TuliproxError;
 pub use try_option_bad_request;
+pub use try_option_forbidden;
 pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
