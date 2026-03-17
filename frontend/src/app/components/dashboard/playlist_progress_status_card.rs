@@ -15,7 +15,7 @@ pub fn PlaylistProgressStatusCard() -> Html {
             let data_clone = data_clone.clone();
             let subid = services_ctx.event.subscribe(move |msg| {
                 if let EventMessage::PlaylistUpdateProgress(_target, msg) = msg {
-                    data_clone.set(format!("[{}] {msg}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")));
+                    data_clone.set(format!("[{}] {msg}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
                 }
             });
             move || services_ctx.event.unsubscribe(subid)
