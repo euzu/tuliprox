@@ -773,7 +773,7 @@ where
         };
 
         if redirect_request {
-            // handle redirect for series but why?
+            // handle redirect for series otherwise the series_info url is build
             if params.cluster == XtreamCluster::Series {
                 let ext = params.stream_ext.unwrap_or_default();
                 let url = params.input.url.as_str();

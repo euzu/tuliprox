@@ -616,14 +616,19 @@ pub async fn xtream_get_item_for_stream_id(
                 PlaylistItemType::Series
                 | PlaylistItemType::LocalSeries => {
                     log::debug!("Disk series item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
+
+                    if let Ok(episode) = xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, XtreamCluster::Series).await {
+                        return Ok(episode);
+                    }
+
                     if let Ok(mut item) = xtream_read_series_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path).await {
                         item.provider_id = mapping.provider_id;
                         item.item_type = PlaylistItemType::Series;
                         item.virtual_id = mapping.virtual_id;
-                        Ok(item)
-                    } else {
-                        xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, XtreamCluster::Series).await
+                        return Ok(item);
                     }
+
+                    return Err(Error::other(format!("Failed to find episode item with virutal-id {virtual_id}")));
                 }
                 PlaylistItemType::Catchup => {
                     log::debug!("Disk catchup item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);

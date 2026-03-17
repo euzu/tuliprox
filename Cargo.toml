@@ -44,7 +44,6 @@ strip = true
 incremental = false
 
 [profile.dev]
-opt-level = 1
 lto = false
 incremental = true
 codegen-units = 256

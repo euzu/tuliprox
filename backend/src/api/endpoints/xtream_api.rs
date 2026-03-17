@@ -363,6 +363,8 @@ async fn xtream_player_api_stream(
 
     let context = stream_req.context;
 
+    let stream_ext = stream_ext.filter(|s| !s.is_empty())
+        .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
     let redirect_params = RedirectParams {
         item: &pli,
         provider_id: pli.get_provider_id(),

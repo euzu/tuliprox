@@ -1,5 +1,4 @@
 use crate::{
-    concat_string,
     error::TuliproxError,
     info_err, info_err_res,
     utils::{CONSTANTS, DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY},
@@ -40,22 +39,37 @@ pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-/// Extracts the file extension from a URL path (query/fragment stripped).
+/// Extracts the file extension from a URL path (fragment stripped).
 /// Returns the extension **prefixed with a dot** (e.g., ".m3u8").
 pub fn extract_extension_from_url(input: &str) -> Option<String> {
-    // 1. Strip query + fragment
-    let input = input.split('?').next().unwrap_or(input).split('#').next().unwrap_or(input);
+    // 1. Remove fragment (#)
+    let base = input.split('#').next()?;
 
-    // 2. Remove scheme (http://, file://, etc.)
-    let path = input.split("://").last().unwrap_or(input);
+    // 2. Get last path segment (after last '/')
+    let last_segment = base.rsplit('/').next().filter(|s| !s.is_empty())?;
 
-    // 3. Take last path segment
-    let filename = path.rsplit('/').next().filter(|s| !s.is_empty())?;
+    // 3. Define the search area (last 6 characters to include the dot + 5 extension chars)
+    // We use char_indices to handle UTF-8 safely
+    let len = last_segment.len();
+    let search_start = len.saturating_sub(6);
+    let search_area = &last_segment[search_start..];
 
-    // 4. Extract extension
-    let ext = filename.rsplit('.').next().filter(|e| *e != filename)?; // ensures dot exists
+    // 4. Find the dot in the restricted search area
+    if let Some(dot_index) = search_area.rfind('.') {
+        // Slice INCLUDING the dot
+        let extension_with_dot = &search_area[dot_index..];
 
-    Some(concat_string!(".", ext))
+        // Validation (Note: length is now +1 because of the dot)
+        if extension_with_dot.len() > 1
+            && extension_with_dot.len() <= 5
+            && !extension_with_dot.contains('?')
+            && !extension_with_dot.eq_ignore_ascii_case(".php")
+        {
+            return Some(extension_with_dot.to_string());
+        }
+    }
+
+    None
 }
 
 pub fn is_hls_url(url: &str) -> bool {
