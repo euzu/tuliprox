@@ -34,7 +34,7 @@ impl AuthBasic {
 
         let split = authorization.split_once(' ');
         match split {
-            Some(("Basic", contents)) => {
+            Some((scheme, contents)) if scheme.eq_ignore_ascii_case("Basic") => {
                 let decoded = decode(contents)?;
                 Ok(Self::from_header(decoded))
             },

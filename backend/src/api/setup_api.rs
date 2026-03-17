@@ -325,7 +325,7 @@ fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
         server: vec![create_default_api_proxy_server()],
         user: vec![],
         use_user_db: false,
-        auth_error_status: 0,
+        auth_error_status: shared::utils::default_auth_error_status(),
     })
 }
 

@@ -258,7 +258,7 @@
   "EXPLANATION": {
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",
-      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. 0 uses the default (403 Forbidden)."
+      "AUTH_ERROR_STATUS": "HTTP status code returned for authentication failures. Default is 403 (Forbidden)."
     },
     "API_PROXY_SERVER_INFO": {
       "HOST": "Upstream host that this proxy server profile points to.",

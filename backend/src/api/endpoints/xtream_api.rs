@@ -1128,8 +1128,7 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
         false,
         format!("Could not find any user for xc player api {}", api_req.username)
     );
-    {
-        if !target.has_output(TargetType::Xtream) {
+    if !target.has_output(TargetType::Xtream) {
             return axum::response::Json(get_user_info(&user, app_state).await).into_response();
         }
 
@@ -1264,7 +1263,6 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
                 api_utils::empty_json_list_response().into_response()
             }
         }
-    }
 }
 
 fn xtream_create_content_stream<S>(xtream_iter: S) -> impl Stream<Item = Result<Bytes, String>>
