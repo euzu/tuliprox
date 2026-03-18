@@ -517,6 +517,9 @@ async fn xtream_player_api_stream_with_token(
             .into_response();
         }
 
+        let stream_ext = stream_ext.filter(|s| !s.is_empty())
+            .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
+
         let session_key = create_session_fingerprint(fingerprint, "webui", virtual_id);
 
         let is_hls_request = pli.item_type == PlaylistItemType::LiveHls || stream_ext.as_deref() == Some(HLS_EXT);

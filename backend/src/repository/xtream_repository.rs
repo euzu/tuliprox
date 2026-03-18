@@ -620,7 +620,7 @@ pub async fn xtream_get_item_for_stream_id(
                         return Ok(item);
                     }
 
-                    return Err(Error::other(format!("Failed to find episode item with virutal-id {virtual_id}")));
+                    return Err(Error::other(format!("Failed to find episode item with virtual-id {virtual_id}")));
                 }
                 PlaylistItemType::Catchup => {
                     log::debug!("Disk catchup item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
