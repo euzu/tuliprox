@@ -773,21 +773,6 @@ where
         };
 
         if redirect_request {
-            // handle redirect for series but why?
-            if params.cluster == XtreamCluster::Series {
-                let ext = params.stream_ext.unwrap_or_default();
-                let url = params.input.url.as_str();
-                let (username, password) =
-                    (params.input.username.as_deref().unwrap_or(""), params.input.password.as_deref().unwrap_or(""));
-                // TODO do i need action_path like for timeshift ?
-                let stream_url = format!("{url}/series/{username}/{password}/{provider_id}{ext}");
-                debug_if_enabled!(
-                    "Redirecting stream request to {}",
-                    sanitize_sensitive_info(resolve_request_url_for_logging(params.input, &stream_url).as_ref())
-                );
-                return Some(redirect(&stream_url).into_response());
-            }
-
             let target_name = params.target.name.as_str();
             let virtual_id = params.item.get_virtual_id();
             let stream_url = match get_xtream_player_api_stream_url(

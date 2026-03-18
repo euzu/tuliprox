@@ -265,6 +265,9 @@ async fn xtream_player_api_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
+    let stream_ext = stream_ext.filter(|s| !s.is_empty())
+        .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
+
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
         true,
@@ -513,6 +516,9 @@ async fn xtream_player_api_stream_with_token(
             .await
             .into_response();
         }
+
+        let stream_ext = stream_ext.filter(|s| !s.is_empty())
+            .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
 
         let session_key = create_session_fingerprint(fingerprint, "webui", virtual_id);
 

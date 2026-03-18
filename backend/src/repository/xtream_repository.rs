@@ -5,12 +5,12 @@ use crate::model::{Config, ConfigTarget};
 use crate::model::{ConfigInput, PlaylistXtreamCategory};
 use crate::processing::parser::xtream;
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
+use crate::repository::open_playlist_reader;
 use crate::repository::playlist_scratch::PlaylistScratch;
 use crate::repository::storage::{ensure_input_storage_path, get_file_path_for_db_index, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
-use crate::repository::open_playlist_reader;
 use crate::utils::json_write_documents_to_file;
 use crate::utils::request::DynReader;
 use crate::utils::FileReadGuard;
@@ -19,7 +19,7 @@ use bytes::Bytes;
 use fs2::FileExt;
 use futures::{stream, Stream, StreamExt};
 use indexmap::IndexMap;
-use log::{error};
+use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use shared::error::{info_err_res, notify_err, string_to_io_error, TuliproxError};
@@ -45,13 +45,6 @@ macro_rules! cant_write_result {
     };
 }
 
-// fn rebuild_source_ordinal_index_if_present(xtream_path: &Path) -> Result<(), std::io::Error> {
-//     let index_path = get_file_path_for_db_index(xtream_path);
-//     if !index_path.exists() {
-//         return Ok(());
-//     }
-//     BPlusTree::<u32, XtreamPlaylistItem>::store_index(xtream_path, |pli| pli.source_ordinal)
-// }
 
 #[inline]
 pub fn get_collection_path(path: &Path, collection: &str) -> PathBuf {
@@ -164,7 +157,6 @@ pub async fn write_playlist_item_update(
         let _guard = file_lock;
         let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
         tree.upsert_batch_encoded(prepared_items)?;
-       // rebuild_source_ordinal_index_if_present(&xtream_path_clone)?;
         Ok(())
     })
         .await
@@ -210,7 +202,6 @@ pub async fn write_playlist_batch_item_upsert(
         let _guard = file_lock;
         let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&xtream_path_clone)?;
         tree.upsert_batch_encoded(prepared_items)?;
-        //rebuild_source_ordinal_index_if_present(&xtream_path_clone)?;
         Ok(())
     })
         .await
@@ -465,8 +456,8 @@ async fn xtream_read_item_for_stream_id(
             Err(err) => Err(Error::other(format!("Query failed for {stream_id} in {cluster}: {err}"))),
         }
     })
-    .await
-    .map_err(|err| Error::other(format!("Query task failed for {stream_id} in {cluster}: {err}")))?
+        .await
+        .map_err(|err| Error::other(format!("Query task failed for {stream_id} in {cluster}: {err}")))?
 }
 
 async fn xtream_read_series_item_for_stream_id(
@@ -486,8 +477,8 @@ async fn xtream_read_series_item_for_stream_id(
             Err(err) => Err(Error::other(format!("Query failed for {stream_id} in series: {err}"))),
         }
     })
-    .await
-    .map_err(|err| Error::other(format!("Query task failed for {stream_id} in series: {err}")))?
+        .await
+        .map_err(|err| Error::other(format!("Query task failed for {stream_id} in series: {err}")))?
 }
 
 
@@ -519,16 +510,17 @@ async fn xtream_get_item_for_stream_id_from_memory(
                     PlaylistItemType::Series
                     | PlaylistItemType::LocalSeries => {
                         log::debug!("In-memory series item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
-                        if let Some(item) = xtream_storage.series.query(&mapping.parent_virtual_id) {
+
+                        if let Some(item) = xtream_storage.series.query(&virtual_id) {
+                            Ok(item.clone())
+                        } else if let Some(item) = xtream_storage.series.query(&mapping.parent_virtual_id) {
                             let mut xc_item = item.clone();
                             xc_item.provider_id = mapping.provider_id;
                             xc_item.item_type = PlaylistItemType::Series;
                             xc_item.virtual_id = mapping.virtual_id;
                             Ok(xc_item)
                         } else {
-                            Ok(xtream_storage.series.query(&virtual_id)
-                                .ok_or_else(|| string_to_io_error(format!("Failed to read xtream item for id {virtual_id}")))?
-                                .clone())
+                            Err(string_to_io_error(format!("Failed to read xtream item for id {virtual_id}")))
                         }
                     }
                     PlaylistItemType::Catchup => {
@@ -606,8 +598,8 @@ pub async fn xtream_get_item_for_stream_id(
                     Err(err) => Err(string_to_io_error(format!("Query failed for id {virtual_id}: {err}"))),
                 }
             })
-            .await
-            .map_err(|err| string_to_io_error(format!("Mapping query task failed for id {virtual_id}: {err}")))??;
+                .await
+                .map_err(|err| string_to_io_error(format!("Mapping query task failed for id {virtual_id}: {err}")))??;
             match mapping.item_type {
                 PlaylistItemType::SeriesInfo
                 | PlaylistItemType::LocalSeriesInfo => {
@@ -616,14 +608,19 @@ pub async fn xtream_get_item_for_stream_id(
                 PlaylistItemType::Series
                 | PlaylistItemType::LocalSeries => {
                     log::debug!("Disk series item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
+
+                    if let Ok(episode) = xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, XtreamCluster::Series).await {
+                        return Ok(episode);
+                    }
+
                     if let Ok(mut item) = xtream_read_series_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path).await {
                         item.provider_id = mapping.provider_id;
                         item.item_type = PlaylistItemType::Series;
                         item.virtual_id = mapping.virtual_id;
-                        Ok(item)
-                    } else {
-                        xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, XtreamCluster::Series).await
+                        return Ok(item);
                     }
+
+                    return Err(Error::other(format!("Failed to find episode item with virtual-id {virtual_id}")));
                 }
                 PlaylistItemType::Catchup => {
                     log::debug!("Disk catchup item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
@@ -655,14 +652,14 @@ pub async fn xtream_load_rewrite_playlist(
     XtreamPlaylistJsonIterator::new(cluster, app_state, target, category_id, user).await
 }
 
-pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
+pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin>> {
     let config = app_config.config.load();
     let storage_path = xtream_get_storage_path(&config, target.name.as_str())?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
     iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
-pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
+pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin>> {
     let config = app_config.config.load();
     let storage_dir = &config.storage_dir;
     let storage_path = get_input_storage_path(&input.name, storage_dir).await.ok()?;
@@ -671,7 +668,7 @@ pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &Conf
     iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
-async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin>> {
+async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin>> {
     if !file_exists_async(xtream_path).await {
         return None;
     }
@@ -725,7 +722,7 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
         }
     });
 
-    let stream: Box<dyn Stream<Item = XtreamPlaylistItem> + Send + Unpin> =
+    let stream: Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin> =
         Box::new(ReceiverStream::new(rx));
     Some(stream)
 }
@@ -775,10 +772,9 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
     old_path: &Path,
     tmp_path: &Path,
 ) -> Result<(), TuliproxError> {
-
-   let Ok(mut old_tree) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(old_path) else {
-       return Ok(())
-   };
+    let Ok(mut old_tree) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(old_path) else {
+        return Ok(())
+    };
 
     let Ok(mut new_tree) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(tmp_path) else {
         return Ok(())
@@ -1082,7 +1078,7 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
                 }
                 entries
             })
-            .await
+                .await
             {
                 Ok(entries) => Some(entries),
                 Err(err) => {
@@ -1203,7 +1199,6 @@ pub(crate) fn needs_update_info_details(
     new_stream_props: &StreamProperties,
     old_stream_props: &StreamProperties,
 ) -> bool {
-
     let new_modified = new_stream_props.get_last_modified();
     let old_modified = old_stream_props.get_last_modified();
 
@@ -1486,8 +1481,8 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
                 }
                 Ok(items)
             })
-            .await
-            .map_err(|err| notify_err!("failed to read xtream playlist: {} - {err}", xtream_display))??;
+                .await
+                .map_err(|err| notify_err!("failed to read xtream playlist: {} - {err}", xtream_display))??;
 
             for item in items {
                 let cat_id = item.category_id;
