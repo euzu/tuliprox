@@ -384,6 +384,31 @@ pub fn ConfigView() -> Html {
                             },
                             0,
                         );
+                    } else {
+                        let mut refresh_failures = Vec::with_capacity(3);
+                        if !has_main_refresh {
+                            refresh_failures.push(translate.t("MESSAGES.SAVE.REFRESH_INCOMPLETE.MAIN_CONFIG"));
+                        }
+                        if !has_api_proxy_refresh {
+                            refresh_failures.push(translate.t("MESSAGES.SAVE.REFRESH_INCOMPLETE.API_PROXY_CONFIG"));
+                        }
+                        if !has_sources_refresh {
+                            refresh_failures.push(translate.t("MESSAGES.SAVE.REFRESH_INCOMPLETE.SOURCES_CONFIG"));
+                        }
+
+                        let refresh_details = if refresh_failures.is_empty() {
+                            translate.t("MESSAGES.SAVE.REFRESH_INCOMPLETE.UNKNOWN")
+                        } else {
+                            format!(
+                                "{} {}",
+                                translate.t("MESSAGES.SAVE.REFRESH_INCOMPLETE.MISSING_REFRESHED"),
+                                refresh_failures.join(", ")
+                            )
+                        };
+                        services.toastr.warning(format!(
+                            "{} ({refresh_details})",
+                            translate.t("MESSAGES.SAVE.REFRESH_INCOMPLETE.BASE")
+                        ));
                     }
                 }
             });
