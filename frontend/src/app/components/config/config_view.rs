@@ -317,6 +317,7 @@ pub fn ConfigView() -> Html {
                 let mut ok = true;
                 let main_refresh_required = modified_main_dto.is_some();
                 let api_proxy_refresh_required = modified_api_proxy.is_some();
+                let sources_refresh_required = modified_sources.is_some();
 
                 if let Some(config_dto) = modified_main_dto {
                     match services.config.save_config(config_dto).await {
@@ -370,11 +371,12 @@ pub fn ConfigView() -> Html {
 
                     let has_main_refresh = !main_refresh_required || app_config.is_some();
                     let has_api_proxy_refresh = !api_proxy_refresh_required || api_proxy_config.is_some();
+                    let has_sources_refresh = !sources_refresh_required || app_config.is_some();
 
                     // Leave edit mode only after the refreshed config has been pushed
                     // back through the shared context. Otherwise views that rehydrate
                     // on `edit_mode` changes can briefly restore stale pre-save state.
-                    if has_main_refresh && has_api_proxy_refresh {
+                    if has_main_refresh && has_api_proxy_refresh && has_sources_refresh {
                         let set_edit_mode = set_edit_mode.clone();
                         set_timeout(
                             move || {
