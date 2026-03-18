@@ -125,6 +125,16 @@ fn create_video_stream(
     }
 }
 
+fn create_ok_video_stream(
+    cfg: &AppConfig,
+    stream_type: CustomVideoStreamType,
+    video_buffer: Option<&TransportStreamBuffer>,
+    headers: &[(String, String)],
+    log_message: &str,
+) -> ProviderStreamResponse {
+    create_video_stream(cfg, stream_type, video_buffer, headers, StatusCode::OK, log_message)
+}
+
 pub fn create_channel_unavailable_stream(
     cfg: &AppConfig,
     headers: &[(String, String)],
@@ -148,12 +158,11 @@ pub fn create_user_connections_exhausted_stream(
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.user_connections_exhausted.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::UserConnectionsExhausted,
         video,
         headers,
-        StatusCode::OK,
         "Streaming response user connections exhausted",
     )
 }
@@ -164,12 +173,11 @@ pub fn create_provider_connections_exhausted_stream(
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.provider_connections_exhausted.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::ProviderConnectionsExhausted,
         video,
         headers,
-        StatusCode::OK,
         "Streaming response provider connections exhausted",
     )
 }
@@ -180,12 +188,11 @@ pub fn create_low_priority_preempted_stream(
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.low_priority_preempted.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::LowPriorityPreempted,
         video,
         headers,
-        StatusCode::OK,
         "Streaming response low-priority preempted",
     )
 }
@@ -193,12 +200,11 @@ pub fn create_low_priority_preempted_stream(
 pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.user_account_expired.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::UserAccountExpired,
         video,
         headers,
-        StatusCode::OK,
         "Streaming response user account expired",
     )
 }
@@ -206,12 +212,11 @@ pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, S
 pub fn create_panel_api_provisioning_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::Provisioning,
         video,
         headers,
-        StatusCode::OK,
         "Streaming response panel api provisioning",
     )
 }

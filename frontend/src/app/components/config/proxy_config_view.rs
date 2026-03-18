@@ -3,6 +3,7 @@ use crate::{
         components::config::{
             config_page::{ConfigForm, LABEL_PROXY_CONFIG},
             config_view_context::ConfigViewContext,
+            use_emit_config_form,
         },
         context::ConfigContext,
     },
@@ -37,11 +38,7 @@ pub fn ProxyConfigView() -> Html {
         use_reducer(|| ProxyConfigFormState { form: ProxyConfigDto::default(), modified: false });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let deps = (form_state.clone(), form_state.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit(ConfigForm::Proxy(*modified, state.form.clone()));
-        });
+        use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Proxy);
     }
 
     {

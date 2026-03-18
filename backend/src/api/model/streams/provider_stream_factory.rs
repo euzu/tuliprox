@@ -460,7 +460,9 @@ async fn provider_stream_request(
                     | StatusCode::UNAUTHORIZED
                     | StatusCode::PROXY_AUTHENTICATION_REQUIRED
                     | StatusCode::METHOD_NOT_ALLOWED
-                    | StatusCode::BAD_REQUEST => handle_channel_unavailable_stream(app_state, stream_options).await,
+                    | StatusCode::BAD_REQUEST => {
+                        handle_channel_unavailable_stream(app_state, stream_options, status).await
+                    }
                     _ => Err(status),
                 };
             }
@@ -470,7 +472,9 @@ async fn provider_stream_request(
                     StatusCode::INTERNAL_SERVER_ERROR
                     | StatusCode::BAD_GATEWAY
                     | StatusCode::SERVICE_UNAVAILABLE
-                    | StatusCode::GATEWAY_TIMEOUT => handle_channel_unavailable_stream(app_state, stream_options).await,
+                    | StatusCode::GATEWAY_TIMEOUT => {
+                        handle_channel_unavailable_stream(app_state, stream_options, status).await
+                    }
                     _ => Err(status),
                 };
             }
@@ -483,7 +487,7 @@ async fn provider_stream_request(
                 sanitize_sensitive_info(err.to_string().as_str()),
                 sanitize_sensitive_info(&diagnostics)
             );
-            handle_channel_unavailable_stream(app_state, stream_options).await
+            handle_channel_unavailable_stream(app_state, stream_options, StatusCode::SERVICE_UNAVAILABLE).await
         }
     }
 }
@@ -491,6 +495,7 @@ async fn provider_stream_request(
 async fn handle_channel_unavailable_stream(
     app_state: &Arc<AppState>,
     stream_options: &ProviderStreamFactoryOptions,
+    status: StatusCode,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
     app_state
         .connection_manager
@@ -501,11 +506,11 @@ async fn handle_channel_unavailable_stream(
     if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
         &app_state.app_config,
         &get_response_headers(stream_options.get_headers()),
-        StatusCode::SERVICE_UNAVAILABLE,
+        status,
     ) {
         Ok(Some((boxed_provider_stream, response_info)))
     } else {
-        Err(StatusCode::SERVICE_UNAVAILABLE)
+        Err(status)
     }
 }
 

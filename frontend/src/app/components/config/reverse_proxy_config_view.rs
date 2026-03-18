@@ -6,6 +6,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_REVERSE_PROXY_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_mapped_option,
             },
             Card, Chip,
         },
@@ -204,7 +205,6 @@ pub fn ReverseProxyConfigView() -> Html {
     let last_emitted_form = use_mut_ref(|| None::<ConfigForm>);
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
         let reverse_proxy_state = reverse_proxy_state.clone();
         let disabled_header_state = disabled_header_state.clone();
         let cache_state = cache_state.clone();
@@ -216,52 +216,76 @@ pub fn ReverseProxyConfigView() -> Html {
         let failover_patterns_state = failover_patterns_state.clone();
         let last_emitted_form = last_emitted_form.clone();
 
-        use_effect_with(
+        use_emit_mapped_option(
             (
-                reverse_proxy_state,
-                disabled_header_state,
-                cache_state,
-                rate_limit_state,
-                resource_retry_state,
-                stream_state,
-                geoip_state,
-                stream_buffer_state,
-                failover_patterns_state,
+                (
+                    reverse_proxy_state.form.clone(),
+                    disabled_header_state.form.clone(),
+                    cache_state.form.clone(),
+                    rate_limit_state.form.clone(),
+                    resource_retry_state.form.clone(),
+                    stream_state.form.clone(),
+                    geoip_state.form.clone(),
+                    stream_buffer_state.form.clone(),
+                    failover_patterns_state.form.clone(),
+                ),
+                (
+                    reverse_proxy_state.modified,
+                    disabled_header_state.modified,
+                    cache_state.modified,
+                    rate_limit_state.modified,
+                    resource_retry_state.modified,
+                    stream_state.modified,
+                    geoip_state.modified,
+                    stream_buffer_state.modified,
+                    failover_patterns_state.modified,
+                ),
             ),
-            move |(rp, disabled_header, cache, rl, resource_retry, stream, geoip, stream_buffer, failover_patterns)| {
-                let mut form = rp.form.clone();
-                let mut stream_form = stream.form.clone();
-                stream_form.buffer =
-                    if stream_buffer.form.is_empty() { None } else { Some(stream_buffer.form.clone()) };
+            config_view_ctx.on_form_change.clone(),
+            move |(
+                (rp, disabled_header, cache, rl, resource_retry, stream, geoip, stream_buffer, failover_patterns),
+                (
+                    rp_modified,
+                    disabled_header_modified,
+                    cache_modified,
+                    rl_modified,
+                    resource_retry_modified,
+                    stream_modified,
+                    geoip_modified,
+                    stream_buffer_modified,
+                    failover_patterns_modified,
+                ),
+            )| {
+                let mut form = rp.clone();
+                let mut stream_form = stream.clone();
+                stream_form.buffer = if stream_buffer.is_empty() { None } else { Some(stream_buffer.clone()) };
 
-                form.cache = Some(cache.form.clone());
-                form.rate_limit = Some(rl.form.clone());
-                let mut resource_retry_form = resource_retry.form.clone();
-                resource_retry_form.failover_redirect_patterns = if failover_patterns.form.is_empty() {
-                    None
-                } else {
-                    Some(failover_patterns.form.patterns.clone())
-                };
+                form.cache = Some(cache.clone());
+                form.rate_limit = Some(rl.clone());
+                let mut resource_retry_form = resource_retry.clone();
+                resource_retry_form.failover_redirect_patterns =
+                    if failover_patterns.is_empty() { None } else { Some(failover_patterns.patterns.clone()) };
                 form.resource_retry = Some(resource_retry_form);
                 form.stream = Some(stream_form);
-                form.geoip = Some(geoip.form.clone());
-                form.disabled_header =
-                    if disabled_header.form.is_empty() { None } else { Some(disabled_header.form.clone()) };
+                form.geoip = Some(geoip.clone());
+                form.disabled_header = if disabled_header.is_empty() { None } else { Some(disabled_header.clone()) };
 
-                let modified = rp.modified
-                    || disabled_header.modified
-                    || cache.modified
-                    || rl.modified
-                    || resource_retry.modified
-                    || stream.modified
-                    || geoip.modified
-                    || stream_buffer.modified
-                    || failover_patterns.modified;
+                let modified = rp_modified
+                    || disabled_header_modified
+                    || cache_modified
+                    || rl_modified
+                    || resource_retry_modified
+                    || stream_modified
+                    || geoip_modified
+                    || stream_buffer_modified
+                    || failover_patterns_modified;
                 let next_form = ConfigForm::ReverseProxy(modified, form);
                 let mut last_form = last_emitted_form.borrow_mut();
                 if last_form.as_ref() != Some(&next_form) {
-                    on_form_change.emit(next_form.clone());
                     *last_form = Some(next_form);
+                    last_form.clone()
+                } else {
+                    None
                 }
             },
         );

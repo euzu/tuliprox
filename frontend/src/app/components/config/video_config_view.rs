@@ -4,6 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_VIDEO_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_mapped,
             },
             Card, Chip, KeyValueEditor,
         },
@@ -83,17 +84,18 @@ pub fn VideoConfigView() -> Html {
     }
 
     {
-        // Sync form changes with parent context
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let download_state = download_state.clone();
-        let video_state = video_state.clone();
-        let deps = (video_state.modified, download_state.modified, video_state, download_state);
-        use_effect_with(deps, move |(vm, dm, v, d)| {
-            let mut form = v.form.clone();
-            form.download = if *dm { Some(d.form.clone()) } else { form.download };
-            let modified = *vm || *dm;
-            on_form_change.emit(ConfigForm::Video(modified, form));
-        });
+        let deps =
+            (video_state.form.clone(), download_state.form.clone(), video_state.modified, download_state.modified);
+        use_emit_mapped(
+            deps,
+            config_view_ctx.on_form_change.clone(),
+            |(video_form, download_form, video_modified, download_modified)| {
+                let mut form = video_form;
+                form.download = if download_modified { Some(download_form) } else { form.download };
+                let modified = video_modified || download_modified;
+                ConfigForm::Video(modified, form)
+            },
+        );
     }
 
     let render_extensions = |extensions: &Vec<String>| {

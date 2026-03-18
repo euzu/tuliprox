@@ -4,6 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_LIBRARY_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_mapped,
             },
             input::Input,
             select::Select,
@@ -132,22 +133,35 @@ pub fn LibraryConfigView() -> Html {
     }
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let form_state = form_state.clone();
-        let playlist_state = playlist_state.clone();
-        let metadata_state = metadata_state.clone();
-        let metadata_read_state = metadata_read_state.clone();
+        use_emit_mapped(
+            (
+                form_state.form.clone(),
+                playlist_state.form.clone(),
+                metadata_state.form.clone(),
+                metadata_read_state.form.clone(),
+                form_state.modified,
+                playlist_state.modified,
+                metadata_state.modified,
+                metadata_read_state.modified,
+            ),
+            config_view_ctx.on_form_change.clone(),
+            |(
+                form,
+                playlist,
+                metadata,
+                metadata_read,
+                form_modified,
+                playlist_modified,
+                metadata_modified,
+                metadata_read_modified,
+            )| {
+                let mut new_form = form;
+                new_form.playlist = playlist;
+                new_form.metadata = metadata;
+                new_form.metadata.read_existing = metadata_read;
+                let modified = form_modified || playlist_modified || metadata_modified || metadata_read_modified;
 
-        use_effect_with(
-            (form_state, playlist_state, metadata_state, metadata_read_state),
-            move |(form, playlist, metadata, metadata_read)| {
-                let mut new_form = form.form.clone();
-                new_form.playlist = playlist.form.clone();
-                new_form.metadata = metadata.form.clone();
-                new_form.metadata.read_existing = metadata_read.form.clone();
-                let modified = form.modified || playlist.modified || metadata.modified || metadata_read.modified;
-
-                on_form_change.emit(ConfigForm::Library(modified, new_form));
+                ConfigForm::Library(modified, new_form)
             },
         );
     }

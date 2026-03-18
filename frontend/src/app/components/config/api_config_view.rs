@@ -4,6 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_API_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_config_form,
             },
             input::Input,
             menu_item::MenuItem,
@@ -163,21 +164,15 @@ pub fn ApiConfigView() -> Html {
         use_reducer(|| ApiProxyConfigFormState { form: ApiProxyConfigDto::default(), modified: false });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let deps = (form_state_api_config.clone(), form_state_api_config.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit(ConfigForm::Api(*modified, state.form.clone()));
-            || ()
-        });
+        use_emit_config_form(&form_state_api_config, config_view_ctx.on_form_change.clone(), ConfigForm::Api);
     }
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let deps = (form_state_api_proxy_config.clone(), form_state_api_proxy_config.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit(ConfigForm::ApiProxy(*modified, state.form.clone()));
-            || ()
-        });
+        use_emit_config_form(
+            &form_state_api_proxy_config,
+            config_view_ctx.on_form_change.clone(),
+            ConfigForm::ApiProxy,
+        );
     }
 
     {

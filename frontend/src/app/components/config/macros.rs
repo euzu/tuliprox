@@ -197,7 +197,7 @@ macro_rules! config_field_empty {
 pub trait HasFormData {
     type Data;
     fn data(&self) -> &Self::Data;
-    //fn data_mut(&mut self) -> &mut Self::Data;
+    fn modified(&self) -> bool;
 }
 
 #[macro_export]
@@ -757,9 +757,9 @@ macro_rules! generate_form_reducer {
                 &self.$data_field
             }
 
-            // fn data_mut(&mut self) -> &mut Self::Data {
-            //     &mut self.$data_field
-            // }
+            fn modified(&self) -> bool {
+                self.modified
+            }
         }
     };
 }

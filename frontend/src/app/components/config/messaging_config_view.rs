@@ -4,6 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_MESSAGING_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_mapped,
             },
             Card, Chip, RadioButtonGroup, TextArea,
         },
@@ -117,34 +118,27 @@ pub fn MessagingConfigView() -> Html {
     });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let messaging_state = messaging_state.clone();
-        let telegram_state = telegram_state.clone();
-        let rest_state = rest_state.clone();
-        let pushover_state = pushover_state.clone();
-        let discord_state = discord_state.clone();
-
         let dependencies = (
+            messaging_state.form.clone(),
+            telegram_state.form.clone(),
+            rest_state.form.clone(),
+            pushover_state.form.clone(),
+            discord_state.form.clone(),
             messaging_state.modified,
             telegram_state.modified,
             rest_state.modified,
             pushover_state.modified,
             discord_state.modified,
-            messaging_state,
-            telegram_state,
-            rest_state,
-            pushover_state,
-            discord_state,
         );
-        use_effect_with(dependencies, move |(mm, tm, rm, pm, dm, m, t, r, p, d)| {
-            let mut form = m.form.clone();
-            form.telegram = Some(t.form.clone());
-            form.rest = Some(r.form.clone());
-            form.pushover = Some(p.form.clone());
-            form.discord = Some(d.form.clone());
+        use_emit_mapped(dependencies, config_view_ctx.on_form_change.clone(), |(m, t, r, p, d, mm, tm, rm, pm, dm)| {
+            let mut form = m;
+            form.telegram = Some(t);
+            form.rest = Some(r);
+            form.pushover = Some(p);
+            form.discord = Some(d);
 
-            let modified = *mm || *tm || *rm || *pm || *dm;
-            on_form_change.emit(ConfigForm::Messaging(modified, form));
+            let modified = mm || tm || rm || pm || dm;
+            ConfigForm::Messaging(modified, form)
         });
     }
 
