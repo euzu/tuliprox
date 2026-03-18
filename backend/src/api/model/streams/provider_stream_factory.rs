@@ -11,8 +11,8 @@ use crate::{
     utils::{
         debug_if_enabled,
         request::{
-            classify_content_type, get_request_headers, preview_request_target_for_logging, send_with_retry_and_provider,
-            MimeCategory,
+            classify_content_type, get_request_headers, preview_request_diagnostics_for_logging,
+            preview_request_target_for_logging, send_with_retry_and_provider, MimeCategory,
         },
     },
 };
@@ -388,6 +388,14 @@ async fn provider_stream_request(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
+    if log_enabled!(log::Level::Debug) {
+        let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
+        debug!(
+            "Provider request diagnostics: manual_redirects={}, {}",
+            app_state.should_use_manual_redirects(),
+            sanitize_sensitive_info(&diagnostics)
+        );
+    }
     let response_result = if app_state.should_use_manual_redirects() {
         let client_no_redirect = app_state.http_client_no_redirect.load();
         send_with_manual_redirects(&client_no_redirect, stream_options, app_state).await
@@ -408,8 +416,11 @@ async fn provider_stream_request(
             let response_url = response.url().clone();
             if log_enabled!(log::Level::Debug) && !status.is_success() {
                 let debug_headers = collect_debug_headers(response.headers());
+                let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
                 let message =
-                    format!("Provider response error: status={status}, url={response_url}, headers={debug_headers:?}");
+                    format!(
+                        "Provider response error: status={status}, url={response_url}, headers={debug_headers:?}, {diagnostics}"
+                    );
                 debug!("{}", sanitize_sensitive_info(&message));
             }
             if status.is_success() {
@@ -466,7 +477,12 @@ async fn provider_stream_request(
             Err(status)
         }
         Err(err) => {
-            debug!("Provider request failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
+            let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
+            debug!(
+                "Provider request failed: {}, {}",
+                sanitize_sensitive_info(err.to_string().as_str()),
+                sanitize_sensitive_info(&diagnostics)
+            );
             handle_channel_unavailable_stream(app_state, stream_options).await
         }
     }
