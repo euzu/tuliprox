@@ -5,6 +5,7 @@ use crate::{
                 config_page::{ConfigForm, LABEL_HDHOMERUN_CONFIG},
                 config_view_context::ConfigViewContext,
                 hdhomerun_device_view::HdHomerunDeviceView,
+                use_emit_config_form,
             },
             Card, NoContent, TextButton,
         },
@@ -45,11 +46,7 @@ pub fn HdHomerunConfigView() -> Html {
         use_reducer(|| HdHomeRunConfigFormState { form: HdHomeRunConfigDto::default(), modified: false });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let deps = (form_state.clone(), form_state.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit(ConfigForm::HdHomerun(*modified, state.form.clone()));
-        });
+        use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::HdHomerun);
     }
 
     {
@@ -68,7 +65,10 @@ pub fn HdHomerunConfigView() -> Html {
 
     let handle_device_change = {
         let form_state = form_state.clone();
-        Callback::from(move |(device_idx, _device_modified, device)| {
+        Callback::from(move |(device_idx, device_modified, device): (usize, bool, HdHomeRunDeviceConfigDto)| {
+            if !device_modified {
+                return;
+            }
             let mut devices = form_state.form.devices.clone();
             if let Some(slot) = devices.get_mut(device_idx) {
                 *slot = device;

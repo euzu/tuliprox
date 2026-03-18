@@ -4,6 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_PANEL_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_config_form, HasFormData,
             },
             input::Input,
             select::Select,
@@ -482,6 +483,14 @@ impl Reducible for PanelConfigFormState {
     }
 }
 
+impl HasFormData for PanelConfigFormState {
+    type Data = SourcesConfigDto;
+
+    fn data(&self) -> &Self::Data { &self.form }
+
+    fn modified(&self) -> bool { self.modified }
+}
+
 fn render_param_editor(
     form_state: &UseReducerHandle<PanelConfigFormState>,
     edit_mode: bool,
@@ -608,11 +617,7 @@ pub fn PanelConfigView() -> Html {
         use_reducer(|| PanelConfigFormState { form: SourcesConfigDto::default(), modified: false });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let deps = (form_state.clone(), form_state.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit(ConfigForm::Panel(*modified, state.form.clone()));
-        });
+        use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Panel);
     }
 
     {

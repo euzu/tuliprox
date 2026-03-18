@@ -356,7 +356,6 @@ pub fn ConfigView() -> Html {
                 }
 
                 if ok {
-                    set_edit_mode.set(false);
                     let (app_config, api_proxy_config) = services.config.get_server_config().await;
                     if app_config.is_none() {
                         // Log but don't fail - save succeeded; refresh is best-effort
@@ -366,6 +365,17 @@ pub fn ConfigView() -> Html {
                         // Log but don't fail - save succeeded; refresh is best-effort
                         warn!("ApiProxy Config refresh failed");
                     }
+
+                    // Leave edit mode only after the refreshed config has been pushed
+                    // back through the shared context. Otherwise views that rehydrate
+                    // on `edit_mode` changes can briefly restore stale pre-save state.
+                    let set_edit_mode = set_edit_mode.clone();
+                    set_timeout(
+                        move || {
+                            set_edit_mode.set(false);
+                        },
+                        0,
+                    );
                 }
             });
         })

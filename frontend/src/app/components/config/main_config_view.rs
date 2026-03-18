@@ -3,6 +3,7 @@ use crate::{
         components::config::{
             config_page::{ConfigForm, LABEL_MAIN_CONFIG},
             config_view_context::ConfigViewContext,
+            use_emit_config_form,
         },
         context::ConfigContext,
     },
@@ -63,11 +64,7 @@ pub fn MainConfigView() -> Html {
         use_reducer(|| MainConfigFormState { form: MainConfigDto::default(), modified: false });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let deps = (form_state.clone(), form_state.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit(ConfigForm::Main(*modified, state.form.clone()));
-        });
+        use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Main);
     }
 
     {

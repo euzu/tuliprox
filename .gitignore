@@ -15,6 +15,15 @@ dist
 /dev/
 /debug/
 
+# ignore everything inside docs
+docs/**/*
+
+# allow src inside docs
+!docs/src/
+
+# allow everything inside src
+!docs/src/**/*
+
 docker/binaries
 .DS_Store
 
