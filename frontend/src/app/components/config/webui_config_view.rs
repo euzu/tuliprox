@@ -4,6 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_mapped,
             },
             AppIcon, Card, Chip,
         },
@@ -83,19 +84,26 @@ pub fn WebUiConfigView() -> Html {
 
     // Notify parent when form changes
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let webui_state = webui_state.clone();
-        let auth_state = auth_state.clone();
-        let csp_state = csp_state.clone();
-        let deps = (webui_state.modified, auth_state.modified, csp_state.modified, webui_state, auth_state, csp_state);
-        use_effect_with(deps, move |(wm, am, cm, w, a, c)| {
-            let mut form = w.form.clone();
-            form.auth = Some(a.form.clone());
-            form.content_security_policy = Some(c.form.clone());
+        let deps = (
+            webui_state.form.clone(),
+            auth_state.form.clone(),
+            csp_state.form.clone(),
+            webui_state.modified,
+            auth_state.modified,
+            csp_state.modified,
+        );
+        use_emit_mapped(
+            deps,
+            config_view_ctx.on_form_change.clone(),
+            |(webui_form, auth_form, csp_form, webui_modified, auth_modified, csp_modified)| {
+                let mut form = webui_form;
+                form.auth = Some(auth_form);
+                form.content_security_policy = Some(csp_form);
 
-            let modified = *wm || *am || *cm;
-            on_form_change.emit(ConfigForm::WebUi(modified, form));
-        });
+                let modified = webui_modified || auth_modified || csp_modified;
+                ConfigForm::WebUi(modified, form)
+            },
+        );
     }
 
     // Sync from context when config or edit mode changes

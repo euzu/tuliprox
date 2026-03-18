@@ -1231,6 +1231,14 @@
         "SUCCESS": "Main config saved!"
       },
       "NO_CHANGES": "No changes",
+      "REFRESH_INCOMPLETE": {
+        "API_PROXY_CONFIG": "api proxy config",
+        "BASE": "Changes saved but failed to refresh server config - staying in edit mode",
+        "MAIN_CONFIG": "main config",
+        "MISSING_REFRESHED": "missing refreshed",
+        "SOURCES_CONFIG": "sources config",
+        "UNKNOWN": "unknown refresh state"
+      },
       "SOURCES_CONFIG": {
         "FAIL": "Failed to save the sources config!",
         "SUCCESS": "Sources config saved!"

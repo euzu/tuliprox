@@ -4,7 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_SCHEDULES_CONFIG},
                 config_view_context::ConfigViewContext,
-                HasFormData,
+                use_emit_config_form, HasFormData,
             },
             input::Input,
             select::Select,
@@ -72,11 +72,7 @@ pub fn SchedulesConfigView() -> Html {
         use_reducer(|| SchedulesConfigFormState { form: SchedulesConfigDto::default(), modified: false });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
-        let deps = (form_state.clone(), form_state.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit(ConfigForm::Schedules(*modified, state.form.clone()));
-        });
+        use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Schedules);
     }
 
     {

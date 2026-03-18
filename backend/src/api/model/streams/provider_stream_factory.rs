@@ -11,8 +11,8 @@ use crate::{
     utils::{
         debug_if_enabled,
         request::{
-            classify_content_type, get_request_headers, preview_request_target_for_logging, send_with_retry_and_provider,
-            MimeCategory,
+            classify_content_type, get_request_headers, preview_request_diagnostics_for_logging,
+            preview_request_target_for_logging, send_with_retry_and_provider, MimeCategory,
         },
     },
 };
@@ -388,6 +388,14 @@ async fn provider_stream_request(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
+    if log_enabled!(log::Level::Debug) {
+        let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
+        debug!(
+            "Provider request diagnostics: manual_redirects={}, {}",
+            app_state.should_use_manual_redirects(),
+            sanitize_sensitive_info(&diagnostics)
+        );
+    }
     let response_result = if app_state.should_use_manual_redirects() {
         let client_no_redirect = app_state.http_client_no_redirect.load();
         send_with_manual_redirects(&client_no_redirect, stream_options, app_state).await
@@ -408,8 +416,11 @@ async fn provider_stream_request(
             let response_url = response.url().clone();
             if log_enabled!(log::Level::Debug) && !status.is_success() {
                 let debug_headers = collect_debug_headers(response.headers());
+                let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
                 let message =
-                    format!("Provider response error: status={status}, url={response_url}, headers={debug_headers:?}");
+                    format!(
+                        "Provider response error: status={status}, url={response_url}, headers={debug_headers:?}, {diagnostics}"
+                    );
                 debug!("{}", sanitize_sensitive_info(&message));
             }
             if status.is_success() {
@@ -449,7 +460,9 @@ async fn provider_stream_request(
                     | StatusCode::UNAUTHORIZED
                     | StatusCode::PROXY_AUTHENTICATION_REQUIRED
                     | StatusCode::METHOD_NOT_ALLOWED
-                    | StatusCode::BAD_REQUEST => handle_channel_unavailable_stream(app_state, stream_options).await,
+                    | StatusCode::BAD_REQUEST => {
+                        handle_channel_unavailable_stream(app_state, stream_options, status).await
+                    }
                     _ => Err(status),
                 };
             }
@@ -459,15 +472,22 @@ async fn provider_stream_request(
                     StatusCode::INTERNAL_SERVER_ERROR
                     | StatusCode::BAD_GATEWAY
                     | StatusCode::SERVICE_UNAVAILABLE
-                    | StatusCode::GATEWAY_TIMEOUT => handle_channel_unavailable_stream(app_state, stream_options).await,
+                    | StatusCode::GATEWAY_TIMEOUT => {
+                        handle_channel_unavailable_stream(app_state, stream_options, status).await
+                    }
                     _ => Err(status),
                 };
             }
             Err(status)
         }
         Err(err) => {
-            debug!("Provider request failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
-            handle_channel_unavailable_stream(app_state, stream_options).await
+            let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
+            debug!(
+                "Provider request failed: {}, {}",
+                sanitize_sensitive_info(err.to_string().as_str()),
+                sanitize_sensitive_info(&diagnostics)
+            );
+            handle_channel_unavailable_stream(app_state, stream_options, StatusCode::SERVICE_UNAVAILABLE).await
         }
     }
 }
@@ -475,6 +495,7 @@ async fn provider_stream_request(
 async fn handle_channel_unavailable_stream(
     app_state: &Arc<AppState>,
     stream_options: &ProviderStreamFactoryOptions,
+    status: StatusCode,
 ) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
     app_state
         .connection_manager
@@ -485,11 +506,11 @@ async fn handle_channel_unavailable_stream(
     if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
         &app_state.app_config,
         &get_response_headers(stream_options.get_headers()),
-        StatusCode::SERVICE_UNAVAILABLE,
+        status,
     ) {
         Ok(Some((boxed_provider_stream, response_info)))
     } else {
-        Err(StatusCode::SERVICE_UNAVAILABLE)
+        Err(status)
     }
 }
 

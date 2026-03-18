@@ -4,6 +4,7 @@ use crate::{
             config::{
                 config_page::{ConfigForm, LABEL_METADATA_UPDATE_CONFIG},
                 config_view_context::ConfigViewContext,
+                use_emit_mapped,
             },
             dto_field_id,
             number_input::NumberInput,
@@ -158,32 +159,54 @@ pub fn MetadataUpdateConfigView() -> Html {
         use_reducer(|| TmdbConfigFormState { form: TmdbConfigDto::default(), modified: false });
 
     {
-        let on_form_change = config_view_ctx.on_form_change.clone();
         let deps = (
-            form_state.clone(),
-            log_state.clone(),
-            resolve_state.clone(),
-            probe_state.clone(),
-            ffprobe_state.clone(),
-            tmdb_state.clone(),
+            form_state.form.clone(),
+            log_state.form.clone(),
+            resolve_state.form.clone(),
+            probe_state.form.clone(),
+            ffprobe_state.form.clone(),
+            tmdb_state.form.clone(),
+            form_state.modified,
+            log_state.modified,
+            resolve_state.modified,
+            probe_state.modified,
+            ffprobe_state.modified,
+            tmdb_state.modified,
         );
-        use_effect_with(deps, move |(form, log, resolve, probe, ffprobe, tmdb)| {
-            let mut merged = form.form.clone();
-            merged.log = log.form.clone();
-            merged.resolve = resolve.form.clone();
-            merged.probe = probe.form.clone();
-            merged.ffprobe = ffprobe.form.clone();
-            merged.tmdb = tmdb.form.clone();
-            on_form_change.emit(ConfigForm::MetadataUpdate(
-                form.modified
-                    || log.modified
-                    || resolve.modified
-                    || probe.modified
-                    || ffprobe.modified
-                    || tmdb.modified,
-                merged,
-            ));
-        });
+        use_emit_mapped(
+            deps,
+            config_view_ctx.on_form_change.clone(),
+            |(
+                form,
+                log,
+                resolve,
+                probe,
+                ffprobe,
+                tmdb,
+                form_modified,
+                log_modified,
+                resolve_modified,
+                probe_modified,
+                ffprobe_modified,
+                tmdb_modified,
+            )| {
+                let mut merged = form;
+                merged.log = log;
+                merged.resolve = resolve;
+                merged.probe = probe;
+                merged.ffprobe = ffprobe;
+                merged.tmdb = tmdb;
+                ConfigForm::MetadataUpdate(
+                    form_modified
+                        || log_modified
+                        || resolve_modified
+                        || probe_modified
+                        || ffprobe_modified
+                        || tmdb_modified,
+                    merged,
+                )
+            },
+        );
     }
 
     {

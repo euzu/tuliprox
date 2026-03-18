@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{Card, CollapsePanel, TextButton},
+    app::components::{config::use_emit_reducer_state, Card, CollapsePanel, TextButton},
     config_field, edit_field_number_u16, edit_field_number_u8, edit_field_text, generate_form_reducer, html_if,
     i18n::use_translation,
 };
@@ -42,11 +42,9 @@ pub fn HdHomerunDeviceView(props: &HdHomerunDeviceViewProps) -> Html {
         use_reducer(|| HdHomeRunDeviceConfigFormState { form: Box::new(props.device.clone()), modified: false });
 
     {
-        let on_form_change = props.on_form_change.clone();
         let device_id = props.device_id;
-        let deps = (form_state.clone(), form_state.modified);
-        use_effect_with(deps, move |(state, modified)| {
-            on_form_change.emit((device_id, *modified, (*state.form).clone()));
+        use_emit_reducer_state(&form_state, props.on_form_change.clone(), move |modified, form| {
+            (device_id, modified, *form)
         });
     }
 

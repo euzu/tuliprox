@@ -200,10 +200,6 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
     }
 }
 
-fn is_setup_hdhomerun_toggle_only_update(cfg: &HdHomeRunConfigDto) -> bool {
-    cfg.devices.is_empty() && !cfg.auth && !cfg.ssdp_discovery && !cfg.proprietary_discovery
-}
-
 fn is_setup_library_toggle_only_update(cfg: &LibraryConfigDto) -> bool {
     cfg.scan_directories.is_empty()
         && cfg.supported_extensions.is_empty()
@@ -212,13 +208,11 @@ fn is_setup_library_toggle_only_update(cfg: &LibraryConfigDto) -> bool {
 }
 
 fn apply_setup_hdhomerun_form(config: &mut shared::model::ConfigDto, hdhr_cfg: HdHomeRunConfigDto) {
-    if let Some(existing) = config.hdhomerun.as_mut() {
-        if is_setup_hdhomerun_toggle_only_update(&hdhr_cfg) {
-            existing.enabled = hdhr_cfg.enabled;
-            return;
-        }
+    if hdhr_cfg.is_empty() {
+        config.hdhomerun = None;
+    } else {
+        config.hdhomerun = Some(hdhr_cfg);
     }
-    config.hdhomerun = Some(hdhr_cfg);
 }
 
 fn apply_setup_library_form(config: &mut shared::model::ConfigDto, library_cfg: LibraryConfigDto) {
@@ -598,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_hdhomerun_toggle_only_form_preserves_existing_payload() {
+    fn setup_hdhomerun_empty_form_clears_existing_payload() {
         let mut app_config = AppConfigDto::default();
         app_config.config.hdhomerun = Some(HdHomeRunConfigDto {
             enabled: true,
@@ -610,10 +604,44 @@ mod tests {
         form_state.update_form(ConfigForm::HdHomerun(true, HdHomeRunConfigDto::default()));
 
         let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        assert!(app_cfg.config.hdhomerun.is_none(), "empty forms must clear existing HDHomeRun payload");
+    }
+
+    #[test]
+    fn setup_hdhomerun_form_allows_removing_all_devices() {
+        let mut app_config = AppConfigDto::default();
+        app_config.config.hdhomerun = Some(HdHomeRunConfigDto {
+            enabled: true,
+            devices: vec![HdHomeRunDeviceConfigDto { name: "living_room".to_string(), ..Default::default() }],
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::HdHomerun(
+            true,
+            HdHomeRunConfigDto { enabled: true, devices: Vec::new(), ..Default::default() },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
         let hdhr = app_cfg.config.hdhomerun.expect("hdhomerun config should be present");
-        assert!(!hdhr.enabled);
-        assert_eq!(hdhr.devices.len(), 1);
-        assert_eq!(hdhr.devices[0].name, "living_room");
+        assert!(hdhr.enabled);
+        assert!(hdhr.devices.is_empty(), "devices should be removed instead of restored");
+    }
+
+    #[test]
+    fn setup_hdhomerun_form_allows_removing_all_devices_while_disabled() {
+        let mut app_config = AppConfigDto::default();
+        app_config.config.hdhomerun = Some(HdHomeRunConfigDto {
+            enabled: false,
+            devices: vec![HdHomeRunDeviceConfigDto { name: "living_room".to_string(), ..Default::default() }],
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::HdHomerun(true, HdHomeRunConfigDto::default()));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        assert!(app_cfg.config.hdhomerun.is_none(), "disabled empty forms should clear the HDHomeRun config");
     }
 
     #[test]

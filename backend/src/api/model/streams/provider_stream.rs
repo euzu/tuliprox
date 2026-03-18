@@ -109,6 +109,7 @@ fn create_video_stream(
     stream_type: CustomVideoStreamType,
     video_buffer: Option<&TransportStreamBuffer>,
     headers: &[(String, String)],
+    status: StatusCode,
     log_message: &str,
 ) -> ProviderStreamResponse {
     if let Some(video) = video_buffer {
@@ -117,11 +118,21 @@ fn create_video_stream(
             apply_custom_stream_timeout(cfg, Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000)));
         (
             Some(stream),
-            Some((prepare_video_headers(headers), StatusCode::OK, None, Some(stream_type))),
+            Some((prepare_video_headers(headers), status, None, Some(stream_type))),
         )
     } else {
         (None, None)
     }
+}
+
+fn create_ok_video_stream(
+    cfg: &AppConfig,
+    stream_type: CustomVideoStreamType,
+    video_buffer: Option<&TransportStreamBuffer>,
+    headers: &[(String, String)],
+    log_message: &str,
+) -> ProviderStreamResponse {
+    create_video_stream(cfg, stream_type, video_buffer, headers, StatusCode::OK, log_message)
 }
 
 pub fn create_channel_unavailable_stream(
@@ -136,6 +147,7 @@ pub fn create_channel_unavailable_stream(
         CustomVideoStreamType::ChannelUnavailable,
         video,
         headers,
+        status,
         &format!("Streaming response channel unavailable for status {status}"),
     )
 }
@@ -146,7 +158,7 @@ pub fn create_user_connections_exhausted_stream(
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.user_connections_exhausted.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::UserConnectionsExhausted,
         video,
@@ -161,7 +173,7 @@ pub fn create_provider_connections_exhausted_stream(
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.provider_connections_exhausted.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::ProviderConnectionsExhausted,
         video,
@@ -176,7 +188,7 @@ pub fn create_low_priority_preempted_stream(
 ) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.low_priority_preempted.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::LowPriorityPreempted,
         video,
@@ -188,7 +200,7 @@ pub fn create_low_priority_preempted_stream(
 pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.user_account_expired.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::UserAccountExpired,
         video,
@@ -200,7 +212,7 @@ pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, S
 pub fn create_panel_api_provisioning_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());
-    create_video_stream(
+    create_ok_video_stream(
         cfg,
         CustomVideoStreamType::Provisioning,
         video,
@@ -270,13 +282,91 @@ pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFil
 
 #[cfg(test)]
 mod tests {
-    use super::CustomVideoStreamType;
-    use std::str::FromStr;
+    use super::{create_channel_unavailable_stream, CustomVideoStreamType};
+    use crate::{
+        api::model::TransportStreamBuffer,
+        model::{AppConfig, Config, ConfigInput, CustomStreamResponse, SourcesConfig},
+        utils::FileLockManager,
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use reqwest::StatusCode;
+    use shared::{
+        model::{ConfigPaths, InputFetchMethod, InputType},
+        utils::Internable,
+    };
+    use std::{collections::HashMap, str::FromStr, sync::Arc};
+
+    fn create_test_app_config_with_channel_unavailable() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+
+        let app_cfg = AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            ffprobe_available: Arc::default(),
+        };
+
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        app_cfg.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
+            channel_unavailable: Some(TransportStreamBuffer::new(ts_packet)),
+            user_connections_exhausted: None,
+            provider_connections_exhausted: None,
+            low_priority_preempted: None,
+            user_account_expired: None,
+            panel_api_provisioning: None,
+        })));
+        app_cfg
+    }
 
     #[test]
     fn test_low_priority_preempted_custom_video_type_roundtrip() {
         let parsed = CustomVideoStreamType::from_str("low_priority_preempted")
             .expect("low_priority_preempted should parse as custom video type");
         assert_eq!(parsed.to_string(), "low_priority_preempted");
+    }
+
+    #[test]
+    fn test_channel_unavailable_preserves_supplied_status_code() {
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+
+        let (_stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
+        let (_headers, status, _url, stream_type) = info.expect("channel unavailable custom stream should exist");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(matches!(stream_type, Some(CustomVideoStreamType::ChannelUnavailable)));
     }
 }
