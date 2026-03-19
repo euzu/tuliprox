@@ -1488,7 +1488,7 @@ mod tests {
                 joined.is_none(),
                 "sleep timer should terminate the deferred-open stream without yielding bytes"
             ),
-            Err(_) => assert!(false, "timeout already checked"),
+            Err(_) => unreachable!("timeout already checked"),
         }
     }
 
