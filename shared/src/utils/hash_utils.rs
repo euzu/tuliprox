@@ -64,6 +64,11 @@ pub fn extract_numeric_id_from_url(url: &str) -> Option<u32> {
         end = delim;
     }
 
+    // Trim any trailing slashes that were before the query/fragment (e.g. "/123/?foo")
+    while end > 0 && bytes[end - 1] == b'/' {
+        end -= 1;
+    }
+
     // Find the last '/' — the numeric id must follow one.
     let slash_pos = bytes[..end].iter().rposition(|&b| b == b'/')?;
     let segment = &bytes[slash_pos + 1..end];
@@ -356,6 +361,16 @@ mod tests {
     #[test]
     fn numeric_url_id_fragment_no_extension() {
         assert_eq!(extract_numeric_id_from_url("http://server.com/live/55555#start"), Some(55555));
+    }
+
+    #[test]
+    fn numeric_url_id_trailing_slash_before_query() {
+        assert_eq!(extract_numeric_id_from_url("http://server.com/123/?foo=bar"), Some(123));
+    }
+
+    #[test]
+    fn numeric_url_id_trailing_slash_before_fragment() {
+        assert_eq!(extract_numeric_id_from_url("http://server.com/456/#section"), Some(456));
     }
 
     // ── hash_bytes / hash_string ─────────────────────────────────────
