@@ -1,7 +1,7 @@
 use crate::model::{Config, ConfigInput};
 use crate::utils::request::DynReader;
 use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
-use shared::utils::{default_supported_video_extensions, extract_id_from_url, Internable};
+use shared::utils::{default_supported_video_extensions, extract_id_from_url, extract_numeric_id_from_url, Internable};
 use std::borrow::BorrowMut;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
@@ -233,16 +233,15 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
             c = it.next();
         }
 
-        let url_id = extract_id_from_url(&plih.url);
-        if !url_id.is_empty() && url_id.bytes().all(|b| b.is_ascii_digit()) {
+        if let Some(numeric_url_id) = extract_numeric_id_from_url(&plih.url).filter(|&id| id > 0) {
             // Numeric ID extracted from URL is always the authoritative provider ID.
-            plih.id = url_id.intern();
+            plih.id = numeric_url_id.to_string().intern();
         } else if let Some(pid) = provider_id {
             plih.id = pid.intern();
         } else if let Some(fid) = fallback_id {
             plih.id = fid.intern();
-        } else if !url_id.is_empty() {
-            plih.id = url_id.intern();
+        } else {
+            plih.id = extract_id_from_url(&plih.url).intern();
         }
     }
     if let Some((url_cluster, url_item_type)) = url_types {
