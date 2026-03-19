@@ -233,15 +233,16 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
             c = it.next();
         }
 
-        if let Some(pid) = provider_id {
+        let url_id = extract_id_from_url(&plih.url);
+        if !url_id.is_empty() && url_id.bytes().all(|b| b.is_ascii_digit()) {
+            // Numeric ID extracted from URL is always the authoritative provider ID.
+            plih.id = url_id.intern();
+        } else if let Some(pid) = provider_id {
             plih.id = pid.intern();
         } else if let Some(fid) = fallback_id {
             plih.id = fid.intern();
-        } else {
-            let url_id = extract_id_from_url(&plih.url);
-            if !url_id.is_empty() {
-                plih.id = url_id.intern();
-            }
+        } else if !url_id.is_empty() {
+            plih.id = url_id.intern();
         }
     }
     if let Some((url_cluster, url_item_type)) = url_types {
@@ -383,7 +384,7 @@ mod test {
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.name, "UK-NOWTV| SKY CRIME FHD".intern());
         assert_eq!(pli.title, "UK-NOWTV| SKY CRIME FHD".intern());
-        assert_eq!(pli.id, "12046".intern()); // CUID is recognized as provider_id, overrides tvg-id
+        assert_eq!(pli.id, "1905905".intern()); // URL id is master; CUID is only fallback
         assert_eq!(pli.logo, "https://logo.m3uassets.com/skycrime.png".intern());
         assert_eq!(&*pli.group, "🔪Murder Mystery");
         assert_eq!(pli.epg_channel_id, Some("skycrime.uk".intern()));
@@ -448,7 +449,7 @@ mod test {
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.title, "Seven".intern());
-        assert_eq!(pli.id, "provider-123".intern()); // Should use xui-id
+        assert_eq!(pli.id, "provider-123".intern()); // URL has no numeric id, xui-id used as fallback
         assert_eq!(pli.epg_channel_id, Some("abc-seven".intern())); // Should preserve original tvg-id
         assert_eq!(&*pli.group, "Sydney");
     }
@@ -462,7 +463,7 @@ mod test {
         let line = r#"#EXTINF:-1 stream-id="55555" tvg-name="Test Channel" group-title="Group",Test Channel"#;
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.id, "55555".intern()); // fallback numeric id field detected
+        assert_eq!(pli.id, "99999".intern()); // URL numeric id is master, stream-id is only fallback
         assert_eq!(pli.epg_channel_id, None);
     }
 
@@ -487,6 +488,6 @@ mod test {
         let line = r#"#EXTINF:-1 stream-id="55555" CUID="77777" tvg-name="Test" group-title="G",Test"#;
 
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
-        assert_eq!(pli.id, "77777".intern()); // CUID takes priority
+        assert_eq!(pli.id, "99999".intern()); // URL numeric id is master, CUID/stream-id are only fallbacks
     }
 }

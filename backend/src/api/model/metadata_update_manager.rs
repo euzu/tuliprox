@@ -413,6 +413,7 @@ struct RetryStateDbValue {
     next_allowed_at_ts: i64,
     cooldown_until_ts: Option<i64>,
     last_error: Option<String>,
+    #[serde(default)]
     source_last_modified: Option<u64>,
 }
 
@@ -4356,6 +4357,33 @@ mod tests {
         persist_metadata_retry_state_to_disk(&path, &key, None).expect("state clear should succeed");
         let cleared = load_metadata_retry_states_from_disk(&path).expect("state reload should succeed");
         assert!(!cleared.contains_key(&key));
+    }
+
+    #[test]
+    fn msgpack_backward_compat_old_4field_retry_state() {
+        // Simulate old 4-field format (before source_last_modified was added)
+        #[derive(Debug, serde::Serialize)]
+        struct OldRetryStateDbValue {
+            attempts: u8,
+            next_allowed_at_ts: i64,
+            cooldown_until_ts: Option<i64>,
+            last_error: Option<String>,
+        }
+
+        let old = OldRetryStateDbValue {
+            attempts: 3,
+            next_allowed_at_ts: 1_700_000_000,
+            cooldown_until_ts: Some(1_700_043_200),
+            last_error: Some("HTTP 404".to_string()),
+        };
+
+        let bytes = rmp_serde::to_vec(&old).expect("old format should serialize");
+        let result = rmp_serde::from_slice::<RetryStateDbValue>(&bytes);
+        assert!(result.is_ok(), "deserializing old 4-field format into new 5-field struct should succeed, got: {result:?}");
+        let loaded = result.unwrap();
+        assert_eq!(loaded.attempts, 3);
+        assert_eq!(loaded.cooldown_until_ts, Some(1_700_043_200));
+        assert_eq!(loaded.source_last_modified, None);
     }
 
     #[test]
