@@ -332,7 +332,7 @@ pub struct ForceStreamRequestContext<'a> {
 /// This means direct provider piping is enabled only when retry is disabled and buffering is disabled.
 ///
 /// Returns a `StreamOptions` instance with the resolved configuration.
-fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
+pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
     let (stream_retry, buffer_enabled, buffer_size) = app_state
         .app_config
         .config
@@ -680,8 +680,8 @@ async fn create_stream_response_details(
                 }
             }
 
-            // if we have no stream, we should release the provider unless we intentionally defer
-            // opening it for provider-grace hold_stream behavior.
+            // If no upstream stream is ready, release the provider unless provider grace
+            // intentionally deferred the open until the grace check resolves.
             let provider_handle = if stream.is_none() && !defer_provider_stream_until_grace_check {
                 let provider_handle = streaming_strategy.provider_handle.take();
                 app_state.connection_manager.release_provider_handle(provider_handle).await;
@@ -896,8 +896,7 @@ pub async fn force_provider_stream_response(
         }
     };
 
-    let deferred_grace_hold_stream =
-        !stream_details.has_stream() && stream_details.provider_grace_active && stream_details.grace_period.hold_stream;
+    let deferred_grace_hold_stream = stream_details.has_deferred_provider_open();
 
     if stream_details.has_stream() || deferred_grace_hold_stream {
         let provider_response =
@@ -1064,9 +1063,8 @@ pub async fn stream_response(
     // needs to resolve (provider-grace with hold_stream, or user-grace). The grace task will
     // determine the correct mode (UserExhausted / ProviderExhausted / Inner) and serve the
     // appropriate custom video or terminate cleanly.
-    let deferred_grace_hold_stream = !stream_details.has_stream()
-        && (stream_details.provider_grace_active
-            || connection_permission == UserConnectionPermission::GracePeriod);
+    let deferred_grace_hold_stream =
+        stream_details.has_deferred_provider_open() || connection_permission == UserConnectionPermission::GracePeriod;
 
     if stream_details.has_stream() || deferred_grace_hold_stream {
         // let content_length = get_stream_content_length(provider_response.as_ref());
@@ -1096,7 +1094,11 @@ pub async fn stream_response(
                 is_stream_shared = false;
             }
         }
-        let provider_handle = if is_stream_shared { stream_details.provider_handle.take() } else { None };
+        let provider_handle = if is_stream_shared && !stream_details.has_deferred_provider_open() {
+            stream_details.provider_handle.take()
+        } else {
+            None
+        };
 
         stream_channel.shared = is_stream_shared;
         let stream = create_active_client_stream(
