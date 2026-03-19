@@ -27,6 +27,7 @@ static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([12
 pub type ClientConnectionId = SocketAddr;
 type AllocationId = u64;
 type SharedConnectionId = AllocationId;
+type PreemptionCandidate = (PriorityOwner, AllocationId, i8, Instant);
 // Key for BTreeMap priority index: (priority, Reverse<created_at>, AllocationId)
 // Semantics: lower numeric priority value = higher importance (0 = highest, 127 = lowest).
 // `.last()` on the BTreeMap returns the entry with the highest priority value, which is
@@ -34,6 +35,21 @@ type SharedConnectionId = AllocationId;
 // Ties are broken by `Reverse<Instant>`: among equal priority values, the oldest connection
 // (smallest `created_at`) sorts last and is evicted first.
 type PriorityKey = (i8, Reverse<Instant>, AllocationId);
+
+fn is_better_preemption_candidate(
+    current: Option<PreemptionCandidate>,
+    candidate: PreemptionCandidate,
+) -> bool {
+    match current {
+        None => true,
+        Some((_, current_allocation_id, current_priority, current_created_at)) => {
+            candidate.2 > current_priority
+                || (candidate.2 == current_priority
+                    && (candidate.3 < current_created_at
+                        || (candidate.3 == current_created_at && candidate.1 < current_allocation_id)))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PriorityOwner {
@@ -292,25 +308,38 @@ impl ActiveProviderManager {
             }
         }
 
-        if matches!(&allocation, ProviderAllocation::GracePeriod(_))
-            && self.has_non_preemptable_connection_on_input(input_name, priority).await
-        {
-            allocation.release().await;
-            return None;
-        }
-
         self.register_allocation(allocation, addr, priority).await
     }
 
-    async fn has_non_preemptable_connection_on_input(&self, input_name: &Arc<str>, new_priority: i8) -> bool {
-        let connections = self.connections.read().await;
-        connections.priority_index.iter().any(|(prov_name, tree)| {
-            self.providers.is_provider_for_input(prov_name, input_name)
-                && tree
-                    .iter()
-                    .next()
-                    .is_some_and(|((prio, _, _), _)| *prio <= new_priority)
-        })
+    fn select_preemption_candidate(
+        &self,
+        connections: &Connections,
+        input_name: &Arc<str>,
+        new_priority: i8,
+        reserved_providers: &HashSet<Arc<str>>,
+    ) -> Option<PreemptionCandidate> {
+        let mut victim = None;
+
+        for (prov_name, tree) in &connections.priority_index {
+            if !self.providers.is_provider_for_input(prov_name, input_name) || reserved_providers.contains(prov_name) {
+                continue;
+            }
+
+            let Some(((victim_priority, Reverse(created_at), allocation_id), owner)) = tree.iter().next_back() else {
+                continue;
+            };
+
+            if *victim_priority <= new_priority {
+                continue;
+            }
+
+            let candidate = (*owner, *allocation_id, *victim_priority, *created_at);
+            if is_better_preemption_candidate(victim, candidate) {
+                victim = Some(candidate);
+            }
+        }
+
+        victim
     }
 
     async fn acquire_connection_inner(
@@ -424,33 +453,9 @@ impl ActiveProviderManager {
     ) -> bool {
         let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner).await;
 
-        // Find best victim across all aliases under read lock
-        let victim: Option<(PriorityOwner, AllocationId, i8, Instant)> = {
+        let victim = {
             let connections = self.connections.read().await;
-            let mut found: Option<(PriorityOwner, AllocationId, i8, Instant)> = None;
-            for (prov_name, tree) in &connections.priority_index {
-                if !self.providers.is_provider_for_input(prov_name, input_name) {
-                    continue;
-                }
-                if reserved_providers.contains(prov_name) {
-                    continue;
-                }
-                if let Some(((prio, Reverse(created_at), alloc_id), owner)) = tree.iter().next_back() {
-                    if *prio <= new_priority {
-                        continue;
-                    }
-                    let is_better = match found {
-                        None => true,
-                        Some((_, _, v_prio, v_created)) => {
-                            *prio > v_prio || (*prio == v_prio && *created_at < v_created)
-                        }
-                    };
-                    if is_better {
-                        found = Some((*owner, *alloc_id, *prio, *created_at));
-                    }
-                }
-            }
-            found
+            self.select_preemption_candidate(&connections, input_name, new_priority, &reserved_providers)
         };
 
         let Some((owner, alloc_id, v_prio, victim_created_at)) = victim else {
@@ -569,37 +574,10 @@ impl ActiveProviderManager {
         session_owner: Option<&str>,
     ) -> Option<ProviderAllocation> {
         let reserved_providers = self.reserved_provider_names_for_other(input_name, session_owner).await;
-        // Victim: (owner, alloc_id, priority, created_at)
-        let mut victim: Option<(PriorityOwner, AllocationId, i8, Instant)> = None;
-
-        {
+        let victim = {
             let connections = self.connections.read().await;
-
-            // Search across ALL provider aliases of this input using the priority index
-            for (prov_name, tree) in &connections.priority_index {
-                if !self.providers.is_provider_for_input(prov_name, input_name) {
-                    continue;
-                }
-                if reserved_providers.contains(prov_name) {
-                    continue;
-                }
-                // Highest priority value (lowest importance) is the best victim candidate.
-                if let Some(((prio, Reverse(created_at), alloc_id), owner)) = tree.iter().next_back() {
-                    if *prio <= new_priority {
-                        continue;
-                    }
-                    let is_better = match victim {
-                        None => true,
-                        Some((_, _, v_prio, v_created)) => {
-                            *prio > v_prio || (*prio == v_prio && *created_at < v_created)
-                        }
-                    };
-                    if is_better {
-                        victim = Some((*owner, *alloc_id, *prio, *created_at));
-                    }
-                }
-            }
-        }
+            self.select_preemption_candidate(&connections, input_name, new_priority, &reserved_providers)
+        };
 
         if let Some((owner, alloc_id, v_prio, victim_created_at)) = victim {
             match owner {
@@ -1126,7 +1104,7 @@ impl ActiveProviderManager {
 mod tests {
     use super::ActiveProviderManager;
     use crate::{
-        api::model::EventManager,
+        api::model::{EventManager, ProviderAllocation},
         model::{AppConfig, Config, ConfigInput, ConfigInputAlias, SourcesConfig},
         utils::FileLockManager,
     };
@@ -1526,7 +1504,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_equal_priority_user_does_not_preempt_and_gets_rejected() {
+    async fn test_equal_priority_user_gets_grace_without_preempting_existing_stream() {
         let app_cfg = create_test_app_config_single_provider_pool();
         let event_manager = Arc::new(EventManager::new());
         let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
@@ -1546,18 +1524,99 @@ mod tests {
         // Provider is now exhausted
         assert!(manager.is_exhausted(&input_name).await);
 
-        // User 2 arrives with same priority.
-        // Equal priority must not preempt and must not receive a grace allocation.
+        // User 2 arrives with the same priority and should be granted grace instead of being rejected.
         let alloc2 = manager
             .acquire_connection(&input_name, &user_2_addr, default_user_priority())
-            .await;
+            .await
+            .expect("same-priority user should get grace allocation");
+        assert!(matches!(alloc2.allocation, ProviderAllocation::GracePeriod(_)));
+        assert_eq!(alloc2.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
 
-        assert!(alloc2.is_none(), "same-priority user must be rejected when provider capacity is exhausted");
-        // User 1 should NOT be cancelled
+        // User 1 should NOT be cancelled, and the provider should be temporarily over limit.
         assert!(!token1.is_cancelled(), "same-prio user should not be evicted");
+        assert!(manager.is_over_limit(&input_name).await, "provider should be temporarily over limit during grace");
 
         manager.release_connection(&user_1_addr).await;
         manager.release_connection(&user_2_addr).await;
+    }
+
+    #[tokio::test]
+    async fn test_higher_priority_user_preempts_first_inserted_low_priority_victim_on_exact_tie() {
+        let app_cfg = create_test_app_config_with_dual_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let old_low_addr: SocketAddr = "127.0.0.1:48101".parse().unwrap();
+        let new_low_addr: SocketAddr = "127.0.0.1:48102".parse().unwrap();
+        let high_prio_addr: SocketAddr = "127.0.0.1:48103".parse().unwrap();
+
+        // Place two equal-priority low-priority victims on different provider aliases.
+        // The test then normalizes their created_at timestamps to an exact tie so the
+        // selector must fall back to the final stable tie-break instead of clock order.
+        let old_alloc = manager
+            .acquire_exact_connection_with_grace(&"provider_2".intern(), &old_low_addr, false, 20)
+            .await
+            .expect("old low-priority allocation should succeed");
+        let old_token = old_alloc.cancel_token.clone().expect("old allocation should have cancel token");
+        assert_eq!(old_alloc.allocation.get_provider_name().as_deref(), Some("provider_2"));
+
+        let new_alloc = manager
+            .acquire_exact_connection_with_grace(&"provider_1".intern(), &new_low_addr, false, 20)
+            .await
+            .expect("new low-priority allocation should succeed");
+        let new_token = new_alloc.cancel_token.clone().expect("new allocation should have cancel token");
+        assert_eq!(new_alloc.allocation.get_provider_name().as_deref(), Some("provider_1"));
+
+        {
+            let mut connections = manager.connections.write().await;
+            let old_created_at = connections
+                .single
+                .get(&old_low_addr)
+                .and_then(|per_addr| per_addr.get(&old_alloc.allocation_id))
+                .map(|info| info.created_at)
+                .expect("old allocation should still be registered");
+
+            let (new_created_at, new_priority) = {
+                let per_addr = connections
+                    .single
+                    .get_mut(&new_low_addr)
+                    .expect("new allocation address should still be registered");
+                let info = per_addr
+                    .get_mut(&new_alloc.allocation_id)
+                    .expect("new allocation should still be registered");
+                let original_created_at = info.created_at;
+                info.created_at = old_created_at;
+                (original_created_at, info.priority)
+            };
+
+            let provider_name = "provider_1".intern();
+            let tree = connections
+                .priority_index
+                .get_mut(&provider_name)
+                .expect("priority index for provider_1 should exist");
+            let owner = tree
+                .remove(&(new_priority, std::cmp::Reverse(new_created_at), new_alloc.allocation_id))
+                .expect("new allocation should still be indexed");
+            tree.insert((new_priority, std::cmp::Reverse(old_created_at), new_alloc.allocation_id), owner);
+        }
+
+        assert!(manager.is_exhausted(&input_name).await);
+
+        // Higher-priority request should now select the first-inserted victim because
+        // priority and created_at are exactly tied across provider aliases.
+        let high_alloc = manager
+            .acquire_connection(&input_name, &high_prio_addr, 0)
+            .await
+            .expect("higher-priority request should preempt the first-inserted low-priority victim on exact tie");
+        assert_eq!(high_alloc.allocation.get_provider_name().as_deref(), Some("provider_2"));
+
+        assert!(old_token.is_cancelled(), "first-inserted low-priority victim should be canceled first on exact tie");
+        assert!(!new_token.is_cancelled(), "later allocation should remain active after the stable tie-break");
+
+        manager.release_connection(&high_prio_addr).await;
+        manager.release_connection(&old_low_addr).await;
+        manager.release_connection(&new_low_addr).await;
     }
 
     #[tokio::test]

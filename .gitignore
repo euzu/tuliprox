@@ -27,12 +27,6 @@ docs/**/*
 docker/binaries
 .DS_Store
 
-# Ignore documentation files
-AGENTS.md
-PLANS.md
-STEPS.md
-CLAUDE.md
-
 *.m3u
 
 .idea/
@@ -51,6 +45,15 @@ artifacts
 # Ignore VSCode settings and files
 /.vscode
 
-.claude
 .envrc
 backend/Cargo.lock
+
+# Ignore ai documentation files
+AGENTS.md
+PLANS.md
+STEPS.md
+CLAUDE.md
+CODEX.md
+.claude
+.dual-graph/
+.dual-graph-context/

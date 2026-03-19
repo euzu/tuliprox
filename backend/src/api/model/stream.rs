@@ -57,6 +57,16 @@ impl StreamDetails {
 
     #[inline]
     pub fn has_grace_period(&self) -> bool { self.grace_period.period_millis > 0 }
+
+    #[inline]
+    pub fn has_deferred_provider_open(&self) -> bool {
+        self.stream.is_none()
+            && self.provider_grace_active
+            && self.grace_period.hold_stream
+            && self.provider_handle.is_some()
+            && self.provider_name.is_some()
+            && self.request_url.is_some()
+    }
 }
 
 pub struct StreamingStrategy {
