@@ -678,6 +678,7 @@
     "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web"
   },
   "LABEL": {
+    "ALL_TARGETS": "All targets",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Accept Insecure SSL Certificates",
     "ACTIVE": "Active",
     "ACTIVE_PROVIDER_CONNECTIONS": "Active provider connections",

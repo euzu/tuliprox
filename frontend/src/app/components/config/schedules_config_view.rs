@@ -26,7 +26,8 @@ use yew::prelude::*;
 const LABEL_SCHEDULE: &str = "LABEL.SCHEDULE";
 const LABEL_TARGETS: &str = "LABEL.TARGETS";
 const LABEL_TYPE: &str = "LABEL.TYPE";
-const LABEL_ALL: &str = "LABEL.ALL";
+const LABEL_ALL_TARGETS: &str = "LABEL.ALL_TARGETS";
+const ALL_TARGETS_SENTINEL: &str = "__all_targets__";
 
 generate_form_reducer!(
     state: SchedulesConfigFormState { form: SchedulesConfigDto },
@@ -58,17 +59,27 @@ pub fn SchedulesConfigView() -> Html {
             .collect::<Vec<String>>()
     });
 
-    let target_options =
-        use_memo(((*selected_targets).clone(), all_targets.clone()), move |(selected, all_targets)| {
-            all_targets
-                .iter()
-                .map(|t| DropDownOption {
-                    id: t.clone(),
-                    label: html! { t.clone() },
-                    selected: (*selected).as_ref().is_some_and(|s| s.contains(t)),
-                })
-                .collect::<Vec<DropDownOption>>()
-        });
+    let all_targets_label = translate.t(LABEL_ALL_TARGETS);
+    let target_options = use_memo(
+        ((*selected_targets).clone(), all_targets.clone(), all_targets_label.clone()),
+        move |(selected, all_targets, all_targets_label)| {
+            let all_targets_selected = selected.as_ref().is_none_or(|targets| {
+                targets.is_empty() || targets.iter().any(|target| target == ALL_TARGETS_SENTINEL)
+            });
+            std::iter::once(DropDownOption {
+                id: ALL_TARGETS_SENTINEL.to_string(),
+                label: html! { all_targets_label.clone() },
+                selected: all_targets_selected,
+            })
+            .chain(all_targets.iter().map(|t| DropDownOption {
+                id: t.clone(),
+                label: html! { t.clone() },
+                selected:
+                    selected.as_ref().is_some_and(|targets| targets.iter().any(|selected_target| selected_target == t)),
+            }))
+            .collect::<Vec<DropDownOption>>()
+        },
+    );
 
     let form_state: UseReducerHandle<SchedulesConfigFormState> =
         use_reducer(|| SchedulesConfigFormState { form: SchedulesConfigDto::default(), modified: false });
@@ -115,8 +126,20 @@ pub fn SchedulesConfigView() -> Html {
         let set_selected_targets = selected_targets.clone();
         Callback::from(move |(_name, selections): (String, DropDownSelection)| match selections {
             DropDownSelection::Empty => set_selected_targets.set(None),
-            DropDownSelection::Single(options) => set_selected_targets.set(Some(vec![options])),
-            DropDownSelection::Multi(options) => set_selected_targets.set(Some(options)),
+            DropDownSelection::Single(option) => {
+                if option == ALL_TARGETS_SENTINEL {
+                    set_selected_targets.set(None);
+                } else {
+                    set_selected_targets.set(Some(vec![option]));
+                }
+            }
+            DropDownSelection::Multi(options) => {
+                if options.iter().any(|option| option == ALL_TARGETS_SENTINEL) {
+                    set_selected_targets.set(None);
+                } else {
+                    set_selected_targets.set(Some(options));
+                }
+            }
         })
     };
 
@@ -131,8 +154,13 @@ pub fn SchedulesConfigView() -> Html {
         Callback::from(move |_| {
             if let Some(schedule) = (*set_selected_schedule).as_ref() {
                 let task_type = *selected_type;
-                let targets =
-                    if task_type == ScheduleTaskType::PlaylistUpdate { (*set_selected_targets).clone() } else { None };
+                let targets = if task_type == ScheduleTaskType::PlaylistUpdate {
+                    (*set_selected_targets).clone().filter(|targets| {
+                        !targets.is_empty() && !targets.iter().any(|target| target == ALL_TARGETS_SENTINEL)
+                    })
+                } else {
+                    None
+                };
                 match Schedule::from_str(schedule) {
                     Ok(_) => {
                         let dto = ScheduleConfigDto { schedule: schedule.clone(), task_type, targets };
@@ -205,7 +233,7 @@ pub fn SchedulesConfigView() -> Html {
                 selected_schedule.set(Some(entry.schedule.clone()));
                 selected_type.set(entry.task_type);
                 selected_targets.set(if entry.task_type == ScheduleTaskType::PlaylistUpdate {
-                    entry.targets.clone()
+                    entry.targets.clone().or_else(|| Some(vec![ALL_TARGETS_SENTINEL.to_string()]))
                 } else {
                     None
                 });
@@ -272,7 +300,7 @@ pub fn SchedulesConfigView() -> Html {
                                     }
                                 },
                                 _ => html! {
-                                    <Chip label={translate.t(LABEL_ALL)} />
+                                    <Chip label={translate.t(LABEL_ALL_TARGETS)} />
                                 },
                             }
                             }
@@ -288,10 +316,7 @@ pub fn SchedulesConfigView() -> Html {
                         <thead>
                             <tr>
                                 {html_if!(deletable, {
-                                    <>
-                                        <th></th>
-                                        <th></th>
-                                    </>
+                                   <th></th>
                                 })}
                                 <th>{ translate.t(LABEL_SCHEDULE) }</th>
                                 <th>{ translate.t(LABEL_TYPE) }</th>
