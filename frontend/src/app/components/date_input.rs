@@ -2,6 +2,12 @@ use crate::app::components::FieldLabel;
 use web_sys::HtmlInputElement;
 use yew::{classes, component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
+pub(crate) fn format_date_input_value(value: Option<i64>) -> String {
+    value
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+        .map_or_else(String::new, |date| date.format("%Y-%m-%d").to_string())
+}
+
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct DateInputProps {
     #[prop_or_default]
@@ -47,13 +53,7 @@ pub(crate) fn DateInputBase(props: &DateInputBaseProps) -> Html {
         let value = props.value;
         use_effect_with(value, move |val| {
             if let Some(input) = local_ref.cast::<HtmlInputElement>() {
-                if let Some(ts) = val {
-                    if let Some(date) = chrono::DateTime::from_timestamp(*ts, 0) {
-                        input.set_value(&date.format("%Y-%m-%d").to_string());
-                    }
-                } else {
-                    input.set_value("");
-                }
+                input.set_value(&format_date_input_value(*val));
             }
             || ()
         });

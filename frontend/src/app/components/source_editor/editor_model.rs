@@ -157,6 +157,7 @@ pub enum EditMode {
 pub struct SourceEditorContext {
     pub on_form_change: Callback<(BlockId, BlockInstance)>,
     pub edit_mode: UseStateHandle<EditMode>,
+    pub allow_write: bool,
 }
 
 impl PartialEq for SourceEditorContext {

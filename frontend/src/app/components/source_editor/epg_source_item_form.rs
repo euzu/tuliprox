@@ -1,6 +1,7 @@
 use crate::{
     app::components::{Card, TextButton},
-    edit_field_bool, edit_field_number_i16, edit_field_text, generate_form_reducer,
+    config_field, config_field_bool, config_field_custom, edit_field_bool, edit_field_number_i16, edit_field_text,
+    generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::EpgSourceDto;
@@ -26,6 +27,8 @@ pub struct EpgSourceItemFormProps {
     pub on_cancel: Callback<()>,
     #[prop_or_default]
     pub initial: Option<EpgSourceDto>,
+    #[prop_or(false)]
+    pub readonly: bool,
 }
 
 #[component]
@@ -61,9 +64,15 @@ pub fn EpgSourceItemForm(props: &EpgSourceItemFormProps) -> Html {
 
     html! {
         <Card class="tp__config-view__card tp__item-form">
-            { edit_field_text!(form_state, translate.t(LABEL_EPG_SOURCE_URL), url, EpgSourceFormAction::Url) }
-            { edit_field_number_i16!(form_state, translate.t(LABEL_EPG_PRIORITY), priority, EpgSourceFormAction::Priority) }
-            { edit_field_bool!(form_state, translate.t(LABEL_EPG_LOGO_OVERRIDE), logo_override, EpgSourceFormAction::LogoOverride) }
+            if props.readonly {
+                { config_field!(form_state.form, translate.t(LABEL_EPG_SOURCE_URL), url) }
+                { config_field_custom!(translate.t(LABEL_EPG_PRIORITY), form_state.form.priority.to_string()) }
+                { config_field_bool!(form_state.form, translate.t(LABEL_EPG_LOGO_OVERRIDE), logo_override) }
+            } else {
+                { edit_field_text!(form_state, translate.t(LABEL_EPG_SOURCE_URL), url, EpgSourceFormAction::Url) }
+                { edit_field_number_i16!(form_state, translate.t(LABEL_EPG_PRIORITY), priority, EpgSourceFormAction::Priority) }
+                { edit_field_bool!(form_state, translate.t(LABEL_EPG_LOGO_OVERRIDE), logo_override, EpgSourceFormAction::LogoOverride) }
+            }
 
             <div class="tp__form-page__toolbar">
                 <TextButton
@@ -73,13 +82,15 @@ pub fn EpgSourceItemForm(props: &EpgSourceItemFormProps) -> Html {
                     title={translate.t("LABEL.CANCEL")}
                     onclick={handle_cancel}
                 />
-                <TextButton
-                    class="primary"
-                    name="submit_epg_source"
-                    icon="Accept"
-                    title={translate.t("LABEL.SUBMIT")}
-                    onclick={handle_submit}
-                />
+                if !props.readonly {
+                    <TextButton
+                        class="primary"
+                        name="submit_epg_source"
+                        icon="Accept"
+                        title={translate.t("LABEL.SUBMIT")}
+                        onclick={handle_submit}
+                    />
+                }
             </div>
         </Card>
     }

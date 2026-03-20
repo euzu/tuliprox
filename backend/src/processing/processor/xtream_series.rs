@@ -741,18 +741,38 @@ pub async fn update_series_metadata(
                 .await
                 .map_err(|e| shared::error::info_err!("{e}"))?;
 
-            if !content.is_empty() {
-                if let Ok(mut json_value) = serde_json::from_str::<Value>(&content) {
-                    if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {
-                        crate::model::normalize_release_date(info);
-                    }
-
-                    if let Ok(info) = serde_json::from_value::<XtreamSeriesInfo>(json_value) {
-                        if let Some(existing) = &existing_item {
-                            props = Some(SeriesStreamProperties::from_info(&info, existing));
-                            fetched_new = true;
-                            properties_updated = true;
+            if content.is_empty() {
+                debug!("Series {display_id}: provider returned empty content for info fetch");
+            } else {
+                let canonical_series_id =
+                    existing_item.as_ref().map_or(series_id, PlaylistEntry::get_virtual_id);
+                match serde_json::from_str::<Value>(&content) {
+                    Ok(mut json_value) => {
+                        if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {
+                            crate::model::normalize_release_date(info);
                         }
+
+                        match serde_json::from_value::<XtreamSeriesInfo>(json_value) {
+                            Ok(info) => {
+                                debug!("Series {display_id}: building props from info using canonical series id {canonical_series_id}");
+                                props = Some(SeriesStreamProperties::from_info_without_existing(
+                                    &info,
+                                    canonical_series_id,
+                                ));
+                                fetched_new = true;
+                                properties_updated = true;
+                            }
+                            Err(e) => {
+                                return Err(shared::error::info_err!(
+                                    "Series {display_id}: failed to parse XtreamSeriesInfo: {e}. Raw response: {content}"
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(shared::error::info_err!(
+                            "Series {display_id}: failed to parse provider response as JSON: {e}. Raw response: {content}"
+                        ));
                     }
                 }
             }

@@ -726,6 +726,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
         Callback::from(move |from_id: BlockId| {
+            if !can_write_sources {
+                return;
+            }
             let pending_line = {
                 let editor_state = editor_state_ref.borrow();
                 if let Some(block) = editor_state.get_block(from_id) {
@@ -755,6 +758,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let force_update = force_update.clone();
         let emit_sources_change = emit_sources_change.clone();
         Callback::from(move |to_id: BlockId| {
+            if !can_write_sources {
+                return;
+            }
             let mut changed = false;
             let pending_connection = editor_state_ref.borrow().pending_connection;
             if let Some(from_id) = pending_connection {
@@ -796,6 +802,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let cursor_grabbing = cursor_grabbing.clone();
 
         Callback::from(move |(block_id, e): (BlockId, MouseEvent)| {
+            if !can_write_sources {
+                return;
+            }
             e.prevent_default();
             e.stop_propagation();
 
@@ -1340,6 +1349,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let emit_sources_change = emit_sources_change.clone();
         Callback::<(BlockId, BlockInstance)>::from(move |(block_id, instance): (BlockId, BlockInstance)| {
+            if !can_write_sources {
+                return;
+            }
             let mut editor_state = editor_state_ref.borrow_mut();
             if let Some(block) = editor_state.get_block_mut(block_id) {
                 block.instance = match instance {
@@ -1362,9 +1374,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let edit_mode_set = edit_mode.clone();
         let editor_state_ref = editor_state_ref.clone();
         Callback::from(move |block_id: BlockId| {
-            if !can_write_sources {
-                return;
-            }
             let mut editor_state = editor_state_ref.borrow_mut();
             if let Some(block) = editor_state.get_block(block_id) {
                 edit_mode_set.set(EditMode::Active(block.clone()));
@@ -1373,7 +1382,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
-    let editor_context = SourceEditorContext { on_form_change: form_changed, edit_mode: edit_mode.clone() };
+    let editor_context = SourceEditorContext {
+        on_form_change: form_changed,
+        edit_mode: edit_mode.clone(),
+        allow_write: can_write_sources,
+    };
 
     let edited_block_id = match *edit_mode {
         EditMode::Inactive => 0,

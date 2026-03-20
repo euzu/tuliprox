@@ -3,7 +3,8 @@ use crate::{
         config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, IconButton, Panel,
         SourceEditorContext, TextButton, TitledCard, TraktListItemForm,
     },
-    config_field_child, edit_field_bool, edit_field_text, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_text,
+    generate_form_reducer,
     i18n::use_translation,
 };
 use shared::{
@@ -106,6 +107,8 @@ generate_form_reducer!(
 pub struct XtreamTargetOutputViewProps {
     pub(crate) block_id: BlockId,
     pub(crate) output: Option<Rc<XtreamTargetOutputDto>>,
+    #[prop_or(true)]
+    pub(crate) allow_write: bool,
 }
 
 #[component]
@@ -212,23 +215,41 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
     let render_output = || {
         let output_form_state_1 = output_form_state.clone();
-        html! {
-            <Card class="tp__config-view__card">
-                <TitledCard title={translate.t(LABEL_SKIP_DIRECT_SOURCE)}>
-                  <div class="tp__config-view__cols-3">
-                  { edit_field_bool!(output_form_state, translate.t(LABEL_LIVE), skip_live_direct_source,  XtreamTargetOutputFormAction::SkipLiveDirectSource) }
-                  { edit_field_bool!(output_form_state, translate.t(LABEL_VOD), skip_video_direct_source,  XtreamTargetOutputFormAction::SkipVideoDirectSource) }
-                  { edit_field_bool!(output_form_state, translate.t(LABEL_SERIES), skip_series_direct_source,  XtreamTargetOutputFormAction::SkipSeriesDirectSource) }
-                  </div>
-                </TitledCard>
-                { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_XTREAM_FORM.FILTER", {
-                       html! {
-                            <FilterInput filter={output_form_state_1.form.filter.clone()} on_change={Callback::from(move |new_filter| {
-                                output_form_state_1.dispatch(XtreamTargetOutputFormAction::Filter(new_filter));
-                            })} />
-                       }
-                })}
-            </Card>
+        if !props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    <TitledCard title={translate.t(LABEL_SKIP_DIRECT_SOURCE)}>
+                        <div class="tp__config-view__cols-3">
+                            { config_field_bool!(output_form_state.form, translate.t(LABEL_LIVE), skip_live_direct_source) }
+                            { config_field_bool!(output_form_state.form, translate.t(LABEL_VOD), skip_video_direct_source) }
+                            { config_field_bool!(output_form_state.form, translate.t(LABEL_SERIES), skip_series_direct_source) }
+                        </div>
+                    </TitledCard>
+                    { config_field_custom!(
+                        translate.t(LABEL_FILTER),
+                        output_form_state.form.filter.clone().unwrap_or_default()
+                    ) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    <TitledCard title={translate.t(LABEL_SKIP_DIRECT_SOURCE)}>
+                      <div class="tp__config-view__cols-3">
+                      { edit_field_bool!(output_form_state, translate.t(LABEL_LIVE), skip_live_direct_source,  XtreamTargetOutputFormAction::SkipLiveDirectSource) }
+                      { edit_field_bool!(output_form_state, translate.t(LABEL_VOD), skip_video_direct_source,  XtreamTargetOutputFormAction::SkipVideoDirectSource) }
+                      { edit_field_bool!(output_form_state, translate.t(LABEL_SERIES), skip_series_direct_source,  XtreamTargetOutputFormAction::SkipSeriesDirectSource) }
+                      </div>
+                    </TitledCard>
+                    { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_XTREAM_FORM.FILTER", {
+                           html! {
+                                <FilterInput filter={output_form_state_1.form.filter.clone()} on_change={Callback::from(move |new_filter| {
+                                    output_form_state_1.dispatch(XtreamTargetOutputFormAction::Filter(new_filter));
+                                })} />
+                           }
+                    })}
+                </Card>
+            }
         }
     };
 
@@ -244,16 +265,31 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     <TraktListItemForm
                         on_submit={handle_add_trakt_list_item}
                         on_cancel={handle_close_trakt_list_form}
+                        readonly={!props.allow_write}
                     />
                 } else {
-                // Trakt API Configuration
-                { edit_field_bool!(trakt_form, translate.t(LABEL_ENABLED), enabled, TraktConfigFormAction::Enabled) }
+                { if props.allow_write {
+                    html! { { edit_field_bool!(trakt_form, translate.t(LABEL_ENABLED), enabled, TraktConfigFormAction::Enabled) } }
+                } else {
+                    html! { { config_field_bool!(trakt_form.form, translate.t(LABEL_ENABLED), enabled) } }
+                }}
                 <div class="tp__form-section">
                     <h3>{translate.t(LABEL_API_CONFIGURATION)}</h3>
-                    { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_KEY), api_key, TraktApiConfigFormAction::ApiKey) }
-                    { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_VERSION), version, TraktApiConfigFormAction::Version) }
-                    { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_URL), url, TraktApiConfigFormAction::Url) }
-                    { edit_field_text!(trakt_api_form, translate.t(LABEL_USER_AGENT), user_agent, TraktApiConfigFormAction::UserAgent) }
+                    if props.allow_write {
+                        <>
+                            { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_KEY), api_key, TraktApiConfigFormAction::ApiKey) }
+                            { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_VERSION), version, TraktApiConfigFormAction::Version) }
+                            { edit_field_text!(trakt_api_form, translate.t(LABEL_TRAKT_API_URL), url, TraktApiConfigFormAction::Url) }
+                            { edit_field_text!(trakt_api_form, translate.t(LABEL_USER_AGENT), user_agent, TraktApiConfigFormAction::UserAgent) }
+                        </>
+                    } else {
+                        <>
+                            { config_field!(trakt_api_form.form, translate.t(LABEL_TRAKT_API_KEY), api_key) }
+                            { config_field!(trakt_api_form.form, translate.t(LABEL_TRAKT_API_VERSION), version) }
+                            { config_field!(trakt_api_form.form, translate.t(LABEL_TRAKT_API_URL), url) }
+                            { config_field!(trakt_api_form.form, translate.t(LABEL_USER_AGENT), user_agent) }
+                        </>
+                    }
                 </div>
 
                 // Trakt Lists
@@ -264,10 +300,12 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                             <div class="tp__form-list__items">
                             for item in (*trakt_lists_list).iter().enumerate() {
                                 <div class="tp__form-list__item" key={format!("trakt-{}", item.0)}>
-                                    <IconButton
-                                        name={item.0.to_string()}
-                                        icon="Delete"
-                                        onclick={handle_remove_trakt_list_item.clone()}/>
+                                    if props.allow_write {
+                                        <IconButton
+                                            name={item.0.to_string()}
+                                            icon="Delete"
+                                            onclick={handle_remove_trakt_list_item.clone()}/>
+                                    }
                                     <div class="tp__form-list__item-content">
                                         <span>
                                             <strong>{&item.1.user}</strong>
@@ -290,13 +328,15 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                             }
                             </div>
 
-                            <TextButton
-                                class="primary"
-                                name="add_trakt_list"
-                                icon="Add"
-                                title={translate.t(LABEL_ADD_TRAKT_LIST)}
-                                onclick={handle_show_trakt_list_form}
-                            />
+                            if props.allow_write {
+                                <TextButton
+                                    class="primary"
+                                    name="add_trakt_list"
+                                    icon="Add"
+                                    title={translate.t(LABEL_ADD_TRAKT_LIST)}
+                                    onclick={handle_show_trakt_list_form}
+                                />
+                            }
                         </div>
                     }
                 })}
@@ -383,10 +423,12 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                 icon="Cancel"
                 title={ translate.t("LABEL.CANCEL")}
                 onclick={handle_cancel}></TextButton>
-             <TextButton class={concat_string!("primary", if button_disabled {" disabled"} else {""} )} name="apply_input"
-                icon="Accept"
-                title={ translate.t("LABEL.OK")}
-                onclick={handle_apply_target}></TextButton>
+             if props.allow_write {
+                 <TextButton class={concat_string!("primary", if button_disabled {" disabled"} else {""} )} name="apply_input"
+                    icon="Accept"
+                    title={ translate.t("LABEL.OK")}
+                    onclick={handle_apply_target}></TextButton>
+             }
           </div>
           <div class="tp__source-editor-form__content">
                 { render_sidebar() }

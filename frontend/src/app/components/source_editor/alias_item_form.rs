@@ -1,5 +1,6 @@
 use crate::{
-    app::components::{Card, TextButton, ToolAction},
+    app::components::{format_date_input_value, Card, TextButton, ToolAction},
+    config_field, config_field_bool, config_field_custom, config_field_optional, config_field_optional_hide,
     edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16, edit_field_text,
     edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
@@ -43,6 +44,8 @@ pub struct AliasItemFormProps {
     pub input_type: InputType,
     #[prop_or_default]
     pub initial: Option<ConfigInputAliasDto>,
+    #[prop_or(false)]
+    pub readonly: bool,
 }
 
 #[component]
@@ -168,16 +171,34 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
 
     html! {
         <Card class="tp__config-view__card tp__item-form">
-            { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, AliasFormAction::Enabled) }
-            { edit_field_text!(form_state, translate.t(LABEL_ALIAS_NAME), name, AliasFormAction::Name) }
-            { edit_field_text!(form_state, translate.t(LABEL_URL), url, AliasFormAction::Url) }
-            <div class="tp__config-view__cols-2">
-              { edit_field_text_option!(form_state, translate.t(LABEL_USERNAME), username, AliasFormAction::Username) }
-              { edit_field_text_option!(form_state, translate.t(LABEL_PASSWORD), password, AliasFormAction::Password, true) }
-              { edit_field_number_i16!(form_state, translate.t(LABEL_PRIORITY), priority, AliasFormAction::Priority) }
-              { edit_field_number_u16!(form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, AliasFormAction::MaxConnections) }
-            </div>
-            { edit_field_exp_date!(form_state, translate.t(LABEL_EXP_DATE), exp_date, AliasFormAction::ExpDate, exp_date_tool_action) }
+            if props.readonly {
+                { config_field_bool!(form_state.form, translate.t(LABEL_ENABLED), enabled) }
+                { config_field!(form_state.form, translate.t(LABEL_ALIAS_NAME), name) }
+                { config_field!(form_state.form, translate.t(LABEL_URL), url) }
+                <div class="tp__config-view__cols-2">
+                  { config_field_optional!(form_state.form, translate.t(LABEL_USERNAME), username) }
+                  { config_field_optional_hide!(form_state.form, translate.t(LABEL_PASSWORD), password) }
+                  { config_field_custom!(translate.t(LABEL_PRIORITY), form_state.form.priority.to_string()) }
+                  { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), form_state.form.max_connections.to_string()) }
+                </div>
+                { config_field_custom!(
+                    translate.t(LABEL_EXP_DATE),
+                    format_date_input_value(form_state.form.exp_date)
+                ) }
+            } else {
+                <>
+                    { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, AliasFormAction::Enabled) }
+                    { edit_field_text!(form_state, translate.t(LABEL_ALIAS_NAME), name, AliasFormAction::Name) }
+                    { edit_field_text!(form_state, translate.t(LABEL_URL), url, AliasFormAction::Url) }
+                    <div class="tp__config-view__cols-2">
+                      { edit_field_text_option!(form_state, translate.t(LABEL_USERNAME), username, AliasFormAction::Username) }
+                      { edit_field_text_option!(form_state, translate.t(LABEL_PASSWORD), password, AliasFormAction::Password, true) }
+                      { edit_field_number_i16!(form_state, translate.t(LABEL_PRIORITY), priority, AliasFormAction::Priority) }
+                      { edit_field_number_u16!(form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, AliasFormAction::MaxConnections) }
+                    </div>
+                    { edit_field_exp_date!(form_state, translate.t(LABEL_EXP_DATE), exp_date, AliasFormAction::ExpDate, exp_date_tool_action) }
+                </>
+            }
 
             <div class="tp__form-page__toolbar">
                 <TextButton
@@ -187,13 +208,15 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                     title={translate.t("LABEL.CANCEL")}
                     onclick={handle_cancel}
                 />
-                <TextButton
-                    class="primary"
-                    name="submit_alias"
-                    icon="Accept"
-                    title={translate.t("LABEL.SUBMIT")}
-                    onclick={handle_submit}
-                />
+                if !props.readonly {
+                    <TextButton
+                        class="primary"
+                        name="submit_alias"
+                        icon="Accept"
+                        title={translate.t("LABEL.SUBMIT")}
+                        onclick={handle_submit}
+                    />
+                }
             </div>
         </Card>
     }

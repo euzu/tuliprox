@@ -10,6 +10,8 @@ use yew::{component, html, use_context, Html, Properties};
 pub struct ConfigOutputViewProps {
     pub(crate) block_id: BlockId,
     pub(crate) output: Option<Rc<TargetOutputDto>>,
+    #[prop_or(true)]
+    pub(crate) allow_write: bool,
 }
 
 #[component]
@@ -30,7 +32,7 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
                     }
                 });
 
-                html! { <M3uTargetOutputView block_id={block_id} output={output} /> }
+                html! { <M3uTargetOutputView block_id={block_id} output={output} allow_write={props.allow_write} /> }
             }
             BlockType::OutputXtream => {
                 let output = props.output.as_ref().and_then(|to| {
@@ -41,7 +43,7 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
                     }
                 });
 
-                html! { <XtreamTargetOutputView block_id={block_id} output={output} /> }
+                html! { <XtreamTargetOutputView block_id={block_id} output={output} allow_write={props.allow_write} /> }
             }
             BlockType::OutputHdHomeRun => {
                 let output = props.output.as_ref().and_then(|to| {
@@ -52,7 +54,7 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
                     }
                 });
 
-                html! { <HdHomeRunTargetOutputView block_id={block_id} output={output} /> }
+                html! { <HdHomeRunTargetOutputView block_id={block_id} output={output} allow_write={props.allow_write} /> }
             }
             BlockType::OutputStrm => {
                 let output = props.output.as_ref().and_then(|to| {
@@ -63,7 +65,7 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
                     }
                 });
 
-                html! { <StrmTargetOutputView block_id={block_id} output={output} /> }
+                html! { <StrmTargetOutputView block_id={block_id} output={output} allow_write={props.allow_write} /> }
             }
         },
         EditMode::Inactive => html! {},

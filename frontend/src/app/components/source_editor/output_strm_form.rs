@@ -3,8 +3,8 @@ use crate::{
         config::HasFormData, select::Select, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode,
         FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
     },
-    config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, edit_field_text_option,
-    generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
+    edit_field_list_option, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::{
@@ -87,6 +87,8 @@ generate_form_reducer!(
 pub struct StrmTargetOutputViewProps {
     pub(crate) block_id: BlockId,
     pub(crate) output: Option<Rc<StrmTargetOutputDto>>,
+    #[prop_or(true)]
+    pub(crate) allow_write: bool,
 }
 
 #[component]
@@ -137,54 +139,83 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
     let render_main = || {
         let output_form_state_1 = output_form_state.clone();
         let output_form_state_2 = output_form_state.clone();
-        html! {
-            <Card class="tp__config-view__card">
-                { edit_field_text!(output_form_state, translate.t(LABEL_DIRECTORY), directory, StrmTargetOutputFormAction::Directory) }
-                { edit_field_text_option!(output_form_state, translate.t(LABEL_USERNAME), username, StrmTargetOutputFormAction::Username) }
-                { config_field_child!(translate.t(LABEL_EXPORT_STYLE), "OUTPUT_STRM_FORM.EXPORT_STYLE", {
-                    html! {
-                        <Select
-                            name={"export_style"}
-                            multi_select={false}
-                            on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                match selections {
-                                    DropDownSelection::Empty => {
-                                        output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(StrmExportStyle::Kodi));
-                                    }
-                                    DropDownSelection::Single(option) => {
-                                        output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(option.parse::<StrmExportStyle>().unwrap_or(StrmExportStyle::Kodi)));
-                                    }
-                                    DropDownSelection::Multi(options) => {
-                                        if let Some(first) = options.first() {
-                                            output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(first.parse::<StrmExportStyle>().unwrap_or(StrmExportStyle::Kodi)));
+        if !props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    { config_field!(output_form_state.form, translate.t(LABEL_DIRECTORY), directory) }
+                    { config_field_optional!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
+                    { config_field_custom!(translate.t(LABEL_EXPORT_STYLE), output_form_state.form.style.to_string()) }
+                    { config_field_custom!(
+                        translate.t(LABEL_FILTER),
+                        output_form_state.form.filter.clone().unwrap_or_default()
+                    ) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    { edit_field_text!(output_form_state, translate.t(LABEL_DIRECTORY), directory, StrmTargetOutputFormAction::Directory) }
+                    { edit_field_text_option!(output_form_state, translate.t(LABEL_USERNAME), username, StrmTargetOutputFormAction::Username) }
+                    { config_field_child!(translate.t(LABEL_EXPORT_STYLE), "OUTPUT_STRM_FORM.EXPORT_STYLE", {
+                        html! {
+                            <Select
+                                name={"export_style"}
+                                multi_select={false}
+                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                                    match selections {
+                                        DropDownSelection::Empty => {
+                                            output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(StrmExportStyle::Kodi));
+                                        }
+                                        DropDownSelection::Single(option) => {
+                                            output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(option.parse::<StrmExportStyle>().unwrap_or(StrmExportStyle::Kodi)));
+                                        }
+                                        DropDownSelection::Multi(options) => {
+                                            if let Some(first) = options.first() {
+                                                output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(first.parse::<StrmExportStyle>().unwrap_or(StrmExportStyle::Kodi)));
+                                            }
                                         }
                                     }
-                                }
-                            })}
-                            options={export_styles.clone()}
-                        />
-                    }
-                })}
-                { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_STRM_FORM.FILTER", {
-                   html! {
-                        <FilterInput filter={output_form_state_2.form.filter.clone()} on_change={Callback::from(move |new_filter| {
-                            output_form_state_2.dispatch(StrmTargetOutputFormAction::Filter(new_filter));
-                        })} />
-                   }
-                })}
-            </Card>
+                                })}
+                                options={export_styles.clone()}
+                            />
+                        }
+                    })}
+                    { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_STRM_FORM.FILTER", {
+                       html! {
+                            <FilterInput filter={output_form_state_2.form.filter.clone()} on_change={Callback::from(move |new_filter| {
+                                output_form_state_2.dispatch(StrmTargetOutputFormAction::Filter(new_filter));
+                            })} />
+                       }
+                    })}
+                </Card>
+            }
         }
     };
 
     let render_options = || {
-        html! {
-            <Card class="tp__config-view__card">
-                { edit_field_bool!(output_form_state, translate.t(LABEL_FLAT), flat, StrmTargetOutputFormAction::Flat) }
-                { edit_field_bool!(output_form_state, translate.t(LABEL_UNDERSCORE_WHITESPACE), underscore_whitespace, StrmTargetOutputFormAction::UnderscoreWhitespace) }
-                { edit_field_bool!(output_form_state, translate.t(LABEL_CLEANUP), cleanup, StrmTargetOutputFormAction::Cleanup) }
-                { edit_field_bool!(output_form_state, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename, StrmTargetOutputFormAction::AddQualityToFilename) }
-                { edit_field_list_option!(output_form_state, translate.t(LABEL_STRM_PROPS), strm_props, StrmTargetOutputFormAction::StrmProps, translate.t(LABEL_ADD_PROPERTY)) }
-            </Card>
+        if !props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_FLAT), flat) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_UNDERSCORE_WHITESPACE), underscore_whitespace) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_CLEANUP), cleanup) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename) }
+                    { config_field_custom!(
+                        translate.t(LABEL_STRM_PROPS),
+                        output_form_state.form.strm_props.as_ref().map_or_else(String::new, |props| props.join(", "))
+                    ) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_FLAT), flat, StrmTargetOutputFormAction::Flat) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_UNDERSCORE_WHITESPACE), underscore_whitespace, StrmTargetOutputFormAction::UnderscoreWhitespace) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_CLEANUP), cleanup, StrmTargetOutputFormAction::Cleanup) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename, StrmTargetOutputFormAction::AddQualityToFilename) }
+                    { edit_field_list_option!(output_form_state, translate.t(LABEL_STRM_PROPS), strm_props, StrmTargetOutputFormAction::StrmProps, translate.t(LABEL_ADD_PROPERTY)) }
+                </Card>
+            }
         }
     };
 
@@ -239,10 +270,12 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                     icon="Cancel"
                     title={ translate.t("LABEL.CANCEL")}
                     onclick={handle_cancel}></TextButton>
-                <TextButton class="primary" name="apply_strm_output"
-                    icon="Accept"
-                    title={ translate.t("LABEL.OK")}
-                    onclick={handle_apply}></TextButton>
+                if props.allow_write {
+                    <TextButton class="primary" name="apply_strm_output"
+                        icon="Accept"
+                        title={ translate.t("LABEL.OK")}
+                        onclick={handle_apply}></TextButton>
+                }
             </div>
             <div class="tp__source-editor-form__content">
                 { render_sidebar() }

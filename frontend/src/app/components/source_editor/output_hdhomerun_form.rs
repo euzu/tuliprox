@@ -3,7 +3,7 @@ use crate::{
         config::HasFormData, select::Select, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode,
         SourceEditorContext, TextButton,
     },
-    config_field_child, edit_field_text, generate_form_reducer,
+    config_field, config_field_child, config_field_custom, edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{HdHomeRunTargetOutputDto, TargetOutputDto, TargetType};
@@ -30,6 +30,8 @@ generate_form_reducer!(
 pub struct HdHomeRunTargetOutputViewProps {
     pub(crate) block_id: BlockId,
     pub(crate) output: Option<Rc<HdHomeRunTargetOutputDto>>,
+    #[prop_or(true)]
+    pub(crate) allow_write: bool,
 }
 
 #[component]
@@ -64,36 +66,52 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
     }
 
     let render_output = || {
-        let output_form_state_1 = output_form_state.clone();
-        html! {
-            <Card class="tp__config-view__card">
-                { edit_field_text!(output_form_state, translate.t(LABEL_DEVICE), device, HdHomeRunTargetOutputFormAction::Device) }
-                { edit_field_text!(output_form_state, translate.t(LABEL_USERNAME), username, HdHomeRunTargetOutputFormAction::Username) }
-                { config_field_child!(translate.t(LABEL_USE_OUTPUT), "OUTPUT_HDHOMERUN_FORM.USE_OUTPUT", {
-                    html! {
-                        <Select
-                            name={"use_output"}
-                            multi_select={false}
-                            on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                match selections {
-                                    DropDownSelection::Empty => {
-                                        output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(TargetType::M3u)));
-                                    }
-                                    DropDownSelection::Single(option) => {
-                                        output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(option.parse::<TargetType>().unwrap_or(TargetType::M3u))));
-                                    }
-                                    DropDownSelection::Multi(options) => {
-                                        if let Some(first) = options.first() {
-                                            output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(first.parse::<TargetType>().unwrap_or(TargetType::M3u))));
+        if !props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    { config_field!(output_form_state.form, translate.t(LABEL_DEVICE), device) }
+                    { config_field!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
+                    { config_field_custom!(
+                        translate.t(LABEL_USE_OUTPUT),
+                        output_form_state
+                            .form
+                            .use_output
+                            .map_or_else(|| TargetType::M3u.to_string(), |output| output.to_string())
+                    ) }
+                </Card>
+            }
+        } else {
+            let output_form_state_1 = output_form_state.clone();
+            html! {
+                <Card class="tp__config-view__card">
+                    { edit_field_text!(output_form_state, translate.t(LABEL_DEVICE), device, HdHomeRunTargetOutputFormAction::Device) }
+                    { edit_field_text!(output_form_state, translate.t(LABEL_USERNAME), username, HdHomeRunTargetOutputFormAction::Username) }
+                    { config_field_child!(translate.t(LABEL_USE_OUTPUT), "OUTPUT_HDHOMERUN_FORM.USE_OUTPUT", {
+                        html! {
+                            <Select
+                                name={"use_output"}
+                                multi_select={false}
+                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                                    match selections {
+                                        DropDownSelection::Empty => {
+                                            output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(TargetType::M3u)));
+                                        }
+                                        DropDownSelection::Single(option) => {
+                                            output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(option.parse::<TargetType>().unwrap_or(TargetType::M3u))));
+                                        }
+                                        DropDownSelection::Multi(options) => {
+                                            if let Some(first) = options.first() {
+                                                output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(first.parse::<TargetType>().unwrap_or(TargetType::M3u))));
+                                            }
                                         }
                                     }
-                                }
-                            })}
-                            options={target_types.clone()}
-                        />
-                    }
-                })}
-            </Card>
+                                })}
+                                options={target_types.clone()}
+                            />
+                        }
+                    })}
+                </Card>
+            }
         }
     };
 
@@ -124,10 +142,12 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
                     icon="Cancel"
                     title={ translate.t("LABEL.CANCEL")}
                     onclick={handle_cancel}></TextButton>
-                <TextButton class="primary" name="apply_hdhomerun_output"
-                    icon="Accept"
-                    title={ translate.t("LABEL.OK")}
-                    onclick={handle_apply}></TextButton>
+                if props.allow_write {
+                    <TextButton class="primary" name="apply_hdhomerun_output"
+                        icon="Accept"
+                        title={ translate.t("LABEL.OK")}
+                        onclick={handle_apply}></TextButton>
+                }
             </div>
             <div class="tp__input-form__body">
                 { render_output() }
