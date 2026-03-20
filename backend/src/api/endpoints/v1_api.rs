@@ -3,19 +3,25 @@ use crate::{
         api_utils::{internal_server_error, json_or_bin_response, try_unwrap_body},
         endpoints::{
             download_api, extract_accept_header::ExtractAcceptHeader, library_api::library_api_register,
+            rbac_api::rbac_api_register,
             user_api::user_api_register, v1_api_config::v1_api_config_register,
-            v1_api_playlist::{v1_api_playlist_register_protected, v1_api_playlist_register_public},
-            v1_api_user::v1_api_user_register,
+            v1_api_config::v1_api_config_register_with_permissions, v1_api_playlist::{
+                v1_api_playlist_register_public,
+                v1_api_playlist_register_protected,
+                v1_api_playlist_register_with_permissions,
+            },
+            v1_api_user::{v1_api_user_register, v1_api_user_register_with_permissions},
         },
         model::AppState,
     },
-    auth::validator_admin,
     processing::geoip::{update_geoip_db, GeoIpUpdateError},
     utils::ip_checker::get_ips,
     VERSION,
 };
 use axum::response::IntoResponse;
+use crate::auth::permission_layer;
 use shared::{
+    model::permission::Permission,
     model::{IpCheckDto, StatusCheck},
     utils::concat_path_leading_slash,
 };
@@ -107,34 +113,51 @@ async fn ipinfo(axum::extract::State(app_state): axum::extract::State<Arc<AppSta
 
 pub fn v1_api_register(
     web_auth_enabled: bool,
-    app_state: Arc<AppState>,
+    app_state: &Arc<AppState>,
     web_ui_path: &str,
 ) -> axum::Router<Arc<AppState>> {
     let public_router = v1_api_playlist_register_public(axum::Router::new());
 
-    let mut protected_router = axum::Router::new();
-    protected_router = protected_router
+    let system_read = axum::routing::Router::new()
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
-        .route("/geoip/update", axum::routing::get(geoip_update))
-        .route("/file/download", axum::routing::post(download_api::queue_download_file))
         .route("/file/download/info", axum::routing::get(download_api::download_file_info))
         .route("/ipinfo", axum::routing::get(ipinfo));
-    protected_router = v1_api_config_register(protected_router);
-    protected_router = v1_api_user_register(protected_router);
-    protected_router = v1_api_playlist_register_protected(protected_router);
-    protected_router = library_api_register(protected_router);
-    if web_auth_enabled {
-        protected_router =
-            protected_router.route_layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_admin));
-    }
-    let config = app_state.app_config.config.load();
 
-    let mut base_router = axum::Router::new();
+    let system_write = axum::routing::Router::new()
+        .route("/geoip/update", axum::routing::get(geoip_update))
+        .route("/file/download", axum::routing::post(download_api::queue_download_file));
+
+    let mut router = axum::routing::Router::new();
+
+    if web_auth_enabled {
+        router = router
+            .merge(system_read.layer(permission_layer!(app_state, Permission::SystemRead)))
+            .merge(system_write.layer(permission_layer!(app_state, Permission::SystemWrite)))
+            .merge(v1_api_config_register_with_permissions(app_state))
+            .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
+            .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
+            .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
+            .merge(rbac_api_register(Arc::clone(app_state)));
+    } else {
+        router = router
+            .merge(system_read)
+            .merge(system_write)
+            .merge(v1_api_config_register(axum::routing::Router::new()))
+            .merge(v1_api_user_register(axum::routing::Router::new()))
+            .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
+            .merge(library_api_register(axum::routing::Router::new(), None));
+    }
+
+    let config = app_state.app_config.config.load();
+    let mut base_router = axum::routing::Router::new();
+
     if config.web_ui.as_ref().is_none_or(|c| c.user_ui_enabled) {
         base_router = base_router.merge(user_api_register(app_state, web_ui_path));
     }
+
+    let api_prefix = concat_path_leading_slash(web_ui_path, "api/v1");
     base_router
-        .nest(&concat_path_leading_slash(web_ui_path, "api/v1"), public_router)
-        .nest(&concat_path_leading_slash(web_ui_path, "api/v1"), protected_router)
+        .nest(&api_prefix, public_router)
+        .nest(&api_prefix, router)
 }

@@ -1,23 +1,19 @@
-use crate::{
-    api::{
-        api_utils::{create_api_proxy_user, json_or_bin_response},
-        endpoints::{
-            api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
-            extract_accept_header::ExtractAcceptHeader,
-            xmltv_api::serve_epg_web_ui,
-            xtream_api::xtream_get_stream_info_response,
-        },
-        model::AppState,
+use crate::{api::{
+    api_utils::{create_api_proxy_user, json_or_bin_response},
+    endpoints::{
+        api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
+        extract_accept_header::ExtractAcceptHeader,
+        xmltv_api::serve_epg_web_ui,
+        xtream_api::xtream_get_stream_info_response,
     },
-    auth::create_access_token,
-    model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions},
-    repository::xtream_get_item_for_stream_id,
-};
+    model::AppState,
+}, auth::create_access_token, auth::permission_layer, model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
 use shared::{
     model::{
+        permission::Permission,
         InputType, PlaylistEpgRequest, PlaylistRequest, ProxyType, TargetType, UiPlaylistItem, WebplayerUrlRequest,
         XtreamCluster,
     },
@@ -36,10 +32,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
         url: String::from(url),
         enabled: true,
         options: Some(ConfigInputOptions {
-            flags: ConfigInputFlagsSet::from_variants(&[
-                ConfigInputFlags::XtreamLiveStreamUsePrefix,
-                ConfigInputFlags::ResolveBackground,
-            ]),
+            flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
             resolve_delay: shared::utils::default_resolve_delay_secs(),
             probe_delay: shared::utils::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
@@ -58,10 +51,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
         password: Some(String::from(password)),
         enabled: true,
         options: Some(ConfigInputOptions {
-            flags: ConfigInputFlagsSet::from_variants(&[
-                ConfigInputFlags::XtreamLiveStreamUsePrefix,
-                ConfigInputFlags::ResolveBackground,
-            ]),
+            flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
             resolve_delay: shared::utils::default_resolve_delay_secs(),
             probe_delay: shared::utils::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
@@ -308,6 +298,35 @@ pub fn v1_api_playlist_register_public(
     router: Router<Arc<AppState>>,
 ) -> axum::Router<Arc<AppState>> {
     router.route("/playlist/resource/{resource}", axum::routing::get(playlist_resource))
+}
+
+pub fn v1_api_playlist_register_with_permissions(
+    router: Router<Arc<AppState>>,
+    app_state: &Arc<AppState>,
+) -> axum::Router<Arc<AppState>> {
+
+    let read_routes = Router::new()
+        .route("/live", axum::routing::post(playlist_content_live))
+        .route("/vod", axum::routing::post(playlist_content_vod))
+        .route("/series", axum::routing::post(playlist_content_series))
+        .route("/series_info/{virtual_id}/{provider_id}", axum::routing::post(playlist_series_info))
+        .route("/series/episode/{virtual_id}", axum::routing::post(playlist_episode_item))
+        .route("/webplayer", axum::routing::post(playlist_webplayer))
+        .layer(permission_layer!(app_state, Permission::PlaylistRead));
+
+    let write_routes = Router::new()
+        .route("/update", axum::routing::post(playlist_update))
+        .layer(permission_layer!(app_state, Permission::PlaylistWrite));
+
+    let epg_routes = Router::new()
+        .route("/epg", axum::routing::post(playlist_epg))
+        .layer(permission_layer!(app_state, Permission::EpgRead));
+
+    router.nest("/playlist",
+                read_routes
+                    .merge(write_routes)
+                    .merge(epg_routes)
+    )
 }
 
 async fn playlist_episode_item(

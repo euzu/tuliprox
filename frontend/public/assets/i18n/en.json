@@ -255,6 +255,7 @@
     "ZM": "Zambia",
     "ZW": "Zimbabwe"
   },
+  "UNAUTHORIZED": "Not authorized",
   "EXPLANATION": {
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",
@@ -625,7 +626,8 @@
       "ISSUER": "The issuer name embedded in JWT auth tokens.",
       "SECRET": "The secret key used to sign and verify JWT auth tokens. Changing this logs out everyone.",
       "TOKEN_TTL_MINS": "How many minutes a login session remains valid (default 3600).",
-      "USERFILE": "Path to the text file containing WebUI users (default user.txt)."
+      "USERFILE": "Path to the text file containing WebUI users (default user.txt).",
+      "GROUPFILE": "Path to the text file containing WebUI groups and permissions (default groups.txt)."
     },
     "WEB_UI_CONFIG": {
       "ENABLED": "Enables or disables the central web-based management interface.",
@@ -676,6 +678,7 @@
     "WEB_ROOT": "Web-Root: Contains the web-ui files. They are normally placed in the same directory under ./web"
   },
   "LABEL": {
+    "ALL_TARGETS": "All targets",
     "ACCEPT_INSECURE_SSL_CERTIFICATES": "Accept Insecure SSL Certificates",
     "ACTIVE": "Active",
     "ACTIVE_PROVIDER_CONNECTIONS": "Active provider connections",
@@ -1015,6 +1018,22 @@
     "RATE_LIMIT": "Rate Limit",
     "RATE_LIMIT_MS": "Rate Limit (ms)",
     "READ_EXISTING": "Read Existing",
+    "RBAC": "WebUI User",
+    "RBAC_ACTIONS": "Actions",
+    "RBAC_ADD_GROUP": "Add Group",
+    "RBAC_ADD_USER": "Add User",
+    "RBAC_BUILTIN": "Built-in",
+    "RBAC_DOMAIN": "Domain",
+    "RBAC_EDIT_GROUP": "Edit Group",
+    "RBAC_EDIT_USER": "Edit User",
+    "RBAC_GROUP_MANAGEMENT": "Group Management",
+    "RBAC_LEAVE_BLANK": "Leave blank to keep current",
+    "RBAC_LOADING": "Loading...",
+    "RBAC_NO_PERMISSIONS": "No permissions",
+    "RBAC_PERMISSIONS": "Permissions",
+    "RBAC_READ": "Read",
+    "RBAC_USERS": "Users",
+    "RBAC_WRITE": "Write",
     "RECONNECT": "Reconnect",
     "RECURSIVE": "Recursive",
     "REDIRECT": "Redirect",
@@ -1125,6 +1144,7 @@
     "URL_IPV4": "Url IPv4",
     "URL_IPV6": "Url IPv6",
     "USER": "User",
+    "GROUPFILE": "Groupfile",
     "USERFILE": "Userfile",
     "USERLIST": "Userlist",
     "USERNAME": "Username",
@@ -1204,9 +1224,25 @@
     "LOGIN": {
       "MESSAGE": "Enter Your Credentials"
     },
+    "NO_ACCESS_MESSAGE": "Your account has no permissions assigned. Contact an administrator.",
+    "NO_ACCESS_TITLE": "No Access",
     "NO_CONTENT": "No content",
     "PLAYLIST": {
       "WEBPLAYER_URL_COPY_TO_CLIPBOARD": "The copied WebPlayer url is valid for 30 seconds."
+    },
+    "RBAC": {
+      "ADMIN_HINT": "User is Admin \u2014 additional groups have no effect.",
+      "GROUP_CREATED": "Group created successfully",
+      "GROUP_DELETED": "Group deleted successfully",
+      "GROUP_NAME_REQUIRED": "Group name is required",
+      "GROUP_UPDATED": "Group updated successfully",
+      "PASSWORD_MIN_LENGTH": "Password must be at least 8 characters",
+      "PASSWORDS_DONT_MATCH": "Passwords do not match",
+      "USER_CREATED": "User created successfully",
+      "USER_DELETED": "User deleted successfully",
+      "USER_UPDATED": "User updated successfully",
+      "USERNAME_REQUIRED": "Username is required",
+      "WRITE_WITHOUT_READ": "Write is enabled without Read"
     },
     "PLAYLIST_UPDATE": {
       "FAIL": "Playlist update failed!",

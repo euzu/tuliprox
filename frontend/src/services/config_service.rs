@@ -2,8 +2,8 @@ use crate::{
     error::Error,
     model::WebConfig,
     services::{
-        get_base_href, request_get, request_get_meta, request_post, request_post_meta, request_put_meta, Encoding,
-        EventService,
+        get_base_href, request_get, request_get_meta, request_post, request_post_meta, request_put_meta, AuthService,
+        Encoding, EventService,
     },
 };
 use futures_signals::signal::{Mutable, SignalExt};
@@ -11,8 +11,8 @@ use log::error;
 use shared::{
     foundation::{get_filter, prepare_templates, MapperScript},
     model::{
-        ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto, LibraryScanRequest, SourcesConfigDto,
-        TargetOutputDto, XtreamLoginInfo, XtreamLoginRequest,
+        permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto,
+        LibraryScanRequest, SourcesConfigDto, TargetOutputDto, XtreamLoginInfo, XtreamLoginRequest,
     },
     utils::{
         concat_path, concat_path_leading_slash, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
@@ -57,6 +57,7 @@ pub struct SetupCompleteRequestDto {
 
 pub struct ConfigService {
     pub ui_config: Rc<WebConfig>,
+    auth: Rc<AuthService>,
     pub server_config: RefCell<Option<Rc<AppConfigDto>>>,
     pub api_proxy_config: RefCell<Option<Rc<ApiProxyConfigDto>>>,
     revisions: RefCell<ConfigRevisions>,
@@ -76,11 +77,12 @@ pub struct ConfigService {
 }
 
 impl ConfigService {
-    pub fn new(config: &WebConfig, event_service: Rc<EventService>) -> Self {
+    pub fn new(config: &WebConfig, auth: Rc<AuthService>, event_service: Rc<EventService>) -> Self {
         let base_href = get_base_href();
         let config_path = concat_path_leading_slash(&base_href, "api/v1/config");
         Self {
             ui_config: Rc::new(config.clone()),
+            auth,
             server_config: RefCell::new(None),
             api_proxy_config: RefCell::new(None),
             revisions: RefCell::new(ConfigRevisions::default()),
@@ -128,24 +130,39 @@ impl ConfigService {
             return;
         }
 
-        let (config_response, api_proxy_response) = futures::join!(
-            request_get_meta::<AppConfigDto>(
-                &self.config_path,
-                None,
-                None,
-                &[HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_CONFIG_API_PROXY_REVISION,]
-            ),
-            request_get_meta::<ApiProxyConfigDto>(
-                &self.api_proxy_config_path,
-                None,
-                None,
-                &[HEADER_CONFIG_API_PROXY_REVISION]
+        let can_read_config =
+            self.auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead);
+        let can_read_api_proxy = self.auth.has_any_permissions(Permission::ConfigRead | Permission::UserRead);
+        let config_response = if can_read_config {
+            Some(
+                request_get_meta::<AppConfigDto>(
+                    &self.config_path,
+                    None,
+                    None,
+                    &[HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_CONFIG_API_PROXY_REVISION],
+                )
+                .await,
             )
-        );
+        } else {
+            None
+        };
+        let api_proxy_response = if can_read_api_proxy {
+            Some(
+                request_get_meta::<ApiProxyConfigDto>(
+                    &self.api_proxy_config_path,
+                    None,
+                    None,
+                    &[HEADER_CONFIG_API_PROXY_REVISION],
+                )
+                .await,
+            )
+        } else {
+            None
+        };
 
         let mut revisions = self.revisions.borrow().clone();
         let config_result = match config_response {
-            Ok(response) => {
+            Some(Ok(response)) => {
                 revisions.main = response.headers.get(HEADER_CONFIG_MAIN_REVISION).cloned();
                 revisions.sources = response.headers.get(HEADER_CONFIG_SOURCES_REVISION).cloned();
                 if let Some(rev) = response.headers.get(HEADER_CONFIG_API_PROXY_REVISION) {
@@ -243,23 +260,25 @@ impl ConfigService {
                     Some(Rc::new(AppConfigDto::default()))
                 }
             }
-            Err(err) => {
+            Some(Err(Error::Forbidden(_))) | None => Some(Rc::new(AppConfigDto::default())),
+            Some(Err(err)) => {
                 error!("{err}");
-                None
+                Some(Rc::new(AppConfigDto::default()))
             }
         };
 
         let api_proxy_result = match api_proxy_response {
-            Ok(response) => {
+            Some(Ok(response)) => {
                 if let Some(rev) = response.headers.get(HEADER_CONFIG_API_PROXY_REVISION) {
                     revisions.api_proxy = Some(rev.clone());
                 }
                 response.body.map(Rc::new).or_else(|| Some(Rc::new(ApiProxyConfigDto::default())))
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 error!("{err}");
                 None
             }
+            None => None,
         };
 
         self.server_config.replace(config_result.clone());

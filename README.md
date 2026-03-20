@@ -33,6 +33,14 @@ Define complex filters using expressive logic, e.g.:
 - Send notifications via **Telegram**, **Pushover**, or custom **REST** endpoints when problems occur.
 - Track group changes and get real-time alerts.
 
+## 🔒 Role-Based Access Control
+
+- Fine-grained permissions across 7 domains (config, source, user, playlist, library, system, epg).
+- Manage users and groups via flat files (`user.txt`, `groups.txt`) or the Web UI.
+- Permissions encoded as compact bitmask in JWT — zero file I/O on every request.
+- Built-in `admin` group with full access; custom groups with any permission combination.
+- Backward compatible — existing `user.txt` files work without changes.
+
 ## 📺 Stream Management
 
 - Share live TV connections.

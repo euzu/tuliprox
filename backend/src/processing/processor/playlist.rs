@@ -2,7 +2,7 @@ use crate::{
     api::{
         model::{
             ActiveProviderManager, AppState, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState,
-            ProviderIdType, ResolveReason, ResolveReasonSet, UpdateGuard, UpdateTask,
+            ProviderIdType, ResolveReason, UpdateGuard, UpdateTask,
         },
         sync_panel_api_exp_dates,
     },
@@ -1176,7 +1176,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                             if queued_live_keys.insert(provider_id.clone()) {
                                 let task = UpdateTask::ProbeLive {
                                     id: provider_id.clone(),
-                                    reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+                                    reason: ResolveReason::Probe.into(),
                                     delay: probe_delay,
                                     interval: interval_secs,
                                 };
@@ -1246,7 +1246,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             unique_id: unique_id.clone(),
             url: item.header.url.to_string(),
             item_type: item.header.item_type,
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            reason: ResolveReason::MissingDetails.into(),
             delay: opts.probe_delay,
         };
         if mgr.should_skip_enqueue(input_name.clone(), &task).await {

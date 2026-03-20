@@ -111,6 +111,22 @@
 
 ## 🌟 New Features
 
+- **Role-Based Access Control (RBAC)**: Replaced the binary admin/non-admin model with fine-grained, group-based permissions.
+  - **14 permissions** across 7 domains (`config`, `source`, `user`, `playlist`, `library`, `system`, `epg`),
+    each with independent `.read` and `.write` grants.
+  - **Group management** via `groups.txt` — define custom roles (e.g., `viewer`, `source_manager`)
+    with specific permission sets.
+  - **Extended `user.txt` format** — users can now be assigned to one or more groups
+    (`username:hash:group1,group2`). Missing group field defaults to `admin` for backward compatibility.
+  - **Compact JWT encoding** — permissions are resolved at login and stored as a `u16` bitmask in JWT claims.
+    Backend middleware checks permissions via single-instruction bitwise tests.
+  - **Password-version tracking** — `pwd_version` in JWT enables automatic token invalidation when a user's password changes.
+  - **Backend permission middleware** — per-route `require_permission()` guards replace the old blanket admin check. The backend is the security boundary.
+  - **RBAC management API** — CRUD endpoints for web UI users and groups (`/api/v1/rbac/users`, `/api/v1/rbac/groups`, `/api/v1/rbac/permissions`).
+  - **Frontend permission gating** — UI elements (buttons, menu items, views) are cosmetically hidden based on the user's resolved permissions.
+  - **RBAC admin panel** — new Web UI page with tabbed user/group management, permission checkbox grid, and write-without-read warnings.
+  - **No-access page** — users with zero permissions see a friendly "no access" screen instead of an empty dashboard.
+  - **Built-in `admin` group** — reserved, always grants all permissions (`*`), cannot be deleted or modified.
 - **User Connection Priority**: API users now carry a `priority` field (type `i8`, nice-style: lower value = higher priority, default `0`, probe `127`).
   When all provider slots are occupied and a higher-priority user connects, the lowest-priority active connection on that provider is
   evicted (oldest first when tied). Only connections with exactly one active listener are eligible for eviction; shared connections
@@ -188,6 +204,14 @@ active URL of the specified provider.
 
 ## ⚙️ New Settings
 
+- **config.yml (`web_ui.auth`)**:
+  - Added `groupfile` (optional, default: `groups.txt` in same directory as `userfile`): path to the RBAC group definitions file.
+- **`user.txt`** (extended format, backward compatible):
+  - Format is now `username:argon2_hash[:group1,group2,...]`. The optional third field assigns group memberships.
+    Missing third field defaults to the `admin` group for full backward compatibility.
+- **`groups.txt`** (new file):
+  - Defines permission groups in `group_name:permission1,permission2,...` format.
+    The `admin` group is built-in and cannot be defined here. See the configuration docs for the full permission list.
 - **api-proxy.yml / Web UI (user)**:
   - Added `priority` (`i8`, default `0`) to user credentials. Lower value = higher priority (nice-style).
     Configurable via Web UI user editor. Negative values are valid and represent higher-than-default priority.

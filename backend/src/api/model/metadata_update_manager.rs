@@ -3628,7 +3628,7 @@ mod tests {
         let input_name = "input_suppressed";
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 1,
             source_last_modified: None,
         };
@@ -3653,7 +3653,7 @@ mod tests {
         let input_name = "input_tmdb_marker";
         let task = UpdateTask::ResolveSeries {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            reason: ResolveReason::Tmdb | ResolveReason::Date,
             delay: 1,
             source_last_modified: Some(777),
         };
@@ -3669,7 +3669,7 @@ mod tests {
         let input_name = "input_tmdb_probe";
         let task = UpdateTask::ResolveSeries {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Probe]),
+            reason: ResolveReason::Tmdb | ResolveReason::Probe,
             delay: 1,
             source_last_modified: Some(777),
         };
@@ -3696,7 +3696,7 @@ mod tests {
         let input_name = "input_tmdb_unknown_series";
         let task = UpdateTask::ResolveSeries {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            reason: ResolveReason::Tmdb | ResolveReason::Date,
             delay: 1,
             source_last_modified: None,
         };
@@ -3723,7 +3723,7 @@ mod tests {
         let input_name = "input_vod_tmdb_marker";
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            reason: ResolveReason::Tmdb | ResolveReason::Date,
             delay: 1,
             source_last_modified: Some(777),
         };
@@ -3739,7 +3739,7 @@ mod tests {
         let input_name = "input_vod_tmdb_probe";
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Probe]),
+            reason: ResolveReason::Tmdb | ResolveReason::Probe,
             delay: 1,
             source_last_modified: Some(777),
         };
@@ -3766,7 +3766,7 @@ mod tests {
         let input_name = "input_tmdb_unknown_vod";
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            reason: ResolveReason::Tmdb | ResolveReason::Date,
             delay: 1,
             source_last_modified: None,
         };
@@ -3795,7 +3795,7 @@ mod tests {
 
         let task_initial = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 10,
             source_last_modified: None,
         };
@@ -3812,7 +3812,7 @@ mod tests {
 
         let task_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 2,
             source_last_modified: None,
         };
@@ -3856,7 +3856,7 @@ mod tests {
 
         let initial = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
+            reason: ResolveReason::Tmdb.into(),
             delay: 10,
             source_last_modified: None,
         };
@@ -3872,7 +3872,7 @@ mod tests {
 
         let identical_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
+            reason: ResolveReason::Tmdb.into(),
             delay: 10,
             source_last_modified: None,
         };
@@ -3909,7 +3909,7 @@ mod tests {
             unique_id: "uid_1".to_string(),
             url: "http://old.example/stream".to_string(),
             item_type: PlaylistItemType::Video,
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            reason: ResolveReason::MissingDetails.into(),
             delay: 10,
         };
         MetadataUpdateManager::submit_task(
@@ -3927,7 +3927,7 @@ mod tests {
             unique_id: "uid_1".to_string(),
             url: "http://new.example/stream".to_string(),
             item_type: PlaylistItemType::LocalVideo,
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 2,
         };
         MetadataUpdateManager::submit_task(
@@ -3974,7 +3974,7 @@ mod tests {
         let key = TaskKey::Vod(42);
         let existing_task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 10,
             source_last_modified: None,
         };
@@ -3982,7 +3982,7 @@ mod tests {
 
         let incoming_task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 2,
             source_last_modified: None,
         };
@@ -4013,7 +4013,7 @@ mod tests {
             key.clone(),
             PendingTask::new(UpdateTask::ResolveVod {
                 id: ProviderIdType::Id(7),
-                reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+                reason: ResolveReason::Info.into(),
                 delay: 0,
                 source_last_modified: None,
             }),
@@ -4038,7 +4038,7 @@ mod tests {
         let key = TaskKey::Vod(9);
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(9),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 0,
             source_last_modified: None,
         };
@@ -4051,7 +4051,7 @@ mod tests {
         worker.scheduled_requeues.insert(key.clone(), chrono::Utc::now().timestamp().saturating_add(30));
         worker.recently_completed_no_change.insert(
             key.clone(),
-            (Instant::now(), ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+            (Instant::now(), ResolveReason::Info.into()),
         );
         assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
         assert!(worker.recently_completed_no_change.contains_key(&key));
@@ -4071,7 +4071,7 @@ mod tests {
         let key = TaskKey::Vod(10);
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(10),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 0,
             source_last_modified: None,
         };
@@ -4082,7 +4082,7 @@ mod tests {
             key.clone(),
             (
                 Instant::now(),
-                ResolveReasonSet::from_variants(&[ResolveReason::Info, ResolveReason::Probe]),
+                ResolveReason::Info | ResolveReason::Probe,
             ),
         );
         assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
@@ -4090,7 +4090,7 @@ mod tests {
 
         worker.recently_completed_no_change.insert(
             key.clone(),
-            (Instant::now(), ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+            (Instant::now(), ResolveReason::Info.into()),
         );
         assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
         assert!(worker.recently_completed_no_change.contains_key(&key));
@@ -4104,7 +4104,7 @@ mod tests {
         let key = TaskKey::Vod(11);
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(11),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 0,
             source_last_modified: None,
         };
@@ -4121,7 +4121,7 @@ mod tests {
         let stale_instant = Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
         worker.recently_completed_no_change.insert(
             key.clone(),
-            (stale_instant, ResolveReasonSet::from_variants(&[ResolveReason::Info])),
+            (stale_instant, ResolveReason::Info.into()),
         );
         assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
         assert!(!worker.recently_completed_no_change.contains_key(&key));
@@ -4139,7 +4139,7 @@ mod tests {
             unique_id: "u1".to_string(),
             url: "file:///movie.mkv".to_string(),
             item_type: PlaylistItemType::LocalVideo,
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            reason: ResolveReason::MissingDetails.into(),
             delay: 0,
         };
 
@@ -4153,7 +4153,7 @@ mod tests {
             unique_id: "u1".to_string(),
             url: "http://example.com/stream.m3u8".to_string(),
             item_type: PlaylistItemType::Video,
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::MissingDetails]),
+            reason: ResolveReason::MissingDetails.into(),
             delay: 0,
         };
 
@@ -4165,7 +4165,7 @@ mod tests {
     fn task_needs_provider_connection_keeps_live_probe() {
         let task = UpdateTask::ProbeLive {
             id: ProviderIdType::Id(1),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 0,
             interval: 60,
         };
@@ -4177,7 +4177,7 @@ mod tests {
     fn strip_tmdb_reasons_returns_none_for_tmdb_only_resolve_task() {
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(100),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Date]),
+            reason: ResolveReason::Tmdb | ResolveReason::Date,
             delay: 5,
             source_last_modified: None,
         };
@@ -4189,7 +4189,7 @@ mod tests {
     fn strip_tmdb_reasons_keeps_non_tmdb_reasons() {
         let task = UpdateTask::ResolveSeries {
             id: ProviderIdType::Id(5),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb, ResolveReason::Probe, ResolveReason::Info]),
+            reason: ResolveReason::Tmdb | ResolveReason::Probe | ResolveReason::Info,
             delay: 1,
             source_last_modified: Some(123),
         };
@@ -4210,7 +4210,7 @@ mod tests {
     fn merge_task_payload_resolve_vod_unknown_last_modified_wins() {
         let mut existing = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(7),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 5,
             source_last_modified: Some(123),
         };
@@ -4218,7 +4218,7 @@ mod tests {
             &mut existing,
             UpdateTask::ResolveVod {
                 id: ProviderIdType::Id(7),
-                reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+                reason: ResolveReason::Probe.into(),
                 delay: 3,
                 source_last_modified: None,
             },
@@ -4240,7 +4240,7 @@ mod tests {
     fn merge_task_payload_resolve_series_unknown_last_modified_wins() {
         let mut existing = UpdateTask::ResolveSeries {
             id: ProviderIdType::Id(9),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 2,
             source_last_modified: None,
         };
@@ -4248,7 +4248,7 @@ mod tests {
             &mut existing,
             UpdateTask::ResolveSeries {
                 id: ProviderIdType::Id(9),
-                reason: ResolveReasonSet::from_variants(&[ResolveReason::Tmdb]),
+                reason: ResolveReason::Tmdb.into(),
                 delay: 2,
                 source_last_modified: Some(456),
             },
@@ -4424,7 +4424,7 @@ mod tests {
     fn retry_domain_uses_probe_for_probe_only_resolve_tasks() {
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(7),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 0,
             source_last_modified: None,
         };
@@ -4435,7 +4435,7 @@ mod tests {
     fn retry_domain_keeps_resolve_for_mixed_resolve_tasks() {
         let task = UpdateTask::ResolveSeries {
             id: ProviderIdType::Id(11),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe, ResolveReason::Info]),
+            reason: ResolveReason::Probe | ResolveReason::Info,
             delay: 0,
             source_last_modified: None,
         };
@@ -4452,7 +4452,7 @@ mod tests {
         let key = TaskKey::Live(100);
         let task = UpdateTask::ProbeLive {
             id: ProviderIdType::Id(100),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 0,
             interval: 60,
         };
@@ -4472,7 +4472,7 @@ mod tests {
         let key = TaskKey::Vod(77);
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(77),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 0,
             source_last_modified: None,
         };
@@ -4487,7 +4487,7 @@ mod tests {
     fn playlist_trigger_ignores_probe_only_changes() {
         let task = UpdateTask::ProbeLive {
             id: ProviderIdType::Id(22),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Probe]),
+            reason: ResolveReason::Probe.into(),
             delay: 0,
             interval: 60,
         };
@@ -4498,7 +4498,7 @@ mod tests {
     fn playlist_trigger_keeps_info_changes() {
         let task = UpdateTask::ResolveSeries {
             id: ProviderIdType::Id(33),
-            reason: ResolveReasonSet::from_variants(&[ResolveReason::Info]),
+            reason: ResolveReason::Info.into(),
             delay: 0,
             source_last_modified: None,
         };

@@ -16,6 +16,7 @@ pub const DEFAULT_DOWNLOAD_DIR: &str = "downloads";
 pub const DEFAULT_CUSTOM_STREAM_RESPONSE_PATH: &str = "resources";
 pub const DNS_RESOLVED_FILE: &str = "provider_dns_resolved.json";
 pub const USER_FILE: &str = "user.txt";
+pub const USER_GROUP_FILE: &str = "groups.txt";
 pub const CONFIG_PATH: &str = "config";
 pub const CONFIG_FILE: &str = "config.yml";
 pub const SOURCE_FILE: &str = "source.yml";

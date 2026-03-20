@@ -3,11 +3,12 @@ use crate::{
         api_utils::{serve_file, try_unwrap_body},
         model::AppState,
     },
-    auth::{create_jwt_admin, create_jwt_user, is_admin, verify_password, verify_token, AuthBearer},
+    auth::{create_jwt_admin, create_jwt_api_user, create_jwt_web_user, verify_password, verify_token, AuthBearer},
+    model::WebAuthConfig,
 };
 use axum::{body::Body, http::Request, response::IntoResponse};
 use base64::Engine;
-use log::error;
+use log::{debug, error};
 use lol_html::{element, RewriteStrSettings};
 //use base64::engine::general_purpose;
 use openssl::rand::rand_bytes;
@@ -28,6 +29,8 @@ fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
     axum::Json(TokenResponse { token: TOKEN_NO_AUTH.to_string(), username: "admin".to_string() }).into_response()
 }
 
+fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
+
 async fn token(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(mut req): axum::extract::Json<UserCredential>,
@@ -45,7 +48,28 @@ async fn token(
             if !(username.is_empty() || password.is_empty()) {
                 if let Some(hash) = web_auth.get_user_password(username) {
                     if verify_password(hash, password.as_bytes()) {
-                        if let Ok(token) = create_jwt_admin(web_auth, username) {
+                        let pwd_version = WebAuthConfig::pwd_version_from_hash(hash);
+                        let permissions = web_auth.resolve_permissions(username);
+                        let is_admin = web_auth
+                            .t_users
+                            .as_ref()
+                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)))
+                            .is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
+                        let user_groups = web_auth
+                            .t_users
+                            .as_ref()
+                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)))
+                            .map(|user| user.groups.clone())
+                            .unwrap_or_default();
+                        debug!(
+                            "Web login success candidate: username='{username}', groups={user_groups:?}, is_admin={is_admin}, permissions={permissions}",
+                        );
+                        let token_result = if is_admin {
+                            create_jwt_admin(web_auth, username, pwd_version)
+                        } else {
+                            create_jwt_web_user(web_auth, username, permissions, pwd_version)
+                        };
+                        if let Ok(token) = token_result {
                             req.zeroize();
                             return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
                         }
@@ -53,7 +77,11 @@ async fn token(
                 }
                 if let Some(credentials) = app_state.app_config.get_user_credentials(username) {
                     if credentials.password == password {
-                        if let Ok(token) = create_jwt_user(web_auth, username) {
+                        if !api_user_can_access_web_ui(credentials.ui_enabled) {
+                            req.zeroize();
+                            return axum::http::StatusCode::FORBIDDEN.into_response();
+                        }
+                        if let Ok(token) = create_jwt_api_user(web_auth, username) {
                             req.zeroize();
                             return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
                         }
@@ -81,14 +109,55 @@ async fn token_refresh(
             let secret_key = web_auth.secret.as_ref();
             let maybe_token_data = verify_token(&token, secret_key);
             if let Some(token_data) = maybe_token_data {
-                let username = token_data.claims.username.clone();
-                let new_token = if is_admin(Some(token_data)) {
-                    create_jwt_admin(web_auth, &username)
+                let claims = token_data.claims;
+                let username = claims.username.as_str();
+
+                if claims
+                    .roles
+                    .iter()
+                    .any(|role| role.eq_ignore_ascii_case(shared::model::ROLE_API_USER))
+                {
+                    let Some(user) = app_state.app_config.get_user_credentials(username) else {
+                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                    };
+                    if !user.ui_enabled {
+                        return axum::http::StatusCode::FORBIDDEN.into_response();
+                    }
+                    if let Ok(token) = create_jwt_api_user(web_auth, username) {
+                        return axum::Json(TokenResponse { token, username: claims.username }).into_response();
+                    }
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
+
+                let token_pwd_version = claims.pwd_version;
+                let Some(users) = web_auth.t_users.as_ref() else {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                };
+                let Some(user) = users.iter().find(|candidate| candidate.username.eq_ignore_ascii_case(username)) else {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                };
+
+                let current_pwd_version = WebAuthConfig::pwd_version_from_hash(&user.password_hash);
+                if token_pwd_version != 0 && token_pwd_version != current_pwd_version {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
+
+                let is_admin = user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin"));
+                let resolved_permissions = web_auth.resolve_permissions(username);
+                debug!(
+                    "Web token refresh: username='{}', groups={:?}, is_admin={}, permissions={}",
+                    username,
+                    user.groups,
+                    is_admin,
+                    resolved_permissions
+                );
+                let new_token = if is_admin {
+                    create_jwt_admin(web_auth, username, current_pwd_version)
                 } else {
-                    create_jwt_user(web_auth, &username)
+                    create_jwt_web_user(web_auth, username, resolved_permissions, current_pwd_version)
                 };
                 if let Ok(token) = new_token {
-                    return axum::Json(TokenResponse { token, username: username.clone() }).into_response();
+                    return axum::Json(TokenResponse { token, username: user.username.clone() }).into_response();
                 }
             }
             axum::http::StatusCode::UNAUTHORIZED.into_response()
@@ -121,6 +190,21 @@ fn inject_nonce_with_parser(html: String, nonce_b64: &str) -> String {
     };
 
     lol_html::rewrite_str(&html, settings).unwrap_or(html)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_user_can_access_web_ui;
+
+    #[test]
+    fn rejects_api_user_when_ui_is_disabled() {
+        assert!(!api_user_can_access_web_ui(false));
+    }
+
+    #[test]
+    fn allows_api_user_when_ui_is_enabled() {
+        assert!(api_user_can_access_web_ui(true));
+    }
 }
 
 async fn index(

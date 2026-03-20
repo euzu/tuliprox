@@ -49,6 +49,17 @@ Tuliprox can:
 - scan local media
 - combine local library content with IPTV-oriented outputs
 
+## Access control
+
+Tuliprox supports role-based access control (RBAC) for the Web UI:
+
+- fine-grained permissions across 7 domains (config, source, user, playlist, library, system, epg)
+- custom groups with configurable permission sets
+- user-to-group assignments with union-based permission resolution
+- compact bitmask encoding in JWT claims for low-overhead permission checks
+- backward-compatible user file format
+- Web UI admin panel for user and group management
+
 ## Operational features
 
 Tuliprox also includes:

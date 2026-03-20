@@ -1,6 +1,6 @@
 use crate::utils::{
-    default_as_true, default_token_ttl_mins, default_user_file_path, is_blank_or_default_user_file_path,
-    is_default_token_ttl_mins, is_true,
+    default_as_true, default_token_ttl_mins, default_user_file_path, default_user_group_file_path,
+    is_blank_or_default_user_file_path, is_blank_or_default_user_group_file_path, is_default_token_ttl_mins, is_true,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -14,6 +14,11 @@ pub struct WebAuthConfigDto {
     pub token_ttl_mins: u32,
     #[serde(default = "default_user_file_path", skip_serializing_if = "is_blank_or_default_user_file_path")]
     pub userfile: Option<String>,
+    #[serde(
+        default = "default_user_group_file_path",
+        skip_serializing_if = "is_blank_or_default_user_group_file_path"
+    )]
+    pub groupfile: Option<String>,
 }
 
 impl Default for WebAuthConfigDto {
@@ -24,6 +29,7 @@ impl Default for WebAuthConfigDto {
             secret: String::new(),
             token_ttl_mins: default_token_ttl_mins(),
             userfile: None,
+            groupfile: None,
         }
     }
 }
@@ -36,5 +42,6 @@ impl WebAuthConfigDto {
             && self.issuer.trim().is_empty()
             && self.secret.trim().is_empty()
             && is_blank_or_default_user_file_path(&self.userfile)
+            && is_blank_or_default_user_group_file_path(&self.groupfile)
     }
 }

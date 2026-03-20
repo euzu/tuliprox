@@ -7,7 +7,7 @@ use crate::{
     html_if,
     i18n::use_translation,
 };
-use shared::model::ConfigTargetDto;
+use shared::model::{permission::Permission, ConfigTargetDto};
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_list;
@@ -21,6 +21,8 @@ pub fn PlaylistUpdateView() -> Html {
     let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let services_ctx = use_service_context();
+    let can_write_playlist = services_ctx.auth.has_permission(Permission::PlaylistWrite);
+    let can_write_library = services_ctx.auth.has_permission(Permission::LibraryWrite);
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.UPDATE")]));
     let selected_targets = use_list::<Rc<ConfigTargetDto>>(vec![]);
 
@@ -48,6 +50,9 @@ pub fn PlaylistUpdateView() -> Html {
         let services = services_ctx.clone();
         let selected_targets = selected_targets.clone();
         Callback::from(move |_| {
+            if !can_write_playlist {
+                return;
+            }
             let selected_targets = selected_targets.clone();
             let services = services.clone();
             let translate = translate.clone();
@@ -73,6 +78,9 @@ pub fn PlaylistUpdateView() -> Html {
         let services = services_ctx.clone();
         let translate = translate.clone();
         Callback::from(move |name: String| {
+            if !can_write_library {
+                return;
+            }
             let services = services.clone();
             let translate = translate.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -94,17 +102,19 @@ pub fn PlaylistUpdateView() -> Html {
          <div class="tp__playlist-update-view__header">
           <h1>{ translate.t("LABEL.UPDATE")}</h1>
           <div class="tp__config-view__header-tools">
-            {html_if!(library_enabled, {
+            {html_if!(can_write_library && library_enabled, {
                 <TextButton class="tertiary" name={ACTION_UPDATE_LIBRARY}
                     icon="Refresh"
                     title={ translate.t(LABEL_UPDATE_LOCAL_LIBRARY)}
                     onclick={handle_update_content.clone()}></TextButton>
             })}
             </div>
-        <TextButton class="primary" name="playlist_update"
-               icon="Refresh"
-               title={ translate.t("LABEL.UPDATE")}
-               onclick={handle_update}></TextButton>
+        { html_if!(can_write_playlist, {
+            <TextButton class="primary" name="playlist_update"
+                   icon="Refresh"
+                   title={ translate.t("LABEL.UPDATE")}
+                   onclick={handle_update}></TextButton>
+        })}
         </div>
         <Card>
          <div class="tp__playlist-update-view__body">

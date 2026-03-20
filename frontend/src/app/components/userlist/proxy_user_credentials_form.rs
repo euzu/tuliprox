@@ -9,11 +9,15 @@ use crate::{
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_number_i8,
     edit_field_text, edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
+    html_if,
     i18n::use_translation,
 };
 use chrono::{Duration, Utc};
 use shared::{
-    model::{ApiProxyServerInfoDto, ConfigTargetDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus},
+    model::{
+        permission::Permission, ApiProxyServerInfoDto, ConfigTargetDto, ProxyType, ProxyUserCredentialsDto,
+        ProxyUserStatus,
+    },
     utils::generate_random_string,
 };
 use std::rc::Rc;
@@ -265,10 +269,12 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 icon="Cancel"
                 title={ translate.t("LABEL.CANCEL")}
                 onclick={handle_cancel}></TextButton>
-             <TextButton class="primary" name="save_user"
-                icon="Save"
-                title={ translate.t("LABEL.SAVE")}
-                onclick={handle_save_user}></TextButton>
+             { html_if!(service_ctx.auth.has_permission(Permission::UserWrite), {
+                 <TextButton class="primary" name="save_user"
+                    icon="Save"
+                    title={ translate.t("LABEL.SAVE")}
+                    onclick={handle_save_user}></TextButton>
+             })}
           </div>
         </div>
     }

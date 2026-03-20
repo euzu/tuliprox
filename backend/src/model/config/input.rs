@@ -32,36 +32,8 @@ create_bitset!(
     ProbeLive
 );
 
-impl ConfigInputFlagsSet {
-    #[inline]
-    pub fn contains_any(&self, other: Self) -> bool {
-        (self.0 & other.0) != 0
-    }
 
-    #[inline]
-    pub fn contains_all(&self, other: Self) -> bool {
-        (self.0 & other.0) == other.0
-    }
-}
 
-impl std::ops::BitOr for ConfigInputFlags {
-    type Output = ConfigInputFlagsSet;
-
-    #[inline]
-    fn bitor(self, rhs: Self) -> Self::Output {
-        ConfigInputFlagsSet::from_variants(&[self, rhs])
-    }
-}
-
-impl std::ops::BitOr<ConfigInputFlags> for ConfigInputFlagsSet {
-    type Output = Self;
-
-    #[inline]
-    fn bitor(mut self, rhs: ConfigInputFlags) -> Self::Output {
-        self.set(rhs);
-        self
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ConfigInputOptions {
@@ -80,12 +52,12 @@ impl ConfigInputOptions {
 
     #[inline]
     pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.flags.contains_any(flags)
+        self.flags.contains_any(&flags)
     }
 
     #[inline]
     pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.flags.contains_all(flags)
+        self.flags.contains_all(&flags)
     }
 
     #[inline]

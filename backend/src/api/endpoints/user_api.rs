@@ -3,7 +3,7 @@ use crate::{
         api_utils::{get_user_target_by_username, get_username_from_auth_header, try_unwrap_body},
         model::AppState,
     },
-    auth::{validator_user, AuthBearer},
+    auth::{validator_api_user, AuthBearer},
     model::{AppConfig, ConfigTarget, PlaylistXtreamCategory},
     repository::{
         iter_raw_m3u_target_playlist, load_user_bouquet_as_json, save_user_bouquet, xtream_get_playlist_categories,
@@ -169,14 +169,14 @@ async fn playlist_bouquet(
         .body(axum::body::Body::from("{}")))
 }
 
-pub fn user_api_register(app_state: Arc<AppState>, web_ui_path: &str) -> axum::Router<Arc<AppState>> {
+pub fn user_api_register(app_state: &Arc<AppState>, web_ui_path: &str) -> axum::Router<Arc<AppState>> {
     axum::Router::new().nest(
         &concat_path_leading_slash(web_ui_path, "/api/v1/user"),
         axum::Router::new()
             .route("/playlist/categories", axum::routing::get(playlist_categories))
             .route("/playlist/bouquet", axum::routing::get(playlist_bouquet))
             .route("/playlist/bouquet", axum::routing::post(save_playlist_bouquet))
-            .route_layer(axum::middleware::from_fn_with_state(app_state, validator_user)),
+            .route_layer(axum::middleware::from_fn_with_state(Arc::clone(app_state), validator_api_user)),
     )
 
     // cfg.service(web::scope("/api/v1/user")

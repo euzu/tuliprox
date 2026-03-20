@@ -13,6 +13,7 @@ const PLAYLIST_SETTINGS_SNAKE: &str = "playlist_settings";
 const PLAYLIST_EDITOR_LEGACY: &str = "playlist_editor";
 const PLAYLIST_EXPLORER: &str = "playlist_explorer";
 const PLAYLIST_EPG: &str = "playlist_epg";
+const RBAC: &str = "rbac";
 const SOURCE_EDITOR: &str = "source_editor";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -27,6 +28,7 @@ pub enum ViewType {
     PlaylistSettings,
     PlaylistExplorer,
     PlaylistEpg,
+    Rbac,
 }
 
 impl FromStr for ViewType {
@@ -46,6 +48,7 @@ impl FromStr for ViewType {
             }
             PLAYLIST_EXPLORER => Ok(ViewType::PlaylistExplorer),
             PLAYLIST_EPG => Ok(ViewType::PlaylistEpg),
+            RBAC => Ok(ViewType::Rbac),
             _ => info_err_res!("Unknown view type: {s}"),
         }
     }
@@ -64,6 +67,7 @@ impl fmt::Display for ViewType {
             ViewType::PlaylistSettings => PLAYLIST_SETTINGS,
             ViewType::PlaylistExplorer => PLAYLIST_EXPLORER,
             ViewType::PlaylistEpg => PLAYLIST_EPG,
+            ViewType::Rbac => RBAC,
         };
         write!(f, "{s}")
     }

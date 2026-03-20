@@ -278,6 +278,7 @@
     gap: var(--gap-default);
     box-sizing: border-box;
   }
+
   &__card-header {
     display: flex;
     flex-flow: row;
@@ -298,6 +299,7 @@
     display: flex;
     flex-flow: row;
     gap: var(--gap-default);
+
     &-item {
       font-size: 1.1rem;
       color: var(--text-color);
@@ -312,6 +314,25 @@
   }
 }
 
-.tp__form-page__toolbar {
-  @extend %toolbar-base;
+.tp__form-page {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  box-sizing: border-box;
+  width: 100%;
+  overflow: hidden;
+
+  &__body {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    box-sizing: border-box;
+    width: 100%;
+    overflow: auto;
+  }
+
+  &__toolbar {
+    @extend %toolbar-base;
+    padding-top: var(--padding-default);
+  }
 }

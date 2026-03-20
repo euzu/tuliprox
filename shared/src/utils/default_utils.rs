@@ -3,7 +3,7 @@ use crate::{
     utils::{
         CONFIG_PATH, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_DOWNLOAD_DIR,
         DEFAULT_EPISODE_PATTERN, DEFAULT_STORAGE_DIR, DEFAULT_USER_AGENT, DEFAULT_USER_CONFIG_DIR, DEFAULT_WEB_DIR,
-        MAPPING_FILE, TEMPLATE_FILE, USER_FILE,
+        MAPPING_FILE, TEMPLATE_FILE, USER_FILE, USER_GROUP_FILE,
     },
 };
 use std::sync::Arc;
@@ -284,6 +284,9 @@ pub fn default_main_mapping_path() -> Option<String> { Some(format!("./{CONFIG_P
 pub fn default_main_template_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{TEMPLATE_FILE}")) }
 pub fn default_custom_stream_response_path() -> Option<String> { Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string()) }
 pub fn default_user_file_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{USER_FILE}")) }
+
+pub fn default_user_group_file_path() -> Option<String> { Some(format!("./{CONFIG_PATH}/{USER_GROUP_FILE}")) }
+
 fn is_default_config_file_path(value: &str, file_name: &str) -> bool {
     let normalized = value.trim().replace('\\', "/");
     let normalized = normalized.trim_start_matches("./");
@@ -318,6 +321,10 @@ pub fn is_blank_or_default_user_config_dir(path: &Option<String>) -> bool {
 
 pub fn is_blank_or_default_user_file_path(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, USER_FILE))
+}
+
+pub fn is_blank_or_default_user_group_file_path(path: &Option<String>) -> bool {
+    path.as_ref().is_none_or(|value| value.trim().is_empty() || is_default_config_file_path(value, USER_GROUP_FILE))
 }
 
 pub fn normalize_optional_dir(path: &Option<String>, default_dir: &str) -> Option<String> {

@@ -8,6 +8,8 @@ Tuliprox is driven by a small set of files rather than one giant document.
 - `source.yml`: inputs, providers, aliases, targets
 - `mapping.yml`: optional mapping logic
 - `template.yml`: reusable expressions and templates
+- `user.txt`: Web UI login credentials with optional group assignments
+- `groups.txt`: RBAC permission group definitions (optional)
 
 ## Practical split
 

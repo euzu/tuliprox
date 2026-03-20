@@ -221,6 +221,7 @@ mod tests {
                     enabled: true,
                     issuer: "tuliprox".to_string(),
                     secret: "top-secret".to_string(),
+                    groupfile: Some("groups.txt".to_string()),
                     ..Default::default()
                 }),
                 content_security_policy: Some(ContentSecurityPolicyConfigDto {
@@ -252,6 +253,7 @@ mod tests {
         assert_eq!(web_ui.path.as_deref(), Some("/dashboard"));
         assert_eq!(web_ui.player_server.as_deref(), Some("http://player.local"));
         assert_eq!(web_ui.auth.as_ref().map(|auth| auth.secret.as_str()), Some("top-secret"));
+        assert_eq!(web_ui.auth.as_ref().and_then(|auth| auth.groupfile.as_deref()), Some("groups.txt"));
     }
 
     #[test]

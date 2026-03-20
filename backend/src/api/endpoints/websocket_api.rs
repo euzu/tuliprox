@@ -3,7 +3,7 @@ use crate::{
         endpoints::v1_api::create_status_check,
         model::{AppState, EventMessage},
     },
-    auth::{verify_token_admin, verify_token_user},
+    auth::verify_token,
 };
 use axum::{
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -12,7 +12,8 @@ use axum::{
 use log::{error, trace};
 use shared::{
     model::{
-        ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode, PROTOCOL_VERSION,
+        Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
+        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION,
     },
     utils::{concat_path_leading_slash, default_kick_secs},
 };
@@ -46,19 +47,19 @@ pub fn ws_api_register(web_auth_enabled: bool, web_ui_path: &str) -> axum::Route
 }
 
 #[inline]
-fn verify_auth_admin_token(auth_token: &str, secret_key: Option<&Vec<u8>>) -> bool {
-    match secret_key.as_ref() {
-        None => false,
-        Some(key) => verify_token_admin(auth_token, key.as_slice()),
-    }
+fn set_websocket_auth(mem: &mut ProtocolHandlerMemory, auth_token: String, claims: &shared::model::Claims) {
+    mem.permissions = claims.permissions;
+    mem.role = if claims.roles.iter().any(|role| role == ROLE_ADMIN) {
+        UserRole::Admin
+    } else {
+        UserRole::User
+    };
+    mem.token = Some(auth_token);
 }
 
 #[inline]
-fn verify_auth_user_token(auth_token: &str, secret_key: Option<&Vec<u8>>) -> bool {
-    match secret_key.as_ref() {
-        None => false,
-        Some(key) => verify_token_user(auth_token, key.as_slice()),
-    }
+fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
+    !auth_required || mem.permissions.contains(Permission::SystemRead)
 }
 
 fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
@@ -104,32 +105,51 @@ async fn handle_protocol_message(
     if let Message::Binary(bytes) = msg {
         match ProtocolMessage::from_bytes(bytes) {
             Ok(ProtocolMessage::Auth(auth_token)) => {
-                mem.token = None;
-                if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
+                if !auth_required {
+                    mem.permissions = PERM_ALL;
                     mem.role = UserRole::Admin;
                     mem.token = Some(auth_token);
-                    Some(ProtocolMessage::Authorized)
-                } else if verify_auth_user_token(&auth_token, secret_key) {
-                    mem.role = UserRole::User;
-                    mem.token = Some(auth_token);
-                    Some(ProtocolMessage::Authorized)
-                } else {
-                    Some(ProtocolMessage::Unauthorized)
+                    return Some(ProtocolMessage::Authorized);
                 }
+
+                let Some(secret_key) = secret_key else {
+                    return Some(ProtocolMessage::Unauthorized);
+                };
+
+                let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                    return Some(ProtocolMessage::Unauthorized);
+                };
+
+                if !token_data.claims.permissions.contains(Permission::SystemRead) {
+                    return Some(ProtocolMessage::Unauthorized);
+                }
+
+                set_websocket_auth(mem, auth_token, &token_data.claims);
+                Some(ProtocolMessage::Authorized)
             }
             Ok(ProtocolMessage::StatusRequest(auth_token)) => {
-                if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
-                    mem.role = UserRole::Admin;
-                    mem.token = Some(auth_token);
-                    let status = create_status_check(app_state).await;
-                    Some(ProtocolMessage::StatusResponse(status))
-                } else {
-                    Some(ProtocolMessage::Unauthorized)
+                if auth_required {
+                    let Some(secret_key) = secret_key else {
+                        return Some(ProtocolMessage::Unauthorized);
+                    };
+
+                    let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                        return Some(ProtocolMessage::Unauthorized);
+                    };
+
+                    if !token_data.claims.permissions.contains(Permission::SystemRead) {
+                        return Some(ProtocolMessage::Unauthorized);
+                    }
+
+                    set_websocket_auth(mem, auth_token, &token_data.claims);
                 }
+
+                let status = create_status_check(app_state).await;
+                Some(ProtocolMessage::StatusResponse(status))
             }
             Ok(ProtocolMessage::UserAction(cmd)) => {
-                if let Some(token) = mem.token.as_ref() {
-                    if !auth_required || verify_auth_admin_token(token, secret_key) {
+                if websocket_requires_system_read(auth_required, mem) {
+                    if !auth_required || mem.token.is_some() {
                         Some(ProtocolMessage::UserActionResponse(handle_user_action(app_state, cmd).await))
                     } else {
                         Some(ProtocolMessage::UserActionResponse(false))
@@ -139,13 +159,26 @@ async fn handle_protocol_message(
                 }
             }
             Ok(ProtocolMessage::ActiveProviderCountRequest(auth_token)) => {
-                if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
+                if auth_required {
+                    let Some(secret_key) = secret_key else {
+                        return Some(ProtocolMessage::Unauthorized);
+                    };
+                    let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                        return Some(ProtocolMessage::Unauthorized);
+                    };
+                    set_websocket_auth(mem, auth_token, &token_data.claims);
+                    if mem.permissions.contains(Permission::SystemRead) {
+                        let connections = app_state.active_provider.get_provider_connections_count().await;
+                        Some(ProtocolMessage::ActiveProviderCountResponse(connections))
+                    } else {
+                        Some(ProtocolMessage::Unauthorized)
+                    }
+                } else {
+                    mem.permissions = PERM_ALL;
                     mem.role = UserRole::Admin;
                     mem.token = Some(auth_token);
                     let connections = app_state.active_provider.get_provider_connections_count().await;
                     Some(ProtocolMessage::ActiveProviderCountResponse(connections))
-                } else {
-                    Some(ProtocolMessage::Unauthorized)
                 }
             }
             Ok(_) => {
