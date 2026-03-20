@@ -3,7 +3,8 @@ use crate::{
         config::HasFormData, select::Select, BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode,
         DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
     },
-    config_field_child, edit_field_bool, edit_field_list_option, edit_field_text, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_list_option,
+    edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::{
@@ -98,6 +99,8 @@ generate_form_reducer!(
 pub struct ConfigTargetViewProps {
     pub(crate) block_id: BlockId,
     pub(crate) target: Option<Rc<ConfigTargetDto>>,
+    #[prop_or(true)]
+    pub(crate) allow_write: bool,
 }
 
 #[component]
@@ -158,72 +161,113 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
 
     let render_options = || {
         let target_options_state_1 = target_options_state.clone();
-        html! {
-            <Card class="tp__config-view__card">
-            <div class="tp__config-view__cols-2">
-            { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
-            { edit_field_bool!(target_options_state, translate.t(LABEL_SHARE_LIVE_STREAMS), share_live_streams, ConfigTargetOptionsFormAction::ShareLiveStreams) }
-            </div>
-            { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
-            { config_field_child!(translate.t(LABEL_FORCE_REDIRECT), "TARGET_FORM.FORCE_REDIRECT", {
-               html! {
-                    <ClusterFlagsInput
-                        name="force_redirect"
-                        value={target_options_state.form.force_redirect}
-                        mode={ClusterFlagsInputMode::NoneIsNone}
-                        on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
-                        target_options_state_1.dispatch(ConfigTargetOptionsFormAction::ForceRedirect(flags));
-                    })}
-                />
-            }})}
-            </Card>
+        if !props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    <div class="tp__config-view__cols-2">
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_SHARE_LIVE_STREAMS), share_live_streams) }
+                    </div>
+                    { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
+                    { config_field_custom!(
+                        translate.t(LABEL_FORCE_REDIRECT),
+                        target_options_state.form.force_redirect.map_or_else(String::new, |flags| flags.to_string())
+                    ) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                <div class="tp__config-view__cols-2">
+                { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
+                { edit_field_bool!(target_options_state, translate.t(LABEL_SHARE_LIVE_STREAMS), share_live_streams, ConfigTargetOptionsFormAction::ShareLiveStreams) }
+                </div>
+                { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
+                { config_field_child!(translate.t(LABEL_FORCE_REDIRECT), "TARGET_FORM.FORCE_REDIRECT", {
+                   html! {
+                        <ClusterFlagsInput
+                            name="force_redirect"
+                            value={target_options_state.form.force_redirect}
+                            mode={ClusterFlagsInputMode::NoneIsNone}
+                            on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
+                            target_options_state_1.dispatch(ConfigTargetOptionsFormAction::ForceRedirect(flags));
+                        })}
+                    />
+                }})}
+                </Card>
+            }
         }
     };
 
     let render_target = || {
         let target_form_state_1 = target_form_state.clone();
         let target_form_state_2 = target_form_state.clone();
-        html! {
-            <Card class="tp__config-view__card">
-            <div class="tp__config-view__cols-2">
-            { edit_field_bool!(target_form_state, translate.t(LABEL_ENABLED), enabled,  ConfigTargetFormAction::Enabled) }
-            { edit_field_bool!(target_form_state, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache,  ConfigTargetFormAction::UseMemoryCache) }
-            </div>
-            { edit_field_text!(target_form_state, translate.t(LABEL_NAME), name, ConfigTargetFormAction::Name) }
-            { config_field_child!(translate.t(LABEL_FILTER), "TARGET_FORM.FILTER", {
-                   html! {
-                        <FilterInput filter={target_form_state_2.form.filter.clone()} on_change={Callback::from(move |new_filter: Option<String>| {
-                            target_form_state_2.dispatch(ConfigTargetFormAction::Filter(new_filter.unwrap_or_default()));
-                        })} />
-                   }
-            })}
+        if !props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    <div class="tp__config-view__cols-2">
+                        { config_field_bool!(target_form_state.form, translate.t(LABEL_ENABLED), enabled) }
+                        { config_field_bool!(target_form_state.form, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache) }
+                    </div>
+                    { config_field!(target_form_state.form, translate.t(LABEL_NAME), name) }
+                    { config_field_custom!(translate.t(LABEL_FILTER), target_form_state.form.filter.clone()) }
+                    { config_field_custom!(
+                        translate.t(LABEL_PROCESSING_ORDER),
+                        target_form_state.form.processing_order.to_string()
+                    ) }
+                    { config_field_custom!(
+                        translate.t(LABEL_MAPPING),
+                        target_form_state.form.mapping.as_ref().map_or_else(String::new, |values| values.join(", "))
+                    ) }
+                    { config_field_custom!(
+                        translate.t(LABEL_WATCH),
+                        target_form_state.form.watch.as_ref().map_or_else(String::new, |values| values.join(", "))
+                    ) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                <div class="tp__config-view__cols-2">
+                { edit_field_bool!(target_form_state, translate.t(LABEL_ENABLED), enabled,  ConfigTargetFormAction::Enabled) }
+                { edit_field_bool!(target_form_state, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache,  ConfigTargetFormAction::UseMemoryCache) }
+                </div>
+                { edit_field_text!(target_form_state, translate.t(LABEL_NAME), name, ConfigTargetFormAction::Name) }
+                { config_field_child!(translate.t(LABEL_FILTER), "TARGET_FORM.FILTER", {
+                       html! {
+                            <FilterInput filter={target_form_state_2.form.filter.clone()} on_change={Callback::from(move |new_filter: Option<String>| {
+                                target_form_state_2.dispatch(ConfigTargetFormAction::Filter(new_filter.unwrap_or_default()));
+                            })} />
+                       }
+                })}
 
-            { config_field_child!(translate.t(LABEL_PROCESSING_ORDER), "TARGET_FORM.PROCESSING_ORDER", {
-                   html! {
-                       <Select
-                        name={"processing_order"}
-                        multi_select={false}
-                        on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                           match selections {
-                            DropDownSelection::Empty => {
-                                   target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(ProcessingOrder::Frm));
-                            }
-                            DropDownSelection::Single(option) => {
-                                target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(option.parse::<ProcessingOrder>().unwrap_or(ProcessingOrder::Frm)));
-                            }
-                            DropDownSelection::Multi(options) => {
-                              if let Some(first) = options.first() {
-                                target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(first.parse::<ProcessingOrder>().unwrap_or(ProcessingOrder::Frm)));
+                { config_field_child!(translate.t(LABEL_PROCESSING_ORDER), "TARGET_FORM.PROCESSING_ORDER", {
+                       html! {
+                           <Select
+                            name={"processing_order"}
+                            multi_select={false}
+                            on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                               match selections {
+                                DropDownSelection::Empty => {
+                                       target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(ProcessingOrder::Frm));
+                                }
+                                DropDownSelection::Single(option) => {
+                                    target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(option.parse::<ProcessingOrder>().unwrap_or(ProcessingOrder::Frm)));
+                                }
+                                DropDownSelection::Multi(options) => {
+                                  if let Some(first) = options.first() {
+                                    target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(first.parse::<ProcessingOrder>().unwrap_or(ProcessingOrder::Frm)));
+                                   }
+                                 }
                                }
-                             }
-                           }
-                        })}
-                        options={processing_orders.clone()}
-                    />
-               }})}
-            { edit_field_list_option!(target_form_state, translate.t(LABEL_MAPPING), mapping, ConfigTargetFormAction::Mapping, translate.t(LABEL_ADD_MAPPING)) }
-            { edit_field_list_option!(target_form_state, translate.t(LABEL_WATCH), watch, ConfigTargetFormAction::Watch, translate.t(LABEL_ADD_WATCH)) }
-            </Card>
+                            })}
+                            options={processing_orders.clone()}
+                        />
+                   }})}
+                { edit_field_list_option!(target_form_state, translate.t(LABEL_MAPPING), mapping, ConfigTargetFormAction::Mapping, translate.t(LABEL_ADD_MAPPING)) }
+                { edit_field_list_option!(target_form_state, translate.t(LABEL_WATCH), watch, ConfigTargetFormAction::Watch, translate.t(LABEL_ADD_WATCH)) }
+                </Card>
+            }
         }
     };
 
@@ -282,10 +326,12 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             icon="Cancel"
             title={ translate.t("LABEL.CANCEL")}
             onclick={handle_cancel}></TextButton>
-         <TextButton class="primary" name="apply_input"
-            icon="Accept"
-            title={ translate.t("LABEL.OK")}
-            onclick={handle_apply_target}></TextButton>
+         if props.allow_write {
+             <TextButton class="primary" name="apply_input"
+                icon="Accept"
+                title={ translate.t("LABEL.OK")}
+                onclick={handle_apply_target}></TextButton>
+         }
       </div>
         <div class="tp__source-editor-form__content">
             { render_sidebar() }

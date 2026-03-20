@@ -25,9 +25,9 @@ pub fn SourceEditorForm() -> Html {
             {
                 if let EditMode::Active(block) = &*source_editor_ctx.edit_mode {
                     match &block.instance {
-                        BlockInstance::Input(input) => html! { <ConfigInputView block_id={block.id} input={Some(input.clone())}></ConfigInputView> },
-                        BlockInstance::Target(target) => html! { <ConfigTargetView block_id={block.id} target={Some(target.clone())}></ConfigTargetView> },
-                        BlockInstance::Output(output) => html! { <ConfigOutputView block_id={block.id} output={Some(output.clone())}></ConfigOutputView> },
+                        BlockInstance::Input(input) => html! { <ConfigInputView block_id={block.id} input={Some(input.clone())} allow_write={source_editor_ctx.allow_write}></ConfigInputView> },
+                        BlockInstance::Target(target) => html! { <ConfigTargetView block_id={block.id} target={Some(target.clone())} allow_write={source_editor_ctx.allow_write}></ConfigTargetView> },
+                        BlockInstance::Output(output) => html! { <ConfigOutputView block_id={block.id} output={Some(output.clone())} allow_write={source_editor_ctx.allow_write}></ConfigOutputView> },
                     }
                 } else {
                     html!{}

@@ -1,6 +1,7 @@
 use crate::{
     app::components::{select::Select, Card, DropDownOption, DropDownSelection, Tag, TagList, TextButton},
-    config_field_child, edit_field_bool, edit_field_number_u64, edit_field_text, generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u64,
+    edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::{
@@ -151,6 +152,8 @@ pub struct ProviderItemFormProps {
     pub on_cancel: Callback<()>,
     #[prop_or_default]
     pub initial: Option<ConfigProviderDto>,
+    #[prop_or(false)]
+    pub readonly: bool,
 }
 
 #[component]
@@ -336,12 +339,16 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
 
     html! {
         <Card class="tp__config-view__card tp__item-form">
-            { edit_field_text!(form_state, translate.t(LABEL_PROVIDER_NAME), name, ProviderFormAction::Name) }
+            if props.readonly {
+                { config_field!(form_state.form, translate.t(LABEL_PROVIDER_NAME), name) }
+            } else {
+                { edit_field_text!(form_state, translate.t(LABEL_PROVIDER_NAME), name, ProviderFormAction::Name) }
+            }
             { config_field_child!(translate.t(LABEL_PROVIDER_URLS), "PROVIDER_FORM.URLS", {
                 html! {
                     <TagList
                         tags={(*urls_state).clone()}
-                        readonly={false}
+                        readonly={props.readonly}
                         placeholder={translate.t(LABEL_ADD_URL)}
                         on_change={handle_urls_change}
                     />
@@ -354,65 +361,94 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
             }
 
             <h1> { translate.t(LABEL_PROVIDER_DNS) } </h1>
-            { edit_field_bool!(dns_state, translate.t(LABEL_DNS_ENABLED), enabled, ProviderDnsFormAction::Enabled) }
-            <div class="tp__config-view__cols-2">
-                { edit_field_number_u64!(dns_state, translate.t(LABEL_DNS_REFRESH_SECS), refresh_secs, ProviderDnsFormAction::RefreshSecs) }
-                <div class="tp__form-field tp__form-field__number">
-                    <crate::app::components::number_input::NumberInput
-                        label={Some(translate.t(LABEL_DNS_MAX_ADDRS))}
-                        name={"dns_max_addrs"}
-                        value={dns_state.form.max_addrs.map(|v| i64::try_from(v).unwrap_or(i64::MAX))}
-                        on_change={Callback::from({
-                            let dns_state = dns_state.clone();
-                            move |value: Option<i64>| {
-                                let parsed = value.and_then(|v| usize::try_from(v).ok());
-                                dns_state.dispatch(ProviderDnsFormAction::MaxAddrs(parsed));
-                            }
-                        })}
-                    />
+            if props.readonly {
+                { config_field_bool!(dns_state.form, translate.t(LABEL_DNS_ENABLED), enabled) }
+                <div class="tp__config-view__cols-2">
+                    { config_field_custom!(translate.t(LABEL_DNS_REFRESH_SECS), dns_state.form.refresh_secs.to_string()) }
+                    { config_field_custom!(
+                        translate.t(LABEL_DNS_MAX_ADDRS),
+                        dns_state.form.max_addrs.map_or_else(String::new, |value| value.to_string())
+                    ) }
                 </div>
-            </div>
-            { config_field_child!(translate.t(LABEL_DNS_PREFER), "PROVIDER_FORM.DNS.PREFER", {
-                html! {
-                    <Select
-                        name={"provider_dns_prefer"}
-                        multi_select={false}
-                        on_select={handle_dns_prefer_select}
-                        options={dns_prefer_options}
-                    />
-                }
-            })}
-            { config_field_child!(translate.t(LABEL_DNS_SCHEMES), "PROVIDER_FORM.DNS.SCHEMES", {
-                html! {
-                    <Select
-                        name={"provider_dns_schemes"}
-                        multi_select={true}
-                        on_select={handle_dns_schemes_select}
-                        options={dns_scheme_options}
-                    />
-                }
-            })}
-            { edit_field_bool!(dns_state, translate.t(LABEL_DNS_KEEP_VHOST), keep_vhost, ProviderDnsFormAction::KeepVhost) }
-            { config_field_child!(translate.t(LABEL_DNS_ON_RESOLVE_ERROR), "PROVIDER_FORM.DNS.ON_RESOLVE_ERROR", {
-                html! {
-                    <Select
-                        name={"provider_dns_on_resolve_error"}
-                        multi_select={false}
-                        on_select={handle_dns_on_resolve_error_select}
-                        options={dns_on_resolve_error_options}
-                    />
-                }
-            })}
-            { config_field_child!(translate.t(LABEL_DNS_ON_CONNECT_ERROR), "PROVIDER_FORM.DNS.ON_CONNECT_ERROR", {
-                html! {
-                    <Select
-                        name={"provider_dns_on_connect_error"}
-                        multi_select={false}
-                        on_select={handle_dns_on_connect_error_select}
-                        options={dns_on_connect_error_options}
-                    />
-                }
-            })}
+                { config_field_custom!(translate.t(LABEL_DNS_PREFER), dns_prefer_to_id(dns_state.form.prefer).to_string()) }
+                { config_field_custom!(
+                    translate.t(LABEL_DNS_SCHEMES),
+                    dns_state.form.schemes.as_ref().map_or_else(String::new, |schemes| {
+                        schemes.iter().map(|scheme| scheme_to_id(*scheme)).collect::<Vec<_>>().join(", ")
+                    })
+                ) }
+                { config_field_bool!(dns_state.form, translate.t(LABEL_DNS_KEEP_VHOST), keep_vhost) }
+                { config_field_custom!(
+                    translate.t(LABEL_DNS_ON_RESOLVE_ERROR),
+                    on_resolve_error_to_id(dns_state.form.on_resolve_error).to_string()
+                ) }
+                { config_field_custom!(
+                    translate.t(LABEL_DNS_ON_CONNECT_ERROR),
+                    on_connect_error_to_id(dns_state.form.on_connect_error).to_string()
+                ) }
+            } else {
+                <>
+                    { edit_field_bool!(dns_state, translate.t(LABEL_DNS_ENABLED), enabled, ProviderDnsFormAction::Enabled) }
+                    <div class="tp__config-view__cols-2">
+                        { edit_field_number_u64!(dns_state, translate.t(LABEL_DNS_REFRESH_SECS), refresh_secs, ProviderDnsFormAction::RefreshSecs) }
+                        <div class="tp__form-field tp__form-field__number">
+                            <crate::app::components::number_input::NumberInput
+                                label={Some(translate.t(LABEL_DNS_MAX_ADDRS))}
+                                name={"dns_max_addrs"}
+                                value={dns_state.form.max_addrs.map(|v| i64::try_from(v).unwrap_or(i64::MAX))}
+                                on_change={Callback::from({
+                                    let dns_state = dns_state.clone();
+                                    move |value: Option<i64>| {
+                                        let parsed = value.and_then(|v| usize::try_from(v).ok());
+                                        dns_state.dispatch(ProviderDnsFormAction::MaxAddrs(parsed));
+                                    }
+                                })}
+                            />
+                        </div>
+                    </div>
+                    { config_field_child!(translate.t(LABEL_DNS_PREFER), "PROVIDER_FORM.DNS.PREFER", {
+                        html! {
+                            <Select
+                                name={"provider_dns_prefer"}
+                                multi_select={false}
+                                on_select={handle_dns_prefer_select}
+                                options={dns_prefer_options}
+                            />
+                        }
+                    })}
+                    { config_field_child!(translate.t(LABEL_DNS_SCHEMES), "PROVIDER_FORM.DNS.SCHEMES", {
+                        html! {
+                            <Select
+                                name={"provider_dns_schemes"}
+                                multi_select={true}
+                                on_select={handle_dns_schemes_select}
+                                options={dns_scheme_options}
+                            />
+                        }
+                    })}
+                    { edit_field_bool!(dns_state, translate.t(LABEL_DNS_KEEP_VHOST), keep_vhost, ProviderDnsFormAction::KeepVhost) }
+                    { config_field_child!(translate.t(LABEL_DNS_ON_RESOLVE_ERROR), "PROVIDER_FORM.DNS.ON_RESOLVE_ERROR", {
+                        html! {
+                            <Select
+                                name={"provider_dns_on_resolve_error"}
+                                multi_select={false}
+                                on_select={handle_dns_on_resolve_error_select}
+                                options={dns_on_resolve_error_options}
+                            />
+                        }
+                    })}
+                    { config_field_child!(translate.t(LABEL_DNS_ON_CONNECT_ERROR), "PROVIDER_FORM.DNS.ON_CONNECT_ERROR", {
+                        html! {
+                            <Select
+                                name={"provider_dns_on_connect_error"}
+                                multi_select={false}
+                                on_select={handle_dns_on_connect_error_select}
+                                options={dns_on_connect_error_options}
+                            />
+                        }
+                    })}
+                </>
+            }
             <div class="tp__form-page__toolbar">
                 <TextButton
                     class="secondary"
@@ -421,14 +457,16 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                     title={translate.t("LABEL.CANCEL")}
                     onclick={handle_cancel}
                 />
-                <TextButton
-                    class="primary"
-                    name="submit_provider"
-                    icon="Accept"
-                    title={translate.t("LABEL.SUBMIT")}
-                    onclick={handle_submit}
-                    disabled={!form_valid}
-                />
+                if !props.readonly {
+                    <TextButton
+                        class="primary"
+                        name="submit_provider"
+                        icon="Accept"
+                        title={translate.t("LABEL.SUBMIT")}
+                        onclick={handle_submit}
+                        disabled={!form_valid}
+                    />
+                }
             </div>
         </Card>
     }

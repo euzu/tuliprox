@@ -7,7 +7,8 @@ use crate::{
         },
         ConfigContext,
     },
-    config_field_child, edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16,
+    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional,
+    config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16,
     edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
     html_if,
@@ -217,6 +218,8 @@ pub struct ConfigInputViewProps {
     #[prop_or_default]
     pub(crate) block_id: Option<BlockId>,
     pub(crate) input: Option<Rc<ConfigInputDto>>,
+    #[prop_or(true)]
+    pub(crate) allow_write: bool,
     #[prop_or_default]
     pub(crate) on_apply: Option<Callback<ConfigInputDto>>,
     #[prop_or_default]
@@ -268,6 +271,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let show_provider_form_state = use_state(|| false);
     let edit_alias = use_state(|| None::<ConfigInputAliasDto>);
     let edit_provider = use_state(|| None::<ConfigProviderDto>);
+    let edit_epg_source = use_state(|| None::<EpgSourceDto>);
     let exp_date_loading = use_state(|| false);
     let exp_date_request_in_flight = use_mut_ref(|| false);
     let exp_date_request_token = use_mut_ref(|| 0_u64);
@@ -365,9 +369,21 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let handle_add_epg_item = {
         let epg_sources = epg_sources_state.clone();
         let show_epg_form = show_epg_form_state.clone();
+        let edit_epg_source = edit_epg_source.clone();
         Callback::from(move |source: EpgSourceDto| {
             let mut sources = (*epg_sources).clone();
-            sources.push(source);
+            if let Some(existing) = edit_epg_source.as_ref() {
+                if let Some(position) = sources.iter().position(|item| item == existing) {
+                    if let Some(slot) = sources.get_mut(position) {
+                        *slot = source;
+                    }
+                } else {
+                    sources.push(source);
+                }
+                edit_epg_source.set(None);
+            } else {
+                sources.push(source);
+            }
             epg_sources.set(sources);
             show_epg_form.set(false);
         })
@@ -375,15 +391,36 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_close_add_epg_item = {
         let show_epg_form = show_epg_form_state.clone();
+        let edit_epg_source = edit_epg_source.clone();
         Callback::from(move |_| {
             show_epg_form.set(false);
+            edit_epg_source.set(None);
         })
     };
 
     let handle_show_add_epg_item = {
         let show_epg_form = show_epg_form_state.clone();
+        let edit_epg_source = edit_epg_source.clone();
         Callback::from(move |_| {
             show_epg_form.set(true);
+            edit_epg_source.set(None);
+        })
+    };
+
+    let handle_edit_epg_source = {
+        let epg_list = epg_sources_state.clone();
+        let show_epg_form = show_epg_form_state.clone();
+        let edit_epg_source = edit_epg_source.clone();
+        Callback::from(move |(idx, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            if let Ok(index) = idx.parse::<usize>() {
+                let items = (*epg_list).clone();
+                if let Some(item) = items.get(index).cloned() {
+                    edit_epg_source.set(Some(item));
+                    show_epg_form.set(true);
+                }
+            }
         })
     };
 
@@ -589,6 +626,53 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let xtream_input = input_form_state.form.input_type.is_xtream();
 
     let render_options = || {
+        if !props.allow_write {
+            return html! {
+                <Card class="tp__config-view__card">
+                { html_if!(xtream_input, {
+                    <>
+                    <TitledCard title={translate.t(LABEL_SKIP)}>
+                      <div class="tp__config-view__cols-3">
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_LIVE), xtream_skip_live) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), xtream_skip_vod) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series) }
+                      </div>
+                    </TitledCard>
+                    <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>
+                      <div class="tp__config-view__cols-2">
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension) }
+                      </div>
+                    </TitledCard>
+                    <TitledCard title={translate.t(LABEL_RESOLVE)}>
+                        <div class="tp__config-view__cols-3">
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), resolve_vod) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), resolve_series) }
+                        </div>
+                        <div class="tp__config-view__cols-2">
+                        { config_field_custom!(translate.t(LABEL_RESOLVE_DELAY_SEC), input_options_state.form.resolve_delay.to_string()) }
+                        </div>
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background) }
+                    </TitledCard>
+                    <TitledCard title={translate.t(LABEL_PROBE)}>
+                        <div class="tp__config-view__cols-3">
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_LIVE), probe_live) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), probe_vod) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), probe_series) }
+                        </div>
+                        <div class="tp__config-view__cols-2">
+                        { config_field_custom!(translate.t(LABEL_PROBE_DELAY_SEC), input_options_state.form.probe_delay.to_string()) }
+                        { config_field_custom!(translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), input_options_state.form.probe_live_interval_hours.to_string()) }
+                        </div>
+                    </TitledCard>
+                    </>
+                })}
+                <TitledCard title={translate.t(LABEL_METADATA)}>
+                  { config_field_bool!(input_options_state.form, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb) }
+                </TitledCard>
+                </Card>
+            };
+        }
         html! {
             <Card class="tp__config-view__card">
             { html_if!(xtream_input, {
@@ -647,6 +731,29 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let live_source_options = cluster_source_options(staged_input_state.form.live_source);
         let vod_source_options = cluster_source_options(staged_input_state.form.vod_source);
         let series_source_options = cluster_source_options(staged_input_state.form.series_source);
+        if !props.allow_write {
+            return html! {
+                <Card class="tp__config-view__card">
+                    { config_field_bool!(staged_input_state.form, translate.t(LABEL_ENABLED), enabled) }
+                    { config_field!(staged_input_state.form, translate.t(LABEL_URL), url) }
+                    <div class="tp__config-view__cols-2">
+                    { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
+                    { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
+                    { config_field_custom!(translate.t(LABEL_FETCH_METHOD), staged_input_state.form.method.to_string()) }
+                    { config_field_custom!(translate.t(LABEL_INPUT_TYPE), staged_input_state.form.input_type.to_string()) }
+                    </div>
+                    {
+                        html_if!(show_cluster_sources, {
+                        <div class="tp__config-view__cols-2">
+                        { config_field_custom!(translate.t(LABEL_LIVE_SOURCE), staged_input_state.form.live_source.map_or_else(String::new, |source| source.to_string())) }
+                        { config_field_custom!(translate.t(LABEL_VOD_SOURCE), staged_input_state.form.vod_source.map_or_else(String::new, |source| source.to_string())) }
+                        { config_field_custom!(translate.t(LABEL_SERIES_SOURCE), staged_input_state.form.series_source.map_or_else(String::new, |source| source.to_string())) }
+                        </div>
+                        })
+                    }
+                </Card>
+            };
+        }
         html! {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
@@ -839,6 +946,31 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             None
         };
 
+        if !props.allow_write {
+            return html! {
+                 <Card class="tp__config-view__card">
+                   <div class="tp__config-view__cols-2">
+                   { config_field!(input_form_state.form, translate.t(LABEL_NAME), name) }
+                   { config_field_bool!(input_form_state.form, translate.t(LABEL_ENABLED), enabled) }
+                   </div>
+                   { html_if!(!library_input, {
+                    <>
+                     { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
+                     <div class="tp__config-view__cols-2">
+                     { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
+                     { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
+                     { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
+                     { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
+                     { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
+                     { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                     { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
+                     </div>
+                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
+                    </>
+                   })}
+                </Card>
+            };
+        }
         html! {
              <Card class="tp__config-view__card">
                <div class="tp__config-view__cols-2">
@@ -889,6 +1021,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         initial={(*edit_alias).clone()}
                         on_submit={handle_add_alias_item}
                         on_cancel={handle_close_add_alias_item}
+                        readonly={!props.allow_write}
                     />
               } else {
                   { config_field_child!(translate.t(LABEL_ALIASES), "INPUT_FORM.ALIASES", {
@@ -902,34 +1035,36 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                     html! {
                                         <div class="tp__form-list__item" key={format!("alias-{idx}")}>
                                             <div class="tp__form-list__item-toolbar">
-                                                if idx > 0 {
+                                                if props.allow_write && idx > 0 {
                                                     <IconButton
                                                         class="tp__form-list__item-arrow-btn"
                                                         name={idx.to_string()}
                                                         icon="ArrowUp"
                                                         onclick={handle_move_alias_up.clone()}
                                                     />
-                                                } else if alias_count > 2 {
+                                                } else if props.allow_write && alias_count > 2 {
                                                     <span class="tp__form-list__item-placeholder-btn"/>
                                                 }
-                                                if idx + 1 < alias_count {
+                                                if props.allow_write && idx + 1 < alias_count {
                                                     <IconButton
                                                         class="tp__form-list__item-arrow-btn"
                                                         name={idx.to_string()}
                                                         icon="ArrowDown"
                                                         onclick={handle_move_alias_down.clone()}
                                                     />
-                                                } else if alias_count > 2 {
+                                                } else if props.allow_write && alias_count > 2 {
                                                     <span class="tp__form-list__item-placeholder-btn"/>
                                                 }
                                                 <IconButton
                                                 name={idx.to_string()}
-                                                icon="Delete"
-                                                onclick={handle_remove_alias_list_item.clone()}/>
-                                                <IconButton
-                                                name={idx.to_string()}
                                                 icon="Edit"
                                                 onclick={handle_edit_alias_list_item.clone()}/>
+                                                if props.allow_write {
+                                                    <IconButton
+                                                    name={idx.to_string()}
+                                                    icon="Delete"
+                                                    onclick={handle_remove_alias_list_item.clone()}/>
+                                                }
                                             </div>
                                             <div class="tp__form-list__item-content">
                                                 <span class={if alias.enabled {""} else {"inactive"}}>
@@ -947,15 +1082,17 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 })
                             }
                             </div>
-                            <div class="tp__form-list__toolbar">
-                                <TextButton
-                                    class="primary"
-                                    name="add_alias"
-                                    icon="Add"
-                                    title={translate.t(LABEL_ADD_ALIAS)}
-                                    onclick={handle_show_add_alias_item}
-                                />
-                            </div>
+                            if props.allow_write {
+                                <div class="tp__form-list__toolbar">
+                                    <TextButton
+                                        class="primary"
+                                        name="add_alias"
+                                        icon="Add"
+                                        title={translate.t(LABEL_ADD_ALIAS)}
+                                        onclick={handle_show_add_alias_item}
+                                    />
+                                </div>
+                            }
                           </div>
                       }
                   })}
@@ -976,6 +1113,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         initial={(*edit_provider).clone()}
                         on_submit={handle_add_provider_item.clone()}
                         on_cancel={handle_close_add_provider_item.clone()}
+                        readonly={!props.allow_write}
                     />
               } else {
                   { config_field_child!(translate.t(LABEL_PROVIDERS), "INPUT_FORM.PROVIDERS", {
@@ -990,14 +1128,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                             <div class="tp__form-list__item-toolbar">
                                                 <IconButton
                                                     name={idx.to_string()}
-                                                    icon="Delete"
-                                                    onclick={handle_remove_provider_list_item.clone()}
-                                                />
-                                                <IconButton
-                                                    name={idx.to_string()}
                                                     icon="Edit"
                                                     onclick={handle_edit_provider_list_item.clone()}
                                                 />
+                                                if props.allow_write {
+                                                    <IconButton
+                                                        name={idx.to_string()}
+                                                        icon="Delete"
+                                                        onclick={handle_remove_provider_list_item.clone()}
+                                                    />
+                                                }
                                             </div>
                                             <div class="tp__form-list__item-content">
                                                 <span>
@@ -1009,15 +1149,17 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 })
                             }
                             </div>
-                            <div class="tp__form-list__toolbar">
-                                <TextButton
-                                    class="primary"
-                                    name="add_provider"
-                                    icon="Add"
-                                    title={translate.t(LABEL_ADD_PROVIDER)}
-                                    onclick={handle_show_add_provider_item.clone()}
-                                />
-                            </div>
+                            if props.allow_write {
+                                <div class="tp__form-list__toolbar">
+                                    <TextButton
+                                        class="primary"
+                                        name="add_provider"
+                                        icon="Add"
+                                        title={translate.t(LABEL_ADD_PROVIDER)}
+                                        onclick={handle_show_add_provider_item.clone()}
+                                    />
+                                </div>
+                            }
                           </div>
                       }
                   })}
@@ -1030,6 +1172,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let headers = headers_state.clone();
         let epg_sources = epg_sources_state.clone();
         let show_epg_form = show_epg_form_state.clone();
+        let edit_epg_source = edit_epg_source.clone();
 
         html! {
             <Card class="tp__config-view__card">
@@ -1037,6 +1180,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     <EpgSourceItemForm
                         on_submit={handle_add_epg_item}
                         on_cancel={handle_close_add_epg_item}
+                        initial={(*edit_epg_source).clone()}
+                        readonly={!props.allow_write}
                     />
                } else  {
                   // Headers Section
@@ -1045,7 +1190,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                       html! {
                         <KeyValueEditor
                             entries={(*headers).clone()}
-                            readonly={false}
+                            readonly={!props.allow_write}
                             key_placeholder={translate.t("LABEL.HEADER_NAME")}
                            value_placeholder={translate.t("LABEL.HEADER_VALUE")}
                             on_change={Callback::from(move |new_headers: HashMap<String, String>| {
@@ -1066,25 +1211,42 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                 for (*epg_sources_list).iter().enumerate().map(|(idx, source)| {
                                     html! {
                                         <div class="tp__form-list__item" key={format!("epg-{idx}")}>
-                                            <IconButton
-                                                name={idx.to_string()}
-                                                icon="Delete"
-                                                onclick={handle_remove_epg_source.clone()} />
+                                            <div class="tp__form-list__item-toolbar">
+                                                <IconButton
+                                                    name={idx.to_string()}
+                                                    icon="Edit"
+                                                    onclick={handle_edit_epg_source.clone()} />
+                                                if props.allow_write {
+                                                    <IconButton
+                                                        name={idx.to_string()}
+                                                        icon="Delete"
+                                                        onclick={handle_remove_epg_source.clone()} />
+                                                }
+                                            </div>
                                             <div class="tp__form-list__item-content">
-                                                <span>{&source.url}</span>
+                                                <span>
+                                                    {&source.url}
+                                                    {" ("}
+                                                    {source.priority}
+                                                    {", "}
+                                                    {if source.logo_override { "logo_override" } else { "no_logo_override" }}
+                                                    {")"}
+                                                </span>
                                             </div>
                                         </div>
                                     }
                                 })
                             }
                             </div>
-                        <TextButton
-                                class="primary"
-                                name="add_epg_source"
-                                icon="Add"
-                                title={translate.t(LABEL_ADD_EPG_SOURCE)}
-                                onclick={handle_show_add_epg_item}
-                            />
+                        if props.allow_write {
+                            <TextButton
+                                    class="primary"
+                                    name="add_epg_source"
+                                    icon="Add"
+                                    title={translate.t(LABEL_ADD_EPG_SOURCE)}
+                                    onclick={handle_show_add_epg_item}
+                                />
+                        }
                         </div>
                       }
                   })
@@ -1222,10 +1384,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 icon="Cancel"
                 title={ translate.t("LABEL.CANCEL")}
                 onclick={handle_cancel}></TextButton>
-             <TextButton class={concat_string!("primary", if button_disabled {" disabled"} else {""} )} name="apply_input"
-                icon="Accept"
-                title={ translate.t("LABEL.OK")}
-                onclick={handle_apply_input}></TextButton>
+             if props.allow_write {
+                 <TextButton class={concat_string!("primary", if button_disabled {" disabled"} else {""} )} name="apply_input"
+                    icon="Accept"
+                    title={ translate.t("LABEL.OK")}
+                    onclick={handle_apply_input}></TextButton>
+             }
           </div>
         <div class="tp__source-editor-form__content">
             { render_sidebar() }

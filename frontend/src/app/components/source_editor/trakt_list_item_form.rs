@@ -1,6 +1,7 @@
 use crate::{
     app::components::{select::Select, Card, DropDownOption, DropDownSelection, TextButton},
-    config_field_child, edit_field_number_u8, edit_field_text, generate_form_reducer,
+    config_field, config_field_child, config_field_custom, edit_field_number_u8, edit_field_text,
+    generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktContentType, TraktListConfigDto};
@@ -30,6 +31,8 @@ pub struct TraktListItemFormProps {
     pub on_cancel: Callback<()>,
     #[prop_or_default]
     pub initial: Option<TraktListConfigDto>,
+    #[prop_or(false)]
+    pub readonly: bool,
 }
 
 #[component]
@@ -91,29 +94,48 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
 
     html! {
         <Card class="tp__config-view__card tp__item-form">
-            { edit_field_text!(form_state, translate.t(LABEL_TRAKT_USER), user, TraktListFormAction::User) }
-            { edit_field_text!(form_state, translate.t(LABEL_TRAKT_LIST_SLUG), list_slug, TraktListFormAction::ListSlug) }
-            { edit_field_text!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktListFormAction::CategoryName) }
+            if props.readonly {
+                { config_field!(form_state.form, translate.t(LABEL_TRAKT_USER), user) }
+                { config_field!(form_state.form, translate.t(LABEL_TRAKT_LIST_SLUG), list_slug) }
+                { config_field!(form_state.form, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name) }
+            } else {
+                <>
+                    { edit_field_text!(form_state, translate.t(LABEL_TRAKT_USER), user, TraktListFormAction::User) }
+                    { edit_field_text!(form_state, translate.t(LABEL_TRAKT_LIST_SLUG), list_slug, TraktListFormAction::ListSlug) }
+                    { edit_field_text!(form_state, translate.t(LABEL_TRAKT_CATEGORY_NAME), category_name, TraktListFormAction::CategoryName) }
+                </>
+            }
 
-            { config_field_child!(translate.t(LABEL_TRAKT_CONTENT_TYPE), "TRAKT_LIST_FORM.TRAKT_CONTENT_TYPE", {
-                let form_state_ct = form_state.clone();
-                html! {
-                    <Select
-                        name={"trakt_content_type"}
-                        multi_select={false}
-                        on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                            if let DropDownSelection::Single(option) = selections {
-                                if let Ok(ct) = option.parse::<TraktContentType>() {
-                                    form_state_ct.dispatch(TraktListFormAction::ContentType(ct));
+            if props.readonly {
+                { config_field_custom!(translate.t(LABEL_TRAKT_CONTENT_TYPE), form_state.form.content_type.to_string()) }
+            } else {
+                { config_field_child!(translate.t(LABEL_TRAKT_CONTENT_TYPE), "TRAKT_LIST_FORM.TRAKT_CONTENT_TYPE", {
+                    let form_state_ct = form_state.clone();
+                    html! {
+                        <Select
+                            name={"trakt_content_type"}
+                            multi_select={false}
+                            on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                                if let DropDownSelection::Single(option) = selections {
+                                    if let Ok(ct) = option.parse::<TraktContentType>() {
+                                        form_state_ct.dispatch(TraktListFormAction::ContentType(ct));
+                                    }
                                 }
-                            }
-                        })}
-                        options={content_type_options.clone()}
-                    />
-                }
-            })}
+                            })}
+                            options={content_type_options.clone()}
+                        />
+                    }
+                })}
+            }
 
-            { edit_field_number_u8!(form_state, translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), fuzzy_match_threshold, TraktListFormAction::FuzzyMatchThreshold) }
+            if props.readonly {
+                { config_field_custom!(
+                    translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD),
+                    form_state.form.fuzzy_match_threshold.to_string()
+                ) }
+            } else {
+                { edit_field_number_u8!(form_state, translate.t(LABEL_TRAKT_FUZZY_MATCH_THRESHOLD), fuzzy_match_threshold, TraktListFormAction::FuzzyMatchThreshold) }
+            }
 
             <div class="tp__form-page__toolbar">
                 <TextButton
@@ -123,13 +145,15 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
                     title={translate.t("LABEL.CANCEL")}
                     onclick={handle_cancel}
                 />
-                <TextButton
-                    class="primary"
-                    name="submit_trakt_list"
-                    icon="Accept"
-                    title={translate.t("LABEL.SUBMIT")}
-                    onclick={handle_submit}
-                />
+                if !props.readonly {
+                    <TextButton
+                        class="primary"
+                        name="submit_trakt_list"
+                        icon="Accept"
+                        title={translate.t("LABEL.SUBMIT")}
+                        onclick={handle_submit}
+                    />
+                }
             </div>
         </Card>
     }

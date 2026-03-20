@@ -1362,9 +1362,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let edit_mode_set = edit_mode.clone();
         let editor_state_ref = editor_state_ref.clone();
         Callback::from(move |block_id: BlockId| {
-            if !can_write_sources {
-                return;
-            }
             let mut editor_state = editor_state_ref.borrow_mut();
             if let Some(block) = editor_state.get_block(block_id) {
                 edit_mode_set.set(EditMode::Active(block.clone()));
@@ -1373,7 +1370,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
-    let editor_context = SourceEditorContext { on_form_change: form_changed, edit_mode: edit_mode.clone() };
+    let editor_context = SourceEditorContext {
+        on_form_change: form_changed,
+        edit_mode: edit_mode.clone(),
+        allow_write: can_write_sources,
+    };
 
     let edited_block_id = match *edit_mode {
         EditMode::Inactive => 0,

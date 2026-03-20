@@ -741,14 +741,11 @@ impl VideoStreamProperties {
 }
 
 impl SeriesStreamProperties {
-    pub fn from_info<P>(info: &XtreamSeriesInfo, pli: &P) -> SeriesStreamProperties
-    where
-        P: PlaylistEntry,
-    {
+    fn from_info_base(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
         SeriesStreamProperties {
             name: info.info.name.clone(),
             category_id: info.info.category_id,
-            series_id: pli.get_virtual_id(),
+            series_id,
             backdrop_path: info.info.backdrop_path.clone(),
             cast: info.info.cast.clone(),
             cover: info.info.cover.clone(),
@@ -813,6 +810,17 @@ impl SeriesStreamProperties {
                 }),
             }),
         }
+    }
+
+    pub fn from_info<P>(info: &XtreamSeriesInfo, pli: &P) -> SeriesStreamProperties
+    where
+        P: PlaylistEntry,
+    {
+        Self::from_info_base(info, pli.get_virtual_id())
+    }
+
+    pub fn from_info_without_existing(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
+        Self::from_info_base(info, series_id)
     }
 
     pub fn from_info_doc(info: &XtreamSeriesInfoDoc, series_id: u32) -> SeriesStreamProperties {

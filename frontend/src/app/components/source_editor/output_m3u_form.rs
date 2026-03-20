@@ -2,7 +2,8 @@ use crate::{
     app::components::{
         config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, SourceEditorContext, TextButton,
     },
-    config_field_child, edit_field_bool, edit_field_text_option, generate_form_reducer,
+    config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
+    edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{M3uTargetOutputDto, TargetOutputDto};
@@ -29,6 +30,8 @@ generate_form_reducer!(
 pub struct M3uTargetOutputViewProps {
     pub(crate) block_id: BlockId,
     pub(crate) output: Option<Rc<M3uTargetOutputDto>>,
+    #[prop_or(true)]
+    pub(crate) allow_write: bool,
 }
 
 #[component]
@@ -55,19 +58,33 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
 
     let render_output = || {
         let output_form_state_1 = output_form_state.clone();
-        html! {
-            <Card class="tp__config-view__card">
-                { edit_field_text_option!(output_form_state, translate.t(LABEL_FILENAME), filename, M3uTargetOutputFormAction::Filename) }
-                { edit_field_bool!(output_form_state, translate.t(LABEL_INCLUDE_TYPE_IN_URL), include_type_in_url, M3uTargetOutputFormAction::IncludeTypeInUrl) }
-                { edit_field_bool!(output_form_state, translate.t(LABEL_MASK_REDIRECT_URL), mask_redirect_url, M3uTargetOutputFormAction::MaskRedirectUrl) }
-                { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_M3U_FORM.FILTER", {
-                       html! {
-                            <FilterInput filter={output_form_state_1.form.filter.clone()} on_change={Callback::from(move |new_filter| {
-                                output_form_state_1.dispatch(M3uTargetOutputFormAction::Filter(new_filter));
-                            })} />
-                       }
-                })}
-            </Card>
+        if !props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    { config_field_optional!(output_form_state.form, translate.t(LABEL_FILENAME), filename) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_INCLUDE_TYPE_IN_URL), include_type_in_url) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_MASK_REDIRECT_URL), mask_redirect_url) }
+                    { config_field_custom!(
+                        translate.t(LABEL_FILTER),
+                        output_form_state.form.filter.clone().unwrap_or_default()
+                    ) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    { edit_field_text_option!(output_form_state, translate.t(LABEL_FILENAME), filename, M3uTargetOutputFormAction::Filename) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_INCLUDE_TYPE_IN_URL), include_type_in_url, M3uTargetOutputFormAction::IncludeTypeInUrl) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_MASK_REDIRECT_URL), mask_redirect_url, M3uTargetOutputFormAction::MaskRedirectUrl) }
+                    { config_field_child!(translate.t(LABEL_FILTER), "OUTPUT_M3U_FORM.FILTER", {
+                           html! {
+                                <FilterInput filter={output_form_state_1.form.filter.clone()} on_change={Callback::from(move |new_filter| {
+                                    output_form_state_1.dispatch(M3uTargetOutputFormAction::Filter(new_filter));
+                                })} />
+                           }
+                    })}
+                </Card>
+            }
         }
     };
 
@@ -98,10 +115,12 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
                     icon="Cancel"
                     title={ translate.t("LABEL.CANCEL")}
                     onclick={handle_cancel}></TextButton>
-                <TextButton class="primary" name="apply_m3u_output"
-                    icon="Accept"
-                    title={ translate.t("LABEL.OK")}
-                    onclick={handle_apply}></TextButton>
+                if props.allow_write {
+                    <TextButton class="primary" name="apply_m3u_output"
+                        icon="Accept"
+                        title={ translate.t("LABEL.OK")}
+                        onclick={handle_apply}></TextButton>
+                }
             </div>
             <div class="tp__input-form__body">
                 { render_output() }
