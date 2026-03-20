@@ -69,10 +69,15 @@ impl AuthService {
     pub fn logout(&self) {
         set_token(None);
         self.username.borrow_mut().clear();
+        self.roles.borrow_mut().clear();
+        *self.permissions.borrow_mut() = PermissionSet::new();
         self.auth_channel.set(false);
     }
 
     fn unauthorized(&self) -> Result<TokenResponse, Error> {
+        self.username.borrow_mut().clear();
+        self.roles.borrow_mut().clear();
+        *self.permissions.borrow_mut() = PermissionSet::new();
         self.auth_channel.set(false);
         set_token(None);
         Err(Unauthorized)

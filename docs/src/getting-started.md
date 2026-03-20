@@ -62,7 +62,8 @@ Options:
 - `config/source.yml`: inputs, providers, targets
 - `config/api-proxy.yml`: users and published server URLs
 - `config/mapping.yml` / `config/template.yml`: optional mapping and template rules
-- `config/user.txt`: Web UI login credentials (`username:hash[:groups]`)
+- `config/user.txt`: Web UI login credentials (`username:hash[:groups]`). If `:groups` is omitted, the user falls back to  
+   the legacy `admin` assignment. Examples: `admin:$argon2id$...` and `editor:$argon2id$...:operators`
 - `config/groups.txt`: RBAC permission group definitions (optional)
 
 ## Default project layout

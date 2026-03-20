@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -10,11 +11,21 @@ use shared::model::WebAuthConfigDto;
 use crate::model::macros;
 use crate::utils;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WebUiUser {
     pub username: String,
     pub password_hash: String,
     pub groups: Vec<String>,
+}
+
+impl fmt::Debug for WebUiUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebUiUser")
+            .field("username", &self.username)
+            .field("password_hash", &"*****")
+            .field("groups", &self.groups)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -304,8 +315,26 @@ impl WebAuthConfig {
 mod tests {
     use super::*;
     use shared::model::permission::{Permission, PermissionSet, PERM_ALL};
-    use std::io::Write;
+    use std::{io::Write, path::Path};
     use tempfile::NamedTempFile;
+
+    struct DirGuard {
+        previous_dir: PathBuf,
+    }
+
+    impl DirGuard {
+        fn enter(path: &Path) -> std::io::Result<Self> {
+            let previous_dir = std::env::current_dir()?;
+            std::env::set_current_dir(path)?;
+            Ok(Self { previous_dir })
+        }
+    }
+
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous_dir);
+        }
+    }
 
     // --- parse_user_line tests ---
 
@@ -639,10 +668,8 @@ mod tests {
             t_groups: None,
         };
 
-        let previous_dir = std::env::current_dir().expect("current dir");
-        std::env::set_current_dir(&workdir).expect("enter workdir");
+        let _guard = DirGuard::enter(&workdir).expect("enter workdir");
         let prepare_result = config.prepare(config_path.to_str().expect("config path utf-8"));
-        std::env::set_current_dir(previous_dir).expect("restore current dir");
 
         prepare_result.expect("prepare config");
 
@@ -664,5 +691,19 @@ mod tests {
         let v1 = WebAuthConfig::pwd_version_from_hash("hash_a");
         let v2 = WebAuthConfig::pwd_version_from_hash("hash_b");
         assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn test_web_ui_user_debug_redacts_password_hash() {
+        let user = WebUiUser {
+            username: "alice".to_string(),
+            password_hash: "secret-hash".to_string(),
+            groups: vec!["admin".to_string()],
+        };
+
+        let debug = format!("{user:?}");
+        assert!(debug.contains("alice"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-hash"));
     }
 }

@@ -197,10 +197,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 }
             )}
             {html_if!(auth.is_admin(), {
-                <>
-                  <span class="tp__app-sidebar__content-space"></span>
-                  <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Rbac, if *active_menu == ViewType::Rbac { " active" } else {""})} icon="Shield" name={ViewType::Rbac.to_string()} onclick={&handle_menu_click}></IconButton>
-                </>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Rbac, if *active_menu == ViewType::Rbac { " active" } else {""})} icon="Shield" name={ViewType::Rbac.to_string()} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::ConfigRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if *active_menu == ViewType::Config { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} onclick={&handle_menu_click}></IconButton>

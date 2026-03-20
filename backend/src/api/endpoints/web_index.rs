@@ -29,6 +29,8 @@ fn no_web_auth_token() -> impl axum::response::IntoResponse + Send {
     axum::Json(TokenResponse { token: TOKEN_NO_AUTH.to_string(), username: "admin".to_string() }).into_response()
 }
 
+fn api_user_can_access_web_ui(ui_enabled: bool) -> bool { ui_enabled }
+
 async fn token(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(mut req): axum::extract::Json<UserCredential>,
@@ -75,6 +77,10 @@ async fn token(
                 }
                 if let Some(credentials) = app_state.app_config.get_user_credentials(username) {
                     if credentials.password == password {
+                        if !api_user_can_access_web_ui(credentials.ui_enabled) {
+                            req.zeroize();
+                            return axum::http::StatusCode::FORBIDDEN.into_response();
+                        }
                         if let Ok(token) = create_jwt_api_user(web_auth, username) {
                             req.zeroize();
                             return axum::Json(TokenResponse { token, username: req.username.clone() }).into_response();
@@ -184,6 +190,21 @@ fn inject_nonce_with_parser(html: String, nonce_b64: &str) -> String {
     };
 
     lol_html::rewrite_str(&html, settings).unwrap_or(html)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_user_can_access_web_ui;
+
+    #[test]
+    fn rejects_api_user_when_ui_is_disabled() {
+        assert!(!api_user_can_access_web_ui(false));
+    }
+
+    #[test]
+    fn allows_api_user_when_ui_is_enabled() {
+        assert!(api_user_can_access_web_ui(true));
+    }
 }
 
 async fn index(

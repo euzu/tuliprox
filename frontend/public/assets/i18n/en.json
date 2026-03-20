@@ -255,6 +255,7 @@
     "ZM": "Zambia",
     "ZW": "Zimbabwe"
   },
+  "UNAUTHORIZED": "Not authorized",
   "EXPLANATION": {
     "API_PROXY_CONFIG": {
       "USE_USER_DB": "If enabled, API proxy users are loaded from the user database.",

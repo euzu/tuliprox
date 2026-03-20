@@ -1,6 +1,6 @@
 use crate::{
     api::model::AppState,
-    auth::{generate_password_from_input, validator_admin, verify_token, AuthBearer},
+    auth::{generate_password_from_input, verify_token, AuthBearer},
     model::{RbacGroup, WebAuthConfig, WebUiUser},
     utils,
 };
@@ -23,6 +23,8 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
+
+const RBAC_MUTATION_LOCK: &str = "rbac:mutation";
 
 #[derive(Debug, Deserialize)]
 struct CreateUserRequest {
@@ -151,6 +153,14 @@ fn validate_group_names(groups: &[String], available_groups: &[RbacGroup]) -> Re
     Ok(())
 }
 
+fn reject_empty_groups(groups: &[String]) -> Result<(), (StatusCode, &'static str)> {
+    if groups.is_empty() {
+        Err((StatusCode::BAD_REQUEST, "At least one group must be assigned"))
+    } else {
+        Ok(())
+    }
+}
+
 fn normalize_permissions(permission_names: &[String]) -> PermissionSet {
     let mut permissions = PermissionSet::new();
     for permission_name in permission_names {
@@ -257,6 +267,55 @@ fn store_reprepared_web_auth(app_state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+fn token_from_extensions_or_headers(request: &mut axum::extract::Request) -> Result<AuthBearer, StatusCode> {
+    if let Some(token) = request.extensions().get::<AuthBearer>().cloned() {
+        return Ok(token);
+    }
+
+    let token = AuthBearer::from_headers(request.headers()).map_err(|(status, _)| status)?;
+    request.extensions_mut().insert(token.clone());
+    Ok(token)
+}
+
+async fn check_permission(
+    permission: Permission,
+    State(app_state): State<Arc<AppState>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let token = token_from_extensions_or_headers(&mut request)?;
+    let config = app_state.app_config.config.load();
+    let Some(web_auth_config) = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    let Some(token_data) = verify_token(&token.0, web_auth_config.secret.as_bytes()) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    if token_data.claims.permissions.contains(permission) {
+        return Ok(next.run(request).await);
+    }
+
+    Err(StatusCode::FORBIDDEN)
+}
+
+async fn validator_user_read(
+    state: State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    check_permission(Permission::UserRead, state, request, next).await
+}
+
+async fn validator_user_write(
+    state: State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    check_permission(Permission::UserWrite, state, request, next).await
+}
+
 async fn list_users(State(app_state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = app_state.app_config.config.load();
     let users: Vec<WebUiUserDto> = config
@@ -328,20 +387,9 @@ async fn create_user(
     if request.password.len() < 8 {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "Password must be at least 8 characters"}))).into_response();
     }
-
-    let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
-        Ok(value) => value,
-        Err(status) => return status.into_response(),
-    };
-    let mut users = web_auth.t_users.clone().unwrap_or_default();
     let groups = normalize_groups(&request.groups);
-    let available_groups = web_auth.t_groups.clone().unwrap_or_default();
-
-    if users.iter().any(|user| user.username.eq_ignore_ascii_case(&username)) {
-        return (StatusCode::CONFLICT, Json(json!({"error": format!("User '{username}' already exists")}))).into_response();
-    }
-    if let Err(err) = validate_group_names(&groups, &available_groups) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": err}))).into_response();
+    if let Err((status, error)) = reject_empty_groups(&groups) {
+        return (status, Json(json!({"error": error}))).into_response();
     }
 
     let password = request.password;
@@ -358,6 +406,21 @@ async fn create_user(
                 .into_response();
         }
     };
+
+    let _rbac_lock = app_state.app_config.file_locks.write_lock_str(RBAC_MUTATION_LOCK).await;
+    let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
+        Ok(value) => value,
+        Err(status) => return status.into_response(),
+    };
+    let mut users = web_auth.t_users.clone().unwrap_or_default();
+    let available_groups = web_auth.t_groups.clone().unwrap_or_default();
+
+    if users.iter().any(|user| user.username.eq_ignore_ascii_case(&username)) {
+        return (StatusCode::CONFLICT, Json(json!({"error": format!("User '{username}' already exists")}))).into_response();
+    }
+    if let Err(err) = validate_group_names(&groups, &available_groups) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": err}))).into_response();
+    }
 
     users.push(WebUiUser {
         username: username.clone(),
@@ -391,28 +454,9 @@ async fn update_user(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "Password must be at least 8 characters"}))).into_response();
     }
 
-    let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
-        Ok(value) => value,
-        Err(status) => return status.into_response(),
-    };
-    let mut users = web_auth.t_users.clone().unwrap_or_default();
-    let available_groups = web_auth.t_groups.clone().unwrap_or_default();
     let groups = normalize_groups(&request.groups);
-    if let Err(err) = validate_group_names(&groups, &available_groups) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": err}))).into_response();
-    }
-
-    let Some(user_index) = users.iter().position(|user| user.username.eq_ignore_ascii_case(&username)) else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": format!("User '{username}' not found")}))).into_response();
-    };
-
-    let removing_admin = user_has_admin_group(&users[user_index]) && !groups.iter().any(|group| group.eq_ignore_ascii_case("admin"));
-    if removing_admin && count_admin_users(&users) == 1 {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "Cannot remove admin group from the last admin user"})),
-        )
-            .into_response();
+    if let Err((status, error)) = reject_empty_groups(&groups) {
+        return (status, Json(json!({"error": error}))).into_response();
     }
 
     let new_hash = if let Some(password) = request.password {
@@ -432,6 +476,30 @@ async fn update_user(
     } else {
         None
     };
+
+    let _rbac_lock = app_state.app_config.file_locks.write_lock_str(RBAC_MUTATION_LOCK).await;
+    let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
+        Ok(value) => value,
+        Err(status) => return status.into_response(),
+    };
+    let mut users = web_auth.t_users.clone().unwrap_or_default();
+    let available_groups = web_auth.t_groups.clone().unwrap_or_default();
+    if let Err(err) = validate_group_names(&groups, &available_groups) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": err}))).into_response();
+    }
+
+    let Some(user_index) = users.iter().position(|user| user.username.eq_ignore_ascii_case(&username)) else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": format!("User '{username}' not found")}))).into_response();
+    };
+
+    let removing_admin = user_has_admin_group(&users[user_index]) && !groups.iter().any(|group| group.eq_ignore_ascii_case("admin"));
+    if removing_admin && count_admin_users(&users) == 1 {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "Cannot remove admin group from the last admin user"})),
+        )
+            .into_response();
+    }
 
     users[user_index].groups = groups;
     if let Some(hash) = new_hash {
@@ -465,6 +533,7 @@ async fn delete_user(
         return (StatusCode::FORBIDDEN, Json(json!({"error": "Admin cannot delete themselves"}))).into_response();
     }
 
+    let _rbac_lock = app_state.app_config.file_locks.write_lock_str(RBAC_MUTATION_LOCK).await;
     let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
         Ok(value) => value,
         Err(status) => return status.into_response(),
@@ -512,6 +581,7 @@ async fn create_group(
             .into_response();
     }
 
+    let _rbac_lock = app_state.app_config.file_locks.write_lock_str(RBAC_MUTATION_LOCK).await;
     let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
         Ok(value) => value,
         Err(status) => return status.into_response(),
@@ -559,6 +629,7 @@ async fn update_group(
             .into_response();
     }
 
+    let _rbac_lock = app_state.app_config.file_locks.write_lock_str(RBAC_MUTATION_LOCK).await;
     let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
         Ok(value) => value,
         Err(status) => return status.into_response(),
@@ -595,6 +666,7 @@ async fn delete_group(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "Group 'admin' cannot be deleted"}))).into_response();
     }
 
+    let _rbac_lock = app_state.app_config.file_locks.write_lock_str(RBAC_MUTATION_LOCK).await;
     let (web_auth, config_path) = match current_web_auth_snapshot(&app_state) {
         Ok(value) => value,
         Err(status) => return status.into_response(),
@@ -638,21 +710,45 @@ async fn delete_group(
 
 pub fn rbac_api_register(app_state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
-        .route("/rbac/users", axum::routing::get(list_users))
-        .route("/rbac/users", axum::routing::post(create_user))
-        .route("/rbac/users/{username}", axum::routing::put(update_user))
-        .route("/rbac/users/{username}", axum::routing::delete(delete_user))
-        .route("/rbac/groups", axum::routing::get(list_groups))
-        .route("/rbac/groups", axum::routing::post(create_group))
-        .route("/rbac/groups/{name}", axum::routing::put(update_group))
-        .route("/rbac/groups/{name}", axum::routing::delete(delete_group))
-        .route("/rbac/permissions", axum::routing::get(list_permissions))
-        .route_layer(axum::middleware::from_fn_with_state(app_state, validator_admin))
+        .route(
+            "/rbac/users",
+            axum::routing::get(list_users)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_read))
+                .post(create_user)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_write)),
+        )
+        .route(
+            "/rbac/users/{username}",
+            axum::routing::put(update_user)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_write))
+                .delete(delete_user)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_write)),
+        )
+        .route(
+            "/rbac/groups",
+            axum::routing::get(list_groups)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_read))
+                .post(create_group)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_write)),
+        )
+        .route(
+            "/rbac/groups/{name}",
+            axum::routing::put(update_group)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_write))
+                .delete(delete_group)
+                .layer(axum::middleware::from_fn_with_state(Arc::clone(&app_state), validator_user_write)),
+        )
+        .route(
+            "/rbac/permissions",
+            axum::routing::get(list_permissions)
+                .layer(axum::middleware::from_fn_with_state(app_state, validator_user_read)),
+        )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_auth_paths, validate_permission_dependencies};
+    use super::{reject_empty_groups, resolve_auth_paths, validate_permission_dependencies};
+    use axum::http::StatusCode;
     use crate::model::WebAuthConfig;
     use crate::utils;
 
@@ -661,6 +757,14 @@ mod tests {
         let result = validate_permission_dependencies(&["config.write".to_string()]);
 
         assert_eq!(result, Err(vec!["config".to_string()]));
+    }
+
+    #[test]
+    fn rejects_empty_group_assignments() {
+        assert_eq!(
+            reject_empty_groups(&[]),
+            Err((StatusCode::BAD_REQUEST, "At least one group must be assigned")),
+        );
     }
 
     #[test]

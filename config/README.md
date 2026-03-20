@@ -4,8 +4,8 @@ Sample configuration.
 
 The `user.txt` file uses the format `username:argon2_hash[:group1,group2,...]`:
 
-- `test: test.secret` (no groups = defaults to `admin`)
-- `nobody: nobody.secret`
+- `test:test.secret` (no groups = defaults to `admin`)
+- `nobody:nobody.secret`
 
 Generate password hashes with `tuliprox --genpwd`.
 

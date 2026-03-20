@@ -11,23 +11,21 @@ use crate::{
                 v1_api_playlist_register_with_permissions,
             },
             v1_api_user::{v1_api_user_register, v1_api_user_register_with_permissions},
-            library_api::library_api_register_with_permissions,
         },
         model::AppState,
     },
-    auth::require_permission_inner,
     processing::geoip::{update_geoip_db, GeoIpUpdateError},
     utils::ip_checker::get_ips,
     VERSION,
 };
 use axum::response::IntoResponse;
+use crate::auth::permission_layer;
 use shared::{
     model::permission::Permission,
     model::{IpCheckDto, StatusCheck},
     utils::concat_path_leading_slash,
 };
 use std::{collections::BTreeMap, sync::Arc};
-use crate::auth::permission_layer;
 
 async fn create_ipinfo_check(app_state: &Arc<AppState>) -> Option<(Option<String>, Option<String>)> {
     let config = app_state.app_config.config.load();
@@ -130,25 +128,25 @@ pub fn v1_api_register(
         .route("/geoip/update", axum::routing::get(geoip_update))
         .route("/file/download", axum::routing::post(download_api::queue_download_file));
 
-    let mut protected_router = axum::routing::Router::new();
+    let mut router = axum::routing::Router::new();
 
     if web_auth_enabled {
-        protected_router = protected_router
+        router = router
             .merge(system_read.layer(permission_layer!(app_state, Permission::SystemRead)))
             .merge(system_write.layer(permission_layer!(app_state, Permission::SystemWrite)))
             .merge(v1_api_config_register_with_permissions(app_state))
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
-            .merge(library_api_register_with_permissions(axum::routing::Router::new(), app_state))
+            .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
             .merge(rbac_api_register(Arc::clone(app_state)));
     } else {
-        protected_router = protected_router
+        router = router
             .merge(system_read)
             .merge(system_write)
             .merge(v1_api_config_register(axum::routing::Router::new()))
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
-            .merge(library_api_register(axum::routing::Router::new()));
+            .merge(library_api_register(axum::routing::Router::new(), None));
     }
 
     let config = app_state.app_config.config.load();
@@ -161,5 +159,5 @@ pub fn v1_api_register(
     let api_prefix = concat_path_leading_slash(web_ui_path, "api/v1");
     base_router
         .nest(&api_prefix, public_router)
-        .nest(&api_prefix, protected_router)
+        .nest(&api_prefix, router)
 }

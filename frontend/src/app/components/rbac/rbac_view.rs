@@ -30,10 +30,9 @@ pub fn RbacView() -> Html {
     }
 
     let on_groups_changed = {
-        let services = services.clone();
-        let groups = groups.clone();
-        Callback::from(move |()| {
-            if !can_read_users {
+        let deps = (services.clone(), groups.clone(), can_read_users);
+        use_callback(deps, |(), (services, groups, can_read_users)| {
+            if !*can_read_users {
                 return;
             }
             let services = services.clone();
@@ -49,9 +48,8 @@ pub fn RbacView() -> Html {
     let tabs = {
         let translate = translate.clone();
         let groups_val = (*groups).clone();
-        let on_groups_changed = on_groups_changed.clone();
         use_memo(
-            (translate.clone(), groups_val, on_groups_changed),
+            (translate.clone(), groups_val, on_groups_changed.clone()),
             move |(translate, groups_val, on_groups_changed)| {
                 vec![
                     TabItem {

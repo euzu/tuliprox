@@ -12,9 +12,9 @@ type Rejection = (StatusCode, &'static str);
 macro_rules! permission_layer {
     ($app_state:expr, $permission:expr ) => {
         {
-            let app_state = Arc::clone($app_state);
-            axum::middleware::from_fn_with_state(app_state, move |state, auth, request, next| {
-                require_permission_inner($permission, state, auth, request, next)
+            let app_state = ::std::sync::Arc::clone($app_state);
+            ::axum::middleware::from_fn_with_state(app_state, move |state, auth, request, next| {
+                $crate::auth::require_permission_inner($permission, state, auth, request, next)
             })
         }
     };

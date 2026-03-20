@@ -56,7 +56,7 @@ Tuliprox supports role-based access control (RBAC) for the Web UI:
 - fine-grained permissions across 7 domains (config, source, user, playlist, library, system, epg)
 - custom groups with configurable permission sets
 - user-to-group assignments with union-based permission resolution
-- compact bitmask encoding in JWT claims for zero-overhead permission checks
+- compact bitmask encoding in JWT claims for low-overhead permission checks
 - backward-compatible user file format
 - Web UI admin panel for user and group management
 

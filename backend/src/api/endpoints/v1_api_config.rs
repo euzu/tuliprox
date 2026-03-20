@@ -2,7 +2,7 @@ use crate::{api::{
     api_utils::{internal_server_error, try_unwrap_body},
     config_file::ConfigFile,
     model::AppState,
-}, auth::{require_permission_inner, verify_token, AuthBearer, permission_layer}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource}, utils, utils::{
+}, auth::{verify_token, AuthBearer, permission_layer}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource}, utils, utils::{
     persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file,
     request::download_text_content,
     xtream::{get_xtream_stream_url_base, xtream_login},

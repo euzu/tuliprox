@@ -3,7 +3,7 @@ use crate::{
         endpoints::v1_api::create_status_check,
         model::{AppState, EventMessage},
     },
-    auth::{verify_token, verify_token_admin},
+    auth::verify_token,
 };
 use axum::{
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -60,11 +60,6 @@ fn set_websocket_auth(mem: &mut ProtocolHandlerMemory, auth_token: String, claim
 #[inline]
 fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
     !auth_required || mem.permissions.contains(Permission::SystemRead)
-}
-
-#[inline]
-fn verify_auth_admin_token(auth_token: &str, secret_key: Option<&Vec<u8>>) -> bool {
-    secret_key.is_some_and(|key| verify_token_admin(auth_token, key.as_slice()))
 }
 
 fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
@@ -164,13 +159,26 @@ async fn handle_protocol_message(
                 }
             }
             Ok(ProtocolMessage::ActiveProviderCountRequest(auth_token)) => {
-                if !auth_required || verify_auth_admin_token(&auth_token, secret_key) {
+                if auth_required {
+                    let Some(secret_key) = secret_key else {
+                        return Some(ProtocolMessage::Unauthorized);
+                    };
+                    let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+                        return Some(ProtocolMessage::Unauthorized);
+                    };
+                    set_websocket_auth(mem, auth_token, &token_data.claims);
+                    if mem.permissions.contains(Permission::SystemRead) {
+                        let connections = app_state.active_provider.get_provider_connections_count().await;
+                        Some(ProtocolMessage::ActiveProviderCountResponse(connections))
+                    } else {
+                        Some(ProtocolMessage::Unauthorized)
+                    }
+                } else {
+                    mem.permissions = PERM_ALL;
                     mem.role = UserRole::Admin;
                     mem.token = Some(auth_token);
                     let connections = app_state.active_provider.get_provider_connections_count().await;
                     Some(ProtocolMessage::ActiveProviderCountResponse(connections))
-                } else {
-                    Some(ProtocolMessage::Unauthorized)
                 }
             }
             Ok(_) => {

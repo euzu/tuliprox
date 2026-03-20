@@ -1,6 +1,7 @@
 use crate::{
     app::{components::api_user::ApiUserView, switch, AppRoute},
     hooks::use_service_context,
+    i18n::use_translation,
 };
 use yew::prelude::*;
 use yew_router::Switch;
@@ -25,11 +26,12 @@ fn resolve_view(is_authenticated: bool, is_api_user: bool) -> RoleBasedView {
 #[component]
 pub fn RoleBasedContent() -> Html {
     let services = use_service_context();
+    let translate = use_translation();
 
     match resolve_view(services.auth.is_authenticated(), services.auth.is_api_user()) {
         RoleBasedView::MainApp => html! { <Switch<AppRoute> render={switch} /> },
         RoleBasedView::ApiUser => html! { <ApiUserView /> },
-        RoleBasedView::Unauthorized => html! { <div class="tp__unauthorized">{"Not authorized"}</div> },
+        RoleBasedView::Unauthorized => html! { <div class="tp__unauthorized">{translate.t("UNAUTHORIZED")}</div> },
     }
 }
 

@@ -285,6 +285,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                                 match services.rbac.delete_group(&dto.name).await {
                                     Ok(()) => {
                                         services.toastr.success(translate.t("MESSAGES.RBAC.GROUP_DELETED"));
+                                        selected_group.set(None);
                                         on_groups_changed.emit(());
                                     }
                                     Err(err) => {
@@ -430,7 +431,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                                         let write_perm = format!("{domain}.write");
                                         let read_checked = form_state.form.permissions.contains(&read_perm);
                                         let write_checked = form_state.form.permissions.contains(&write_perm);
-                                        let is_epg_write =  *domain == "epg";
+                                        let is_epg_domain = *domain == "epg";
 
                                         let on_read = {
                                             let toggle = on_permission_toggle.clone();
@@ -453,7 +454,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                                                     />
                                                 </td>
                                                 <td class="tp__table__cell--center">
-                                                 { html_if!(!is_epg_write, {
+                                                 { html_if!(!is_epg_domain, {
                                                     <ToggleSwitch
                                                         value={write_checked}
                                                         on_change={on_write}

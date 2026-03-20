@@ -78,6 +78,7 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
     let translate = use_translation();
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let can_read_users = services.auth.has_permission(Permission::UserRead);
+    let can_write_users = services.auth.has_permission(Permission::UserWrite);
 
     let users = use_state(|| None::<Vec<WebUiUserDto>>);
     let form_mode = use_state(|| FormMode::Hidden);
@@ -131,6 +132,9 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
         let form_mode = form_mode.clone();
         let form_state = form_state.clone();
         Callback::from(move |_: String| {
+            if !can_write_users {
+                return;
+            }
             form_mode.set(FormMode::Add);
             form_state.dispatch(UserFormAction::SetAll(UserFormDto::default()));
         })
@@ -141,6 +145,9 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
         let form_state = form_state.clone();
         let users = users.clone();
         move |username: String| {
+            if !can_write_users {
+                return;
+            }
             if let Some(ref user_list) = *users {
                 if let Some(user) = user_list.iter().find(|u| u.username == username) {
                     form_mode.set(FormMode::Edit(username));
@@ -190,6 +197,10 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
             let reset_form = reset_form.clone();
             let refetch_users = refetch_users.clone();
 
+            if !can_write_users {
+                services.toastr.error(translate.t("UNAUTHORIZED"));
+                return;
+            }
             if username.trim().is_empty() {
                 services.toastr.error(translate.t("MESSAGES.RBAC.USERNAME_REQUIRED"));
                 return;
@@ -281,6 +292,10 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
         Callback::from(move |(name, e): (String, MouseEvent)| {
             e.prevent_default();
             e.stop_propagation();
+            if !can_write_users {
+                popup_is_open.set(false);
+                return;
+            }
             match name.as_str() {
                 "edit" => {
                     if let Some(dto) = &*selected_user {
@@ -333,6 +348,9 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
         Callback::<(usize, usize, Rc<WebUiUserDto>), Html>::from(
             move |(_row, col, dto): (usize, usize, Rc<WebUiUserDto>)| match col {
                 0 => {
+                    if !can_write_users {
+                        return html! {};
+                    }
                     let popup_onclick = popup_onclick.clone();
                     html! {
                         <button class="tp__icon-button"
@@ -395,10 +413,12 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
             <Panel value={USER_DISPLAY_PANEL.to_string()} active={active_panel.to_string()}>
                 <div class="tp__config-view__header">
                     <h2>{ translate.t("LABEL.RBAC_USERS") }</h2>
-                    <TextButton class="primary" name="add_user"
-                        icon="Add"
-                        title={translate.t("LABEL.RBAC_ADD_USER")}
-                        onclick={on_add_click.clone()} />
+                    { html_if!(can_write_users, {
+                        <TextButton class="primary" name="add_user"
+                            icon="Add"
+                            title={translate.t("LABEL.RBAC_ADD_USER")}
+                            onclick={on_add_click.clone()} />
+                    })}
                 </div>
 
                 <Table::<WebUiUserDto> definition={table_definition} />
@@ -447,19 +467,25 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                             icon="Cancel"
                             title={translate.t("LABEL.CANCEL")}
                             onclick={on_cancel.clone()} />
-                        <TextButton class="primary" name="save"
-                            icon="Save"
-                            title={translate.t("LABEL.SAVE")}
-                            onclick={on_save.clone()} />
+                        { html_if!(can_write_users, {
+                            <TextButton class="primary" name="save"
+                                icon="Save"
+                                title={translate.t("LABEL.SAVE")}
+                                onclick={on_save.clone()} />
+                        })}
                     </div>
                 </div>
             </Panel>
             <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
-                <MenuItem icon="Edit" name={UserAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click} />
-                { html_if!(!is_self_selected, {
+                { html_if!(can_write_users, {
                     <>
-                        <hr/>
-                        <MenuItem icon="Delete" name={UserAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action" />
+                        <MenuItem icon="Edit" name={UserAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click} />
+                        { html_if!(!is_self_selected, {
+                            <>
+                                <hr/>
+                                <MenuItem icon="Delete" name={UserAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action" />
+                            </>
+                        })}
                     </>
                 })}
             </PopupMenu>

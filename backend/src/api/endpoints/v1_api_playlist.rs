@@ -7,7 +7,7 @@ use crate::{api::{
         xtream_api::xtream_get_stream_info_response,
     },
     model::AppState,
-}, auth::create_access_token, auth::{require_permission_inner, permission_layer}, model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id};
+}, auth::create_access_token, auth::permission_layer, model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;

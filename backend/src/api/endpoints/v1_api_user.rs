@@ -1,7 +1,7 @@
 use crate::{api::{
     model::AppState,
     panel_api::{sync_panel_api_alias_pool_for_target, target_has_alias_pool_min},
-}, auth::{require_permission_inner, permission_layer}, model::{ApiProxyConfig, ProxyUserCredentials, TargetUser}, repository::store_api_user};
+}, auth::permission_layer, model::{ApiProxyConfig, ProxyUserCredentials, TargetUser}, repository::store_api_user};
 use axum::{response::IntoResponse, Router};
 use serde_json::json;
 use shared::{

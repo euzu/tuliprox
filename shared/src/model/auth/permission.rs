@@ -19,7 +19,7 @@ create_bitset!(
     EpgWrite
 );
 
-pub const PERM_ALL: PermissionSet = PermissionSet(0xFFFF);
+pub const PERM_ALL: PermissionSet = PermissionSet((1u16 << PERMISSION_NAMES.len()) - 1);
 
 pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("config.read", Permission::ConfigRead),
@@ -106,6 +106,12 @@ mod tests {
         assert!(PERM_ALL.contains(Permission::ConfigWrite));
         assert!(PERM_ALL.contains(Permission::EpgRead));
         assert!(PERM_ALL.contains(Permission::EpgWrite));
+    }
+
+    #[test]
+    fn test_perm_all_matches_defined_permissions_only() {
+        let expected_mask = (1u16 << PERMISSION_NAMES.len()) - 1;
+        assert_eq!(PERM_ALL.0, expected_mask);
     }
 
     #[test]

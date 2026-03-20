@@ -2,6 +2,7 @@ use crate::{
     error::Error,
     services::{get_base_href, request_delete, request_get, request_post, request_put},
 };
+use js_sys::encode_uri_component;
 use shared::{
     model::{RbacGroupDto, WebUiUserDto},
     utils::{concat_path, concat_path_leading_slash},
@@ -37,6 +38,8 @@ pub struct RbacService {
     rbac_path: String,
 }
 
+fn encode_path_segment(value: &str) -> String { encode_uri_component(value).into() }
+
 impl RbacService {
     pub fn new() -> Self {
         let base_href = get_base_href();
@@ -54,6 +57,7 @@ impl RbacService {
     }
 
     pub async fn update_user(&self, username: &str, req: UpdateUserRequest) -> Result<(), Error> {
+        let username = encode_path_segment(username);
         request_put::<UpdateUserRequest, ()>(
             &concat_path(&self.rbac_path, &format!("users/{username}")),
             req,
@@ -65,6 +69,7 @@ impl RbacService {
     }
 
     pub async fn delete_user(&self, username: &str) -> Result<(), Error> {
+        let username = encode_path_segment(username);
         request_delete::<()>(&concat_path(&self.rbac_path, &format!("users/{username}")), None, None).await?;
         Ok(())
     }
@@ -80,6 +85,7 @@ impl RbacService {
     }
 
     pub async fn update_group(&self, name: &str, req: CreateGroupRequest) -> Result<(), Error> {
+        let name = encode_path_segment(name);
         request_put::<CreateGroupRequest, ()>(
             &concat_path(&self.rbac_path, &format!("groups/{name}")),
             req,
@@ -91,6 +97,7 @@ impl RbacService {
     }
 
     pub async fn delete_group(&self, name: &str) -> Result<(), Error> {
+        let name = encode_path_segment(name);
         request_delete::<()>(&concat_path(&self.rbac_path, &format!("groups/{name}")), None, None).await?;
         Ok(())
     }
