@@ -60,11 +60,7 @@ async fn token(
                             .map(|user| user.groups.clone())
                             .unwrap_or_default();
                         debug!(
-                            "Web login success candidate: username='{}', groups={:?}, is_admin={}, permissions={}",
-                            username,
-                            user_groups,
-                            is_admin,
-                            permissions
+                            "Web login success candidate: username='{username}', groups={user_groups:?}, is_admin={is_admin}, permissions={permissions}",
                         );
                         let token_result = if is_admin {
                             create_jwt_admin(web_auth, username, pwd_version)

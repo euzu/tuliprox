@@ -375,8 +375,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
 
     // Memoize write-without-read warnings
     let perms_for_warnings = form_state.form.permissions.clone();
-    let write_without_read_warnings =
-        use_memo(perms_for_warnings, |perms| collect_write_without_read_warnings(perms));
+    let write_without_read_warnings = use_memo(perms_for_warnings, |perms| collect_write_without_read_warnings(perms));
 
     let is_builtin_selected = selected_group.as_ref().is_some_and(|g| g.builtin);
     let active_panel = active_panel(&form_mode);

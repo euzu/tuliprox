@@ -374,19 +374,16 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
     // Memoize group options for Select multi-select
     let selected_groups = form_state.form.groups.clone();
     let groups_for_memo = props.groups.clone();
-    let group_options: Rc<Vec<DropDownOption>> =
-        use_memo((groups_for_memo, selected_groups), |(groups, selected)| {
-            groups
-                .as_ref()
-                .map(|g| {
-                    g.iter()
-                        .map(|grp| {
-                            DropDownOption::new(&grp.name, html! { &grp.name }, selected.contains(&grp.name))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        });
+    let group_options: Rc<Vec<DropDownOption>> = use_memo((groups_for_memo, selected_groups), |(groups, selected)| {
+        groups
+            .as_ref()
+            .map(|g| {
+                g.iter()
+                    .map(|grp| DropDownOption::new(&grp.name, html! { &grp.name }, selected.contains(&grp.name)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
 
     let user_is_admin = form_state.form.groups.iter().any(|g| g == "admin");
     let is_self_selected = selected_user.as_ref().is_some_and(|u| u.username == current_username);

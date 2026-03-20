@@ -50,26 +50,29 @@ pub fn RbacView() -> Html {
         let translate = translate.clone();
         let groups_val = (*groups).clone();
         let on_groups_changed = on_groups_changed.clone();
-        use_memo((translate.clone(), groups_val, on_groups_changed), move |(translate, groups_val, on_groups_changed)| {
-            vec![
-                TabItem {
-                    id: "users".to_string(),
-                    title: translate.t("LABEL.RBAC_USERS"),
-                    icon: "UserOutline".to_string(),
-                    children: html! { <UserManagement groups={groups_val.clone()} /> },
-                    active_class: None,
-                    inactive_class: None,
-                },
-                TabItem {
-                    id: "groups".to_string(),
-                    title: translate.t("LABEL.GROUPS"),
-                    icon: "Group".to_string(),
-                    children: html! { <GroupManagement groups={groups_val.clone()} on_groups_changed={on_groups_changed.clone()} /> },
-                    active_class: None,
-                    inactive_class: None,
-                },
-            ]
-        })
+        use_memo(
+            (translate.clone(), groups_val, on_groups_changed),
+            move |(translate, groups_val, on_groups_changed)| {
+                vec![
+                    TabItem {
+                        id: "users".to_string(),
+                        title: translate.t("LABEL.RBAC_USERS"),
+                        icon: "UserOutline".to_string(),
+                        children: html! { <UserManagement groups={groups_val.clone()} /> },
+                        active_class: None,
+                        inactive_class: None,
+                    },
+                    TabItem {
+                        id: "groups".to_string(),
+                        title: translate.t("LABEL.GROUPS"),
+                        icon: "Group".to_string(),
+                        children: html! { <GroupManagement groups={groups_val.clone()} on_groups_changed={on_groups_changed.clone()} /> },
+                        active_class: None,
+                        inactive_class: None,
+                    },
+                ]
+            },
+        )
     };
 
     html! {

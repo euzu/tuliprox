@@ -54,6 +54,7 @@ select {
 :not(input[type="text"]) {
   caret-color: transparent;
 }
+
 input[type="text"] {
   caret-color: auto;
 }
@@ -63,8 +64,8 @@ option {
 }
 
 .tp__delete_action {
-   color: var(--attention-color) !important;
-   fill: currentColor !important;
+  color: var(--attention-color) !important;
+  fill: currentColor !important;
 }
 
 .tp__update_action {
@@ -88,13 +89,13 @@ li {
   background: transparent;
 }
 
-.tp__full-width  {
+.tp__full-width {
   box-sizing: border-box;
   width: 100%;
   align-items: center;
 }
 
-.tp__full-height  {
+.tp__full-height {
   box-sizing: border-box;
   height: 100%;
   align-items: center;
@@ -106,10 +107,10 @@ li {
 }
 
 .no-select {
-  user-select: none;          /* Standard */
-  -webkit-user-select: none;  /* Chrome, Safari, Opera */
-  -moz-user-select: none;     /* Firefox */
-  -ms-user-select: none;      /* IE/Edge */
+  user-select: none; /* Standard */
+  -webkit-user-select: none; /* Chrome, Safari, Opera */
+  -moz-user-select: none; /* Firefox */
+  -ms-user-select: none; /* IE/Edge */
 }
 
 @media (max-width: size.$mobile-breakpoint) {
@@ -126,4 +127,18 @@ li {
   display: flex;
   justify-content: center;
   align-items: center;
+}
+
+.tp__inline-toolbar {
+  display: flex;
+  flex-flow: row nowrap;
+  gap: var(--gap-micro);
+  box-sizing: border-box;
+
+  .tp__icon-button {
+    &:hover {
+      background-color: var(--icon-button-hover-background-color);
+      border-radius: 50%;
+    }
+  }
 }

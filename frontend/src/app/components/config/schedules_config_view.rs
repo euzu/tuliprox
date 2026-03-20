@@ -8,6 +8,7 @@ use crate::{
             },
             input::Input,
             select::Select,
+            text_button::TextButton,
             Card, Chip, DropDownOption, DropDownSelection, IconButton, NoContent,
         },
         ConfigContext,
@@ -42,8 +43,9 @@ pub fn SchedulesConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
     let selected_targets = use_state(|| None::<Vec<String>>);
-    let selected_schedule = use_state(|| None);
+    let selected_schedule = use_state(|| None::<String>);
     let selected_type = use_state(|| ScheduleTaskType::PlaylistUpdate);
+    let editing_index = use_state(|| None::<usize>);
 
     let all_targets = use_memo(config_ctx.config.clone(), move |config| {
         config
@@ -77,6 +79,10 @@ pub fn SchedulesConfigView() -> Html {
 
     {
         let form_state = form_state.clone();
+        let editing_index = editing_index.clone();
+        let selected_schedule = selected_schedule.clone();
+        let selected_targets = selected_targets.clone();
+        let selected_type = selected_type.clone();
         let config = config_ctx.config.as_ref().map(|c| c.config.clone());
         use_effect_with((config, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
             if let Some(conf) = cfg {
@@ -85,6 +91,10 @@ pub fn SchedulesConfigView() -> Html {
             } else {
                 form_state.dispatch(SchedulesConfigFormAction::SetAll(SchedulesConfigDto::default()));
             }
+            editing_index.set(None);
+            selected_schedule.set(None);
+            selected_targets.set(None);
+            selected_type.set(ScheduleTaskType::PlaylistUpdate);
             || ()
         });
     }
@@ -117,6 +127,7 @@ pub fn SchedulesConfigView() -> Html {
         let set_selected_targets = selected_targets.clone();
         let set_selected_schedule = selected_schedule.clone();
         let selected_type = selected_type.clone();
+        let editing_index = editing_index.clone();
         Callback::from(move |_| {
             if let Some(schedule) = (*set_selected_schedule).as_ref() {
                 let task_type = *selected_type;
@@ -126,18 +137,28 @@ pub fn SchedulesConfigView() -> Html {
                     Ok(_) => {
                         let dto = ScheduleConfigDto { schedule: schedule.clone(), task_type, targets };
                         let mut new_schedules = form_state.data().schedules.as_ref().cloned().unwrap_or_default();
+                        let edited_index = *editing_index;
 
-                        let exists = new_schedules.iter().any(|s| {
-                            s.schedule == dto.schedule
+                        let exists = new_schedules.iter().enumerate().any(|(idx, s)| {
+                            Some(idx) != edited_index
+                                && s.schedule == dto.schedule
                                 && s.task_type == dto.task_type
                                 && s.targets.as_deref() == dto.targets.as_deref()
                         });
                         if exists {
                             services.toastr.warning(translate.t("MESSAGES.SCHEDULE_EXISTS"));
                         } else {
-                            new_schedules.push(dto);
+                            if let Some(idx) = edited_index {
+                                if idx < new_schedules.len() {
+                                    new_schedules[idx] = dto;
+                                } else {
+                                    new_schedules.push(dto);
+                                }
+                            } else {
+                                new_schedules.push(dto);
+                            }
                             form_state.dispatch(SchedulesConfigFormAction::Schedules(Some(new_schedules)));
-                            // clear editor
+                            editing_index.set(None);
                             set_selected_schedule.set(None);
                             set_selected_targets.set(None);
                         }
@@ -154,10 +175,14 @@ pub fn SchedulesConfigView() -> Html {
 
     let handle_remove = {
         let form_state = form_state.clone();
-        Callback::from(move |target: String| {
+        Callback::from(move |target_index: usize| {
             if let Some(schedules) = form_state.data().schedules.as_ref() {
-                let new_schedules: Vec<ScheduleConfigDto> =
-                    schedules.iter().filter(|&s| s.schedule != target).cloned().collect();
+                let new_schedules: Vec<ScheduleConfigDto> = schedules
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| *idx != target_index)
+                    .map(|(_, schedule)| schedule.clone())
+                    .collect();
                 if new_schedules.is_empty() {
                     form_state.dispatch(SchedulesConfigFormAction::Schedules(None));
                 } else {
@@ -167,19 +192,69 @@ pub fn SchedulesConfigView() -> Html {
         })
     };
 
+    let handle_edit = {
+        let editing_index = editing_index.clone();
+        let selected_schedule = selected_schedule.clone();
+        let selected_targets = selected_targets.clone();
+        let selected_type = selected_type.clone();
+        let form_state = form_state.clone();
+        Callback::from(move |target_index: usize| {
+            if let Some(entry) = form_state.data().schedules.as_ref().and_then(|schedules| schedules.get(target_index))
+            {
+                editing_index.set(Some(target_index));
+                selected_schedule.set(Some(entry.schedule.clone()));
+                selected_type.set(entry.task_type);
+                selected_targets.set(if entry.task_type == ScheduleTaskType::PlaylistUpdate {
+                    entry.targets.clone()
+                } else {
+                    None
+                });
+            }
+        })
+    };
+
+    let handle_cancel_edit = {
+        let editing_index = editing_index.clone();
+        let selected_schedule = selected_schedule.clone();
+        let selected_targets = selected_targets.clone();
+        let selected_type = selected_type.clone();
+        Callback::from(move |_| {
+            editing_index.set(None);
+            selected_schedule.set(None);
+            selected_targets.set(None);
+            selected_type.set(ScheduleTaskType::PlaylistUpdate);
+        })
+    };
+
     let render_view_mode = |deletable: bool| match form_state.data().schedules.as_ref() {
         Some(schedules) => {
-            let render_schedule_row = |entry: &ScheduleConfigDto| {
+            let is_editing = editing_index.is_some();
+            let render_schedule_row = |(index, entry): (usize, &ScheduleConfigDto)| {
                 let handle_remove_clone = handle_remove.clone();
-                let schedule = entry.schedule.clone();
+                let handle_edit_clone = handle_edit.clone();
                 html! {
                     <tr>
                         { html_if!(deletable, {
-                            <td>
-                            <IconButton class="tp__schedules-config-view__delete-btn"
-                               name="RemoveSchedule" icon="Delete"
-                               onclick={Callback::from(move |_| handle_remove_clone.emit(schedule.clone()))} />
-                            </td>
+                            <>
+                                <td>
+                                    {html_if!(!is_editing, {
+                                        <div class="tp__inline-toolbar">
+                                        <IconButton
+                                            class="tp__schedules-config-view__edit-btn"
+                                            name="EditSchedule"
+                                            icon="Edit"
+                                            onclick={Callback::from(move |_| handle_edit_clone.emit(index))}
+                                        />
+                                        <IconButton
+                                            class="tp__schedules-config-view__delete-btn"
+                                            name="RemoveSchedule"
+                                            icon="Delete"
+                                            onclick={Callback::from(move |_| handle_remove_clone.emit(index))}
+                                        />
+                                        </div>
+                                    })}
+                                </td>
+                            </>
                         })}
                         <td>{ entry.schedule.clone() }</td>
                         <td>{ match entry.task_type {
@@ -212,16 +287,19 @@ pub fn SchedulesConfigView() -> Html {
                     <table class="tp__config-view__table tp__table__table ">
                         <thead>
                             <tr>
-                                {html_if!(deletable, {<th></th>})}
+                                {html_if!(deletable, {
+                                    <>
+                                        <th></th>
+                                        <th></th>
+                                    </>
+                                })}
                                 <th>{ translate.t(LABEL_SCHEDULE) }</th>
                                 <th>{ translate.t(LABEL_TYPE) }</th>
                                 <th>{ translate.t(LABEL_TARGETS) }</th>
                             </tr>
                         </thead>
                         <tbody>
-                            for entry in schedules.iter() {
-                                { render_schedule_row(entry) }
-                            }
+                            { for schedules.iter().enumerate().map(render_schedule_row) }
                         </tbody>
                     </table>
                 </div>
@@ -233,6 +311,7 @@ pub fn SchedulesConfigView() -> Html {
 
     let render_edit_mode = || {
         let set_selected_type = selected_type.clone();
+        let is_editing = editing_index.is_some();
         let types = Rc::new(vec![
             DropDownOption {
                 id: "PlaylistUpdate".to_string(),
@@ -279,7 +358,39 @@ pub fn SchedulesConfigView() -> Html {
                     />
                 }})
             })}
-            <IconButton name="AddSchedule" icon="ScheduleAdd" class="primary" onclick={handle_add_schedule} />
+            { if is_editing {
+                html! {
+                    <div class="tp__form-page__toolbar">
+                        <TextButton
+                            class="secondary"
+                            name="CancelScheduleEdit"
+                            icon="Cancel"
+                            title={translate.t("LABEL.CANCEL")}
+                            onclick={handle_cancel_edit.clone()}
+                        />
+                        <TextButton
+                            class="primary"
+                            name="SubmitScheduleEdit"
+                            icon="Accept"
+                            title={translate.t("LABEL.SUBMIT")}
+                            onclick={handle_add_schedule.clone()}
+                        />
+                    </div>
+                }
+            } else {
+                let handle_add_schedule_click = {
+                    let handle_add_schedule = handle_add_schedule.clone();
+                    Callback::from(move |(name, _event)| handle_add_schedule.emit(name))
+                };
+                html! {
+                        <IconButton
+                            name="AddSchedule"
+                            icon="ScheduleAdd"
+                            class="primary"
+                            onclick={handle_add_schedule_click}
+                        />
+                }
+            }}
             </div>
         }
     };
