@@ -117,3 +117,13 @@ li {
     font-size: 1.1rem;
   }
 }
+
+.tp__unauthorized {
+  height: 100%;
+  width: 100%;
+  font-size: 2rem;
+  color: var(--text-color);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}

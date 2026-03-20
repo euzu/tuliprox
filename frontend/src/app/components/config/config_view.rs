@@ -26,7 +26,7 @@ use crate::{
     utils::set_timeout,
 };
 use log::warn;
-use shared::model::{ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
+use shared::model::{permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
 use std::str::FromStr;
 use yew::{platform::spawn_local, prelude::*};
 
@@ -73,6 +73,8 @@ pub fn ConfigView() -> Html {
     let services_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let setup_mode = services_ctx.config.ui_config.setup_mode;
+    let can_edit_config =
+        setup_mode || services_ctx.auth.has_any_permissions(Permission::ConfigWrite | Permission::SourceWrite);
 
     let active_tab = use_state(|| ConfigPage::Main);
     let edit_mode = use_state(|| setup_mode);
@@ -157,7 +159,7 @@ pub fn ConfigView() -> Html {
     let handle_config_edit = {
         let set_edit_mode = edit_mode.clone();
         Callback::from(move |_| {
-            if setup_mode {
+            if !can_edit_config {
                 return;
             }
             set_edit_mode.set(!*set_edit_mode);
@@ -461,14 +463,14 @@ pub fn ConfigView() -> Html {
             <div class="tp__config-view__header">
                 <h1>{ translate.t(LABEL_CONFIG) } </h1>
                 <div class="tp__config-view__header-tools">
-                {html_if!(geo_ip_enabled, {
+                {html_if!(services_ctx.auth.has_permission(Permission::SystemWrite) && geo_ip_enabled, {
                     <TextButton class="tertiary" name={ACTION_UPDATE_GEO_IP}
                         icon="Refresh"
                         title={ translate.t(LABEL_UPDATE_GEOIP)}
                         onclick={handle_update_content.clone()}></TextButton>
                 })}
                 </div>
-               { html_if!(!setup_mode, {
+               { html_if!(!setup_mode && can_edit_config, {
                    <TextButton name="config_edit"
                         class={ if *edit_mode { "secondary" } else { "primary" }}
                         icon={ if *edit_mode { "Unlocked" } else { "Locked" }}
@@ -516,7 +518,7 @@ pub fn ConfigView() -> Html {
                      on_tab_change={Some(handle_tab_change)}
                      class="tp__config-view__tabset"/>
 
-                { html_if!(*edit_mode || setup_mode, {
+                { html_if!(services_ctx.auth.has_any_permissions(Permission::ConfigWrite | Permission::SourceWrite) && (*edit_mode || setup_mode), {
                     <div class="tp__config-view__toolbar tp__form-page__toolbar">
                      <TextButton class="secondary" name="save_config"
                         icon="Save"

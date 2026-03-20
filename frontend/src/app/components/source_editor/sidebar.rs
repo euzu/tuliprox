@@ -26,6 +26,8 @@ fn create_brick(t: &BlockType, on_drag_start: Callback<DragEvent>, label: String
 #[derive(Properties, PartialEq)]
 pub struct SourceEditorSidebarProps {
     #[prop_or_default]
+    pub allow_write: bool,
+    #[prop_or_default]
     pub delete_mode: bool,
     #[prop_or_default]
     pub on_toggle_delete: Callback<(String, MouseEvent)>,
@@ -45,7 +47,13 @@ pub fn SourceEditorSidebar(props: &SourceEditorSidebarProps) -> Html {
             <div class="tp__source-editor__sidebar-actions">
                 <IconButton name="layout" icon="Nodes" onclick={props.on_layout.clone()} />
                 // Delete mode toggle button
-                <IconButton class={if props.delete_mode {"tp__source-editor__sidebar-actions-active"} else {""} } name="toggle_delete" icon="Delete" onclick={props.on_toggle_delete.clone()} />
+                { html! {
+                    if props.allow_write {
+                        <IconButton class={if props.delete_mode {"tp__source-editor__sidebar-actions-active"} else {""} } name="toggle_delete" icon="Delete" onclick={props.on_toggle_delete.clone()} />
+                    } else {
+                        <></>
+                    }
+                }}
             </div>
             <div class="tp__source-editor__sidebar-bricks">
                 <CollapsePanel title={translate.t("LABEL.INPUTS")}>

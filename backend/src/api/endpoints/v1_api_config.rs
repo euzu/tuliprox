@@ -1,17 +1,12 @@
-use crate::{
-    api::{
-        api_utils::{internal_server_error, try_unwrap_body},
-        config_file::ConfigFile,
-        model::AppState,
-    },
-    model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource},
-    utils,
-    utils::{
-        persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file,
-        request::download_text_content,
-        xtream::{get_xtream_stream_url_base, xtream_login},
-    },
-};
+use crate::{api::{
+    api_utils::{internal_server_error, try_unwrap_body},
+    config_file::ConfigFile,
+    model::AppState,
+}, auth::{require_permission_inner, verify_token, AuthBearer, permission_layer}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource}, utils, utils::{
+    persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file,
+    request::download_text_content,
+    xtream::{get_xtream_stream_url_base, xtream_login},
+}};
 use axum::{
     http::{header::IF_MATCH, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
@@ -21,6 +16,7 @@ use log::error;
 use serde_json::json;
 use shared::{
     error::TuliproxError,
+    model::permission::{Permission, PermissionSet},
     model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto, XtreamLoginRequest},
     utils::{
         HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH,
@@ -84,6 +80,46 @@ fn require_matching_revision(
         return Some(response_with_revision_header(response, revision_header, current_revision));
     }
     None
+}
+
+fn has_any_permission(permissions: PermissionSet, required: &[Permission]) -> bool {
+    required.iter().any(|permission| permissions.contains(*permission))
+}
+
+fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet> {
+    let config = app_state.app_config.config.load();
+    let web_auth = config.web_ui.as_ref()?.auth.as_ref()?;
+    verify_token(token, web_auth.secret.as_bytes()).map(|token_data| token_data.claims.permissions)
+}
+
+fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permissions: PermissionSet) {
+    if !permissions.contains(Permission::ConfigRead) {
+        api_proxy.server.clear();
+    }
+    if !permissions.contains(Permission::UserRead) {
+        api_proxy.user.clear();
+    }
+}
+
+fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: PermissionSet) {
+    if !permissions.contains(Permission::ConfigRead) {
+        app_config.config = ConfigDto::default();
+        if let Some(api_proxy) = app_config.api_proxy.as_mut() {
+            api_proxy.server.clear();
+        }
+    }
+
+    if !permissions.contains(Permission::SourceRead) {
+        app_config.sources = SourcesConfigDto::default();
+        app_config.mappings = None;
+        app_config.templates = None;
+    }
+
+    if let Some(api_proxy) = app_config.api_proxy.as_mut() {
+        if !permissions.contains(Permission::UserRead) {
+            api_proxy.user.clear();
+        }
+    }
 }
 
 pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
@@ -234,7 +270,7 @@ async fn save_config_sources(
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_SOURCES_REVISION, &updated_revision)
 }
 
-async fn get_config_api_proxy_config(
+async fn get_config_api_proxy_config_public(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let paths = app_state.app_config.paths.load();
@@ -330,7 +366,7 @@ async fn save_config_api_proxy_config(
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_API_PROXY_REVISION, &updated_revision)
 }
 
-async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
+async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
     let (config_file_path, sources_file_path, api_proxy_file_path) = {
         let paths = app_state.app_config.paths.load();
         (
@@ -383,6 +419,115 @@ async fn config(axum::extract::State(app_state): axum::extract::State<Arc<AppSta
         }
         Err(err) => {
             error!("Failed to read config files: {err}");
+            internal_server_error!()
+        }
+    }
+}
+
+async fn config(
+    AuthBearer(token): AuthBearer,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    let Some(permissions) = decode_permissions(&app_state, &token) else {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !has_any_permission(
+        permissions,
+        &[Permission::ConfigRead, Permission::SourceRead, Permission::UserRead],
+    ) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    let (config_file_path, sources_file_path, api_proxy_file_path) = {
+        let paths = app_state.app_config.paths.load();
+        (
+            paths.config_file_path.clone(),
+            paths.sources_file_path.clone(),
+            paths.api_proxy_file_path.clone(),
+        )
+    };
+
+    let main_revision = match read_file_revision(&config_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for config.yml '{config_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    let sources_revision = match read_file_revision(&sources_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for source.yml '{sources_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    let api_proxy_revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+
+    let read_result = {
+        let paths = app_state.app_config.paths.load();
+        utils::read_app_config_dto(&paths, true, false).await
+    };
+    match read_result {
+        Ok(mut app_config) => {
+            if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
+                error!("Failed to prepare sources batch: {err}");
+                internal_server_error!()
+            } else if let Err(err) = prepare_users(&mut app_config, &app_state.app_config).await {
+                error!("Failed to prepare users: {err}");
+                internal_server_error!()
+            } else {
+                filter_app_config_by_permissions(&mut app_config, permissions);
+                let response = axum::response::Json(app_config).into_response();
+                let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
+                let response = response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
+                response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &api_proxy_revision)
+            }
+        }
+        Err(err) => {
+            error!("Failed to read config files: {err}");
+            internal_server_error!()
+        }
+    }
+}
+
+async fn get_config_api_proxy_config(
+    AuthBearer(token): AuthBearer,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    let Some(permissions) = decode_permissions(&app_state, &token) else {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::UserRead]) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    let paths = app_state.app_config.paths.load();
+    let api_proxy_file_path = paths.api_proxy_file_path.clone();
+    let revision = match read_file_revision(&api_proxy_file_path).await {
+        Ok(revision) => revision,
+        Err(err) => {
+            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
+            return internal_server_error!();
+        }
+    };
+    match read_api_proxy_file(api_proxy_file_path.as_str(), true) {
+        Ok(Some(mut api_proxy_dto)) => {
+            filter_api_proxy_by_permissions(&mut api_proxy_dto, permissions);
+            let response = axum::response::Json(api_proxy_dto).into_response();
+            response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &revision)
+        }
+        Ok(None) => {
+            error!("Failed to read api proxy config");
+            internal_server_error!()
+        }
+        Err(err) => {
+            error!("Failed to read api proxy config: {err}");
             internal_server_error!()
         }
     }
@@ -464,20 +609,52 @@ async fn get_xtream_login_info(
 
 pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
-        .route("/config", axum::routing::get(config))
+        .route("/config", axum::routing::get(config_public))
         .route("/config/batchContent/{input_id}", axum::routing::get(config_batch_content))
         .route("/config/xtream/login-info", axum::routing::post(get_xtream_login_info))
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/sources", axum::routing::post(save_config_sources))
-        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config))
+        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config_public))
         .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
+}
+pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    let base_read = Router::new()
+        .route("/config", axum::routing::get(config))
+        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config));
+
+    // 2. Source Domain (Read & Write)
+    let source_read = Router::new()
+        .route("/config/batchContent/{input_id}", axum::routing::get(config_batch_content))
+        .route("/config/xtream/login-info", axum::routing::post(get_xtream_login_info))
+        .layer(permission_layer!(app_state, Permission::SourceRead));
+
+    let source_write = Router::new()
+        .route("/config/sources", axum::routing::post(save_config_sources))
+        .layer(permission_layer!(app_state, Permission::SourceWrite));
+
+    let config_write = Router::new()
+        .route("/config/main", axum::routing::post(save_config_main))
+        .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
+        .layer(permission_layer!(app_state, Permission::ConfigWrite));
+
+    Router::new()
+        .merge(base_read)
+        .merge(source_read)
+        .merge(source_write)
+        .merge(config_write)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::require_matching_revision;
+    use super::{filter_api_proxy_by_permissions, filter_app_config_by_permissions, require_matching_revision};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
-    use shared::utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH};
+    use shared::{
+        model::{
+            ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigDto, Permission, PermissionSet, SourcesConfigDto,
+            TargetUserDto,
+        },
+        utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH},
+    };
 
     #[test]
     fn require_matching_revision_rejects_missing_if_match_header() {
@@ -506,5 +683,80 @@ mod tests {
             "source.yml",
         );
         assert!(result.is_none(), "exact revision match should be accepted");
+    }
+
+    #[test]
+    fn filter_app_config_clears_unauthorized_sections() {
+        let permissions: PermissionSet = Permission::ConfigRead.into();
+        let mut app_config = AppConfigDto {
+            config: ConfigDto {
+                storage_dir: Some(String::from("storage")),
+                ..ConfigDto::default()
+            },
+            sources: SourcesConfigDto {
+                inputs: vec![],
+                sources: vec![],
+                provider: Some(vec![]),
+                templates: Some(vec![]),
+            },
+            mappings: None,
+            templates: Some(Default::default()),
+            api_proxy: Some(ApiProxyConfigDto {
+                server: vec![ApiProxyServerInfoDto {
+                    name: String::from("main"),
+                    protocol: String::from("http"),
+                    host: String::from("localhost"),
+                    port: None,
+                    timezone: String::from("UTC"),
+                    message: String::from("hello"),
+                    path: None,
+                }],
+                user: vec![TargetUserDto {
+                    target: String::from("target-a"),
+                    credentials: vec![],
+                }],
+                use_user_db: true,
+                auth_error_status: 401,
+            }),
+        };
+
+        filter_app_config_by_permissions(&mut app_config, permissions);
+
+        assert_eq!(app_config.config.storage_dir.as_deref(), Some("storage"));
+        assert_eq!(app_config.sources, SourcesConfigDto::default());
+        assert!(app_config.templates.is_none());
+
+        let api_proxy = app_config.api_proxy.expect("api proxy should remain present");
+        assert_eq!(api_proxy.server.len(), 1);
+        assert!(api_proxy.user.is_empty());
+        assert!(api_proxy.use_user_db);
+    }
+
+    #[test]
+    fn filter_api_proxy_keeps_user_section_only_with_user_read() {
+        let permissions: PermissionSet = Permission::UserRead.into();
+        let mut api_proxy = ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: String::from("main"),
+                protocol: String::from("http"),
+                host: String::from("localhost"),
+                port: None,
+                timezone: String::from("UTC"),
+                message: String::from("hello"),
+                path: None,
+            }],
+            user: vec![TargetUserDto {
+                target: String::from("target-a"),
+                credentials: vec![],
+            }],
+            use_user_db: true,
+            auth_error_status: 401,
+        };
+
+        filter_api_proxy_by_permissions(&mut api_proxy, permissions);
+
+        assert!(api_proxy.server.is_empty());
+        assert_eq!(api_proxy.user.len(), 1);
+        assert!(api_proxy.use_user_db);
     }
 }

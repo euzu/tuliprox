@@ -29,16 +29,6 @@ macro_rules! create_bitset {
                 Self(0)
             }
 
-            // New: Constructor for multiple variants
-            #[inline]
-            pub fn from_variants(variants: &[$enum_name]) -> Self {
-                let mut set = Self::new();
-                for &v in variants {
-                    set.set(v);
-                }
-                set
-            }
-
            #[inline(always)]
             pub fn set(&mut self, variant: $enum_name) {
                 // LLVM can optimize this to a single 'bts' or 'or' instruction
@@ -64,6 +54,16 @@ macro_rules! create_bitset {
             pub fn contains(&self, variant: $enum_name) -> bool {
                 // Becomes a single 'bt' or 'test' instruction
                 (self.0 & (1 << (variant as $storage))) != 0
+            }
+
+            #[inline(always)]
+            pub fn contains_all(&self, other: &Self) -> bool {
+                (self.0 & other.0) == other.0
+            }
+
+            #[inline(always)]
+            pub fn contains_any(&self, other: &Self) -> bool {
+                (self.0 & other.0) != 0
             }
 
             #[inline(always)]
@@ -121,6 +121,32 @@ macro_rules! create_bitset {
                 let mut new = self.clone();
                 new.intersect(rhs);
                 new
+            }
+        }
+
+        // Permission::A | Permission::B → PermissionSet
+        impl std::ops::BitOr for $enum_name {
+            type Output = [<$enum_name Set>];
+            #[inline(always)]
+            fn bitor(self, rhs: Self) -> [<$enum_name Set>] {
+                [<$enum_name Set>]((1 << (self as $storage)) | (1 << (rhs as $storage)))
+            }
+        }
+
+        // PermissionSet | Permission → PermissionSet
+        impl std::ops::BitOr<$enum_name> for [<$enum_name Set>] {
+            type Output = Self;
+            #[inline(always)]
+            fn bitor(self, rhs: $enum_name) -> Self {
+                Self(self.0 | (1 << (rhs as $storage)))
+            }
+        }
+
+        // Permission → PermissionSet (single variant)
+        impl From<$enum_name> for [<$enum_name Set>] {
+            #[inline(always)]
+            fn from(variant: $enum_name) -> Self {
+                Self(1 << (variant as $storage))
             }
         }
 

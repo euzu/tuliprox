@@ -2,10 +2,7 @@ use crate::utils::debug_if_enabled;
 use log::{debug, error, trace};
 use path_clean::PathClean;
 use shared::error::str_to_io_error;
-use shared::utils::{
-    API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_DIR, DEFAULT_WEB_ROOT_ENV_VAR,
-    MAPPING_FILE, SOURCE_FILE, TEMPLATE_FILE, USER_FILE,
-};
+use shared::utils::{API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_DIR, DEFAULT_WEB_ROOT_ENV_VAR, MAPPING_FILE, SOURCE_FILE, TEMPLATE_FILE, USER_FILE, USER_GROUP_FILE};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -99,6 +96,11 @@ pub fn get_default_file_path(config_path: &str, file: &str) -> String {
 #[inline]
 pub fn get_default_user_file_path(config_path: &str) -> String {
     get_default_file_path(config_path, USER_FILE)
+}
+
+#[inline]
+pub fn get_default_user_group_file_path(config_path: &str) -> String {
+    get_default_file_path(config_path, USER_GROUP_FILE)
 }
 
 #[inline]

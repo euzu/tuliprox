@@ -1,14 +1,11 @@
-use crate::{
-    api::{
-        library_scan::{spawn_library_scan, LibraryScanTaskOptions},
-        model::{AppState, EventMessage},
-    },
-    library::{resolve_metadata_storage_path, LibraryProcessor},
-};
+use crate::{api::{
+    library_scan::{spawn_library_scan, LibraryScanTaskOptions},
+    model::{AppState, EventMessage},
+}, auth::{require_permission_inner, permission_layer}, library::{resolve_metadata_storage_path, LibraryProcessor}};
 use axum::response::IntoResponse;
 use log::{debug, warn};
 use serde_json::json;
-use shared::model::{LibraryScanRequest, LibraryScanSummary, LibraryScanSummaryStatus, LibraryStatus};
+use shared::model::{permission::Permission, LibraryScanRequest, LibraryScanSummary, LibraryScanSummaryStatus, LibraryStatus};
 use std::sync::Arc;
 
 // Triggers a library scan
@@ -109,4 +106,19 @@ pub fn library_api_register(router: axum::Router<Arc<AppState>>) -> axum::Router
     router
         .route("/library/scan", axum::routing::post(scan_library))
         .route("/library/status", axum::routing::get(get_library_status))
+}
+
+pub fn library_api_register_with_permissions(
+    router: axum::Router<Arc<AppState>>,
+    app_state: &Arc<AppState>,
+) -> axum::Router<Arc<AppState>> {
+    router
+        .route(
+            "/library/status",
+            axum::routing::get(get_library_status).layer(permission_layer!(app_state, Permission::LibraryRead)),
+        )
+        .route(
+            "/library/scan",
+            axum::routing::post(scan_library).layer(permission_layer!(app_state, Permission::LibraryWrite)),
+        )
 }

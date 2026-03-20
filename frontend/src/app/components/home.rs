@@ -2,9 +2,9 @@ use crate::{
     app::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
-            IconButton, InputRow, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
-            PlaylistUpdateView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ToastrView, UserlistView,
-            WebsocketStatus,
+            IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
+            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ToastrView,
+            UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -16,6 +16,7 @@ use crate::{
     services::{ToastCloseMode, ToastOptions},
 };
 use shared::model::{
+    permission::{Permission, PERM_ALL},
     ApiProxyConfigDto, AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck,
     SystemInfo,
 };
@@ -84,7 +85,15 @@ pub fn Home() -> Html {
         });
     }
 
-    let _ = use_server_status(status.clone(), system_info.clone(), !setup_mode);
+    let can_read_system_status = services.auth.has_permission(Permission::SystemRead);
+    let can_read_config = services.auth.has_permission(Permission::ConfigRead);
+    let can_read_users = services.auth.has_permission(Permission::UserRead);
+    let can_read_sources = services.auth.has_permission(Permission::SourceRead);
+    let can_write_playlist = services.auth.has_permission(Permission::PlaylistWrite);
+    let can_read_playlist = services.auth.has_permission(Permission::PlaylistRead);
+    let can_read_epg = services.auth.has_permission(Permission::EpgRead);
+    let is_admin = services.auth.is_admin();
+    let _ = use_server_status(status.clone(), system_info.clone(), !setup_mode && can_read_system_status);
 
     {
         // first register for config update
@@ -170,6 +179,36 @@ pub fn Home() -> Html {
         return html! {};
     }
 
+    // Check if non-admin user has any permissions at all
+    let has_any_permission = services.auth.has_any_permissions(PERM_ALL);
+
+    if !has_any_permission && !setup_mode {
+        return html! {
+            <div class="tp__app">
+                <div class="tp__app-main">
+                    <div class="tp__app-main__header tp__app-header">
+                        <div class="tp__app-main__header-left">
+                        {
+                            if let Some(ref title) = services.config.ui_config.app_title {
+                                 html! { <span class="tp__app-title">{ title }</span> }
+                            } else {
+                                html! { <AppIcon name="AppTitle" /> }
+                            }
+                        }
+                        </div>
+                        <div class={"tp__app-header-toolbar"}>
+                            <IconButton name="Theme" icon={if *theme == Theme::Bright {"Moon"} else {"Sun"}} onclick={handle_theme_switch.clone()} />
+                            <IconButton name="Logout" icon="Logout" onclick={handle_logout.clone()} />
+                        </div>
+                    </div>
+                    <div class="tp__app-main__body">
+                        <NoAccess />
+                    </div>
+                </div>
+            </div>
+        };
+    }
+
     // combine_views_stats_streams=true means embed streams in stats (no separate page), so show_streams_page = !combine_views_stats_streams.
     // The default unwrap_or(true) correctly preserves backward compatibility (separate pages by default).
     let show_streams_page = config_context
@@ -222,6 +261,7 @@ pub fn Home() -> Html {
                     <div class="tp__app-main__body">
                       { html_if!(setup_mode, { <ParticleFlowBackground /> }) }
 
+                       { html_if!(setup_mode || can_read_config, {
                        <Panel class="tp__full-width" value={ViewType::Config.to_string()} active={view_visible.to_string()}>
                           {
                               if setup_mode {
@@ -231,6 +271,7 @@ pub fn Home() -> Html {
                               }
                           }
                        </Panel>
+                       })}
                        {
                             if setup_mode {
                                 html! {}
@@ -240,32 +281,51 @@ pub fn Home() -> Html {
                                        <Panel class="tp__full-width" value={ViewType::Dashboard.to_string()} active={view_visible.to_string()}>
                                         <DashboardView/>
                                        </Panel>
+                                       { html_if!(can_read_system_status, {
                                        <Panel class="tp__full-width" value={ViewType::Stats.to_string()} active={view_visible.to_string()}>
                                         <StatsView show_streams={!show_streams_page}/>
                                        </Panel>
-                                        { html_if!(show_streams_page, {
-                                           <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
+                                       })}
+                                        { html_if!(show_streams_page && can_read_system_status, {
+                                                   <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
                                               <StreamsView embedded={false}/>
                                             </Panel>
                                         })}
+                                       { html_if!(can_read_users, {
                                        <Panel class="tp__full-width" value={ViewType::Users.to_string()} active={view_visible.to_string()}>
                                           <UserlistView/>
                                        </Panel>
+                                       })}
+                                       { html_if!(can_read_sources, {
                                        <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.to_string()} active={view_visible.to_string()}>
                                           <SourceEditor/>
                                        </Panel>
+                                       })}
+                                       { html_if!(can_write_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.to_string()} active={view_visible.to_string()}>
                                          <PlaylistUpdateView/>
                                        </Panel>
+                                       })}
+                                       { html_if!(can_read_playlist, {
+                                       <>
                                        <Panel class="tp__full-width" value={ViewType::PlaylistSettings.to_string()} active={view_visible.to_string()}>
                                          <PlaylistSettingsView/>
                                        </Panel>
                                        <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.to_string()} active={view_visible.to_string()}>
                                          <PlaylistExplorerView/>
                                        </Panel>
+                                       </>
+                                       })}
+                                       { html_if!(can_read_epg, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistEpg.to_string()} active={view_visible.to_string()}>
                                          <EpgView/>
                                        </Panel>
+                                       })}
+                                       { html_if!(is_admin, {
+                                           <Panel class="tp__full-width" value={ViewType::Rbac.to_string()} active={view_visible.to_string()}>
+                                               <RbacView />
+                                           </Panel>
+                                       })}
                                     </>
                                 }
                             }

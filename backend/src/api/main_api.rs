@@ -515,7 +515,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
                 &concat_path_leading_slash(&web_ui_path, "assets"),
                 tower_http::services::ServeDir::new(web_dir_path.join("assets")),
             )
-            .merge(v1_api_register(web_auth_enabled, Arc::clone(&shared_data), web_ui_path.as_str()));
+            .merge(v1_api_register(web_auth_enabled, &shared_data, web_ui_path.as_str()));
         if !web_ui_path.is_empty() {
             router = router.merge(index_register_with_path(&web_dir_path, web_ui_path.as_str()));
         }

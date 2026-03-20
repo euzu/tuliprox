@@ -1,3 +1,4 @@
+pub mod permission;
 mod user;
 
-pub use self::user::*;
+pub use self::{permission::*, user::*};

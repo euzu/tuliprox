@@ -14,8 +14,8 @@ use crate::{
 };
 use shared::{
     model::{
-        ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto,
-        SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+        permission::Permission, ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType,
+        M3uTargetOutputDto, SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
     },
     utils::BATCH_SCHEME_PREFIX,
 };
@@ -382,6 +382,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let services = use_service_context();
+    let can_write_sources = services.auth.has_permission(Permission::SourceWrite);
     let translate = use_translation();
 
     let force_update = use_state(|| 0);
@@ -637,6 +638,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let cursor_grabbing = cursor_grabbing.clone();
         Callback::from(move |e: DragEvent| {
+            if !can_write_sources {
+                return;
+            }
             editor_state_ref.borrow_mut().selection.reset_selection();
             if let Some(target) = e.target_dyn_into::<HtmlElement>() {
                 let block_type = target.get_attribute("data-block-type").unwrap_or_default();
@@ -661,6 +665,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let emit_sources_change = emit_sources_change.clone();
 
         Callback::from(move |e: DragEvent| {
+            if !can_write_sources {
+                return;
+            }
             e.prevent_default();
             e.stop_propagation();
             cursor_grabbing.set(false);
@@ -1242,7 +1249,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     // ----------------- Delete handlers -----------------
     let handle_toggle_delete_mode = {
         let delete_mode = delete_mode.clone();
-        Callback::from(move |_| delete_mode.set(!*delete_mode))
+        Callback::from(move |_| {
+            if can_write_sources {
+                delete_mode.set(!*delete_mode);
+            }
+        })
     };
 
     // Deleting a Block means updating the following block ids,
@@ -1252,6 +1263,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let force_update = force_update.clone();
         let emit_sources_change = emit_sources_change.clone();
         Callback::from(move |block_id: BlockId| {
+            if !can_write_sources {
+                return;
+            }
             let mut editor_state = editor_state_ref.borrow_mut();
             let before_blocks = editor_state.blocks.len();
             editor_state.blocks.retain(|b| b.id != block_id);
@@ -1291,6 +1305,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let force_update = force_update.clone();
         let emit_sources_change = emit_sources_change.clone();
         Callback::from(move |(from, to): (BlockId, BlockId)| {
+            if !can_write_sources {
+                return;
+            }
             let mut editor_state = editor_state_ref.borrow_mut();
             let before_connections = editor_state.connections.len();
             editor_state.connections.retain(|c| !(c.from == from && c.to == to));
@@ -1345,6 +1362,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let edit_mode_set = edit_mode.clone();
         let editor_state_ref = editor_state_ref.clone();
         Callback::from(move |block_id: BlockId| {
+            if !can_write_sources {
+                return;
+            }
             let mut editor_state = editor_state_ref.borrow_mut();
             if let Some(block) = editor_state.get_block(block_id) {
                 edit_mode_set.set(EditMode::Active(block.clone()));
@@ -1415,7 +1435,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 <div class="tp__config-view__header-tools">
                 </div>
                 {
-                    if props.show_save_button {
+                    if props.show_save_button && services.auth.has_permission(Permission::SourceWrite) {
                         html! {
                             <TextButton name="sources_save"
                                 class={ "secondary" }
@@ -1430,6 +1450,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             </div>
         <div class="tp__source-editor__content">
             <SourceEditorSidebar
+                allow_write={can_write_sources}
                 delete_mode={*delete_mode}
                 on_drag_start={handle_drag_start.clone()}
                 on_toggle_delete={handle_toggle_delete_mode.clone()}

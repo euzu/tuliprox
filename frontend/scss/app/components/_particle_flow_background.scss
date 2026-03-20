@@ -19,5 +19,5 @@
       color-mix(in srgb, var(--particle-flow-background-color), var(--particle-flow-background-accent-color-2) 12%) 0%,
       transparent 45%
     ),
-    linear-gradient(180deg, var(--particle-flow-background-color) 0%, var(--background-color) 84%);
+    linear-gradient(180deg, var(--particle-flow-background-color) 0%, var(--particle-flow-background-accent-color-2) 84%);
 }

@@ -329,6 +329,7 @@ Controls the Web UI itself:
 - `secret`
 - `token_ttl_mins`
 - `userfile`
+- `groupfile`
 
 Example:
 
@@ -341,10 +342,59 @@ web_ui:
     issuer: tuliprox
     secret: "<jwt secret>"
     userfile: user.txt
+    groupfile: groups.txt
 ```
 
-The `userfile` format is `username:password_hash` per line.
 Password hashes can be generated with `tuliprox --genpwd`.
+
+### `userfile` format
+
+The `userfile` uses an extended format that is backward compatible with the previous `username:hash` format:
+
+```text
+# username:argon2_hash[:group1,group2,...]
+admin:$argon2id$v=19$...              # no groups field -> defaults to "admin"
+alice:$argon2id$v=19$...:viewer
+bob:$argon2id$v=19$...:user_manager,source_manager
+```
+
+- Lines starting with `#` are comments, empty lines are ignored.
+- The optional third field (after the second `:`) assigns group memberships.
+- If the third field is missing, the user defaults to the `admin` group (backward compatibility).
+- Users belonging to the `admin` group have full access; other groups are silently ignored for admin users.
+- Users can belong to multiple groups; permissions are the union of all group permissions.
+
+### `groupfile` format
+
+The `groupfile` (default: `groups.txt` in the same directory as `userfile`) defines permission groups:
+
+```text
+# group_name:permission1,permission2,...
+viewer:config.read,source.read,user.read,playlist.read,library.read,system.read,epg.read
+user_manager:user.read,user.write
+source_manager:source.read,source.write
+config_manager:config.read,config.write
+playlist_manager:playlist.read,playlist.write
+full_manager:config.read,config.write,source.read,source.write,user.read,user.write,playlist.read,playlist.write,library.read,library.write,system.read,system.write,epg.read
+```
+
+- The `admin` group is built-in (always grants all permissions) and must not be defined in this file.
+- If the file does not exist, only the built-in `admin` group is available.
+- Groups and users can also be managed through the RBAC admin panel in the Web UI.
+
+### Permission domains
+
+| Domain     | `.read`              | `.write`                        |
+|------------|----------------------|---------------------------------|
+| `config`   | view main config     | edit main config                |
+| `source`   | view sources         | edit sources                    |
+| `user`     | list proxy users     | create/edit/delete proxy users  |
+| `playlist` | view playlists       | update/refresh playlists        |
+| `library`  | view library         | scan/manage library             |
+| `system`   | view status/streams  | GeoIP update, file downloads    |
+| `epg`      | view EPG data        | *(reserved for future use)*     |
+
+Write does not imply read. A group must explicitly grant both `domain.read` and `domain.write` if users need to view and edit content.
 
 ## Access control and stream fallback
 

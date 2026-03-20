@@ -1,6 +1,6 @@
 use crate::model::{
-    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState,
-    StatusCheck, SystemInfo,
+    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PermissionSet,
+    PlaylistUpdateState, StatusCheck, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,7 @@ impl UserRole {
 #[derive(Default)]
 pub struct ProtocolHandlerMemory {
     pub token: Option<String>,
+    pub permissions: PermissionSet,
     pub role: UserRole,
 }
 

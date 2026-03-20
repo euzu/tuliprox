@@ -13,6 +13,7 @@
     border-radius: var(--border-radius);
     background-color: var(--input-background-color);
     align-items: center;
+    padding-right: var(--padding-mini);
 
     &:focus-within {
       border-color: var(--input-focus-border-color);

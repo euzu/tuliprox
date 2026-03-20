@@ -2,13 +2,17 @@ use crate::{
     app::components::{
         userlist::user_table::UserTable, DropDownOption, Search, TextButton, UserlistContext, UserlistPage,
     },
+    hooks::use_service_context,
+    html_if,
     i18n::use_translation,
 };
+use shared::model::permission::Permission;
 use yew::prelude::*;
 
 #[component]
 pub fn UserlistList() -> Html {
     let translate = use_translation();
+    let services = use_service_context();
     let userlist_ctx = use_context::<UserlistContext>().expect("Userlist context not found");
     let search_fields = use_memo((), |_| {
         vec![
@@ -48,10 +52,12 @@ pub fn UserlistList() -> Html {
           <h1>{ translate.t("LABEL.USERS")}</h1>
           <div class="tp__userlist-list__header-toolbar">
               <Search min_length={1} onsearch={handle_search} options={search_fields.clone()}/>
-              <TextButton class="primary" name="new_userlist"
-                icon="PersonAdd"
-                title={ translate.t("LABEL.NEW_USER")}
-                onclick={handle_create}></TextButton>
+              { html_if!(services.auth.has_permission(Permission::UserWrite), {
+                  <TextButton class="primary" name="new_userlist"
+                    icon="PersonAdd"
+                    title={ translate.t("LABEL.NEW_USER")}
+                    onclick={handle_create}></TextButton>
+              })}
           </div>
         </div>
         <div class="tp__userlist-list__body tp__list-list__body">

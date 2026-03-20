@@ -1,15 +1,11 @@
-use crate::{
-    api::{
-        model::AppState,
-        panel_api::{sync_panel_api_alias_pool_for_target, target_has_alias_pool_min},
-    },
-    model::{ApiProxyConfig, ProxyUserCredentials, TargetUser},
-    repository::store_api_user,
-};
+use crate::{api::{
+    model::AppState,
+    panel_api::{sync_panel_api_alias_pool_for_target, target_has_alias_pool_min},
+}, auth::{require_permission_inner, permission_layer}, model::{ApiProxyConfig, ProxyUserCredentials, TargetUser}, repository::store_api_user};
 use axum::{response::IntoResponse, Router};
 use serde_json::json;
 use shared::{
-    model::{ApiProxyConfigDto, ProxyUserCredentialsDto},
+    model::{permission::Permission, ApiProxyConfigDto, ProxyUserCredentialsDto},
     utils::mask_credentials,
 };
 use std::{path::Path, sync::Arc};
@@ -215,4 +211,23 @@ pub fn v1_api_user_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<A
         .route("/user/{target}", axum::routing::post(save_config_api_proxy_user))
         .route("/user/{target}", axum::routing::put(save_config_api_proxy_user))
         .route("/user/{target}/{username}", axum::routing::delete(delete_config_api_proxy_user))
+}
+
+pub fn v1_api_user_register_with_permissions(
+    router: Router<Arc<AppState>>,
+    app_state: &Arc<AppState>,
+) -> axum::Router<Arc<AppState>> {
+    let user_write_routes = Router::new()
+        .route(
+            "/{target}",
+            axum::routing::post(save_config_api_proxy_user)
+                .put(save_config_api_proxy_user)
+        )
+        .route(
+            "/{target}/{username}",
+            axum::routing::delete(delete_config_api_proxy_user)
+        )
+        .layer(permission_layer!(app_state, Permission::UserWrite));
+
+    router.nest("/user", user_write_routes)
 }

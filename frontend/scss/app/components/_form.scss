@@ -56,6 +56,10 @@
   }
 }
 
+.tp__form-field__label {
+  @include tp-field-label-base;
+}
+
 .tp__field-label {
   display: flex;
   align-items: center;

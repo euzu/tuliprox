@@ -139,7 +139,7 @@ pub fn HdHomerunConfigView() -> Html {
     html! {
         <div class="tp__hdhomerun-config-view tp__config-view-page">
             <div class="tp__config-view-page__title">{translate.t(LABEL_HDHOMERUN_CONFIG)}</div>
-            <div class="hdhomerun-config-view__body tp__config-view-page__header">
+            <div class="tp__hdhomerun-config-view__header tp__config-view-page__header">
               {if  edit_mode {
                  html! {
                  <>
@@ -166,7 +166,7 @@ pub fn HdHomerunConfigView() -> Html {
                     <TextButton class="primary" name="add_hdhomerun_device" title={ translate.t("LABEL.ADD_DEVICE")} onclick={handle_add_device}></TextButton>
                 </div>
             })}
-            <div class="hdhomerun-config-view__body tp__config-view-page__body">
+            <div class="tp__hdhomerun-config-view__body tp__config-view-page__body">
               {render_devices(&form_state.form.devices)}
             </div>
         </div>

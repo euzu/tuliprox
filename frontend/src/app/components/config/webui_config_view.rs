@@ -25,6 +25,7 @@ const LABEL_ISSUER: &str = "LABEL.ISSUER";
 const LABEL_SECRET: &str = "LABEL.SECRET";
 const LABEL_TOKEN_TTL_MINS: &str = "LABEL.TOKEN_TTL_MINS";
 const LABEL_USERFILE: &str = "LABEL.USERFILE";
+const LABEL_GROUPFILE: &str = "LABEL.GROUPFILE";
 const LABEL_PLAYER_SERVER: &str = "LABEL.PLAYER_SERVER";
 const LABEL_KICK_DURATION: &str = "LABEL.KICK_DURATION";
 const LABEL_USER_UI_ENABLED: &str = "LABEL.USER_UI_ENABLED";
@@ -56,6 +57,7 @@ generate_form_reducer!(
         Secret => secret: String,
         TokenTtlMins => token_ttl_mins: u32,
         Userfile => userfile: Option<String>,
+        Groupfile => groupfile: Option<String>,
     }
 );
 
@@ -171,6 +173,7 @@ pub fn WebUiConfigView() -> Html {
             { config_field_hide!(auth_state.form, translate.t(LABEL_SECRET), secret) }
             { config_field!(auth_state.form, translate.t(LABEL_TOKEN_TTL_MINS), token_ttl_mins) }
             { config_field_optional!(auth_state.form, translate.t(LABEL_USERFILE), userfile) }
+            { config_field_optional!(auth_state.form, translate.t(LABEL_GROUPFILE), groupfile) }
             </Card>
         </>
         }
@@ -200,6 +203,7 @@ pub fn WebUiConfigView() -> Html {
                     { edit_field_text!(auth_state, translate.t(LABEL_SECRET), secret, WebUiAuthConfigFormAction::Secret, true) }
                     { edit_field_number!(auth_state, translate.t(LABEL_TOKEN_TTL_MINS), token_ttl_mins, WebUiAuthConfigFormAction::TokenTtlMins) }
                     { edit_field_text_option!(auth_state, translate.t(LABEL_USERFILE), userfile, WebUiAuthConfigFormAction::Userfile) }
+                    { edit_field_text_option!(auth_state, translate.t(LABEL_GROUPFILE), groupfile, WebUiAuthConfigFormAction::Groupfile) }
                 </Card>
             </>
         }

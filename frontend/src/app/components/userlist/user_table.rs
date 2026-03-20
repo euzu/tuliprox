@@ -9,13 +9,14 @@ use crate::{
         ConfigContext, TargetUserList,
     },
     hooks::use_service_context,
+    html_if,
     i18n::use_translation,
     model::DialogResult,
     services::DialogService,
 };
 use shared::{
     error::{info_err_res, TuliproxError},
-    model::SortOrder,
+    model::{permission::Permission, SortOrder},
     utils::{unix_ts_to_str, Substring},
 };
 use std::{cmp::Ordering, collections::HashSet, fmt::Display, rc::Rc, str::FromStr};
@@ -113,6 +114,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let userlist_context = use_context::<UserlistContext>().expect("Userlist context not found");
+    let can_write_users = service_ctx.auth.has_permission(Permission::UserWrite);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
     let selected_dto = use_state(|| None::<Rc<TargetUser>>);
@@ -288,13 +290,19 @@ pub fn UserTable(props: &UserTableProps) -> Html {
             if let Ok(action) = TableAction::from_str(&name) {
                 match action {
                     TableAction::Edit => {
-                        if let Some(dto) = &*selected_dto {
-                            ul_context.selected_user.set(Some(Rc::clone(dto)));
-                            ul_context.active_page.set(UserlistPage::Edit);
+                        if can_write_users {
+                            if let Some(dto) = &*selected_dto {
+                                ul_context.selected_user.set(Some(Rc::clone(dto)));
+                                ul_context.active_page.set(UserlistPage::Edit);
+                            }
                         }
                     }
                     TableAction::Refresh => {}
                     TableAction::Delete => {
+                        if !can_write_users {
+                            popup_is_open_state.set(false);
+                            return;
+                        }
                         let confirm = confirm.clone();
                         let translator = translate.clone();
                         let services = services.clone();
@@ -383,10 +391,16 @@ pub fn UserTable(props: &UserTableProps) -> Html {
               <>
                <Table::<TargetUser> definition={table_definition.clone()} />
                 <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
-                    <MenuItem icon="Edit" name={TableAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click}></MenuItem>
+                    { html_if!(can_write_users, {
+                        <MenuItem icon="Edit" name={TableAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click}></MenuItem>
+                    })}
                     <MenuItem icon="Clipboard" name={TableAction::CopyCredentials.to_string()} label={translate.t("LABEL.COPY_CREDENTIALS")} onclick={&handle_menu_click}></MenuItem>
-                    <hr/>
-                    <MenuItem icon="Delete" name={TableAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action"></MenuItem>
+                    { html_if!(can_write_users, {
+                        <>
+                            <hr/>
+                            <MenuItem icon="Delete" name={TableAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action"></MenuItem>
+                        </>
+                    })}
                 </PopupMenu>
             </>
              }
