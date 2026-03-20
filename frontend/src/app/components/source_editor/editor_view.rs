@@ -1349,6 +1349,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let emit_sources_change = emit_sources_change.clone();
         Callback::<(BlockId, BlockInstance)>::from(move |(block_id, instance): (BlockId, BlockInstance)| {
+            if !can_write_sources {
+                return;
+            }
             let mut editor_state = editor_state_ref.borrow_mut();
             if let Some(block) = editor_state.get_block_mut(block_id) {
                 block.instance = match instance {

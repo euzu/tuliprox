@@ -66,7 +66,6 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
     }
 
     let render_output = || {
-        let output_form_state_1 = output_form_state.clone();
         if !props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
@@ -82,6 +81,7 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
                 </Card>
             }
         } else {
+            let output_form_state_1 = output_form_state.clone();
             html! {
                 <Card class="tp__config-view__card">
                     { edit_field_text!(output_form_state, translate.t(LABEL_DEVICE), device, HdHomeRunTargetOutputFormAction::Device) }
