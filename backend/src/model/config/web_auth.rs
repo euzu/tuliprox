@@ -703,7 +703,7 @@ mod tests {
 
         let debug = format!("{user:?}");
         assert!(debug.contains("alice"));
-        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("*****"));
         assert!(!debug.contains("secret-hash"));
     }
 }
