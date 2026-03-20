@@ -744,6 +744,8 @@ pub async fn update_series_metadata(
             if content.is_empty() {
                 debug!("Series {display_id}: provider returned empty content for info fetch");
             } else {
+                let canonical_series_id =
+                    existing_item.as_ref().map_or(series_id, PlaylistEntry::get_virtual_id);
                 match serde_json::from_str::<Value>(&content) {
                     Ok(mut json_value) => {
                         if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {
@@ -752,23 +754,25 @@ pub async fn update_series_metadata(
 
                         match serde_json::from_value::<XtreamSeriesInfo>(json_value) {
                             Ok(info) => {
-                                props = Some(if let Some(existing) = &existing_item {
-                                    debug!("Series {display_id}: building props from info with existing item");
-                                    SeriesStreamProperties::from_info(&info, existing)
-                                } else {
-                                    debug!("Series {display_id}: building props from info without existing item (not yet in DB)");
-                                    SeriesStreamProperties::from_info_without_existing(&info, series_id)
-                                });
+                                debug!("Series {display_id}: building props from info using canonical series id {canonical_series_id}");
+                                props = Some(SeriesStreamProperties::from_info_without_existing(
+                                    &info,
+                                    canonical_series_id,
+                                ));
                                 fetched_new = true;
                                 properties_updated = true;
                             }
                             Err(e) => {
-                                debug!("Series {display_id}: failed to parse XtreamSeriesInfo: {e}");
+                                return Err(shared::error::info_err!(
+                                    "Series {display_id}: failed to parse XtreamSeriesInfo: {e}. Raw response: {content}"
+                                ));
                             }
                         }
                     }
                     Err(e) => {
-                        debug!("Series {display_id}: failed to parse provider response as JSON: {e}");
+                        return Err(shared::error::info_err!(
+                            "Series {display_id}: failed to parse provider response as JSON: {e}. Raw response: {content}"
+                        ));
                     }
                 }
             }

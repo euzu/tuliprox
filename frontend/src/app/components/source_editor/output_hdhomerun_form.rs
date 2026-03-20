@@ -74,7 +74,10 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
                     { config_field!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
                     { config_field_custom!(
                         translate.t(LABEL_USE_OUTPUT),
-                        output_form_state.form.use_output.map_or_else(String::new, |output| output.to_string())
+                        output_form_state
+                            .form
+                            .use_output
+                            .map_or_else(|| TargetType::M3u.to_string(), |output| output.to_string())
                     ) }
                 </Card>
             }
