@@ -1132,7 +1132,7 @@ pub async fn stream_response(
             0
         };
 
-        let mut is_stream_shared = share_stream;
+        let mut is_stream_shared = share_stream && !deferred_grace_hold_stream;
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
             if stream_details.stream.is_some() {
                 is_stream_shared = false;
