@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 const STREAM_METER_INTERVAL: Duration = Duration::from_secs(3);
 const STREAM_METER_INTERVAL_SECS: u64 = STREAM_METER_INTERVAL.as_secs();
@@ -34,6 +35,7 @@ pub struct EventManager {
     meter_channel_tx: tokio::sync::broadcast::Sender<Vec<StreamMeterEntry>>,
     meter_registry: Arc<RwLock<MeterRegistry>>,
     stream_meter_subscriber_count: Arc<AtomicUsize>,
+    meter_sampler_cancel: CancellationToken,
 }
 
 #[derive(Debug, Default)]
@@ -49,11 +51,13 @@ impl EventManager {
         let (meter_channel_tx, _meter_channel_rx) = tokio::sync::broadcast::channel(10);
         let meter_registry = Arc::new(RwLock::new(MeterRegistry::default()));
         let stream_meter_subscriber_count = Arc::new(AtomicUsize::new(0));
+        let meter_sampler_cancel = CancellationToken::new();
 
         Self::spawn_meter_sampler(
             meter_channel_tx.clone(),
             Arc::clone(&meter_registry),
             Arc::clone(&stream_meter_subscriber_count),
+            meter_sampler_cancel.clone(),
         );
 
         Self {
@@ -61,6 +65,7 @@ impl EventManager {
             meter_channel_tx,
             meter_registry,
             stream_meter_subscriber_count,
+            meter_sampler_cancel,
         }
     }
 
@@ -68,13 +73,17 @@ impl EventManager {
         meter_channel_tx: tokio::sync::broadcast::Sender<Vec<StreamMeterEntry>>,
         meter_registry: Arc<RwLock<MeterRegistry>>,
         stream_meter_subscriber_count: Arc<AtomicUsize>,
+        cancel_token: CancellationToken,
     ) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(STREAM_METER_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    () = cancel_token.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
 
                 if stream_meter_subscriber_count.load(Ordering::Relaxed) == 0 {
                     continue;
@@ -254,6 +263,12 @@ impl Default for EventManager {
     fn default() -> Self { Self::new() }
 }
 
+impl Drop for EventManager {
+    fn drop(&mut self) {
+        self.meter_sampler_cancel.cancel();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::EventManager;
@@ -268,9 +283,8 @@ mod tests {
         manager.register_meter(Arc::clone(&meter)).await;
         manager.register_meter_client(41, 7).await;
         manager.register_meter_client(42, 7).await;
-        manager.stream_meter_subscriber_connected();
-
         let mut meter_events = manager.get_meter_channel();
+        manager.stream_meter_subscriber_connected();
         meter.record_bytes(15_728_640);
 
         advance(Duration::from_secs(3)).await;
@@ -316,10 +330,9 @@ mod tests {
         let meter = Arc::new(StreamMeterHandle::new(5));
         manager.register_meter(Arc::clone(&meter)).await;
         manager.register_meter_client(11, 5).await;
-        manager.stream_meter_subscriber_connected();
-
         let mut main_events = manager.get_event_channel();
         let mut meter_events = manager.get_meter_channel();
+        manager.stream_meter_subscriber_connected();
 
         meter.record_bytes(3_145_728);
         advance(Duration::from_secs(3)).await;

@@ -325,6 +325,11 @@ fn handle_socket_protocol_msg(
                             event_service.broadcast(EventMessage::ConfigChange(config_type));
                         }
                     }
+                    // Deliberate backward-compat gate: supports_server_error_messages(peer_version.get())
+                    // stays false until version negotiation completes, so pre-handshake ServerError
+                    // messages are intentionally dropped rather than logged or sent to
+                    // event_service.broadcast(...). The server guarantees it won't send ServerError
+                    // before the handshake, and clients start with peer_version = 0.
                     ProtocolMessage::ServerError(error) => {
                         if supports_server_error_messages(peer_version.get()) {
                             event_service.broadcast(EventMessage::ServerError(error));
