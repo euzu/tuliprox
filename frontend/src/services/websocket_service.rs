@@ -342,9 +342,9 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::LibraryScanProgressResponse(msg) => {
                         event_service.broadcast(EventMessage::LibraryScanProgress(msg));
                     }
-                    ProtocolMessage::Version(_) => {
+                    ProtocolMessage::Version(version) => {
                         attempt_counter.set(0);
-                        peer_version.set(PROTOCOL_VERSION);
+                        peer_version.set(version);
                         if let Some(token) = get_token() {
                             return Some(ProtocolMessage::Auth(token));
                         } else {

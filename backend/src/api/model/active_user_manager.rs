@@ -497,7 +497,7 @@ impl ActiveUserManager {
                     let client_ip = fingerprint.client_ip.clone();
                     stream_info.meter_uid = meter_uid;
                     stream_info.addr = fingerprint.addr;
-                    stream_info.client_ip = client_ip.clone();
+                    stream_info.client_ip.clone_from(&client_ip);
                     stream_info.country = self.lookup_country(&client_ip);
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();

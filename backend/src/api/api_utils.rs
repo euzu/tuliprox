@@ -872,6 +872,7 @@ where
 }
 
 /// # Panics
+#[allow(clippy::too_many_lines)]
 pub async fn force_provider_stream_response(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,

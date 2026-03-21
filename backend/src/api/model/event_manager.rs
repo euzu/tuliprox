@@ -205,13 +205,13 @@ impl EventManager {
 }
 
 async fn sample_meter_entries(meter_registry: &RwLock<MeterRegistry>) -> Vec<StreamMeterEntry> {
-    let (has_subscribers, samples) = {
+    let samples = {
         let registry = meter_registry.read().await;
         if registry.meters.is_empty() || registry.meter_to_clients.is_empty() {
             return Vec::new();
         }
 
-        let samples = registry
+        registry
             .meters
             .iter()
             .filter_map(|(meter_uid, meter)| {
@@ -220,11 +220,10 @@ async fn sample_meter_entries(meter_registry: &RwLock<MeterRegistry>) -> Vec<Str
                     (*meter_uid, reading, uids.clone())
                 })
             })
-            .collect::<Vec<_>>();
-        (!samples.is_empty(), samples)
+            .collect::<Vec<_>>()
     };
 
-    if !has_subscribers {
+    if samples.is_empty() {
         return Vec::new();
     }
 
