@@ -5,7 +5,7 @@ use crate::{
 };
 use log::{error, trace, warn};
 use shared::{
-    model::{ProtocolMessage, PROTOCOL_VERSION},
+    model::{supports_server_error_messages, supports_stream_meter_messages, ProtocolMessage, PROTOCOL_VERSION},
     utils::concat_path_leading_slash,
 };
 use std::{
@@ -39,6 +39,7 @@ type JsOnOpenCallback = Option<Closure<dyn FnMut(Event)>>;
 pub struct WebSocketService {
     connected: Rc<Cell<bool>>,
     attempt_counter: Rc<Cell<u16>>,
+    peer_version: Rc<Cell<u8>>,
     ws: Rc<RefCell<Option<WebSocket>>>,
     status_service: Rc<StatusService>,
     event_service: Rc<EventService>,
@@ -57,6 +58,7 @@ impl WebSocketService {
         Self {
             connected: Rc::new(Cell::new(false)),
             attempt_counter: Rc::new(Cell::new(0)),
+            peer_version: Rc::new(Cell::new(0)),
             ws: Rc::new(RefCell::new(None)),
             status_service,
             event_service,
@@ -73,6 +75,7 @@ impl WebSocketService {
         Self {
             connected: self.connected.clone(),
             attempt_counter: self.attempt_counter.clone(),
+            peer_version: self.peer_version.clone(),
             ws: self.ws.clone(),
             status_service: self.status_service.clone(),
             event_service: self.event_service.clone(),
@@ -101,12 +104,18 @@ impl WebSocketService {
                     let ws_onmessage_clone = ws_clone.clone();
                     let event_service = self.event_service.clone();
                     let attempt_counter = self.attempt_counter.clone();
+                    let peer_version = self.peer_version.clone();
                     let onmessage_callback =
                         Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(move |event: MessageEvent| {
                             trace!("WebSocket received message: {event:?}");
-                            if let Some(response) = handle_socket_protocol_msg(event, &event_service, &attempt_counter)
+                            if let Some(response) =
+                                handle_socket_protocol_msg(event, &event_service, &attempt_counter, &peer_version)
                             {
-                                Self::try_send_message(ws_onmessage_clone.borrow().as_ref(), response);
+                                Self::try_send_message(
+                                    ws_onmessage_clone.borrow().as_ref(),
+                                    peer_version.get(),
+                                    response,
+                                );
                             }
                         }));
                     socket.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
@@ -124,6 +133,7 @@ impl WebSocketService {
                         trace!("WebSocket connection opened.");
                         if Self::try_send_message(
                             ws_open_clone.borrow().as_ref(),
+                            PROTOCOL_VERSION,
                             ProtocolMessage::Version(PROTOCOL_VERSION),
                         ) {
                             connected_clone.set(true);
@@ -172,6 +182,7 @@ impl WebSocketService {
 
                         *ws_close_rc.borrow_mut() = None;
                         connected_clone.set(false);
+                        ws_service_reconnect_clone.peer_version.set(0);
                         event_service_clone.broadcast(EventMessage::WebSocketStatus(false));
 
                         // schedule reconnect
@@ -224,7 +235,12 @@ impl WebSocketService {
         );
     }
 
-    fn try_send_message(ws_opt: Option<&WebSocket>, msg: ProtocolMessage) -> bool {
+    fn try_send_message(ws_opt: Option<&WebSocket>, peer_version: u8, msg: ProtocolMessage) -> bool {
+        if matches!(msg, ProtocolMessage::StreamMeterSubscribe | ProtocolMessage::StreamMeterUnsubscribe)
+            && !supports_stream_meter_messages(peer_version)
+        {
+            return false;
+        }
         if let Some(ws) = ws_opt {
             match msg.to_bytes() {
                 Ok(bytes) => {
@@ -242,7 +258,9 @@ impl WebSocketService {
         false
     }
 
-    pub fn send_message(&self, msg: ProtocolMessage) -> bool { Self::try_send_message(self.ws.borrow().as_ref(), msg) }
+    pub fn send_message(&self, msg: ProtocolMessage) -> bool {
+        Self::try_send_message(self.ws.borrow().as_ref(), self.peer_version.get(), msg)
+    }
 
     pub async fn get_server_status(&self) {
         if self.connected.get() {
@@ -269,6 +287,7 @@ fn handle_socket_protocol_msg(
     event: MessageEvent,
     event_service: &Rc<EventService>,
     attempt_counter: &Rc<Cell<u16>>,
+    peer_version: &Rc<Cell<u8>>,
 ) -> Option<ProtocolMessage> {
     if let Ok(buf) = event.data().dyn_into::<ArrayBuffer>() {
         let array = Uint8Array::new(&buf);
@@ -281,6 +300,9 @@ fn handle_socket_protocol_msg(
                     }
                     ProtocolMessage::Error(err) => {
                         error!("{err}");
+                    }
+                    ProtocolMessage::Authorized => {
+                        event_service.broadcast(EventMessage::WebSocketStatus(true));
                     }
                     ProtocolMessage::ActiveUserResponse(event) => {
                         event_service.broadcast(EventMessage::ActiveUser(event));
@@ -303,8 +325,15 @@ fn handle_socket_protocol_msg(
                             event_service.broadcast(EventMessage::ConfigChange(config_type));
                         }
                     }
+                    // Deliberate backward-compat gate: supports_server_error_messages(peer_version.get())
+                    // stays false until version negotiation completes, so pre-handshake ServerError
+                    // messages are intentionally dropped rather than logged or sent to
+                    // event_service.broadcast(...). The server guarantees it won't send ServerError
+                    // before the handshake, and clients start with peer_version = 0.
                     ProtocolMessage::ServerError(error) => {
-                        event_service.broadcast(EventMessage::ServerError(error));
+                        if supports_server_error_messages(peer_version.get()) {
+                            event_service.broadcast(EventMessage::ServerError(error));
+                        }
                     }
                     ProtocolMessage::PlaylistUpdateResponse(update_state) => {
                         event_service.broadcast(EventMessage::PlaylistUpdate(update_state));
@@ -318,18 +347,24 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::LibraryScanProgressResponse(msg) => {
                         event_service.broadcast(EventMessage::LibraryScanProgress(msg));
                     }
-                    ProtocolMessage::Version(_) => {
+                    ProtocolMessage::Version(version) => {
                         attempt_counter.set(0);
-                        event_service.broadcast(EventMessage::WebSocketStatus(true));
+                        peer_version.set(version);
                         if let Some(token) = get_token() {
                             return Some(ProtocolMessage::Auth(token));
+                        } else {
+                            event_service.broadcast(EventMessage::WebSocketStatus(true));
                         }
                     }
                     ProtocolMessage::UserActionResponse(_success) => {
                         // Success is already handled in the UI component that initiated the action
                     }
+                    ProtocolMessage::StreamMeterBatchResponse(entries) => {
+                        event_service.broadcast(EventMessage::StreamMeterBatch(entries));
+                    }
                     ProtocolMessage::Auth(_)
-                    | ProtocolMessage::Authorized
+                    | ProtocolMessage::StreamMeterSubscribe
+                    | ProtocolMessage::StreamMeterUnsubscribe
                     | ProtocolMessage::ActiveProviderCountRequest(_)
                     | ProtocolMessage::StatusRequest(_)
                     | ProtocolMessage::UserAction(_) => {}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `reverse_proxy.stream.metrics_enabled` to enable per-stream bandwidth and transferred-bytes metrics in the Web UI streams view.
+
 ## ⚠️ Breaking Changes
 
 - `working_dir` in `config.yml` renamed to `storage_dir`.

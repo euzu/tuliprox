@@ -53,6 +53,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_http::compression::predicate::{DefaultPredicate, Predicate};
 use tower_http::services::ServeDir;
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
@@ -358,8 +359,23 @@ fn create_cors_layer() -> tower_http::cors::CorsLayer {
         .allow_headers(tower_http::cors::Any)
         .max_age(std::time::Duration::from_secs(3600))
 }
-fn create_compression_layer() -> tower_http::compression::CompressionLayer {
-    tower_http::compression::CompressionLayer::new().br(true).deflate(true).gzip(true).zstd(true)
+fn allow_response_compression(
+    _status: axum::http::StatusCode,
+    _version: axum::http::Version,
+    _headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> bool {
+    crate::api::api_utils::should_compress_response_extensions(extensions)
+}
+
+fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
+    let predicate = DefaultPredicate::new().and(allow_response_compression);
+    tower_http::compression::CompressionLayer::new()
+        .br(true)
+        .deflate(true)
+        .gzip(true)
+        .zstd(true)
+        .compress_when(predicate)
 }
 
 pub(in crate::api) fn start_hdhomerun(

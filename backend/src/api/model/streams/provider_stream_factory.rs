@@ -1,8 +1,8 @@
 use crate::{
-    api::{
-        api_utils::{get_headers_from_request, StreamOptions},
-        model::{
-            create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
+        api::{
+            api_utils::{get_headers_from_request, StreamOptions},
+            model::{
+                create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
             streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
             AppState, BoxedProviderStream, CustomVideoStreamType, ProviderStreamFactoryResponse, StreamError,
         },
@@ -70,27 +70,39 @@ pub struct ProviderStreamFactoryOptions {
     provider: Option<Arc<ConfigProvider>>,
 }
 
+pub(crate) struct ProviderStreamFactoryParams<'a> {
+    pub addr: SocketAddr,
+    pub item_type: PlaylistItemType,
+    pub share_stream: bool,
+    pub stream_options: &'a StreamOptions,
+    pub stream_url: &'a Url,
+    pub req_headers: &'a HeaderMap,
+    pub input_headers: Option<&'a HashMap<String, String>>,
+    pub disabled_headers: Option<&'a ReverseProxyDisabledHeaderConfig>,
+    pub default_user_agent: Option<&'a str>,
+}
+
 impl ProviderStreamFactoryOptions {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        addr: SocketAddr,
-        item_type: PlaylistItemType,
-        share_stream: bool,
-        stream_options: &StreamOptions,
-        stream_url: &Url,
-        req_headers: &HeaderMap,
-        input_headers: Option<&HashMap<String, String>>,
-        disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
-        default_user_agent: Option<&str>,
-    ) -> Self {
+    pub(crate) fn new(request: &ProviderStreamFactoryParams<'_>) -> Self {
+        let ProviderStreamFactoryParams {
+            addr,
+            item_type,
+            share_stream,
+            stream_options,
+            stream_url,
+            req_headers,
+            input_headers,
+            disabled_headers,
+            default_user_agent,
+        } = request;
         let buffer_size = if stream_options.buffer_enabled { stream_options.buffer_size } else { 0 };
-        let filter_header = get_header_filter_for_item_type(item_type);
+        let filter_header = get_header_filter_for_item_type(*item_type);
         let mut req_headers = get_headers_from_request(req_headers, &filter_header);
         let requested_range = get_request_range_start_bytes(&req_headers);
         req_headers.remove("range");
 
         // We merge configured input headers with the headers from the request.
-        let headers = get_request_headers(input_headers, Some(&req_headers), disabled_headers, default_user_agent);
+        let headers = get_request_headers(*input_headers, Some(&req_headers), *disabled_headers, *default_user_agent);
 
         let default_user_agent = default_user_agent
             .and_then(|ua| {
@@ -99,7 +111,7 @@ impl ProviderStreamFactoryOptions {
             })
             .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
 
-        let url = stream_url.clone();
+        let url = (*stream_url).clone();
         let range_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
             requested_range.map(|v| Arc::new(AtomicUsize::new(v)))
         } else {
@@ -115,7 +127,7 @@ impl ProviderStreamFactoryOptions {
         if stream_options.buffer_enabled {
             flags.set(ProviderStreamFactoryFlags::BufferEnabled);
         }
-        if share_stream {
+        if *share_stream {
             flags.set(ProviderStreamFactoryFlags::ShareStream);
         }
         if requested_range.is_some() {
@@ -124,7 +136,7 @@ impl ProviderStreamFactoryOptions {
 
         Self {
             // item_type,
-            addr,
+            addr: *addr,
             flags,
             buffer_size,
             reconnect_flag: CancellationToken::new(),
@@ -188,6 +200,12 @@ impl ProviderStreamFactoryOptions {
 
         std::borrow::Cow::Owned(preview_request_target_for_logging(&self.url, self.provider.as_ref()))
     }
+}
+
+fn should_wrap_provider_stream_in_buffer(stream_options: &ProviderStreamFactoryOptions) -> bool {
+    !stream_options.is_piped()
+        && !stream_options.flags.contains(ProviderStreamFactoryFlags::ShareStream)
+        && stream_options.is_buffer_enabled()
 }
 
 fn get_request_range_start_bytes(req_headers: &HashMap<String, Vec<u8>>) -> Option<usize> {
@@ -442,13 +460,7 @@ async fn provider_stream_request(
                     Some((response_headers, response.status(), Some(response.url().clone()), None))
                 };
 
-                let provider_stream = response
-                    .bytes_stream()
-                    .map_err(|err| {
-                        // error!("Stream error {err}");
-                        StreamError::reqwest(&err)
-                    })
-                    .boxed();
+                let provider_stream = response.bytes_stream().map_err(|err| StreamError::reqwest(&err)).boxed();
                 return Ok(Some((provider_stream, response_info)));
             }
 
@@ -596,7 +608,7 @@ pub async fn create_provider_stream(
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
     let client_stream_factory = |stream, reconnect_flag, range_cnt| {
-        let stream = if !stream_options.is_piped() && stream_options.is_buffer_enabled() {
+        let stream = if should_wrap_provider_stream_in_buffer(&stream_options) {
             BufferedStream::new(
                 stream,
                 stream_options.get_buffer_size(),
@@ -748,66 +760,66 @@ mod tests {
 
         // Case 1: VOD, no initial range requested
         let mut req_headers = HeaderMap::new();
-        let options = ProviderStreamFactoryOptions::new(
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
-            PlaylistItemType::Video,
-            false,
-            &stream_options,
-            &stream_url,
-            &req_headers,
-            None,
+            item_type: PlaylistItemType::Video,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
             disabled_headers,
-            None,
-        );
+            default_user_agent: None,
+        });
         assert!(!options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), Some(0)); // Should track even if not requested
 
         // Case 2: VOD, range requested
         req_headers.insert("Range", "bytes=100-".parse().unwrap());
-        let options = ProviderStreamFactoryOptions::new(
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
-            PlaylistItemType::Video,
-            false,
-            &stream_options,
-            &stream_url,
-            &req_headers,
-            None,
+            item_type: PlaylistItemType::Video,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
             disabled_headers,
-            None,
-        );
+            default_user_agent: None,
+        });
         assert!(options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), Some(100));
 
         // Case 3: Live, no initial range requested
         let req_headers = HeaderMap::new();
-        let options = ProviderStreamFactoryOptions::new(
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
-            PlaylistItemType::Live,
-            false,
-            &stream_options,
-            &stream_url,
-            &req_headers,
-            None,
+            item_type: PlaylistItemType::Live,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
             disabled_headers,
-            None,
-        );
+            default_user_agent: None,
+        });
         assert!(!options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), None); // Should NOT track
 
         // Case 4: Live, range requested (should be stripped)
         let mut req_headers = HeaderMap::new();
         req_headers.insert("Range", "bytes=100-".parse().unwrap());
-        let options = ProviderStreamFactoryOptions::new(
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
-            PlaylistItemType::Live,
-            false,
-            &stream_options,
-            &stream_url,
-            &req_headers,
-            None,
+            item_type: PlaylistItemType::Live,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
             disabled_headers,
-            None,
-        );
+            default_user_agent: None,
+        });
         assert!(!options.was_range_requested()); // Stripped by filter
         assert_eq!(options.get_total_bytes_send(), None);
     }
@@ -820,31 +832,57 @@ mod tests {
         let stream_options =
             StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
 
-        let hls_options = ProviderStreamFactoryOptions::new(
+        let hls_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
-            PlaylistItemType::LiveHls,
-            false,
-            &stream_options,
-            &stream_url,
-            &req_headers,
-            None,
-            None,
-            None,
-        );
+            item_type: PlaylistItemType::LiveHls,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
+            disabled_headers: None,
+            default_user_agent: None,
+        });
 
-        let dash_options = ProviderStreamFactoryOptions::new(
+        let dash_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
-            PlaylistItemType::LiveDash,
-            false,
-            &stream_options,
-            &stream_url,
-            &req_headers,
-            None,
-            None,
-            None,
-        );
+            item_type: PlaylistItemType::LiveDash,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
+            disabled_headers: None,
+            default_user_agent: None,
+        });
 
         assert!(!hls_options.should_reconnect());
         assert!(!dash_options.should_reconnect());
+    }
+
+    #[test]
+    fn test_shared_streams_do_not_use_provider_buffer_wrapper() {
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let stream_url = Url::parse("http://example.com/shared.ts").unwrap();
+        let req_headers = HeaderMap::new();
+        let stream_options =
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+
+        let shared_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
+            addr,
+            item_type: PlaylistItemType::Live,
+            share_stream: true,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
+            disabled_headers: None,
+            default_user_agent: None,
+        });
+
+        assert!(
+            !should_wrap_provider_stream_in_buffer(&shared_options),
+            "shared streams must bypass provider-side BufferedStream"
+        );
     }
 }

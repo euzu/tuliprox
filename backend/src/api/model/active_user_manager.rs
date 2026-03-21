@@ -99,6 +99,33 @@ struct SocketRegistration {
     ts: u64,
 }
 
+pub struct ReleasedConnection {
+    pub addr_removed: bool,
+    pub removed_streams: Vec<StreamInfo>,
+}
+
+pub struct ActiveUserConnectionParams<'a> {
+    pub uid: u32,
+    pub meter_uid: u32,
+    pub username: &'a str,
+    pub max_connections: u32,
+    pub fingerprint: &'a Fingerprint,
+    pub provider: &'a str,
+    pub stream_channel: &'a StreamChannel,
+    pub user_agent: Cow<'a, str>,
+    pub session_token: Option<&'a str>,
+}
+
+pub struct CreateUserSessionParams<'a> {
+    pub user: &'a ProxyUserCredentials,
+    pub session_token: &'a str,
+    pub virtual_id: u32,
+    pub provider: &'a str,
+    pub stream_url: &'a str,
+    pub addr: &'a SocketAddr,
+    pub connection_permission: UserConnectionPermission,
+}
+
 impl SocketRegistration {
     fn anonymous() -> Self {
         Self {
@@ -121,6 +148,13 @@ pub struct ActiveUserManager {
 }
 
 impl ActiveUserManager {
+    fn lookup_country(&self, client_ip: &str) -> Option<String> {
+        let geoip = self.geo_ip.load();
+        (*geoip)
+            .as_ref()
+            .and_then(|geoip_db| geoip_db.lookup(&strip_port(client_ip)))
+    }
+
     fn custom_stream_technical_info() -> StreamTechnicalInfo {
         StreamTechnicalInfo {
             container: String::from("mpegts"),
@@ -170,19 +204,16 @@ impl ActiveUserManager {
     /// Releases an active stream for the given socket address without removing the
     /// socket registration (`key_by_addr`). This is used when a stream ends while
     /// the underlying HTTP connection may still remain open.
-    pub async fn release_stream(&self, addr: &SocketAddr) -> bool {
+    pub async fn release_stream(&self, addr: &SocketAddr) -> Option<StreamInfo> {
         let (removed_stream, username) = {
             let mut user_connections = self.connections.write().await;
 
-            let Some(username) = user_connections.key_by_addr.get(addr).map(|reg| reg.username.clone()) else {
-                return false;
-            };
+            let username = user_connections.key_by_addr.get(addr).map(|reg| reg.username.clone())?;
 
-            let mut removed_stream = false;
+            let mut removed_stream = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                 if let Some(stream_idx) = connection_data.streams.iter().position(|c| c.addr == *addr) {
-                    connection_data.streams.swap_remove(stream_idx);
-                    removed_stream = true;
+                    removed_stream = Some(connection_data.streams.swap_remove(stream_idx));
                     if connection_data.connections > 0 {
                         connection_data.connections -= 1;
                     }
@@ -193,9 +224,9 @@ impl ActiveUserManager {
                 }
             }
             (removed_stream, username)
-        };
+};
 
-        if removed_stream {
+        if removed_stream.is_some() {
             if !username.is_empty() {
                 debug_if_enabled!(
                     "Released stream for user {username} at {}",
@@ -208,16 +239,24 @@ impl ActiveUserManager {
         removed_stream
     }
 
-    pub async fn release_connection(&self, addr: &SocketAddr) -> bool {
-        let (addr_removed, disconnected_user) = {
+    pub async fn release_connection(&self, addr: &SocketAddr) -> ReleasedConnection {
+        let (addr_removed, disconnected_user, removed_streams) = {
             let mut user_connections = self.connections.write().await;
 
             if let Some(registration) = user_connections.key_by_addr.remove(addr) {
                 let username = registration.username;
+                let mut removed_streams = Vec::new();
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
-                    let prev_len = connection_data.streams.len();
-                    connection_data.streams.retain(|c| c.addr != *addr);
-                    let removed_count = prev_len.saturating_sub(connection_data.streams.len());
+                    let mut remaining_streams = Vec::with_capacity(connection_data.streams.len());
+                    for stream_info in connection_data.streams.drain(..) {
+                        if stream_info.addr == *addr {
+                            removed_streams.push(stream_info);
+                        } else {
+                            remaining_streams.push(stream_info);
+                        }
+                    }
+                    let removed_count = removed_streams.len();
+                    connection_data.streams = remaining_streams;
                     if removed_count > 0 && connection_data.connections > 0 {
                         connection_data.connections =
                             connection_data.connections.saturating_sub(u32::try_from(removed_count).unwrap_or(0));
@@ -228,9 +267,9 @@ impl ActiveUserManager {
                         connection_data.grace_ts = 0;
                     }
                 }
-                (true, Some(username))
+                (true, Some(username), removed_streams)
             } else {
-                (false, None)
+                (false, None, Vec::new())
             }
         };
 
@@ -247,7 +286,7 @@ impl ActiveUserManager {
             self.log_active_user().await;
         }
 
-        addr_removed
+        ReleasedConnection { addr_removed, removed_streams }
     }
 
     pub fn update_config(&self, config: &Config) {
@@ -398,7 +437,6 @@ impl ActiveUserManager {
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_connection(&self, addr: &SocketAddr) {
         self.gc();
         let mut user_connections = self.connections.write().await;
@@ -409,17 +447,18 @@ impl ActiveUserManager {
             .or_insert_with(SocketRegistration::anonymous);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_connection(
-        &self,
-        username: &str,
-        max_connections: u32,
-        fingerprint: &Fingerprint,
-        provider: &str,
-        stream_channel: StreamChannel,
-        user_agent: Cow<'_, str>,
-        session_token: Option<&str>,
-    ) -> Option<StreamInfo> {
+    pub async fn update_connection(&self, update: ActiveUserConnectionParams<'_>) -> Option<StreamInfo> {
+        let ActiveUserConnectionParams {
+            uid,
+            meter_uid,
+            username,
+            max_connections,
+            fingerprint,
+            provider,
+            stream_channel,
+            user_agent,
+            session_token,
+        } = update;
         let stream_info = {
             let mut user_connections = self.connections.write().await;
 
@@ -455,7 +494,11 @@ impl ActiveUserManager {
                     }
                 })
                 .map(|stream_info| {
+                    let client_ip = fingerprint.client_ip.clone();
+                    stream_info.meter_uid = meter_uid;
                     stream_info.addr = fingerprint.addr;
+                    stream_info.client_ip.clone_from(&client_ip);
+                    stream_info.country = self.lookup_country(&client_ip);
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
@@ -470,21 +513,16 @@ impl ActiveUserManager {
             if let Some(stream_info) = existing_stream_info {
                 stream_info
             } else {
-                let country = {
-                    let geoip = self.geo_ip.load();
-                    if let Some(geoip_db) = (*geoip).as_ref() {
-                        geoip_db.lookup(&strip_port(&fingerprint.client_ip))
-                    } else {
-                        None
-                    }
-                };
+                let country = self.lookup_country(&fingerprint.client_ip);
 
                 let stream_info = StreamInfo::new(
+                    uid,
+                    meter_uid,
                     username,
                     &fingerprint.addr,
                     &fingerprint.client_ip,
                     provider,
-                    stream_channel,
+                    stream_channel.clone(),
                     user_agent_string,
                     country,
                     session_token,
@@ -528,17 +566,16 @@ impl ActiveUserManager {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_user_session(
-        &self,
-        user: &ProxyUserCredentials,
-        session_token: &str,
-        virtual_id: u32,
-        provider: &str,
-        stream_url: &str,
-        addr: &SocketAddr,
-        connection_permission: UserConnectionPermission,
-    ) -> String {
+    pub async fn create_user_session(&self, request: CreateUserSessionParams<'_>) -> String {
+        let CreateUserSessionParams {
+            user,
+            session_token,
+            virtual_id,
+            provider,
+            stream_url,
+            addr,
+            connection_permission,
+        } = request;
         self.gc();
 
         let username = user.username.clone();
@@ -781,15 +818,17 @@ mod tests {
         manager.add_connection(&addr).await;
 
         let first = manager
-            .update_connection(
+            .update_connection(ActiveUserConnectionParams {
+                uid: 0,
+                meter_uid: 0,
                 username,
-                1,
-                &fingerprint,
-                "provider-a",
-                test_channel(1001),
-                Cow::Borrowed("ua"),
-                Some("tok-1"),
-            )
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_channel(1001),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-1"),
+            })
             .await;
         assert!(first.is_some());
         assert_eq!(manager.user_connections(username).await, 1);
@@ -799,23 +838,25 @@ mod tests {
         );
 
         let second = manager
-            .update_connection(
+            .update_connection(ActiveUserConnectionParams {
+                uid: 0,
+                meter_uid: 0,
                 username,
-                1,
-                &fingerprint,
-                "provider-b",
-                test_channel(1002),
-                Cow::Borrowed("ua"),
-                Some("tok-2"),
-            )
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-b",
+                stream_channel: &test_channel(1002),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-2"),
+            })
             .await;
         assert!(second.is_some());
         assert_eq!(manager.user_connections(username).await, 2);
 
-        assert!(manager.release_stream(&addr).await);
+        assert!(manager.release_stream(&addr).await.is_some());
         assert_eq!(manager.user_connections(username).await, 1);
 
-        assert!(manager.release_stream(&addr).await);
+        assert!(manager.release_stream(&addr).await.is_some());
         assert_eq!(manager.user_connections(username).await, 0);
     }
 
@@ -833,15 +874,17 @@ mod tests {
 
         manager.add_connection(&first_addr).await;
         manager
-            .update_connection(
-                "user1",
-                1,
-                &first,
-                "provider-a",
-                test_channel(2001),
-                Cow::Borrowed("ua"),
-                Some("tok-hls"),
-            )
+            .update_connection(ActiveUserConnectionParams {
+                uid: 0,
+                meter_uid: 0,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &first,
+                provider: "provider-a",
+                stream_channel: &test_channel(2001),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-hls"),
+            })
             .await;
 
         assert_eq!(
@@ -851,15 +894,17 @@ mod tests {
 
         manager.add_connection(&second_addr).await;
         manager
-            .update_connection(
-                "user1",
-                1,
-                &second,
-                "provider-a",
-                test_channel(2001),
-                Cow::Borrowed("ua"),
-                Some("tok-hls"),
-            )
+            .update_connection(ActiveUserConnectionParams {
+                uid: 0,
+                meter_uid: 0,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &second,
+                provider: "provider-a",
+                stream_channel: &test_channel(2001),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-hls"),
+            })
             .await;
 
         assert_eq!(manager.user_connections("user1").await, 1);
@@ -868,6 +913,60 @@ mod tests {
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].addr, second_addr);
         assert_eq!(streams[0].session_token.as_deref(), Some("tok-hls"));
+    }
+
+    #[tokio::test]
+    async fn test_same_session_token_refreshes_meter_metadata_on_reuse() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55031".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-key-3".to_string(), "127.0.0.1".to_string(), addr);
+
+        manager.add_connection(&addr).await;
+        let first = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 11,
+                meter_uid: 101,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_channel(3001),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-meter"),
+            })
+            .await
+            .expect("initial stream should register");
+        assert_eq!(first.uid, 11);
+        assert_eq!(first.meter_uid, 101);
+
+        let second = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 22,
+                meter_uid: 202,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-b",
+                stream_channel: &test_channel(3002),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-meter"),
+            })
+            .await
+            .expect("reused stream should register");
+
+        assert_eq!(second.uid, 11, "logical stream identity should stay stable on session reuse");
+        assert_eq!(second.meter_uid, 202, "reused stream must refresh its meter mapping");
+
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].uid, 11);
+        assert_eq!(streams[0].meter_uid, 202);
+        assert_eq!(streams[0].provider, "provider-b");
+        assert_eq!(streams[0].channel.virtual_id, 3002);
     }
 
     #[tokio::test]

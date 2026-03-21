@@ -35,6 +35,8 @@ impl StreamBufferConfigDto {
 pub struct StreamConfigDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub retry: bool,
+    #[serde(default, skip_serializing_if = "crate::utils::is_false")]
+    pub metrics_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<StreamBufferConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -63,6 +65,7 @@ impl Default for StreamConfigDto {
     fn default() -> Self {
         StreamConfigDto {
             retry: true,
+            metrics_enabled: false,
             buffer: None,
             throttle: None,
             grace_period_millis: default_grace_period_millis(),
@@ -79,6 +82,7 @@ impl Default for StreamConfigDto {
 impl StreamConfigDto {
     pub fn is_empty(&self) -> bool {
         self.retry
+            && !self.metrics_enabled
             && (self.buffer.is_none() || self.buffer.as_ref().is_some_and(|b| b.is_empty()))
             && (self.throttle.is_none() || self.throttle.as_ref().is_some_and(|t| t.is_empty()))
             && self.grace_period_millis == default_grace_period_millis()

@@ -269,7 +269,7 @@ pub mod arc_str_serde {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_string(ArcStrVisitor)
+        deserializer.deserialize_option(ArcStrVisitor)
     }
 }
 
@@ -303,6 +303,10 @@ pub mod arc_str_option_serde {
             Some(s) => serializer.serialize_str(s),
         }
     }
+}
+
+pub mod arc_str_option_null_if_empty_serde {
+    pub use super::arc_str_option_serde::{deserialize, serialize_null_if_empty as serialize};
 }
 
 //

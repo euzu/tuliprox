@@ -3,8 +3,8 @@ use crate::{
         api_utils::get_stream_options,
         model::{
             create_provider_stream, AppState, BoxedProviderStream, CleanupEvent, ConnectionManager,
-            CustomVideoStreamType, ProviderHandle, ProviderStreamFactoryOptions, StreamDetails, StreamError,
-            TimedClientStream, TransportStreamBuffer,
+            CustomVideoStreamType, EventManager, MeteringStream, ProviderHandle, ProviderStreamFactoryOptions,
+            StreamDetails, StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -96,6 +96,32 @@ struct DeferredProviderOpenContext {
     provider_stream_factory_options: ProviderStreamFactoryOptions,
 }
 
+pub(crate) struct ActiveClientStreamParams<'a> {
+    pub stream_details: StreamDetails,
+    pub app_state: &'a Arc<AppState>,
+    pub user: &'a ProxyUserCredentials,
+    pub connection_permission: UserConnectionPermission,
+    pub fingerprint: &'a Fingerprint,
+    pub stream_channel: StreamChannel,
+    pub session_token: Option<&'a str>,
+    pub req_headers: &'a HeaderMap,
+    pub meter_uid: u32,
+    pub meter_stream: bool,
+}
+
+struct GracePeriodParams<'a> {
+    app_state: &'a Arc<AppState>,
+    stream_details: &'a StreamDetails,
+    user_grace_period: bool,
+    user: &'a ProxyUserCredentials,
+    fingerprint: &'a Fingerprint,
+    virtual_id: VirtualId,
+    provisioning_info: Option<GraceProvisioningInfo>,
+    waker: Option<Arc<AtomicWaker>>,
+    hold_stream: bool,
+    capacity_notify: Arc<Notify>,
+}
+
 enum DeferredProviderOpenOutcome {
     Stream(BoxedProviderStream),
     Mode(StreamMode),
@@ -118,6 +144,8 @@ struct ActiveClientStreamState {
     grace_task_handle: Option<tokio::task::JoinHandle<()>>,
     provisionable: bool,
     custom_video: CustomVideoBuffers,
+    meter: Option<Arc<StreamMeterHandle>>,
+    event_manager: Arc<EventManager>,
     waker: Option<Arc<AtomicWaker>>,
     connection_manager: Arc<ConnectionManager>,
     fingerprint: Arc<Fingerprint>,
@@ -144,6 +172,11 @@ impl ActiveClientStreamState {
     }
 
     fn wrap_provider_stream(&self, stream: BoxedProviderStream) -> BoxedProviderStream {
+        let stream = if let Some(meter) = &self.meter {
+            MeteringStream::new(stream, Arc::clone(meter), Arc::clone(&self.event_manager)).boxed()
+        } else {
+            stream
+        };
         if let Some(ctx) = self.timed_stream_context.as_ref() {
             TimedClientStream::new(
                 &ctx.app_state,
@@ -388,15 +421,17 @@ fn create_deferred_provider_open_future(
     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
     let disabled_headers = app_state.get_disabled_headers();
     let mut provider_stream_factory_options = ProviderStreamFactoryOptions::new(
-        fingerprint.addr,
-        stream_channel.item_type,
-        stream_channel.shared,
-        &stream_options,
-        &stream_url,
-        req_headers,
-        Some(&input.headers),
-        disabled_headers.as_ref(),
-        default_user_agent.as_deref(),
+        &crate::api::model::ProviderStreamFactoryParams {
+            addr: fingerprint.addr,
+            item_type: stream_channel.item_type,
+            share_stream: stream_channel.shared,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers,
+            input_headers: Some(&input.headers),
+            disabled_headers: disabled_headers.as_ref(),
+            default_user_agent: default_user_agent.as_deref(),
+        },
     );
     provider_stream_factory_options.set_provider(input.get_resolve_provider(stream_url.as_ref()));
 
@@ -617,17 +652,20 @@ impl Drop for ActiveClientStream {
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(crate) async fn create_active_client_stream(
-    mut stream_details: StreamDetails,
-    app_state: &Arc<AppState>,
-    user: &ProxyUserCredentials,
-    connection_permission: UserConnectionPermission,
-    fingerprint: &Fingerprint,
-    stream_channel: StreamChannel,
-    session_token: Option<&str>,
-    req_headers: &HeaderMap,
-) -> BoxedProviderStream {
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParams<'_>) -> BoxedProviderStream {
+    let ActiveClientStreamParams {
+        mut stream_details,
+        app_state,
+        user,
+        connection_permission,
+        fingerprint,
+        stream_channel,
+        session_token,
+        req_headers,
+        meter_uid,
+        meter_stream,
+    } = request;
     if connection_permission == UserConnectionPermission::Exhausted {
         error!("Something is wrong this should not happen");
     }
@@ -641,15 +679,16 @@ pub(crate) async fn create_active_client_stream(
     let is_shared_source_stream = stream_channel.shared && stream_details.stream.is_some();
     app_state
         .connection_manager
-        .update_connection(
+        .update_connection(crate::api::model::ConnectionParams {
+            meter_uid,
             username,
-            user.max_connections,
+            max_connections: user.max_connections,
             fingerprint,
-            provider_name,
-            stream_channel.clone(),
+            provider: provider_name,
+            stream_channel: &stream_channel,
             user_agent,
             session_token,
-        )
+        })
         .await;
     if let Some((_, _, _m_, Some(cvt))) = stream_details.stream_info.as_ref() {
         app_state.connection_manager.update_stream_detail(&fingerprint.addr, *cvt).await;
@@ -670,31 +709,31 @@ pub(crate) async fn create_active_client_stream(
 
     let waker = Arc::new(AtomicWaker::new());
     let (grace_stop_flag, grace_task_handle) = if grant_user_grace_period || stream_details.provider_grace_active {
-        stream_grace_period(
+        stream_grace_period(GracePeriodParams {
             app_state,
-            &stream_details,
-            grant_user_grace_period,
+            stream_details: &stream_details,
+            user_grace_period: grant_user_grace_period,
             user,
             fingerprint,
             virtual_id,
             provisioning_info,
-            Some(Arc::clone(&waker)),
+            waker: Some(Arc::clone(&waker)),
             hold_stream,
             capacity_notify,
-        )
+        })
     } else {
-        stream_grace_period(
+        stream_grace_period(GracePeriodParams {
             app_state,
-            &stream_details,
-            grant_user_grace_period,
+            stream_details: &stream_details,
+            user_grace_period: grant_user_grace_period,
             user,
             fingerprint,
             virtual_id,
             provisioning_info,
-            None,
+            waker: None,
             hold_stream,
             capacity_notify,
-        )
+        })
     };
 
     let cfg = &app_state.app_config;
@@ -722,6 +761,14 @@ pub(crate) async fn create_active_client_stream(
     let timed_stream_context = deferred_provider_open
         .as_ref()
         .and_then(|_| create_timed_stream_context(app_state, virtual_id));
+
+    let meter = if meter_stream && meter_uid != 0 {
+        let meter = Arc::new(StreamMeterHandle::new(meter_uid));
+        app_state.event_manager.register_meter(Arc::clone(&meter)).await;
+        Some(meter)
+    } else {
+        None
+    };
 
     let stream: Option<BoxedProviderStream> = match stream_details.stream.take() {
         None => {
@@ -759,6 +806,8 @@ pub(crate) async fn create_active_client_stream(
         send_custom_stream_flag,
         provisionable: has_provisioning,
         custom_video,
+        meter,
+        event_manager: Arc::clone(&app_state.event_manager),
         waker: Some(waker),
         connection_manager: Arc::clone(&app_state.connection_manager),
         fingerprint: Arc::new(fingerprint.clone()),
@@ -790,19 +839,20 @@ fn resolve_grace_period_provisioning(
     Some(GraceProvisioningInfo { input, stop_signal })
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn stream_grace_period(
-    app_state: &Arc<AppState>,
-    stream_details: &StreamDetails,
-    user_grace_period: bool,
-    user: &ProxyUserCredentials,
-    fingerprint: &Fingerprint,
-    virtual_id: VirtualId,
-    provisioning_info: Option<GraceProvisioningInfo>,
-    waker: Option<Arc<AtomicWaker>>,
-    hold_stream: bool,
-    capacity_notify: Arc<Notify>,
-) -> (Option<Arc<AtomicU8>>, Option<tokio::task::JoinHandle<()>>) {
+#[allow(clippy::too_many_lines)]
+fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>, Option<tokio::task::JoinHandle<()>>) {
+    let GracePeriodParams {
+        app_state,
+        stream_details,
+        user_grace_period,
+        user,
+        fingerprint,
+        virtual_id,
+        provisioning_info,
+        waker,
+        hold_stream,
+        capacity_notify,
+    } = request;
     let active_users = Arc::clone(&app_state.active_users);
     let active_provider = Arc::clone(&app_state.active_provider);
     let connection_manager = Arc::clone(&app_state.connection_manager);
@@ -972,8 +1022,10 @@ fn stream_grace_period(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_active_client_stream, stream_grace_period, ActiveClientStream, ActiveClientStreamState,
+        create_active_client_stream, stream_grace_period, ActiveClientStream, ActiveClientStreamParams,
+        ActiveClientStreamState,
         CustomVideoBuffers, DeferredProviderOpenOutcome, DeferredProviderOpenState, StreamMode, TimedStreamContext,
+        GracePeriodParams,
     };
     use crate::{
         api::model::{
@@ -1178,18 +1230,20 @@ mod tests {
             .await
             .expect("deferred client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(provider_name, deferred_handle);
-        let (flag, task) = stream_grace_period(
+        let test_user = create_test_user("grace-user");
+        let test_fingerprint = create_test_fingerprint(deferred_addr);
+        let (flag, task) = stream_grace_period(GracePeriodParams {
             app_state,
-            &stream_details,
-            false,
-            &create_test_user("grace-user"),
-            &create_test_fingerprint(deferred_addr),
-            1,
-            None,
-            None,
-            true,
-            app_state.connection_manager.capacity_notified(),
-        );
+            stream_details: &stream_details,
+            user_grace_period: false,
+            user: &test_user,
+            fingerprint: &test_fingerprint,
+            virtual_id: 1,
+            provisioning_info: None,
+            waker: None,
+            hold_stream: true,
+            capacity_notify: app_state.connection_manager.capacity_notified(),
+        });
         (
             flag.expect("provider grace should install a mode flag"),
             task.expect("provider grace should spawn a grace-resolution task"),
@@ -1217,6 +1271,8 @@ mod tests {
                 provisioning: None,
                 low_priority_preempted: None,
             },
+            meter: None,
+            event_manager: Arc::new(EventManager::new()),
             waker: None,
             connection_manager,
             fingerprint: Arc::new(Fingerprint::new(
@@ -1344,16 +1400,20 @@ mod tests {
             .await
             .expect("deferred client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(&provider_name, deferred_handle.clone());
-        let stream = create_active_client_stream(
+        let test_user = create_test_user("grace-user");
+        let test_fingerprint = create_test_fingerprint(deferred_addr);
+        let stream = create_active_client_stream(ActiveClientStreamParams {
             stream_details,
-            &app_state,
-            &create_test_user("grace-user"),
-            UserConnectionPermission::Allowed,
-            &create_test_fingerprint(deferred_addr),
-            create_test_stream_channel(1, "http://provider-1.example/live/1"),
-            None,
-            &HeaderMap::default(),
-        )
+            app_state: &app_state,
+            user: &test_user,
+            connection_permission: UserConnectionPermission::Allowed,
+            fingerprint: &test_fingerprint,
+            stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
+            session_token: None,
+            req_headers: &HeaderMap::default(),
+            meter_uid: 0,
+            meter_stream: false,
+        })
         .await;
         pin_mut!(stream);
 
@@ -1395,16 +1455,20 @@ mod tests {
             .await
             .expect("deferred shared client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(&provider_name, deferred_handle.clone());
-        let stream = create_active_client_stream(
+        let test_user = create_test_user("grace-user");
+        let test_fingerprint = create_test_fingerprint(deferred_addr);
+        let stream = create_active_client_stream(ActiveClientStreamParams {
             stream_details,
-            &app_state,
-            &create_test_user("grace-user"),
-            UserConnectionPermission::Allowed,
-            &create_test_fingerprint(deferred_addr),
-            create_test_shared_stream_channel(1, "http://provider-1.example/live/1"),
-            None,
-            &HeaderMap::default(),
-        )
+            app_state: &app_state,
+            user: &test_user,
+            connection_permission: UserConnectionPermission::Allowed,
+            fingerprint: &test_fingerprint,
+            stream_channel: create_test_shared_stream_channel(1, "http://provider-1.example/live/1"),
+            session_token: None,
+            req_headers: &HeaderMap::default(),
+            meter_uid: 0,
+            meter_stream: false,
+        })
         .await;
         pin_mut!(stream);
 
@@ -1454,6 +1518,8 @@ mod tests {
                 provisioning: None,
                 low_priority_preempted: None,
             },
+            meter: None,
+            event_manager: Arc::new(EventManager::new()),
             waker: None,
             connection_manager,
             fingerprint: Arc::new(Fingerprint::new(

@@ -1,8 +1,9 @@
 use crate::{
     model::ProxyUserStatus,
     utils::{
-        arc_str_option_serde, arc_str_serde, deserialize_as_string_array, deserialize_json_as_opt_string,
-        deserialize_number_from_string, deserialize_number_from_string_or_zero, serialize_json_as_opt_string,
+        arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde, deserialize_as_string_array,
+        deserialize_json_as_opt_string, deserialize_number_from_string, deserialize_number_from_string_or_zero,
+        serialize_json_as_opt_string,
     },
 };
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
@@ -42,11 +43,7 @@ pub struct XtreamVideoInfoMovieData {
     pub stream_id: u32,
     #[serde(default, with = "arc_str_serde")]
     pub direct_source: Arc<str>,
-    #[serde(
-        default,
-        serialize_with = "arc_str_option_serde::serialize_null_if_empty",
-        deserialize_with = "arc_str_option_serde::deserialize"
-    )]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, with = "arc_str_serde")]
     pub added: Arc<str>,
@@ -233,11 +230,7 @@ pub struct XtreamSeriesInfoEpisode {
     pub container_extension: Arc<str>,
     #[serde(default)]
     pub info: Option<XtreamSeriesInfoEpisodeInfo>,
-    #[serde(
-        default,
-        serialize_with = "arc_str_option_serde::serialize_null_if_empty",
-        deserialize_with = "arc_str_option_serde::deserialize"
-    )]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, with = "arc_str_serde")]
     pub added: Arc<str>,

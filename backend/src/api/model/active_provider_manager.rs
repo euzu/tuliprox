@@ -23,7 +23,6 @@ use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([127, 0, 0, 1], 0)));
-
 pub type ClientConnectionId = SocketAddr;
 type AllocationId = u64;
 type SharedConnectionId = AllocationId;

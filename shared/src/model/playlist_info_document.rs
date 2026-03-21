@@ -5,7 +5,7 @@ use crate::{
         SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties, VirtualId,
         XtreamCluster, XtreamMappingFlags, XtreamMappingOptions,
     },
-    utils::{arc_str_option_serde, arc_str_serde, arc_str_vec_serde, Internable},
+    utils::{arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde, arc_str_vec_serde, Internable},
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -109,11 +109,7 @@ pub struct XtreamVideoMovieData {
     pub category_ids: Vec<u32>,
     #[serde(with = "arc_str_serde")]
     pub container_extension: Arc<str>,
-    #[serde(
-        default,
-        serialize_with = "arc_str_option_serde::serialize_null_if_empty",
-        deserialize_with = "arc_str_option_serde::deserialize"
-    )]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub direct_source: Arc<str>,
@@ -198,11 +194,7 @@ pub struct XtreamSeriesEpisodeInfoDoc {
     #[serde(with = "arc_str_serde")]
     pub container_extension: Arc<str>,
     pub info: XtreamSeriesEpisodeInfoData,
-    #[serde(
-        default,
-        serialize_with = "arc_str_option_serde::serialize_null_if_empty",
-        deserialize_with = "arc_str_option_serde::deserialize"
-    )]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub added: Arc<str>,

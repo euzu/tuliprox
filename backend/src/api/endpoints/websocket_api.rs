@@ -13,7 +13,7 @@ use log::{error, trace};
 use shared::{
     model::{
         Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
-        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION,
+        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION, supports_server_error_messages, supports_stream_meter_messages,
     },
     utils::{concat_path_leading_slash, default_kick_secs},
 };
@@ -158,28 +158,16 @@ async fn handle_protocol_message(
                     Some(ProtocolMessage::UserActionResponse(false))
                 }
             }
+            Ok(ProtocolMessage::StreamMeterSubscribe) => {
+                handle_stream_meter_subscribe(mem, app_state, auth_required);
+                None
+            }
+            Ok(ProtocolMessage::StreamMeterUnsubscribe) => {
+                handle_stream_meter_unsubscribe(mem, app_state);
+                None
+            }
             Ok(ProtocolMessage::ActiveProviderCountRequest(auth_token)) => {
-                if auth_required {
-                    let Some(secret_key) = secret_key else {
-                        return Some(ProtocolMessage::Unauthorized);
-                    };
-                    let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
-                        return Some(ProtocolMessage::Unauthorized);
-                    };
-                    set_websocket_auth(mem, auth_token, &token_data.claims);
-                    if mem.permissions.contains(Permission::SystemRead) {
-                        let connections = app_state.active_provider.get_provider_connections_count().await;
-                        Some(ProtocolMessage::ActiveProviderCountResponse(connections))
-                    } else {
-                        Some(ProtocolMessage::Unauthorized)
-                    }
-                } else {
-                    mem.permissions = PERM_ALL;
-                    mem.role = UserRole::Admin;
-                    mem.token = Some(auth_token);
-                    let connections = app_state.active_provider.get_provider_connections_count().await;
-                    Some(ProtocolMessage::ActiveProviderCountResponse(connections))
-                }
+                handle_active_provider_count_request(auth_token, mem, app_state, auth_required, secret_key).await
             }
             Ok(_) => {
                 trace!("Unexpected protocol message after handshake");
@@ -192,6 +180,54 @@ async fn handle_protocol_message(
         }
     } else {
         None
+    }
+}
+
+fn handle_stream_meter_subscribe(mem: &mut ProtocolHandlerMemory, app_state: &Arc<AppState>, auth_required: bool) {
+    if supports_stream_meter_messages(mem.peer_version)
+        && websocket_requires_system_read(auth_required, mem)
+        && (!auth_required || mem.token.is_some())
+        && !mem.stream_meter_subscribed
+    {
+        mem.stream_meter_subscribed = true;
+        app_state.event_manager.stream_meter_subscriber_connected();
+    }
+}
+
+fn handle_stream_meter_unsubscribe(mem: &mut ProtocolHandlerMemory, app_state: &Arc<AppState>) {
+    if mem.stream_meter_subscribed {
+        mem.stream_meter_subscribed = false;
+        app_state.event_manager.stream_meter_subscriber_disconnected();
+    }
+}
+
+async fn handle_active_provider_count_request(
+    auth_token: String,
+    mem: &mut ProtocolHandlerMemory,
+    app_state: &Arc<AppState>,
+    auth_required: bool,
+    secret_key: Option<&Vec<u8>>,
+) -> Option<ProtocolMessage> {
+    if auth_required {
+        let Some(secret_key) = secret_key else {
+            return Some(ProtocolMessage::Unauthorized);
+        };
+        let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
+            return Some(ProtocolMessage::Unauthorized);
+        };
+        if token_data.claims.permissions.contains(Permission::SystemRead) {
+            set_websocket_auth(mem, auth_token, &token_data.claims);
+            let connections = app_state.active_provider.get_provider_connections_count().await;
+            Some(ProtocolMessage::ActiveProviderCountResponse(connections))
+        } else {
+            Some(ProtocolMessage::Unauthorized)
+        }
+    } else {
+        mem.permissions = PERM_ALL;
+        mem.role = UserRole::Admin;
+        mem.token = Some(auth_token);
+        let connections = app_state.active_provider.get_provider_connections_count().await;
+        Some(ProtocolMessage::ActiveProviderCountResponse(connections))
     }
 }
 
@@ -208,7 +244,10 @@ async fn handle_incoming_message(
     match handler {
         ProtocolHandler::Version(version) => {
             handle_handshake(msg, socket, *version).await?;
-            *handler = ProtocolHandler::Default(ProtocolHandlerMemory::default());
+            *handler = ProtocolHandler::Default(ProtocolHandlerMemory {
+                peer_version: *version,
+                ..ProtocolHandlerMemory::default()
+            });
             Ok(())
         }
         ProtocolHandler::Default(mem) => {
@@ -238,8 +277,10 @@ async fn handle_event_message(
             if mem.role.is_admin() {
                 match event {
                     EventMessage::ServerError(error) => {
-                        let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
-                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
+                        if supports_server_error_messages(mem.peer_version) {
+                            let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
+                            socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
+                        }
                     }
                     EventMessage::ActiveUser(event) => {
                         let msg = ProtocolMessage::ActiveUserResponse(event).to_bytes().map_err(|e| e.to_string())?;
@@ -293,8 +334,9 @@ async fn handle_event_message(
                             .await
                             .map_err(|e| format!("Library scan progress event: {e} "))?;
                     }
-                    EventMessage::InputMetadataUpdatesCompleted(_) | EventMessage::InputMetadataUpdatesStarted(_) => {
-                        // Internal event, ignore for websocket clients
+                    EventMessage::InputMetadataUpdatesCompleted(_)
+                    | EventMessage::InputMetadataUpdatesStarted(_) => {
+                        // Internal events or already handled above
                     }
                 }
             }
@@ -308,7 +350,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
     let secret_key = get_secret_key(&app_state, auth_required);
 
     let mut event_rx = app_state.event_manager.get_event_channel();
-
+    let mut meter_event_rx = app_state.event_manager.get_meter_channel();
     let mut handler = ProtocolHandler::Version(PROTOCOL_VERSION);
 
     loop {
@@ -324,12 +366,56 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
                 }
             }
 
-            Ok(event) = event_rx.recv() => {
-                if let Err(e) = handle_event_message(&mut socket, event, &handler).await {
-                    trace!("Failed to send ws event: {e}");
-                    break;
+            event_result = event_rx.recv() => {
+                match event_result {
+                    Ok(event) => {
+                        if let Err(e) = handle_event_message(&mut socket, event, &handler).await {
+                            trace!("Failed to send ws event: {e}");
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        trace!("Main websocket event receiver lagged by {skipped} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+
+            meter_result = meter_event_rx.recv() => {
+                match meter_result {
+                    Ok(entries) => {
+                        if let ProtocolHandler::Default(mem) = &handler {
+                            if mem.stream_meter_subscribed {
+                                let msg = ProtocolMessage::StreamMeterBatchResponse(entries)
+                                    .to_bytes()
+                                    .map_err(|e| e.to_string());
+                                match msg {
+                                    Ok(msg) => {
+                                        if let Err(e) = socket.send(Message::Binary(msg)).await {
+                                            trace!("Failed to send ws meter event: {e}");
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        trace!("Failed to encode ws meter event: {e}");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        trace!("Meter websocket event receiver lagged by {skipped} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+
+    if let ProtocolHandler::Default(mem) = &handler {
+        if mem.stream_meter_subscribed {
+            app_state.event_manager.stream_meter_subscriber_disconnected();
         }
     }
 }

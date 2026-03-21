@@ -323,8 +323,8 @@
   overflow: hidden;
 
   &__body {
-    display: flex;
-    flex-flow: column;
+    // display: flex;
+    // flex-flow: column;
     gap: var(--gap-default);
     box-sizing: border-box;
     width: 100%;

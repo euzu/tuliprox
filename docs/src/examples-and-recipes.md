@@ -128,6 +128,18 @@ reverse_proxy:
     grace_period_timeout_secs: 5
 ```
 
+## Enable per-stream metrics in the Web UI
+
+To show live bandwidth and transferred bytes in the streams table, enable stream metrics:
+
+```yaml
+reverse_proxy:
+  stream:
+    metrics_enabled: true
+```
+
+This is useful for operator troubleshooting and live monitoring of active reverse-proxied streams.
+
 ## Local library CLI examples
 
 ```bash

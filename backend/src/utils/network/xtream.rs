@@ -591,7 +591,7 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
 mod tests {
     use super::partition_clusters_by_source;
     use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, StagedInput};
-    use shared::model::{ClusterSource, InputType, XtreamCluster, XtreamVideoInfo};
+    use shared::model::{ClusterSource, InputType, XtreamCluster};
     use shared::utils::Internable;
 
     fn test_input_with_staged(staged: StagedInput) -> ConfigInput {

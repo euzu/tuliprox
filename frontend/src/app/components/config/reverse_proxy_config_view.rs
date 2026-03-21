@@ -32,6 +32,7 @@ const LABEL_SIZE: &str = "LABEL.SIZE";
 const LABEL_DIRECTORY: &str = "LABEL.DIRECTORY";
 
 const LABEL_STREAM: &str = "LABEL.STREAM";
+const LABEL_STREAM_METRICS_ENABLED: &str = "LABEL.STREAM_METRICS_ENABLED";
 const LABEL_RETRY: &str = "LABEL.RETRY";
 const LABEL_THROTTLE: &str = "LABEL.THROTTLE";
 const LABEL_GRACE_PERIOD_MILLIS: &str = "LABEL.GRACE_PERIOD_MILLIS";
@@ -120,6 +121,7 @@ generate_form_reducer!(
     action_name: StreamConfigFormAction,
     fields {
         Retry => retry: bool,
+        MetricsEnabled => metrics_enabled: bool,
         Throttle => throttle: Option<String>,
         GracePeriodMillis => grace_period_millis: u64,
         GracePeriodTimeoutSecs => grace_period_timeout_secs: u64,
@@ -425,6 +427,7 @@ pub fn ReverseProxyConfigView() -> Html {
         html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_STREAM)}</h1>
+                { config_field_bool!(stream_state.form, translate.t(LABEL_STREAM_METRICS_ENABLED), metrics_enabled) }
                 { config_field_bool!(stream_state.form, translate.t(LABEL_RETRY), retry) }
                 { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis) }
                 { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs) }
@@ -593,6 +596,7 @@ pub fn ReverseProxyConfigView() -> Html {
         html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_STREAM)}</h1>
+                { edit_field_bool!(stream_state, translate.t(LABEL_STREAM_METRICS_ENABLED), metrics_enabled, StreamConfigFormAction::MetricsEnabled) }
                 { edit_field_bool!(stream_state, translate.t(LABEL_RETRY), retry, StreamConfigFormAction::Retry) }
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis, StreamConfigFormAction::GracePeriodMillis) }
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs, StreamConfigFormAction::GracePeriodTimeoutSecs) }

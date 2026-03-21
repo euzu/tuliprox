@@ -23,6 +23,7 @@ mod short_epg;
 mod stats;
 mod status_check;
 mod stream_info;
+mod stream_meter;
 mod stream_properties;
 mod strm_export_style;
 pub mod system_info;
@@ -39,7 +40,7 @@ pub use self::{
     active_user_connection_change::*, auth::*, cluster_flags::*, config::*, epg::*, epg_request::*, ip_check::*,
     item_field::*, library_request::*, mapping::*, media_properties::*, messaging::*, playlist::*,
     playlist_categories::*, playlist_info_document::*, playlist_request::*, processing_order::*, regex_cache::*,
-    search_request::*, short_epg::*, stats::*, status_check::*, stream_info::*, stream_properties::*,
+    search_request::*, short_epg::*, stats::*, status_check::*, stream_info::*, stream_meter::*, stream_properties::*,
     strm_export_style::*, system_info::*, target_type::*, ui_playlist_item::*, user_command::*, uuidtype::*,
     web_socket::*, webplayer_url_request::*, xtream::*,
 };
