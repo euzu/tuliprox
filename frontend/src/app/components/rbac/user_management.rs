@@ -477,21 +477,21 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                         })}
                     </div>
             </div>
-            <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
-                { html_if!(can_write_users, {
-                    <>
-                        <MenuItem icon="Edit" name={UserAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click} />
-                        { html_if!(!is_self_selected, {
-                            <>
-                                <hr/>
-                                <MenuItem icon="Delete" name={UserAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action" />
-                            </>
-                        })}
-                    </>
-                })}
-            </PopupMenu>
           </Card>
          </Panel>
+        <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
+            { html_if!(can_write_users, {
+                <>
+                    <MenuItem icon="Edit" name={UserAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click} />
+                    { html_if!(!is_self_selected, {
+                        <>
+                            <hr/>
+                            <MenuItem icon="Delete" name={UserAction::Delete.to_string()} label={translate.t("LABEL.DELETE")} onclick={&handle_menu_click} class="tp__delete_action" />
+                        </>
+                    })}
+                </>
+            })}
+        </PopupMenu>
         </>
     }
 }

@@ -5,7 +5,7 @@ use crate::{
         XtreamMappingOptions, XtreamPlaylistItem, XtreamSeriesInfoData, XtreamSeriesInfoDoc, XtreamVideoInfoData,
         XtreamVideoInfoDoc, XtreamVideoMovieData,
     },
-    utils::{arc_str_option_serde, arc_str_serde, arc_str_vec_serde, Internable},
+    utils::{arc_str_option_null_if_empty_serde, arc_str_serde, arc_str_vec_serde, Internable},
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ pub struct XtreamLiveDoc {
     #[serde(with = "arc_str_serde")]
     pub category_id: Arc<str>,
     pub category_ids: Vec<u32>,
-    #[serde(default, with = "arc_str_option_serde")]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     pub tv_archive: i32,
     #[serde(with = "arc_str_serde")]
@@ -67,7 +67,7 @@ pub struct XtreamVideoDoc {
     pub category_ids: Vec<u32>,
     #[serde(with = "arc_str_serde")]
     pub container_extension: Arc<str>,
-    #[serde(default, with = "arc_str_option_serde")]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(with = "arc_str_serde")]
     pub direct_source: Arc<str>,

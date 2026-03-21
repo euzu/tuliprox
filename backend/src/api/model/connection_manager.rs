@@ -239,7 +239,12 @@ impl ConnectionManager {
     }
 
     pub fn next_stream_uid(&self) -> u32 {
-        self.stream_uid_counter.fetch_add(1, Ordering::Relaxed)
+        self.stream_uid_counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let next = current.wrapping_add(1);
+                Some(if next == 0 { 1 } else { next })
+            })
+            .unwrap_or(1)
     }
 
     pub fn capacity_notified(&self) -> Arc<Notify> {

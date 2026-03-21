@@ -47,7 +47,7 @@ Define complex filters using expressive logic, e.g.:
 - Show a fallback video stream if a channel becomes unavailable.
 - Integrate **HDHomeRun** devices with **Plex**, **Emby**, or **Jellyfin**.
 - Use provider aliases to manage multiple lines from the same source.
-- Per-stream bandwidth and transferred-bytes metrics.
+- Per-stream bandwidth and transferred-bytes metrics (opt-in).
 
 ## 🐋 Docker Container Templates
 

@@ -13,7 +13,7 @@ use log::{error, trace};
 use shared::{
     model::{
         Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
-        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION,
+        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION, supports_server_error_messages, supports_stream_meter_messages,
     },
     utils::{concat_path_leading_slash, default_kick_secs},
 };
@@ -184,7 +184,11 @@ async fn handle_protocol_message(
 }
 
 fn handle_stream_meter_subscribe(mem: &mut ProtocolHandlerMemory, app_state: &Arc<AppState>, auth_required: bool) {
-    if websocket_requires_system_read(auth_required, mem) && (!auth_required || mem.token.is_some()) && !mem.stream_meter_subscribed {
+    if supports_stream_meter_messages(mem.peer_version)
+        && websocket_requires_system_read(auth_required, mem)
+        && (!auth_required || mem.token.is_some())
+        && !mem.stream_meter_subscribed
+    {
         mem.stream_meter_subscribed = true;
         app_state.event_manager.stream_meter_subscriber_connected();
     }
@@ -211,8 +215,8 @@ async fn handle_active_provider_count_request(
         let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
             return Some(ProtocolMessage::Unauthorized);
         };
-        set_websocket_auth(mem, auth_token, &token_data.claims);
-        if mem.permissions.contains(Permission::SystemRead) {
+        if token_data.claims.permissions.contains(Permission::SystemRead) {
+            set_websocket_auth(mem, auth_token, &token_data.claims);
             let connections = app_state.active_provider.get_provider_connections_count().await;
             Some(ProtocolMessage::ActiveProviderCountResponse(connections))
         } else {
@@ -240,7 +244,10 @@ async fn handle_incoming_message(
     match handler {
         ProtocolHandler::Version(version) => {
             handle_handshake(msg, socket, *version).await?;
-            *handler = ProtocolHandler::Default(ProtocolHandlerMemory::default());
+            *handler = ProtocolHandler::Default(ProtocolHandlerMemory {
+                peer_version: *version,
+                ..ProtocolHandlerMemory::default()
+            });
             Ok(())
         }
         ProtocolHandler::Default(mem) => {
@@ -270,8 +277,10 @@ async fn handle_event_message(
             if mem.role.is_admin() {
                 match event {
                     EventMessage::ServerError(error) => {
-                        let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
-                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
+                        if supports_server_error_messages(mem.peer_version) {
+                            let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
+                            socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
+                        }
                     }
                     EventMessage::ActiveUser(event) => {
                         let msg = ProtocolMessage::ActiveUserResponse(event).to_bytes().map_err(|e| e.to_string())?;

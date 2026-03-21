@@ -4,9 +4,9 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
-            tee_stream, AppState, CustomVideoStreamType, MeteringStream, ProviderAllocation, ProviderConfig,
-            ProviderStreamFactoryOptions, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
-            StreamMeterHandle, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
+            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig, ProviderStreamFactoryOptions,
+            ProviderStreamState, SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream,
+            UserApiRequest, UserSession,
         },
     },
     auth::Fingerprint,
@@ -232,6 +232,12 @@ pub(crate) fn should_compress_response<B>(response: &Response<B>) -> bool {
 
 pub(crate) fn should_compress_response_extensions(extensions: &Extensions) -> bool {
     extensions.get::<DisableResponseCompression>().is_none()
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct StreamMeteringConfig {
+    meter_uid: u32,
+    meter_stream: bool,
 }
 
 #[allow(clippy::missing_panics_doc)]
@@ -917,6 +923,14 @@ pub async fn force_provider_stream_response(
     let deferred_grace_hold_stream = stream_details.has_deferred_provider_open();
 
     if stream_details.has_stream() || deferred_grace_hold_stream {
+        let metering = prepare_stream_metering(
+            app_state,
+            user_session.stream_url.as_ref(),
+            share_stream,
+            stream_details.stream.is_some(),
+            stream_details.has_deferred_provider_open(),
+        )
+        .await;
         let provider_response =
             stream_details.stream_info.as_ref().map(|(h, sc, url, cvt)| (h.clone(), *sc, url.clone(), *cvt));
         if ctx.session_reservation_ttl_secs > 0 {
@@ -941,7 +955,8 @@ pub async fn force_provider_stream_response(
             stream_channel,
             session_token: Some(&user_session.token),
             req_headers: ctx.req_headers,
-            meter_uid: 0,
+            meter_uid: metering.meter_uid,
+            meter_stream: metering.meter_stream,
         })
         .await;
 
@@ -1111,26 +1126,14 @@ pub async fn stream_response(
             debug_if_enabled!("panel_api provisioning response to client: status={} headers={:?}", status, headers);
         }
 
-        // Wrap provider stream with metering (if present).
-        // This sits before the shared/1:1 branching so both paths are covered.
-        // The meter_uid is threaded through to StreamInfo for frontend correlation.
-        let meter_uid = if is_stream_metrics_enabled(app_state) && stream_details.stream.is_some() {
-            let uid = app_state.connection_manager.next_stream_uid();
-            if let Some(s) = stream_details.stream.take() {
-                let meter = Arc::new(StreamMeterHandle::new(uid));
-                app_state.event_manager.register_meter(Arc::clone(&meter)).await;
-                stream_details.stream = Some(MeteringStream::new(s, meter, Arc::clone(&app_state.event_manager)).boxed());
-            }
-            if share_stream {
-                app_state.shared_stream_manager.register_meter_uid(stream_url, uid).await;
-            }
-            uid
-        } else if is_stream_metrics_enabled(app_state) && share_stream {
-            // Subsequent shared subscriber: look up the source's meter_uid
-            app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0)
-        } else {
-            0
-        };
+        let metering = prepare_stream_metering(
+            app_state,
+            stream_url,
+            share_stream,
+            stream_details.stream.is_some(),
+            stream_details.has_deferred_provider_open(),
+        )
+        .await;
 
         let mut is_stream_shared = share_stream && !deferred_grace_hold_stream;
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
@@ -1154,7 +1157,8 @@ pub async fn stream_response(
             stream_channel,
             session_token: Some(session_token),
             req_headers,
-            meter_uid,
+            meter_uid: metering.meter_uid,
+            meter_stream: metering.meter_stream,
         })
         .await;
         let stream_resp = if is_stream_shared {
@@ -1302,6 +1306,38 @@ fn is_stream_metrics_enabled(app_state: &Arc<AppState>) -> bool {
         .is_some_and(|stream| stream.metrics_enabled)
 }
 
+async fn prepare_stream_metering(
+    app_state: &Arc<AppState>,
+    stream_url: &str,
+    share_stream: bool,
+    has_stream: bool,
+    has_deferred_provider_open: bool,
+) -> StreamMeteringConfig {
+    if !is_stream_metrics_enabled(app_state) {
+        return StreamMeteringConfig::default();
+    }
+
+    if share_stream && !has_stream && !has_deferred_provider_open {
+        return StreamMeteringConfig {
+            meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
+            meter_stream: false,
+        };
+    }
+
+    if has_stream || has_deferred_provider_open {
+        let meter_uid = app_state.connection_manager.next_stream_uid();
+        if share_stream {
+            app_state.shared_stream_manager.register_meter_uid(stream_url, meter_uid).await;
+        }
+        return StreamMeteringConfig {
+            meter_uid,
+            meter_stream: true,
+        };
+    }
+
+    StreamMeteringConfig::default()
+}
+
 fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64) -> u64 {
     app_state
         .app_config
@@ -1358,7 +1394,10 @@ async fn try_shared_stream_response_if_any(
 
             stream_details.provider_name = provider;
             stream_channel.shared = true;
-            let meter_uid = app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0);
+            let metering = StreamMeteringConfig {
+                meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
+                meter_stream: false,
+            };
             let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
                 stream_details,
                 app_state,
@@ -1368,7 +1407,8 @@ async fn try_shared_stream_response_if_any(
                 stream_channel,
                 session_token: Some(session_token),
                 req_headers,
-                meter_uid,
+                meter_uid: metering.meter_uid,
+                meter_stream: metering.meter_stream,
             })
             .await
             .boxed();

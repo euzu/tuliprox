@@ -12,7 +12,7 @@ use std::{
 use tokio::sync::RwLock;
 
 const STREAM_METER_INTERVAL: Duration = Duration::from_secs(3);
-const STREAM_METER_INTERVAL_SECS: u64 = 3;
+const STREAM_METER_INTERVAL_SECS: u64 = STREAM_METER_INTERVAL.as_secs();
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
@@ -244,6 +244,7 @@ fn build_meter_entry(reading: MeterReading, uids: Vec<u32>) -> Option<StreamMete
     let total_kb = u32::try_from(reading.bytes_total / 1024).unwrap_or(u32::MAX);
 
     Some(StreamMeterEntry {
+        meter_uid: reading.meter_uid,
         uids,
         rate_kbps,
         total_kb,
@@ -277,6 +278,7 @@ mod tests {
 
         let entries = meter_events.recv().await.unwrap();
         assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meter_uid, 7);
         assert_eq!(entries[0].uids, vec![41, 42]);
         assert_eq!(entries[0].rate_kbps, 5120);
         assert_eq!(entries[0].total_kb, 15_360);
@@ -303,6 +305,7 @@ mod tests {
 
         let entries = meter_events.recv().await.unwrap();
         assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meter_uid, 9);
         assert_eq!(entries[0].uids, vec![77]);
         assert_eq!(entries[0].rate_kbps, 1024);
         assert_eq!(entries[0].total_kb, 3072);
@@ -325,6 +328,7 @@ mod tests {
         assert!(main_events.try_recv().is_err(), "meter batches must not occupy the main event channel");
         let entries = meter_events.recv().await.unwrap();
         assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meter_uid, 5);
         assert_eq!(entries[0].uids, vec![11]);
     }
 }

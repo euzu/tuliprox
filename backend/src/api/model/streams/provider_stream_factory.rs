@@ -140,7 +140,7 @@ impl ProviderStreamFactoryOptions {
             flags,
             buffer_size,
             reconnect_flag: CancellationToken::new(),
-            url: url.clone(),
+            url,
             headers,
             default_user_agent,
             range_bytes,

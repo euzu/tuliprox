@@ -6,7 +6,13 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{io, sync::Arc};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
+pub const STREAM_METER_PROTOCOL_VERSION: u8 = 2;
+pub const SERVER_ERROR_PROTOCOL_VERSION: u8 = 2;
+
+pub fn supports_stream_meter_messages(version: u8) -> bool { version >= STREAM_METER_PROTOCOL_VERSION }
+
+pub fn supports_server_error_messages(version: u8) -> bool { version >= SERVER_ERROR_PROTOCOL_VERSION }
 
 #[derive(Default, PartialOrd, PartialEq, Debug, Clone)]
 pub enum UserRole {
@@ -23,6 +29,7 @@ impl UserRole {
 
 #[derive(Default)]
 pub struct ProtocolHandlerMemory {
+    pub peer_version: u8,
     pub token: Option<String>,
     pub permissions: PermissionSet,
     pub role: UserRole,

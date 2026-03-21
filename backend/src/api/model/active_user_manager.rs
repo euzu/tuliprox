@@ -148,6 +148,13 @@ pub struct ActiveUserManager {
 }
 
 impl ActiveUserManager {
+    fn lookup_country(&self, client_ip: &str) -> Option<String> {
+        let geoip = self.geo_ip.load();
+        (*geoip)
+            .as_ref()
+            .and_then(|geoip_db| geoip_db.lookup(&strip_port(client_ip)))
+    }
+
     fn custom_stream_technical_info() -> StreamTechnicalInfo {
         StreamTechnicalInfo {
             container: String::from("mpegts"),
@@ -487,8 +494,11 @@ impl ActiveUserManager {
                     }
                 })
                 .map(|stream_info| {
+                    let client_ip = fingerprint.client_ip.clone();
                     stream_info.meter_uid = meter_uid;
                     stream_info.addr = fingerprint.addr;
+                    stream_info.client_ip = client_ip.clone();
+                    stream_info.country = self.lookup_country(&client_ip);
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
@@ -503,14 +513,7 @@ impl ActiveUserManager {
             if let Some(stream_info) = existing_stream_info {
                 stream_info
             } else {
-                let country = {
-                    let geoip = self.geo_ip.load();
-                    if let Some(geoip_db) = (*geoip).as_ref() {
-                        geoip_db.lookup(&strip_port(&fingerprint.client_ip))
-                    } else {
-                        None
-                    }
-                };
+                let country = self.lookup_country(&fingerprint.client_ip);
 
                 let stream_info = StreamInfo::new(
                     uid,

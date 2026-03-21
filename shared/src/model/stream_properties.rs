@@ -1,10 +1,10 @@
 use crate::{
     model::{info_doc_utils::InfoDocUtils, PlaylistEntry, XtreamSeriesInfo, XtreamSeriesInfoDoc, XtreamVideoInfo},
     utils::{
-        arc_str_default_on_null, arc_str_none_default_on_null, arc_str_option_serde, deserialize_as_option_arc_str,
-        deserialize_as_string_array, deserialize_json_as_opt_string, deserialize_number_from_string,
-        deserialize_number_from_string_or_zero, serialize_json_as_opt_string, serialize_option_string_as_null_if_empty,
-        Internable, CONSTANTS,
+        arc_str_default_on_null, arc_str_none_default_on_null, arc_str_option_null_if_empty_serde,
+        arc_str_option_serde, deserialize_as_option_arc_str, deserialize_as_string_array,
+        deserialize_json_as_opt_string, deserialize_number_from_string, deserialize_number_from_string_or_zero,
+        serialize_json_as_opt_string, Internable, CONSTANTS,
     },
 };
 use log::warn;
@@ -52,11 +52,7 @@ pub struct LiveStreamProperties {
     pub stream_icon: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub direct_source: Arc<str>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_as_option_arc_str",
-        serialize_with = "serialize_option_string_as_null_if_empty"
-    )]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub added: Option<Arc<str>>,
@@ -163,11 +159,7 @@ pub struct VideoStreamProperties {
     pub stream_icon: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub direct_source: Arc<str>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_as_option_arc_str",
-        serialize_with = "serialize_option_string_as_null_if_empty"
-    )]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub added: Arc<str>,
@@ -223,11 +215,7 @@ pub struct SeriesStreamDetailEpisodeProperties {
     pub title: Arc<str>,
     #[serde(default, deserialize_with = "arc_str_default_on_null")]
     pub container_extension: Arc<str>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_as_option_arc_str",
-        serialize_with = "serialize_option_string_as_null_if_empty"
-    )]
+    #[serde(default, with = "arc_str_option_null_if_empty_serde")]
     pub custom_sid: Option<Arc<str>>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
     pub added: Arc<str>,

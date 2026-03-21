@@ -130,11 +130,15 @@ fn StreamMeterCell(props: &StreamMeterCellProps) -> Html {
     {
         let services = services.clone();
         let meter_value = meter_value.clone();
-        let uid = props.uid;
-        use_effect_with(uid, move |_| {
+        let reset_key = (props.uid, props.meter_uid);
+        use_effect_with(reset_key, move |(uid, meter_uid)| {
+            let uid = *uid;
+            let meter_uid = *meter_uid;
             let subid = services.event.subscribe(move |msg| {
                 if let EventMessage::StreamMeterBatch(entries) = msg {
-                    if let Some(entry) = entries.iter().find(|entry| entry.uids.contains(&uid)) {
+                    if let Some(entry) =
+                        entries.iter().find(|entry| entry.uids.contains(&uid) && entry.meter_uid == meter_uid)
+                    {
                         meter_value.set((entry.rate_kbps, entry.total_kb));
                     }
                 }

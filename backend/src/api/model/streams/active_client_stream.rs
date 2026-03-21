@@ -3,8 +3,8 @@ use crate::{
         api_utils::get_stream_options,
         model::{
             create_provider_stream, AppState, BoxedProviderStream, CleanupEvent, ConnectionManager,
-            CustomVideoStreamType, ProviderHandle, ProviderStreamFactoryOptions, StreamDetails, StreamError,
-            TimedClientStream, TransportStreamBuffer,
+            CustomVideoStreamType, EventManager, MeteringStream, ProviderHandle, ProviderStreamFactoryOptions,
+            StreamDetails, StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -106,6 +106,7 @@ pub(crate) struct ActiveClientStreamParams<'a> {
     pub session_token: Option<&'a str>,
     pub req_headers: &'a HeaderMap,
     pub meter_uid: u32,
+    pub meter_stream: bool,
 }
 
 struct GracePeriodParams<'a> {
@@ -143,6 +144,8 @@ struct ActiveClientStreamState {
     grace_task_handle: Option<tokio::task::JoinHandle<()>>,
     provisionable: bool,
     custom_video: CustomVideoBuffers,
+    meter: Option<Arc<StreamMeterHandle>>,
+    event_manager: Arc<EventManager>,
     waker: Option<Arc<AtomicWaker>>,
     connection_manager: Arc<ConnectionManager>,
     fingerprint: Arc<Fingerprint>,
@@ -169,6 +172,11 @@ impl ActiveClientStreamState {
     }
 
     fn wrap_provider_stream(&self, stream: BoxedProviderStream) -> BoxedProviderStream {
+        let stream = if let Some(meter) = &self.meter {
+            MeteringStream::new(stream, Arc::clone(meter), Arc::clone(&self.event_manager)).boxed()
+        } else {
+            stream
+        };
         if let Some(ctx) = self.timed_stream_context.as_ref() {
             TimedClientStream::new(
                 &ctx.app_state,
@@ -656,6 +664,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         session_token,
         req_headers,
         meter_uid,
+        meter_stream,
     } = request;
     if connection_permission == UserConnectionPermission::Exhausted {
         error!("Something is wrong this should not happen");
@@ -753,6 +762,14 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         .as_ref()
         .and_then(|_| create_timed_stream_context(app_state, virtual_id));
 
+    let meter = if meter_stream && meter_uid != 0 {
+        let meter = Arc::new(StreamMeterHandle::new(meter_uid));
+        app_state.event_manager.register_meter(Arc::clone(&meter)).await;
+        Some(meter)
+    } else {
+        None
+    };
+
     let stream: Option<BoxedProviderStream> = match stream_details.stream.take() {
         None => {
             if !stream_details.has_deferred_provider_open() {
@@ -789,6 +806,8 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         send_custom_stream_flag,
         provisionable: has_provisioning,
         custom_video,
+        meter,
+        event_manager: Arc::clone(&app_state.event_manager),
         waker: Some(waker),
         connection_manager: Arc::clone(&app_state.connection_manager),
         fingerprint: Arc::new(fingerprint.clone()),
@@ -1252,6 +1271,8 @@ mod tests {
                 provisioning: None,
                 low_priority_preempted: None,
             },
+            meter: None,
+            event_manager: Arc::new(EventManager::new()),
             waker: None,
             connection_manager,
             fingerprint: Arc::new(Fingerprint::new(
@@ -1391,6 +1412,7 @@ mod tests {
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 0,
+            meter_stream: false,
         })
         .await;
         pin_mut!(stream);
@@ -1445,6 +1467,7 @@ mod tests {
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 0,
+            meter_stream: false,
         })
         .await;
         pin_mut!(stream);
@@ -1495,6 +1518,8 @@ mod tests {
                 provisioning: None,
                 low_priority_preempted: None,
             },
+            meter: None,
+            event_manager: Arc::new(EventManager::new()),
             waker: None,
             connection_manager,
             fingerprint: Arc::new(Fingerprint::new(
