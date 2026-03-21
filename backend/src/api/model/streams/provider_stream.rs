@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        api_utils::{try_unwrap_body, HeaderFilter},
+        api_utils::{mark_response_as_uncompressed, try_unwrap_body, HeaderFilter},
         model::{
             stream::{BoxedProviderStream, ProviderStreamResponse},
             AppState, CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream,
@@ -267,7 +267,9 @@ pub fn create_custom_video_stream_response(
         for (key, value) in headers {
             builder = builder.header(key, value);
         }
-        return try_unwrap_body!(builder.body(axum::body::Body::from_stream(stream)));
+        let mut response = try_unwrap_body!(builder.body(axum::body::Body::from_stream(stream)));
+        mark_response_as_uncompressed(&mut response);
+        return response;
     }
     axum::http::StatusCode::FORBIDDEN.into_response()
 }

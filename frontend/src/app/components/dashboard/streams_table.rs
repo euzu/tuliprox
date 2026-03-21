@@ -8,6 +8,7 @@ use crate::{
     },
     hooks::use_service_context,
     i18n::use_translation,
+    model::EventMessage,
     services::DialogService,
     utils::t_safe,
 };
@@ -39,7 +40,7 @@ const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 
-const HEADERS: [&str; 13] = [
+const HEADERS: [&str; 15] = [
     "EMPTY",
     "USERNAME",
     "STREAM_ID",
@@ -53,13 +54,100 @@ const HEADERS: [&str; 13] = [
     "SHARED",
     "USER_AGENT",
     "DURATION",
+    "BANDWIDTH",
+    "TRANSFERRED",
 ];
+
+fn is_stream_metrics_enabled(config_ctx: &ConfigContext) -> bool {
+    config_ctx
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.config.reverse_proxy.as_ref())
+        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+        .is_some_and(|stream| stream.metrics_enabled)
+}
 
 fn format_duration(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     let seconds = seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn format_bandwidth(rate_kbps: u32) -> String {
+    if rate_kbps == 0 {
+        return "-".to_string();
+    }
+    if rate_kbps >= 1_048_576 {
+        format!("{:.1} GB/s", f64::from(rate_kbps) / 1_048_576.0)
+    } else if rate_kbps >= 1024 {
+        format!("{:.1} MB/s", f64::from(rate_kbps) / 1024.0)
+    } else {
+        format!("{rate_kbps} KB/s")
+    }
+}
+
+fn format_transferred(total_kb: u32) -> String {
+    if total_kb == 0 {
+        return "-".to_string();
+    }
+    if total_kb >= 1_048_576 {
+        format!("{:.2} GB", f64::from(total_kb) / 1_048_576.0)
+    } else if total_kb >= 1024 {
+        format!("{:.1} MB", f64::from(total_kb) / 1024.0)
+    } else {
+        format!("{total_kb} KB")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MeterDisplayKind {
+    Bandwidth,
+    Transferred,
+}
+
+#[derive(Properties, PartialEq)]
+struct StreamMeterCellProps {
+    pub uid: u32,
+    pub meter_uid: u32,
+    pub kind: MeterDisplayKind,
+}
+
+#[component]
+fn StreamMeterCell(props: &StreamMeterCellProps) -> Html {
+    let services = use_service_context();
+    let meter_value = use_state(|| (0_u32, 0_u32));
+
+    {
+        let meter_value = meter_value.clone();
+        let reset_key = (props.uid, props.meter_uid);
+        use_effect_with(reset_key, move |_| {
+            meter_value.set((0, 0));
+            || ()
+        });
+    }
+
+    {
+        let services = services.clone();
+        let meter_value = meter_value.clone();
+        let uid = props.uid;
+        use_effect_with(uid, move |_| {
+            let subid = services.event.subscribe(move |msg| {
+                if let EventMessage::StreamMeterBatch(entries) = msg {
+                    if let Some(entry) = entries.iter().find(|entry| entry.uids.contains(&uid)) {
+                        meter_value.set((entry.rate_kbps, entry.total_kb));
+                    }
+                }
+            });
+            move || services.event.unsubscribe(subid)
+        });
+    }
+
+    let (rate_kbps, total_kb) = *meter_value;
+    match props.kind {
+        MeterDisplayKind::Bandwidth => html! { format_bandwidth(rate_kbps) },
+        MeterDisplayKind::Transferred => html! { format_transferred(total_kb) },
+    }
 }
 
 fn build_technical_chips(technical: Option<&StreamTechnicalInfo>) -> Vec<(String, &'static str)> {
@@ -124,11 +212,21 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
 
     let headers = use_memo(config_ctx.clone(), |cfg| {
         let include_country = if let Some(app_cfg) = &cfg.config { app_cfg.config.is_geoip_enabled() } else { false };
+        let metrics_enabled = is_stream_metrics_enabled(cfg);
 
         let visible_headers: Vec<&str> = if include_country {
-            HEADERS.to_vec() // all headers
+            HEADERS
+                .iter()
+                .filter(|h| metrics_enabled || (**h != "BANDWIDTH" && **h != "TRANSFERRED"))
+                .copied()
+                .collect()
         } else {
-            HEADERS.iter().filter(|h| **h != "COUNTRY").copied().collect()
+            HEADERS
+                .iter()
+                .filter(|h| **h != "COUNTRY")
+                .filter(|h| metrics_enabled || (**h != "BANDWIDTH" && **h != "TRANSFERRED"))
+                .copied()
+                .collect()
         };
         visible_headers
     });
@@ -137,6 +235,32 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
         let interval = Interval::new(1000, update_timestamps);
         move || drop(interval)
     });
+
+    {
+        let metrics_enabled = is_stream_metrics_enabled(&config_ctx);
+        let websocket = service_ctx.websocket.clone();
+        let event_service = service_ctx.event.clone();
+        use_effect_with(metrics_enabled, move |metrics_enabled| {
+            let subid = if *metrics_enabled {
+                websocket.send_message(ProtocolMessage::StreamMeterSubscribe);
+                let websocket_for_events = websocket.clone();
+                Some(event_service.subscribe(move |msg| {
+                    if let EventMessage::WebSocketStatus(true) = msg {
+                        websocket_for_events.send_message(ProtocolMessage::StreamMeterSubscribe);
+                    }
+                }))
+            } else {
+                None
+            };
+
+            move || {
+                if let Some(subid) = subid {
+                    event_service.unsubscribe(subid);
+                    websocket.send_message(ProtocolMessage::StreamMeterUnsubscribe);
+                }
+            }
+        });
+    }
 
     let handle_popup_close = {
         let set_is_open = popup_is_open.clone();
@@ -242,6 +366,12 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                 }
                 "DURATION" => {
                     html! { <span class="tp__stream-table__duration" data-ts={dto.ts.to_string()}>{format_duration(current_time_secs() - dto.ts)}</span> }
+                }
+                "BANDWIDTH" => {
+                    html! { <StreamMeterCell uid={dto.uid} meter_uid={dto.meter_uid} kind={MeterDisplayKind::Bandwidth} /> }
+                }
+                "TRANSFERRED" => {
+                    html! { <StreamMeterCell uid={dto.uid} meter_uid={dto.meter_uid} kind={MeterDisplayKind::Transferred} /> }
                 }
                 _ => html! {""},
             },

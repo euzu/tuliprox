@@ -409,8 +409,9 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
     let is_edit = matches!(*form_mode, FormMode::Edit(_));
 
     html! {
-        <Card>
-            <Panel value={USER_DISPLAY_PANEL.to_string()} active={active_panel.to_string()}>
+     <>
+       <Panel value={USER_DISPLAY_PANEL.to_string()} active={active_panel.to_string()}>
+           <Card class="tp__user-management__user-list">
                 <div class="tp__config-view__header">
                     <h2>{ translate.t("LABEL.RBAC_USERS") }</h2>
                     { html_if!(can_write_users, {
@@ -422,10 +423,11 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                 </div>
 
                 <Table::<WebUiUserDto> definition={table_definition} />
-            </Panel>
-
-            <Panel value={USER_EDIT_PANEL.to_string()} active={active_panel.to_string()}>
-                <div class="tp__form-page">
+           </Card>
+       </Panel>
+        <Panel value={USER_EDIT_PANEL.to_string()} active={active_panel.to_string()}>
+           <Card class="tp__user-management__user-edit">
+                <div class="tp__user-management__user-edit-form tp__form-page">
                     <h3>{
                         if is_edit {
                             translate.t("LABEL.RBAC_EDIT_USER")
@@ -434,7 +436,7 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                         }
                     }</h3>
 
-                    <div class="tp__form-page__body">
+                    <div class="tp__user-management__user-edit-form__body tp__form-page__body">
                         { if is_edit {
                             config_field_custom!(translate.t("LABEL.USERNAME"), form_state.data().username.clone())
                         } else {
@@ -474,8 +476,7 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                                 onclick={on_save.clone()} />
                         })}
                     </div>
-                </div>
-            </Panel>
+            </div>
             <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
                 { html_if!(can_write_users, {
                     <>
@@ -489,6 +490,8 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                     </>
                 })}
             </PopupMenu>
-        </Card>
+          </Card>
+         </Panel>
+        </>
     }
 }

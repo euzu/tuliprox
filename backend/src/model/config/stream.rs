@@ -31,6 +31,7 @@ impl From<&StreamBufferConfig> for StreamBufferConfigDto {
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
     pub retry: bool,
+    pub metrics_enabled: bool,
     pub buffer: Option<StreamBufferConfig>,
     pub grace_period_millis: u64,
     pub grace_period_timeout_secs: u64,
@@ -47,6 +48,7 @@ impl From<&StreamConfigDto> for StreamConfig {
     fn from(dto: &StreamConfigDto) -> Self {
         Self {
             retry: dto.retry,
+            metrics_enabled: dto.metrics_enabled,
             buffer: dto.buffer.as_ref().map(Into::into),
             grace_period_millis: dto.grace_period_millis,
             grace_period_timeout_secs: dto.grace_period_timeout_secs,
@@ -64,6 +66,7 @@ impl From<&StreamConfig> for StreamConfigDto {
     fn from(instance: &StreamConfig) -> Self {
         Self {
             retry: instance.retry,
+            metrics_enabled: instance.metrics_enabled,
             buffer: instance.buffer.as_ref().map(Into::into),
             grace_period_millis: instance.grace_period_millis,
             grace_period_timeout_secs: instance.grace_period_timeout_secs,

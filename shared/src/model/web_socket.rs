@@ -1,6 +1,6 @@
 use crate::model::{
     user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PermissionSet,
-    PlaylistUpdateState, StatusCheck, SystemInfo,
+    PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ pub struct ProtocolHandlerMemory {
     pub token: Option<String>,
     pub permissions: PermissionSet,
     pub role: UserRole,
+    pub stream_meter_subscribed: bool,
 }
 
 pub enum ProtocolHandler {
@@ -69,6 +70,7 @@ impl WsCloseCode {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ProtocolMessage {
     Unauthorized,
@@ -76,6 +78,8 @@ pub enum ProtocolMessage {
     Version(u8),
     Auth(String),
     Authorized,
+    StreamMeterSubscribe,
+    StreamMeterUnsubscribe,
     ServerError(String),
     StatusRequest(String),
     UserAction(UserCommand),
@@ -91,6 +95,7 @@ pub enum ProtocolMessage {
     UserActionResponse(bool),
     SystemInfoResponse(SystemInfo),
     LibraryScanProgressResponse(LibraryScanSummary),
+    StreamMeterBatchResponse(Vec<StreamMeterEntry>),
 }
 
 impl ProtocolMessage {

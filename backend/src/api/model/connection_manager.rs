@@ -1,7 +1,7 @@
 use crate::{
     api::model::{
-        ActiveProviderManager, ActiveUserManager, CustomVideoStreamType, EventManager, EventMessage, ProviderHandle,
-        SharedStreamManager,
+        ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, CustomVideoStreamType, EventManager,
+        EventMessage, ProviderHandle, SharedStreamManager,
     },
     auth::Fingerprint,
     utils::debug_if_enabled,
@@ -11,7 +11,14 @@ use shared::{
     model::{ActiveUserConnectionChange, StreamChannel, VirtualId},
     utils::sanitize_sensitive_info,
 };
-use std::{borrow::Cow, net::SocketAddr, sync::Arc};
+use std::{
+    borrow::Cow,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::{mpsc, Notify};
 
 const CLEANUP_QUEUE_CAPACITY: usize = 4096;
@@ -40,6 +47,18 @@ pub struct ConnectionManager {
     close_socket_signal_tx: tokio::sync::broadcast::Sender<SocketAddr>,
     cleanup_tx: mpsc::Sender<CleanupEvent>,
     capacity_notify: Arc<Notify>,
+    stream_uid_counter: AtomicU32,
+}
+
+pub struct ConnectionParams<'a> {
+    pub meter_uid: u32,
+    pub username: &'a str,
+    pub max_connections: u32,
+    pub fingerprint: &'a Fingerprint,
+    pub provider: &'a str,
+    pub stream_channel: &'a StreamChannel,
+    pub user_agent: Cow<'a, str>,
+    pub session_token: Option<&'a str>,
 }
 
 impl ConnectionManager {
@@ -52,7 +71,6 @@ impl ConnectionManager {
         let (close_socket_signal_tx, _) = tokio::sync::broadcast::channel(256);
         let (cleanup_tx, cleanup_rx) = mpsc::channel(CLEANUP_QUEUE_CAPACITY);
         let capacity_notify = Arc::new(Notify::new());
-
         let mgr = Self {
             user_manager: Arc::clone(user_manager),
             provider_manager: Arc::clone(provider_manager),
@@ -61,6 +79,7 @@ impl ConnectionManager {
             close_socket_signal_tx,
             cleanup_tx,
             capacity_notify: Arc::clone(&capacity_notify),
+            stream_uid_counter: AtomicU32::new(1),
         };
 
         Self::spawn_cleanup_worker(
@@ -69,7 +88,7 @@ impl ConnectionManager {
             Arc::clone(provider_manager),
             Arc::clone(shared_stream_manager),
             Arc::clone(event_manager),
-            capacity_notify,
+            Arc::clone(&capacity_notify),
         );
 
         mgr
@@ -87,7 +106,8 @@ impl ConnectionManager {
             while let Some(event) = rx.recv().await {
                 match event {
                     CleanupEvent::ReleaseStream { addr } => {
-                        if user_manager.release_stream(&addr).await {
+                        if let Some(stream_info) = user_manager.release_stream(&addr).await {
+                            event_manager.unregister_meter_client(stream_info.uid).await;
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
@@ -110,8 +130,10 @@ impl ConnectionManager {
                         } else {
                             false
                         };
-                        let stream_released = user_manager.release_stream(&addr).await;
-                        if stream_released {
+                        let released_stream = user_manager.release_stream(&addr).await;
+                        let stream_released = released_stream.is_some();
+                        if let Some(stream_info) = released_stream {
+                            event_manager.unregister_meter_client(stream_info.uid).await;
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
@@ -184,9 +206,12 @@ impl ConnectionManager {
 
     pub async fn release_connection(&self, addr: &SocketAddr) {
         let removed = self.user_manager.release_connection(addr).await;
+        for stream_info in &removed.removed_streams {
+            self.event_manager.unregister_meter_client(stream_info.uid).await;
+        }
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, true).await;
-        if removed {
+        if removed.addr_removed {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
         }
         notify_capacity(self.capacity_notify.as_ref());
@@ -199,7 +224,8 @@ impl ConnectionManager {
     }
 
     pub async fn release_stream(&self, addr: &SocketAddr) {
-        if self.user_manager.release_stream(addr).await {
+        if let Some(stream_info) = self.user_manager.release_stream(addr).await {
+            self.event_manager.unregister_meter_client(stream_info.uid).await;
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
             notify_capacity(self.capacity_notify.as_ref());
         }
@@ -212,37 +238,38 @@ impl ConnectionManager {
         }
     }
 
+    pub fn next_stream_uid(&self) -> u32 {
+        self.stream_uid_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn capacity_notified(&self) -> Arc<Notify> {
         Arc::clone(&self.capacity_notify)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_connection(&self, addr: &SocketAddr) { self.user_manager.add_connection(addr).await; }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_connection(
-        &self,
-        username: &str,
-        max_connections: u32,
-        fingerprint: &Fingerprint,
-        provider: &str,
-        stream_channel: StreamChannel,
-        user_agent: Cow<'_, str>,
-        session_token: Option<&str>,
-    ) {
+    pub async fn update_connection(&self, update: ConnectionParams<'_>) {
+        let uid = self.next_stream_uid();
+        let username = update.username;
+        let fingerprint = update.fingerprint;
         if let Some(stream_info) = self
             .user_manager
-            .update_connection(
+            .update_connection(ActiveUserConnectionParams {
+                uid,
+                meter_uid: update.meter_uid,
                 username,
-                max_connections,
+                max_connections: update.max_connections,
                 fingerprint,
-                provider,
-                stream_channel,
-                user_agent,
-                session_token,
-            )
+                provider: update.provider,
+                stream_channel: update.stream_channel,
+                user_agent: update.user_agent,
+                session_token: update.session_token,
+            })
             .await
         {
+            self.event_manager
+                .register_meter_client(stream_info.uid, stream_info.meter_uid)
+                .await;
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         } else {
             warn!("Failed to register connection for user {username} at {}; disconnecting client", fingerprint.addr);

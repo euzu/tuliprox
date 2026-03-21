@@ -256,6 +256,10 @@ fn parse_audio_channels(audio: &Value) -> Option<String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StreamInfo {
+    #[serde(default)]
+    pub uid: u32,
+    #[serde(default)]
+    pub meter_uid: u32,
     pub username: String,
     pub channel: StreamChannel,
     pub provider: String,
@@ -274,6 +278,8 @@ pub struct StreamInfo {
 impl StreamInfo {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        uid: u32,
+        meter_uid: u32,
         username: &str,
         addr: &SocketAddr,
         client_ip: &str,
@@ -284,6 +290,8 @@ impl StreamInfo {
         session_token: Option<&str>,
     ) -> Self {
         Self {
+            uid,
+            meter_uid,
             username: username.to_string(),
             channel: stream_channel,
             provider: provider.to_string(),

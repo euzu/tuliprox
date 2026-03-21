@@ -282,6 +282,9 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::Error(err) => {
                         error!("{err}");
                     }
+                    ProtocolMessage::Authorized => {
+                        event_service.broadcast(EventMessage::WebSocketStatus(true));
+                    }
                     ProtocolMessage::ActiveUserResponse(event) => {
                         event_service.broadcast(EventMessage::ActiveUser(event));
                     }
@@ -328,8 +331,12 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::UserActionResponse(_success) => {
                         // Success is already handled in the UI component that initiated the action
                     }
+                    ProtocolMessage::StreamMeterBatchResponse(entries) => {
+                        event_service.broadcast(EventMessage::StreamMeterBatch(entries));
+                    }
                     ProtocolMessage::Auth(_)
-                    | ProtocolMessage::Authorized
+                    | ProtocolMessage::StreamMeterSubscribe
+                    | ProtocolMessage::StreamMeterUnsubscribe
                     | ProtocolMessage::ActiveProviderCountRequest(_)
                     | ProtocolMessage::StatusRequest(_)
                     | ProtocolMessage::UserAction(_) => {}

@@ -19,6 +19,7 @@ Proxy mode gives Tuliprox control over:
 Important fields:
 
 - `retry`
+- `metrics_enabled`
 - `buffer`
 - `throttle`
 - `grace_period_millis`
@@ -31,6 +32,19 @@ Important fields:
 ### `retry`
 
 If `true`, Tuliprox retries provider streams when the upstream disconnects unexpectedly.
+
+### `metrics_enabled`
+
+If `true`, Tuliprox samples active stream throughput and transferred bytes and exposes them to the Web UI streams table.
+
+Use this when you want live per-stream bandwidth visibility while debugging or operating the proxy.
+
+Notes:
+
+- default is `false`
+- metrics are only collected for reverse-proxied streams
+- enabling it adds lightweight runtime accounting for active streams
+- it does not change playlist output or stream selection behavior
 
 ### `buffer`
 
@@ -99,6 +113,15 @@ Current behavior:
 - when a viewer leaves, the shared stream priority is recalculated
 - if provider capacity is full and a higher-priority user starts another stream, the lower-priority shared stream can be preempted
 - equal priority does not preempt a different running stream
+
+Example:
+
+```yaml
+reverse_proxy:
+  stream:
+    retry: true
+    metrics_enabled: true
+```
 
 ## Priority and preemption
 

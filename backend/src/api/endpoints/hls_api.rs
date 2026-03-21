@@ -133,15 +133,15 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 let stream_url = get_stream_alternative_url(&url, input, cfg);
                 let session_token = app_state
                     .active_users
-                    .create_user_session(
+                    .create_user_session(crate::api::model::CreateUserSessionParams {
                         user,
-                        &session.token,
+                        session_token: &session.token,
                         virtual_id,
-                        &cfg.name,
-                        &stream_url,
-                        &fingerprint.addr,
+                        provider: &cfg.name,
+                        stream_url: &stream_url,
+                        addr: &fingerprint.addr,
                         connection_permission,
-                    )
+                    })
                     .await;
                 app_state
                     .active_provider
@@ -175,15 +175,15 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         );
                     let session_token = app_state
                         .active_users
-                        .create_user_session(
+                        .create_user_session(crate::api::model::CreateUserSessionParams {
                             user,
-                            &user_session_token,
+                            session_token: &user_session_token,
                             virtual_id,
-                            &provider_cfg.name,
-                            &stream_url,
-                            &fingerprint.addr,
+                            provider: &provider_cfg.name,
+                            stream_url: &stream_url,
+                            addr: &fingerprint.addr,
                             connection_permission,
-                        )
+                        })
                         .await;
                     app_state
                         .active_provider

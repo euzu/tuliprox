@@ -4,9 +4,9 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
-            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
+            tee_stream, AppState, CustomVideoStreamType, MeteringStream, ProviderAllocation, ProviderConfig,
             ProviderStreamFactoryOptions, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
-            StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
+            StreamMeterHandle, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
         },
     },
     auth::Fingerprint,
@@ -22,7 +22,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use axum::{
     body::Body,
-    http::{header, HeaderMap, HeaderValue, Response, StatusCode},
+    http::{header, Extensions, HeaderMap, HeaderValue, Response, StatusCode},
     response::IntoResponse,
 };
 use bytes::Bytes;
@@ -216,6 +216,22 @@ pub fn get_build_time() -> Option<String> {
         .parse::<DateTime<Utc>>()
         .ok()
         .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %Z").to_string())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DisableResponseCompression;
+
+pub(crate) fn mark_response_as_uncompressed<B>(response: &mut Response<B>) {
+    response.extensions_mut().insert(DisableResponseCompression);
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn should_compress_response<B>(response: &Response<B>) -> bool {
+    should_compress_response_extensions(response.extensions())
+}
+
+pub(crate) fn should_compress_response_extensions(extensions: &Extensions) -> bool {
+    extensions.get::<DisableResponseCompression>().is_none()
 }
 
 #[allow(clippy::missing_panics_doc)]
@@ -637,15 +653,17 @@ async fn create_stream_response_details(
                     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
                     let disabled_headers = app_state.get_disabled_headers();
                     let mut provider_stream_factory_options = ProviderStreamFactoryOptions::new(
-                        fingerprint.addr,
-                        item_type,
-                        share_stream,
-                        stream_options,
-                        &url,
-                        req_headers,
-                        streaming_strategy.input_headers.as_ref(),
-                        disabled_headers.as_ref(),
-                        default_user_agent.as_deref(),
+                        &crate::api::model::ProviderStreamFactoryParams {
+                            addr: fingerprint.addr,
+                            item_type,
+                            share_stream,
+                            stream_options,
+                            stream_url: &url,
+                            req_headers,
+                            input_headers: streaming_strategy.input_headers.as_ref(),
+                            disabled_headers: disabled_headers.as_ref(),
+                            default_user_agent: default_user_agent.as_deref(),
+                        },
                     );
 
                     let provider_config = input.get_resolve_provider(url.as_ref());
@@ -914,16 +932,17 @@ pub async fn force_provider_stream_response(
             .update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr)
             .await;
         stream_channel.shared = share_stream;
-        let stream = create_active_client_stream(
+        let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
-            ctx.user,
+            user: ctx.user,
             connection_permission,
             fingerprint,
             stream_channel,
-            Some(&user_session.token),
-            ctx.req_headers,
-        )
+            session_token: Some(&user_session.token),
+            req_headers: ctx.req_headers,
+            meter_uid: 0,
+        })
         .await;
 
         let (status_code, header_map) = get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
@@ -937,7 +956,9 @@ pub async fn force_provider_stream_response(
             "Streaming provider forced stream request from {}",
             sanitize_sensitive_info(resolve_request_url_for_logging(ctx.input, user_session.stream_url.as_ref()).as_ref())
         );
-        return try_unwrap_body!(response.body(body_stream));
+        let mut response = try_unwrap_body!(response.body(body_stream));
+        mark_response_as_uncompressed(&mut response);
+        return response;
     }
 
     app_state.connection_manager.release_provider_handle(stream_details.provider_handle).await;
@@ -949,9 +970,11 @@ pub async fn force_provider_stream_response(
             .update_stream_detail(&fingerprint.addr, CustomVideoStreamType::ChannelUnavailable)
             .await;
         debug!("Streaming custom stream");
-        try_unwrap_body!(axum::response::Response::builder()
+        let mut response = try_unwrap_body!(axum::response::Response::builder()
             .status(StatusCode::OK)
-            .body(axum::body::Body::from_stream(stream)))
+            .body(axum::body::Body::from_stream(stream)));
+        mark_response_as_uncompressed(&mut response);
+        response
     } else {
         StatusCode::BAD_REQUEST.into_response()
     }
@@ -1088,6 +1111,27 @@ pub async fn stream_response(
             debug_if_enabled!("panel_api provisioning response to client: status={} headers={:?}", status, headers);
         }
 
+        // Wrap provider stream with metering (if present).
+        // This sits before the shared/1:1 branching so both paths are covered.
+        // The meter_uid is threaded through to StreamInfo for frontend correlation.
+        let meter_uid = if is_stream_metrics_enabled(app_state) && stream_details.stream.is_some() {
+            let uid = app_state.connection_manager.next_stream_uid();
+            if let Some(s) = stream_details.stream.take() {
+                let meter = Arc::new(StreamMeterHandle::new(uid));
+                app_state.event_manager.register_meter(Arc::clone(&meter)).await;
+                stream_details.stream = Some(MeteringStream::new(s, meter, Arc::clone(&app_state.event_manager)).boxed());
+            }
+            if share_stream {
+                app_state.shared_stream_manager.register_meter_uid(stream_url, uid).await;
+            }
+            uid
+        } else if is_stream_metrics_enabled(app_state) && share_stream {
+            // Subsequent shared subscriber: look up the source's meter_uid
+            app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0)
+        } else {
+            0
+        };
+
         let mut is_stream_shared = share_stream;
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
             if stream_details.stream.is_some() {
@@ -1101,16 +1145,17 @@ pub async fn stream_response(
         };
 
         stream_channel.shared = is_stream_shared;
-        let stream = create_active_client_stream(
+        let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user,
             connection_permission,
             fingerprint,
             stream_channel,
-            Some(session_token),
+            session_token: Some(session_token),
             req_headers,
-        )
+            meter_uid,
+        })
         .await;
         let stream_resp = if is_stream_shared {
             debug_if_enabled!(
@@ -1119,7 +1164,6 @@ pub async fn stream_response(
             );
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
-
             if let Some((broadcast_stream, _shared_provider)) = SharedStreamManager::register_shared_stream(
                 app_state,
                 stream_url,
@@ -1138,7 +1182,9 @@ pub async fn stream_response(
                 for (key, value) in &header_map {
                     response = response.header(key, value);
                 }
-                try_unwrap_body!(response.body(axum::body::Body::from_stream(broadcast_stream)))
+                let mut response = try_unwrap_body!(response.body(axum::body::Body::from_stream(broadcast_stream)));
+                mark_response_as_uncompressed(&mut response);
+                response
             } else {
                 StatusCode::BAD_REQUEST.into_response()
             }
@@ -1201,15 +1247,15 @@ pub async fn stream_response(
                 ) {
                     let _ = app_state
                         .active_users
-                        .create_user_session(
+                        .create_user_session(crate::api::model::CreateUserSessionParams {
                             user,
                             session_token,
                             virtual_id,
-                            &provider,
-                            &session_url,
-                            &fingerprint.addr,
+                            provider: &provider,
+                            stream_url: &session_url,
+                            addr: &fingerprint.addr,
                             connection_permission,
-                        )
+                        })
                         .await;
                     let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
                     if reservation_ttl_secs > 0 {
@@ -1222,7 +1268,9 @@ pub async fn stream_response(
             }
 
             let body_stream = prepare_body_stream(app_state, item_type, stream);
-            try_unwrap_body!(response.body(body_stream))
+            let mut response = try_unwrap_body!(response.body(body_stream));
+            mark_response_as_uncompressed(&mut response);
+            response
         };
 
         return stream_resp.into_response();
@@ -1241,6 +1289,17 @@ fn get_stream_throttle(app_state: &Arc<AppState>) -> u64 {
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
         .map(|stream| stream.throttle_kbps)
         .unwrap_or_default()
+}
+
+fn is_stream_metrics_enabled(app_state: &Arc<AppState>) -> bool {
+    app_state
+        .app_config
+        .config
+        .load()
+        .reverse_proxy
+        .as_ref()
+        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+        .is_some_and(|stream| stream.metrics_enabled)
 }
 
 fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64) -> u64 {
@@ -1299,23 +1358,27 @@ async fn try_shared_stream_response_if_any(
 
             stream_details.provider_name = provider;
             stream_channel.shared = true;
-            let stream = create_active_client_stream(
+            let meter_uid = app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0);
+            let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
                 stream_details,
                 app_state,
                 user,
-                connect_permission,
+                connection_permission: connect_permission,
                 fingerprint,
                 stream_channel,
-                Some(session_token),
+                session_token: Some(session_token),
                 req_headers,
-            )
+                meter_uid,
+            })
             .await
             .boxed();
             let mut response = axum::response::Response::builder().status(status_code);
             for (key, value) in &header_map {
                 response = response.header(key, value);
             }
-            return response.body(axum::body::Body::from_stream(stream)).ok();
+            let mut response = response.body(axum::body::Body::from_stream(stream)).ok()?;
+            mark_response_as_uncompressed(&mut response);
+            return Some(response);
         }
     }
     None
@@ -1927,7 +1990,7 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, Response};
     use shared::model::XtreamCluster;
 
     #[tokio::test]
@@ -1952,5 +2015,20 @@ mod tests {
         // Live cluster should always return false
         headers.insert("range", "bytes=100-".parse().unwrap());
         assert!(!is_seek_request(XtreamCluster::Live, &headers).await);
+    }
+
+    #[test]
+    fn test_streaming_response_extension_disables_compression() {
+        let mut response = Response::new(());
+        mark_response_as_uncompressed(&mut response);
+
+        assert!(!should_compress_response(&response));
+    }
+
+    #[test]
+    fn test_regular_response_keeps_compression_enabled() {
+        let response = Response::new(());
+
+        assert!(should_compress_response(&response));
     }
 }

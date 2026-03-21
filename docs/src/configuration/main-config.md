@@ -286,6 +286,19 @@ Supported schedule types:
 This block controls stream delivery, buffering, caching, headers, rate limiting and resource retries.
 The detailed stream behavior lives in [Streaming And Proxy](../streaming-and-proxy.md).
 
+Notable `reverse_proxy.stream` flags include:
+
+- `retry`
+- `metrics_enabled`
+- `buffer`
+- `throttle`
+- `grace_period_millis`
+- `grace_period_timeout_secs`
+- `grace_period_hold_stream`
+- `shared_burst_buffer_mb`
+- `hls_session_ttl_secs`
+- `catchup_session_ttl_secs`
+
 ## `backup_dir`
 
 Location for configuration backups written from the Web UI.

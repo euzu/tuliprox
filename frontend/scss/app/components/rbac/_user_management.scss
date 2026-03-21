@@ -1,0 +1,26 @@
+@use "../../../size" as size;
+
+.tp__user-management__user-list {
+  padding-top: var(--padding-default);
+}
+
+.tp__user-management__user-edit {
+  padding-top: var(--padding-default);
+  max-width: 800px;
+
+  &-form {
+
+    &__body {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(size.$form-grid-cell-width, 1fr));
+      max-width: calc(size.$form-max-grid-cells * size.$form-grid-cell-width + 2 * 1rem);
+      gap: var(--gap-large);
+      box-sizing: border-box;
+
+      @media (max-width: size.$mobile-breakpoint) {
+        grid-template-columns: repeat(auto-fit, minmax(size.$form-grid-cell-width-small-screen, 1fr));
+        max-width: calc(size.$form-max-grid-cells-small-screen * size.$form-grid-cell-width-small-screen + 2 * 1rem);
+      }
+    }
+  }
+}

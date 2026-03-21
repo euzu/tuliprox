@@ -47,7 +47,7 @@ Define complex filters using expressive logic, e.g.:
 - Show a fallback video stream if a channel becomes unavailable.
 - Integrate **HDHomeRun** devices with **Plex**, **Emby**, or **Jellyfin**.
 - Use provider aliases to manage multiple lines from the same source.
-- Optional per-input `disable_hls_streaming` flag to force direct TS stream endpoints instead of HLS reverse-proxy streaming.
+- Per-stream bandwidth and transferred-bytes metrics.
 
 ## 🐋 Docker Container Templates
 
