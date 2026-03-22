@@ -1,7 +1,6 @@
 # 🏛️ config.yml (Core System)
 
-The `config.yml` is the primary configuration file of Tuliprox. It dictates the engine's core runtime behavior, memory management,
-caching mechanisms, background schedulers, and external integrations (like HDHomeRun, GeoIP, and the Web UI).
+The `config.yml` is the primary configuration file of Tuliprox. It dictates the engine's core runtime behavior, memory management, caching mechanisms, background schedulers, and external integrations (like HDHomeRun, GeoIP, and the Web UI).
 
 ## Top-level entries
 
@@ -45,13 +44,13 @@ metadata_update:
 | `disk_based_processing` | Bool | No | `false` | **Tradeoff Guidance:** Normally, Tuliprox loads playlists into RAM. With `true`, every chunk is manipulated directly on disk (using a B+Tree database). **Use this on low-end hardware (e.g., Raspberry Pi) or with massive playlists (>500k streams)** to prevent Out-Of-Memory crashes. It significantly increases Disk I/O load, so it is slower but much safer for tight memory footprints. |
 | `storage_dir` | String | No | `./data` | Root directory for all runtime data (B+Tree databases, downloads, caches). Relative paths are resolved against the Tuliprox Home Directory. |
 | `default_user_agent` | String | No | `Tuliprox/...` | Fallback HTTP `User-Agent` used for upstream provider requests if the input definition or client request does not explicitly provide one. |
-| `backup_dir` | String | No | `{storage_dir}/backup` | Storage location for config backups (e.g., triggered via "Save Configuration" in the Web UI). |
+| `backup_dir` | String | No | `{storage_dir}/backup`| Storage location for config backups (e.g., triggered via "Save Configuration" in the Web UI). |
 | `user_config_dir` | String | No | `{storage_dir}/user` | Storage location for user-specific configurations (like favorites or custom bouquets created via the Web UI). |
 | `mapping_path` | String | No | `mapping.yml` | Path to the mapping file. **Pro-Tip:** If you specify a folder path here (e.g., `./config/mappings/`), Tuliprox loads *all* `.yml` files in that folder in alphanumeric order! Ideal for structuring complex setups. |
 | `template_path` | String | No | `template.yml` | Path to the template macro file. Specifying a folder here is also possible and highly recommended. |
 | `update_on_boot` | Bool | No | `false` | Forces Tuliprox to immediately query all providers and rebuild all playlists upon startup. If `false`, the proxy serves the local DB cache from the last run until the scheduler triggers the next update. |
 | `config_hot_reload` | Bool | No | `false` | **Background:** Spawns a filesystem watcher for `mapping.yml` and `api-proxy.yml`. Upon saving, mappings and user credentials become active immediately *without* requiring a server restart. |
-| `accept_insecure_ssl_certificates` | Bool | No | `false` | Set to `true` if your upstream provider uses expired, self-signed, or improperly configured HTTPS certificates. Otherwise, the HTTP client drops the connection securely. |
+| `accept_insecure_ssl_certificates`| Bool | No | `false` | Set to `true` if your upstream provider uses expired, self-signed, or improperly configured HTTPS certificates. Otherwise, the HTTP client drops the connection securely. |
 | `sleep_timer_mins` | Int | No | `null` | Automatic kill-switch for proxied streams. Forcibly terminates active stream connections after X minutes (Protects against users falling asleep with the TV on). |
 | `connect_timeout_secs` | Int | No | `10` | Maximum time (in seconds) Tuliprox waits to establish the initial TCP connection to a provider. `0` disables the timeout (Warning: risk of hanging threads!). |
 | `user_access_control` | Bool | No | `false` | **Security:** If `true`, Tuliprox actively enforces `status` (Active/Banned), `exp_date`, and `max_connections` constraints for users defined in `api-proxy.yml`. If false, those fields are ignored. |
@@ -71,19 +70,17 @@ metadata_update:
 | `proxy` | SOCKS5/HTTP proxy settings for outgoing requests. | [See section](#9-outgoing-proxy-proxy) |
 | `ipcheck` | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#10-ip-check-ipcheck) |
 | `hdhomerun` | Virtual DVB-C/T network tuner emulation. | [See section](#11-hdhomerun-emulation-hdhomerun) |
-| `library` | Local Media Library integration. | [See Local Library](./local-library.md) |
+| `library` | Local Media Library integration. | [See Local Library](../local-library.md) |
 | `reverse_proxy` | Streaming buffers, rate limits, caching. | [See Reverse Proxy](./reverse-proxy.md) |
-| `metadata_update` | TMDB matching, FFprobe processing, Job Queues. | [See Metadata Update](./metadata-update.md) |
+| `metadata_update`| TMDB matching, FFprobe processing, Job Queues. | [See Metadata Update](./metadata-update.md) |
 
-*(Note: The advanced topics **Local Library**, **Reverse Proxy** and **Metadata Update** are extremely extensive and have their own
-dedicated subchapters. Here we cover the global base settings.)*
+*(Note: The advanced topics **Local Library**, **Reverse Proxy** and **Metadata Update** are extremely extensive and have their own dedicated subchapters. Here we cover the global base settings.)*
 
 ---
 
 ## 3. API Server (`api`)
 
-Controls the internal web server of Tuliprox. This does *not* dictate the public URLs given to clients (those belong in
-`api-proxy.yml`), but rather the physical socket binding on your host machine.
+Controls the internal web server of Tuliprox. This does *not* dictate the public URLs given to clients (those belong in `api-proxy.yml`), but rather the physical socket binding on your host machine.
 
 ```yaml
 api:
@@ -130,7 +127,7 @@ web_ui:
 | `path` | String | `""` | Base path for the UI (e.g., `admin`). Critical for reverse proxy subfolder setups so assets load from `example.com/admin/assets/`. |
 | `player_server` | String | `default` | Determines which virtual server block from `api-proxy.yml` is used to construct the streaming URLs when playing a channel directly within the Web UI player. |
 | `kick_secs` | Int | `90` | **Background:** When you kick a user via the Dashboard, they are not only disconnected but hard-blocked at the IP/User level for X seconds. This prevents their IPTV player's auto-reconnect logic from instantly stealing the provider slot back. |
-| `combine_views_stats_streams` | Bool | `false` | Combines the "Server Stats" and "Active Streams" views into a single unified window in the UI. |
+| `combine_views_stats_streams`| Bool | `false` | Combines the "Server Stats" and "Active Streams" views into a single unified window in the UI. |
 
 ### Authentication & RBAC (`web_ui.auth`)
 
@@ -144,10 +141,8 @@ Tuliprox features a robust Role-Based Access Control (RBAC) system.
 | `groupfile` | String | No | `groups.txt` | The RBAC (Role-Based Access Control) definition file. |
 
 #### Structure of `user.txt`
-
 This file stores users, Argon2 password hashes, and RBAC groups. Generate secure passwords via CLI: `./tuliprox --genpwd`.
 Format: `username:argon2_hash[:group1,group2]`
-
 ```text
 # A normal Admin (No group specified = Fallback to built-in Admin role)
 admin:$argon2id$v=19$m=19456,t=2,p=1$QUp...
@@ -157,19 +152,13 @@ editor:$argon2id$v=19$m=19456,t=2,p=1$Y2F...:playlist_manager,user_manager
 ```
 
 #### Structure of `groups.txt`
-
-Define group permissions here. An editor might be allowed to update playlists (`playlist.write`) but forbidden from viewing or
-changing `config.yml` (`config.read`).
+Define group permissions here. An editor might be allowed to update playlists (`playlist.write`) but forbidden from viewing or changing `config.yml` (`config.read`).
 Format: `group_name:permission1,permission2,...`
-
 ```text
 viewer:config.read,source.read,playlist.read,system.read,library.read
 playlist_manager:playlist.read,playlist.write,source.read
 ```
-
-Available Permissions: `config.read/write`, `source.read/write`, `user.read/write`, `playlist.read/write`, `library.read/write`,
-`system.read/write`, `epg.read/write`. Note: Write does not imply Read. A group must explicitly grant both if users need to view
-and edit content.
+Available Permissions: `config.read/write`, `source.read/write`, `user.read/write`, `playlist.read/write`, `library.read/write`, `system.read/write`, `epg.read/write`. Note: Write does not imply Read. A group must explicitly grant both if users need to view and edit content.
 
 ---
 
@@ -194,9 +183,8 @@ log:
 
 ## 6. Schedules (`schedules`)
 
-Automate your background updates here.
-*Important:* Tuliprox uses standard cron syntax, **but strictly includes seconds as the first field**
-(7 fields in total: `Sec Min Hour Day Month Day-of-Week Year`)!
+Automate your background updates here. 
+*Important:* Tuliprox uses standard cron syntax, **but strictly includes seconds as the first field** (7 fields in total: `Sec Min Hour Day Month Day-of-Week Year`)!
 
 ```yaml
 schedules:
@@ -204,11 +192,11 @@ schedules:
   - schedule: "0 0 8 * * * *"
     type: PlaylistUpdate
     targets: [ "m3u_target", "xtream_target" ] # Optional: Only update specific targets
-
+    
   # Every evening at 20:00:00
   - schedule: "0 0 20 * * * *"
     type: LibraryScan
-
+    
   # Every Monday at 04:00:00
   - schedule: "0 0 4 * * 1 *"
     type: GeoIpUpdate
@@ -224,9 +212,7 @@ schedules:
 
 ## 7. Messaging (`messaging`)
 
-Tuliprox can proactively notify you via Push-Notifications when updates fail, finish, or when specific channels are added/removed
-from a watched group. **Why is this useful?** Because it allows you to instantly detect upstream provider issues or simply let you
-know when new movies are added to your playlist.
+Tuliprox can proactively notify you via Push-Notifications when updates fail, finish, or when specific channels are added/removed from a watched group. **Why is this useful?** Because it allows you to instantly detect upstream provider issues or simply let you know when new movies are added to your playlist.
 
 *(Note: You must explicitly opt-in via `notify_on` to receive messages!)*
 
@@ -254,9 +240,7 @@ messaging:
 ```
 
 **Template Auto-File Behavior & Variables (Handlebars):**
-You can reference custom formatting templates (`file://` or HTTP URLs). If the file doesn't exist, Tuliprox can automatically
-populate the `messaging_templates/` folder with default templates if missing. Variables injected during runtime:
-
+You can reference custom formatting templates (`file://` or HTTP URLs). If the file doesn't exist, Tuliprox can automatically populate the `messaging_templates/` folder with default templates if missing. Variables injected during runtime:
 * `{{message}}`: The raw text.
 * `{{kind}}`: The event type (`info`, `error`, `stats`, `watch`).
 * `{{timestamp}}`: RFC3339 timestamp.
@@ -284,10 +268,8 @@ video:
 * `web_search`: A template URL used in the Web UI to quickly search for a movie title (replaces `{}` with the title).
 * `download`: Configuration for the Web UI's "Download Video" button.
   * `directory`: Where the downloaded files are saved.
-  * `organize_into_directories`: If true, Tuliprox automatically creates neat subfolders for series.
-  * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group `(?P<episode>...)` in the
-    Regex to identify and strip the episode identifier (e.g., `S01E01`) from the filename, ensuring all episodes of a show land in
-    the exact same base-show folder.
+  * `organize_into_directories`: If true, Tuliprox automatically creates neat subfolders for series. 
+  * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group `(?P<episode>...)` in the Regex to identify and strip the episode identifier (e.g., `S01E01`) from the filename, ensuring all episodes of a show land in the exact same base-show folder.
 
 ---
 
@@ -301,32 +283,23 @@ proxy:
   username: "opt_user"
   password: "opt_password"
 ```
-
-Setting this forces **every** outgoing request (Playlist downloads, TMDB API calls, FFprobe stream analysis, and Reverse-Proxy
-Video Streaming) through this proxy.
+Setting this forces **every** outgoing request (Playlist downloads, TMDB API calls, FFprobe stream analysis, and Reverse-Proxy Video Streaming) through this proxy.
 
 ---
 
 ## 10. IP-Check (`ipcheck`)
-
-To verify in the Web UI which public IP Tuliprox is currently using (crucial when verifying VPN routing or diagnosing geo-blocks),
-Tuliprox queries a detection API:
-
+To verify in the Web UI which public IP Tuliprox is currently using (crucial when verifying VPN routing or diagnosing geo-blocks), Tuliprox queries a detection API:
 ```yaml
 ipcheck:
   url_ipv4: https://ipinfo.io/ip
 ```
-
-You can also define `url_ipv6`, or generic `url` alongside `pattern_ipv4` or `pattern_ipv6` regexes to extract the IP from
-complex JSON responses.
+You can also define `url_ipv6`, or generic `url` alongside `pattern_ipv4` or `pattern_ipv6` regexes to extract the IP from complex JSON responses.
 
 ---
 
 ## 11. HDHomeRun Emulation (`hdhomerun`)
 
-**Deep-Dive Feature:** Tuliprox can masquerade on the local network as a physical "SiliconDust HDHomeRun" DVB-C/T network tuner.
-Media servers like **Plex**, **Jellyfin**, **Emby**, or **TVHeadend** will automatically discover Tuliprox via UPnP as a real
-hardware antenna and ingest Live-TV natively into their Live-DVR systems.
+**Deep-Dive Feature:** Tuliprox can masquerade on the local network as a physical "SiliconDust HDHomeRun" DVB-C/T network tuner. Media servers like **Plex**, **Jellyfin**, **Emby**, or **TVHeadend** will automatically discover Tuliprox via UPnP as a real hardware antenna and ingest Live-TV natively into their Live-DVR systems.
 
 Tuliprox utilizes standardized UPnP/SSDP (UDP Port 1900) and the proprietary SiliconDust UDP discovery protocol (UDP Port 65001).
 
@@ -343,20 +316,15 @@ hdhomerun:
       friendly_name: "Tuliprox Living Room"
 ```
 
-Both `device_id` and `device_udn` are necessary for Tuliprox to satisfy both the official SiliconDust apps and third-party UPnP
-scanners simultaneously.
+Both `device_id` and `device_udn` are necessary for Tuliprox to satisfy both the official SiliconDust apps and third-party UPnP scanners simultaneously.
 
----
-
+----
 &nbsp;
 
-## Additional Information
-
+# Additional Information
 ## Custom Stream Responses (Fallback Videos)
 
-When a stream fails to load at the provider (HTTP 404/502) or a user reaches their connection limit, Tuliprox can seamlessly
-substitute a fallback info-video (as a `.ts` stream) instead of brutally closing the TCP connection. Dropping connections often
-causes hardware players or Smart TVs to freeze.
+When a stream fails to load at the provider (HTTP 404/502) or a user reaches their connection limit, Tuliprox can seamlessly substitute a fallback info-video (as a `.ts` stream) instead of brutally closing the TCP connection. Dropping connections often causes hardware players or Smart TVs to freeze.
 
 ```yaml
 custom_stream_response_path: /home/tuliprox/resources
@@ -369,7 +337,6 @@ custom_stream_response_timeout_secs: 20
 | `custom_stream_response_timeout_secs` | Int | `0` | Hard timeout (in seconds) that forces the fallback video stream to terminate to prevent infinite bandwidth usage. `0` means the fallback loops endlessly until the user switches channels. |
 
 **Filenames searched for in the directory:**
-
 * `channel_unavailable.ts` (Provider returns 404/502/Timeout)
 * `user_connections_exhausted.ts` (User hit their `max_connections` limit)
 * `provider_connections_exhausted.ts` (Provider has no free slots left)
@@ -378,7 +345,6 @@ custom_stream_response_timeout_secs: 20
 * `panel_api_provisioning.ts` (Loops while a new Provider Account is generated via Panel API)
 
 **How it works:**
-Tuliprox searches the specified folder for exactly named `.ts` files. If found, they are looped back to the client. The
-`custom_stream_response_timeout_secs` parameter hard-kills the fallback stream after X seconds to prevent infinite bandwidth usage.
+Tuliprox searches the specified folder for exactly named `.ts` files. If found, they are looped back to the client. The `custom_stream_response_timeout_secs` parameter hard-kills the fallback stream after X seconds to prevent infinite bandwidth usage.
 
 ---
