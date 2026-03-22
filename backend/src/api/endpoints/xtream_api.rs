@@ -724,7 +724,7 @@ async fn xtream_player_api_timeshift_stream(
 
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
-        get_user_target_by_credentials(&username, &password, &form_req, &app_state),
+        get_user_target_by_credentials(&username, &password, &api_req, &app_state),
         auth_status,
         false,
         format!("Could not find any user {username}")
