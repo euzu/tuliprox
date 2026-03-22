@@ -51,7 +51,7 @@ Tuliprox also includes:
 - hot config reload support
 - provider failover and DNS-aware connection rotation
 - notifications and monitoring hooks
-- **Web UI** with monitoring and web-based configuration ability
+- **Web UI** with monitoring and web based configuration ability
 
 ## Access control
 

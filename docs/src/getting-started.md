@@ -1,5 +1,4 @@
 # Getting Started
-
 ## Recommended reading order
 
 1. [Installation](installation.md)
@@ -23,7 +22,6 @@ services:
       - /opt/tuliprox/data:/app/data
       - /opt/tuliprox/backup:/app/backup
       - /opt/tuliprox/downloads:/app/downloads
-      - /opt/tuliprox/cache:/app/cache
     environment:
       - TZ=Europe/Berlin
     ports:
@@ -37,7 +35,7 @@ services:
       start_period: 10s
 ```
 
-Open the Web UI afterward and continue with the configuration.
+Open the Web UI afterwards and continue with the configuration.
 
 ### First configuration steps
 
@@ -50,7 +48,6 @@ For a new setup, the usual first goal is:
 5. only then add mapping, filtering, reverse proxy and metadata features
 
 That keeps failures local and makes provider-specific issues much easier to diagnose.
-
 ## Run modes
 
 Tuliprox has two main modes:
