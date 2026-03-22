@@ -71,7 +71,6 @@ socket2 = { version = "0.6.3", features = ["all"] }
 async-compression = { version = "0.4.41", features = ["tokio", "gzip", "zlib"] }
 chrono-tz = "0.10.4"
 zeroize.workspace = true
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 uuid = { version = "1.22.0", features = ["v4"] }
 fancy-regex = "0.17.0"
 mime_guess = "2.0.5"
@@ -80,6 +79,8 @@ memchr = "2.7.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi", "sysinfoapi"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }

@@ -273,6 +273,8 @@ pub struct StreamInfo {
     pub country: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub session_token: Option<String>,
+    #[serde(default)]
+    pub preserved: bool,
 }
 
 impl StreamInfo {
@@ -301,6 +303,7 @@ impl StreamInfo {
             ts: current_time_secs(),
             country,
             session_token: session_token.map(|token| token.to_string()),
+            preserved: false,
         }
     }
 }

@@ -199,6 +199,7 @@ macro_rules! try_result_not_found {
 use crate::api::panel_api::{can_provision_on_exhausted, create_panel_api_provisioning_stream_details};
 pub use internal_server_error;
 use shared::error::TuliproxError;
+use shared::utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
 pub use try_option_bad_request;
 pub use try_option_forbidden;
 pub use try_result_bad_request;
@@ -1009,47 +1010,42 @@ pub async fn stream_response(
     target: &Arc<ConfigTarget>,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
+    allow_exhausted_shared_reconnect: bool,
 ) -> impl IntoResponse + Send {
     let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
     if log_enabled!(log::Level::Trace) {
         trace!("Try to open stream {}", sanitize_sensitive_info(request_log_stream_url.as_ref()));
     }
 
-    if connection_permission == UserConnectionPermission::Exhausted {
-        return create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserConnectionsExhausted,
-        )
-        .into_response();
-    }
-
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
+    let allow_shared_reuse = connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
 
     let share_stream = is_stream_share_enabled(item_type, target);
     let _shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
 
-        if let Some(value) = try_shared_stream_response_if_any(
-            app_state,
-            stream_url,
-            fingerprint,
-            user,
-            connection_permission,
-            stream_channel.clone(),
-            session_token,
-            req_headers,
-        )
-        .await
-        {
-            return value.into_response();
+        if allow_shared_reuse {
+            if let Some(value) = try_shared_stream_response_if_any(
+                app_state,
+                stream_url,
+                fingerprint,
+                user,
+                connection_permission,
+                stream_channel.clone(),
+                session_token,
+                req_headers,
+            )
+            .await
+            {
+                return value.into_response();
+            }
         }
         Some(write_lock)
     } else {
         // Opportunistic cross-target sharing: if another target already runs a shared stream
         // for the same provider URL, subscribe to it instead of opening a separate connection.
-        if item_type == PlaylistItemType::Live {
+        if item_type == PlaylistItemType::Live && allow_shared_reuse {
             if let Some(value) = try_shared_stream_response_if_any(
                 app_state,
                 stream_url,
@@ -1071,6 +1067,15 @@ pub async fn stream_response(
         }
         None
     };
+
+    if connection_permission == UserConnectionPermission::Exhausted {
+        return create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            CustomVideoStreamType::UserConnectionsExhausted,
+        )
+        .into_response();
+    }
 
     let stream_options = get_stream_options(app_state);
     let mut stream_details = match create_stream_response_details(
@@ -1339,23 +1344,26 @@ async fn prepare_stream_metering(
     StreamMeteringConfig::default()
 }
 
-fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64) -> u64 {
-    app_state
-        .app_config
-        .config
-        .load()
-        .reverse_proxy
-        .as_ref()
-        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or(0, selector)
+fn resolve_stream_config_u64(
+    stream_config: Option<&crate::model::StreamConfig>,
+    selector: impl FnOnce(&crate::model::StreamConfig) -> u64,
+    default_value: u64,
+) -> u64 {
+    stream_config.map_or(default_value, selector)
+}
+
+fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64, default_value: u64) -> u64 {
+    let config = app_state.app_config.config.load();
+    let stream_config = config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.stream.as_ref());
+    resolve_stream_config_u64(stream_config, selector, default_value)
 }
 
 pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
-    get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs)
+    get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs())
 }
 
 pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
-    get_stream_config_u64(app_state, |stream| stream.catchup_session_ttl_secs)
+    get_stream_config_u64(app_state, |stream| stream.catchup_session_ttl_secs, default_catchup_session_ttl_secs())
 }
 
 pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_type: PlaylistItemType) -> u64 {
@@ -1868,6 +1876,20 @@ pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, vir
     concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
 }
 
+pub(crate) fn should_allow_exhausted_shared_reconnect(
+    share_stream: bool,
+    user_session: Option<&UserSession>,
+    requested_virtual_id: u32,
+    requested_stream_url: &str,
+) -> bool {
+    share_stream
+        && user_session.is_some_and(|session| {
+            session.permission != UserConnectionPermission::Exhausted
+                && session.virtual_id == requested_virtual_id
+                && session.stream_url.as_ref() == requested_stream_url
+        })
+}
+
 pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
@@ -2032,7 +2054,10 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, Response};
-    use shared::model::XtreamCluster;
+    use shared::{
+        model::XtreamCluster,
+        utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
+    };
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -2071,5 +2096,63 @@ mod tests {
         let response = Response::new(());
 
         assert!(should_compress_response(&response));
+    }
+
+    #[test]
+    fn test_get_stream_config_u64_uses_default_when_stream_config_missing() {
+        assert_eq!(
+            resolve_stream_config_u64(
+                None,
+                |stream| stream.hls_session_ttl_secs,
+                default_hls_session_ttl_secs()
+            ),
+            default_hls_session_ttl_secs()
+        );
+        assert_eq!(
+            resolve_stream_config_u64(
+                None,
+                |stream| stream.catchup_session_ttl_secs,
+                default_catchup_session_ttl_secs()
+            ),
+            default_catchup_session_ttl_secs()
+        );
+    }
+
+    #[test]
+    fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session() {
+        let session = UserSession {
+            token: "tok".to_string(),
+            virtual_id: 282,
+            provider: Arc::<str>::from("provider"),
+            stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
+            addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
+            ts: 1,
+            permission: UserConnectionPermission::Allowed,
+        };
+
+        assert!(should_allow_exhausted_shared_reconnect(
+            true,
+            Some(&session),
+            282,
+            "http://provider/live/449924.ts"
+        ));
+        assert!(!should_allow_exhausted_shared_reconnect(
+            false,
+            Some(&session),
+            282,
+            "http://provider/live/449924.ts"
+        ));
+        assert!(!should_allow_exhausted_shared_reconnect(
+            true,
+            Some(&session),
+            999,
+            "http://provider/live/449924.ts"
+        ));
+        assert!(!should_allow_exhausted_shared_reconnect(
+            true,
+            Some(&session),
+            282,
+            "http://provider/live/other.ts"
+        ));
     }
 }

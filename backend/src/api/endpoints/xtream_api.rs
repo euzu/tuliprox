@@ -7,8 +7,10 @@ use crate::{
             create_api_proxy_user, create_catchup_session_key, create_session_fingerprint, empty_json_response_as_array,
             empty_json_response_as_object, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request,
-            local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder, stream_response,
-            try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
+            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found,
+            try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::handle_hls_stream_request,
@@ -355,7 +357,13 @@ async fn xtream_player_api_stream(
     };
 
     let connection_permission = user.connection_permission(app_state).await;
-    if connection_permission == UserConnectionPermission::Exhausted {
+    let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
+        is_stream_share_enabled(item_type, &target),
+        user_session.as_ref(),
+        virtual_id,
+        session_url.as_ref(),
+    );
+    if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
         return create_custom_video_stream_response(
             app_state,
             &fingerprint.addr,
@@ -425,6 +433,7 @@ async fn xtream_player_api_stream(
         &target,
         &user,
         connection_permission,
+        allow_exhausted_shared_reconnect,
     )
     .await
     .into_response()
@@ -566,6 +575,7 @@ async fn xtream_player_api_stream_with_token(
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            false,
         )
         .await
         .into_response()

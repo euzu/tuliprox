@@ -3,9 +3,10 @@ use crate::{
         api_utils::{
             create_catchup_session_key, create_session_fingerprint, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
-            local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
-            stream_response, try_option_bad_request, try_option_forbidden,
-            try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
+            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found,
+            try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::handle_hls_stream_request,
@@ -196,7 +197,13 @@ async fn m3u_api_stream(
     };
 
     let connection_permission = user.connection_permission(app_state).await;
-    if connection_permission == UserConnectionPermission::Exhausted {
+    let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
+        is_stream_share_enabled(pli.item_type, &target),
+        user_session.as_ref(),
+        virtual_id,
+        session_url.as_ref(),
+    );
+    if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
         return create_custom_video_stream_response(
             app_state,
             &fingerprint.addr,
@@ -257,6 +264,7 @@ async fn m3u_api_stream(
         &target,
         &user,
         connection_permission,
+        allow_exhausted_shared_reconnect,
     )
     .await
     .into_response()
