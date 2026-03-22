@@ -988,28 +988,23 @@ impl ActiveUserManager {
 
             let mut remove_user = false;
             if let Some(connection_data) = user_connections.by_key.get_mut(&entry.username) {
-                let should_remove = connection_data
+                let stream_idx_opt = connection_data
                     .streams
                     .iter()
                     .position(|stream| {
                         stream.uid == entry.uid
                             && stream.preserved
                             && stream.session_token.as_deref() == Some(entry.session_token.as_str())
-                    })
-                    .is_some_and(|stream_idx| {
-                        self.is_preserved_stream_expired(
-                            &connection_data.streams[stream_idx],
-                            &connection_data.sessions,
-                            now,
-                        )
                     });
 
-                if should_remove {
-                    if let Some(stream_idx) = connection_data.streams.iter().position(|stream| {
-                        stream.uid == entry.uid
-                            && stream.preserved
-                            && stream.session_token.as_deref() == Some(entry.session_token.as_str())
-                    }) {
+                if let Some(stream_idx) = stream_idx_opt {
+                    let should_remove = self.is_preserved_stream_expired(
+                        &connection_data.streams[stream_idx],
+                        &connection_data.sessions,
+                        now,
+                    );
+
+                    if should_remove {
                         connection_data.streams.swap_remove(stream_idx);
                         expiry_index.remove(&key);
                     }
