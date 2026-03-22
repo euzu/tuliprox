@@ -1010,47 +1010,42 @@ pub async fn stream_response(
     target: &Arc<ConfigTarget>,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
+    allow_exhausted_shared_reconnect: bool,
 ) -> impl IntoResponse + Send {
     let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
     if log_enabled!(log::Level::Trace) {
         trace!("Try to open stream {}", sanitize_sensitive_info(request_log_stream_url.as_ref()));
     }
 
-    if connection_permission == UserConnectionPermission::Exhausted {
-        return create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserConnectionsExhausted,
-        )
-        .into_response();
-    }
-
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
+    let allow_shared_reuse = connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
 
     let share_stream = is_stream_share_enabled(item_type, target);
     let _shared_lock = if share_stream {
         let write_lock = app_state.app_config.file_locks.write_lock_str(stream_url).await;
 
-        if let Some(value) = try_shared_stream_response_if_any(
-            app_state,
-            stream_url,
-            fingerprint,
-            user,
-            connection_permission,
-            stream_channel.clone(),
-            session_token,
-            req_headers,
-        )
-        .await
-        {
-            return value.into_response();
+        if allow_shared_reuse {
+            if let Some(value) = try_shared_stream_response_if_any(
+                app_state,
+                stream_url,
+                fingerprint,
+                user,
+                connection_permission,
+                stream_channel.clone(),
+                session_token,
+                req_headers,
+            )
+            .await
+            {
+                return value.into_response();
+            }
         }
         Some(write_lock)
     } else {
         // Opportunistic cross-target sharing: if another target already runs a shared stream
         // for the same provider URL, subscribe to it instead of opening a separate connection.
-        if item_type == PlaylistItemType::Live {
+        if item_type == PlaylistItemType::Live && allow_shared_reuse {
             if let Some(value) = try_shared_stream_response_if_any(
                 app_state,
                 stream_url,
@@ -1072,6 +1067,15 @@ pub async fn stream_response(
         }
         None
     };
+
+    if connection_permission == UserConnectionPermission::Exhausted {
+        return create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            CustomVideoStreamType::UserConnectionsExhausted,
+        )
+        .into_response();
+    }
 
     let stream_options = get_stream_options(app_state);
     let mut stream_details = match create_stream_response_details(
@@ -1872,6 +1876,20 @@ pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, vir
     concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
 }
 
+pub(crate) fn should_allow_exhausted_shared_reconnect(
+    share_stream: bool,
+    user_session: Option<&UserSession>,
+    requested_virtual_id: u32,
+    requested_stream_url: &str,
+) -> bool {
+    share_stream
+        && user_session.is_some_and(|session| {
+            session.permission != UserConnectionPermission::Exhausted
+                && session.virtual_id == requested_virtual_id
+                && session.stream_url.as_ref() == requested_stream_url
+        })
+}
+
 pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
@@ -2098,5 +2116,43 @@ mod tests {
             ),
             default_catchup_session_ttl_secs()
         );
+    }
+
+    #[test]
+    fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session() {
+        let session = UserSession {
+            token: "tok".to_string(),
+            virtual_id: 282,
+            provider: Arc::<str>::from("provider"),
+            stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
+            addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
+            ts: 1,
+            permission: UserConnectionPermission::Allowed,
+        };
+
+        assert!(should_allow_exhausted_shared_reconnect(
+            true,
+            Some(&session),
+            282,
+            "http://provider/live/449924.ts"
+        ));
+        assert!(!should_allow_exhausted_shared_reconnect(
+            false,
+            Some(&session),
+            282,
+            "http://provider/live/449924.ts"
+        ));
+        assert!(!should_allow_exhausted_shared_reconnect(
+            true,
+            Some(&session),
+            999,
+            "http://provider/live/449924.ts"
+        ));
+        assert!(!should_allow_exhausted_shared_reconnect(
+            true,
+            Some(&session),
+            282,
+            "http://provider/live/other.ts"
+        ));
     }
 }
