@@ -711,18 +711,20 @@ async fn xtream_player_api_timeshift_stream(
     axum::extract::Query(mut api_req): axum::extract::Query<UserApiRequest>,
     axum::extract::Path(timeshift_request): axum::extract::Path<XtreamApiTimeShiftRequest>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Form(api_form_req): axum::extract::Form<UserApiRequest>,
+    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
 ) -> impl IntoResponse + Send {
-    let username = get_non_empty(&timeshift_request.username, &api_req.username, &api_form_req.username).to_string();
-    let password = get_non_empty(&timeshift_request.password, &api_req.password, &api_form_req.password).to_string();
+    let form_req = api_form_req.ok().map(|form| form.0).unwrap_or_default();
+
+    let username = get_non_empty(&timeshift_request.username, &api_req.username, &form_req.username).to_string();
+    let password = get_non_empty(&timeshift_request.password, &api_req.password, &form_req.password).to_string();
     let stream_id =
-        get_non_empty(&timeshift_request.stream_id, &api_req.stream_id, &api_form_req.stream_id).to_string();
-    let duration = get_non_empty(&timeshift_request.duration, &api_req.duration, &api_form_req.duration);
-    let start_time = get_non_empty(&timeshift_request.start, &api_req.start, &api_form_req.start);
+        get_non_empty(&timeshift_request.stream_id, &api_req.stream_id, &form_req.stream_id).to_string();
+    let duration = get_non_empty(&timeshift_request.duration, &api_req.duration, &form_req.duration);
+    let start_time = get_non_empty(&timeshift_request.start, &api_req.start, &form_req.start);
 
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
-        get_user_target_by_credentials(&username, &password, &api_form_req, &app_state),
+        get_user_target_by_credentials(&username, &password, &form_req, &app_state),
         auth_status,
         false,
         format!("Could not find any user {username}")
@@ -753,13 +755,15 @@ async fn xtream_player_api_timeshift_query_stream(
     req_headers: HeaderMap,
     axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Form(api_form_req): axum::extract::Form<UserApiRequest>,
+    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
 ) -> impl IntoResponse + Send {
-    let username = get_non_empty(&api_query_req.username, &api_form_req.username, "");
-    let password = get_non_empty(&api_query_req.password, &api_form_req.password, "");
-    let stream_id = get_non_empty(&api_query_req.stream, &api_form_req.stream, "");
-    let duration = get_non_empty(&api_query_req.duration, &api_form_req.duration, "");
-    let start_time = get_non_empty(&api_query_req.start, &api_form_req.start, "");
+    let form_req = api_form_req.ok().map(|form| form.0).unwrap_or_default();
+
+    let username = get_non_empty(&api_query_req.username, &form_req.username, "");
+    let password = get_non_empty(&api_query_req.password, &form_req.password, "");
+    let stream_id = get_non_empty(&api_query_req.stream, &form_req.stream, "");
+    let duration = get_non_empty(&api_query_req.duration, &form_req.duration, "");
+    let start_time = get_non_empty(&api_query_req.start, &form_req.start, "");
 
     if username.is_empty()
         || password.is_empty()
@@ -1405,6 +1409,7 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use crate::api::model::UserApiRequest;
+    use super::XtreamApiTimeShiftRequest;
 
     #[test]
     fn post_query_only_request_prefers_query_when_form_is_missing() {
@@ -1421,5 +1426,66 @@ mod tests {
         assert_eq!(api_req.username, "query-user");
         assert_eq!(api_req.password, "query-pass");
         assert_eq!(api_req.action, "get_live_streams");
+    }
+
+    #[test]
+    fn timeshift_query_request_prefers_query_when_form_is_missing() {
+        let api_query_req = UserApiRequest {
+            username: String::from("query-user"),
+            password: String::from("query-pass"),
+            stream: String::from("42"),
+            duration: String::from("60"),
+            start: String::from("2024-01-01:00-00"),
+            ..UserApiRequest::default()
+        };
+        let form_req = Option::<UserApiRequest>::None.unwrap_or_default();
+
+        let username = super::get_non_empty(&api_query_req.username, &form_req.username, "");
+        let password = super::get_non_empty(&api_query_req.password, &form_req.password, "");
+        let stream_id = super::get_non_empty(&api_query_req.stream, &form_req.stream, "");
+        let duration = super::get_non_empty(&api_query_req.duration, &form_req.duration, "");
+        let start_time = super::get_non_empty(&api_query_req.start, &form_req.start, "");
+
+        assert_eq!(username, "query-user");
+        assert_eq!(password, "query-pass");
+        assert_eq!(stream_id, "42");
+        assert_eq!(duration, "60");
+        assert_eq!(start_time, "2024-01-01:00-00");
+    }
+
+    #[test]
+    fn timeshift_path_request_prefers_query_when_form_is_missing() {
+        let timeshift_request = XtreamApiTimeShiftRequest {
+            username: String::new(),
+            password: String::new(),
+            duration: String::new(),
+            start: String::new(),
+            stream_id: String::new(),
+        };
+        let api_query_req = UserApiRequest {
+            username: String::from("query-user"),
+            password: String::from("query-pass"),
+            stream_id: String::from("42"),
+            duration: String::from("60"),
+            start: String::from("2024-01-01:00-00"),
+            ..UserApiRequest::default()
+        };
+        let form_req = Option::<UserApiRequest>::None.unwrap_or_default();
+
+        let username =
+            super::get_non_empty(&timeshift_request.username, &api_query_req.username, &form_req.username).to_string();
+        let password =
+            super::get_non_empty(&timeshift_request.password, &api_query_req.password, &form_req.password).to_string();
+        let stream_id =
+            super::get_non_empty(&timeshift_request.stream_id, &api_query_req.stream_id, &form_req.stream_id)
+                .to_string();
+        let duration = super::get_non_empty(&timeshift_request.duration, &api_query_req.duration, &form_req.duration);
+        let start_time = super::get_non_empty(&timeshift_request.start, &api_query_req.start, &form_req.start);
+
+        assert_eq!(username, "query-user");
+        assert_eq!(password, "query-pass");
+        assert_eq!(stream_id, "42");
+        assert_eq!(duration, "60");
+        assert_eq!(start_time, "2024-01-01:00-00");
     }
 }
