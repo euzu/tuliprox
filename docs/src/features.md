@@ -15,13 +15,11 @@ Tuliprox can publish:
 - M3U
 - Xtream-style outputs
 - HDHomeRun
-- STRM
+- STRM Files
 
 That makes it usable both for IPTV players and for media-server-oriented workflows.
 
 ## Playlist processing
-
-Tuliprox can:
 
 - filter channels and groups
 - rename or normalize entries
@@ -30,8 +28,6 @@ Tuliprox can:
 - merge multiple inputs into a curated target
 
 ## Runtime streaming
-
-Tuliprox can:
 
 - reverse-proxy streams instead of redirecting them
 - keep provider account affinity where clients need it
@@ -42,12 +38,20 @@ Tuliprox can:
 
 ## Metadata and library
 
-Tuliprox can:
-
 - resolve VOD and series metadata
 - probe stream capabilities
 - scan local media
 - combine local library content with IPTV-oriented outputs
+
+## Operational features
+
+Tuliprox also includes:
+
+- scheduled playlist refreshes
+- hot config reload support
+- provider failover and DNS-aware connection rotation
+- notifications and monitoring hooks
+- **Web UI** with monitoring and web based configuration ability
 
 ## Access control
 
@@ -59,13 +63,3 @@ Tuliprox supports role-based access control (RBAC) for the Web UI:
 - compact bitmask encoding in JWT claims for low-overhead permission checks
 - backward-compatible user file format
 - Web UI admin panel for user and group management
-
-## Operational features
-
-Tuliprox also includes:
-
-- scheduled playlist refreshes
-- hot config reload support
-- provider failover and DNS-aware connection rotation
-- Web UI
-- notifications and monitoring hooks

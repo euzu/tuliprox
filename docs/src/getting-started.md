@@ -1,5 +1,53 @@
 # Getting Started
+## Recommended reading order
 
+1. [Installation](installation.md)
+2. [Configuration (Core System)](configuration/config.md)
+3. [Add Sources & Targets](configuration/source.md)
+4. [API Proxy](configuration/api-proxy.md)
+5. [Streaming & Proxy](configuration/reverse-proxy.md)
+6. [Templates](configuration/template.md)
+7. [Mappings](configuration/mapping-dsl.md)
+
+## Run Tuliprox via docker compose
+
+```yaml
+services:
+  tuliprox:
+    container_name: tuliprox
+    image: ghcr.io/euzu/tuliprox-alpine:latest
+    working_dir: /app
+    volumes:
+      - /opt/tuliprox/config:/app/config
+      - /opt/tuliprox/data:/app/data
+      - /opt/tuliprox/backup:/app/backup
+      - /opt/tuliprox/downloads:/app/downloads
+    environment:
+      - TZ=Europe/Berlin
+    ports:
+      - "8901:8901"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/tuliprox", "-p", "/app/config", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+```
+
+Open the Web UI afterwards and continue with the configuration.
+
+### First configuration steps
+
+For a new setup, the usual first goal is:
+
+1. add one working input
+2. create one target
+3. confirm playlist output
+4. confirm one stream works
+5. only then add mapping, filtering, reverse proxy and metadata features
+
+That keeps failures local and makes provider-specific issues much easier to diagnose.
 ## Run modes
 
 Tuliprox has two main modes:
@@ -83,45 +131,3 @@ Typical directories below that home:
 - `web/`
 
 All relative paths in the configuration are resolved against that home directory.
-
-## Quick Docker start
-
-```yaml
-services:
-  tuliprox:
-    container_name: tuliprox
-    image: ghcr.io/euzu/tuliprox-alpine:latest
-    working_dir: /app
-    volumes:
-      - /home/tuliprox/tuliprox:/app/tuliprox
-      - /home/tuliprox/config:/app/config
-      - /home/tuliprox/data:/app/data
-      - /home/tuliprox/cache:/app/cache
-    environment:
-      - TZ=Europe/Paris
-    ports:
-      - "8901:8901"
-    restart: unless-stopped
-```
-
-Open the Web UI afterwards and continue with the configuration.
-
-## Good first milestone
-
-For a new setup, the usual first goal is:
-
-1. add one working input
-2. create one target
-3. confirm playlist output
-4. confirm one stream works
-5. only then add mapping, filtering, reverse proxy and metadata features
-
-That keeps failures local and makes provider-specific issues much easier to diagnose.
-
-## Recommended reading order
-
-1. [Config Reference](configuration/main-config.md)
-2. [Sources And Targets](configuration/sources-and-targets.md)
-3. [API Proxy](configuration/api-proxy.md)
-4. [Streaming And Proxy](streaming-and-proxy.md)
-5. [Mapping And Templates](mapping-and-templates.md)
