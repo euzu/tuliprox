@@ -694,10 +694,23 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         app_state.connection_manager.update_stream_detail(&fingerprint.addr, *cvt).await;
     }
 
+    let meter = if meter_stream && meter_uid != 0 {
+        let meter = Arc::new(StreamMeterHandle::new(meter_uid));
+        app_state.event_manager.register_meter(Arc::clone(&meter)).await;
+        Some(meter)
+    } else {
+        None
+    };
+
     // Shared broadcaster source (first subscriber path): feed provider bytes directly.
     // Grace/custom handling is not needed here because this stream is only the fan-out source.
     if is_shared_source_stream {
         if let Some(stream) = stream_details.stream.take() {
+            let stream = if let Some(meter) = &meter {
+                MeteringStream::new(stream, Arc::clone(meter), Arc::clone(&app_state.event_manager)).boxed()
+            } else {
+                stream
+            };
             return wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, virtual_id);
         }
     }
@@ -762,14 +775,6 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         .as_ref()
         .and_then(|_| create_timed_stream_context(app_state, virtual_id));
 
-    let meter = if meter_stream && meter_uid != 0 {
-        let meter = Arc::new(StreamMeterHandle::new(meter_uid));
-        app_state.event_manager.register_meter(Arc::clone(&meter)).await;
-        Some(meter)
-    } else {
-        None
-    };
-
     let stream: Option<BoxedProviderStream> = match stream_details.stream.take() {
         None => {
             if !stream_details.has_deferred_provider_open() {
@@ -779,6 +784,11 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             None
         }
         Some(stream) => {
+            let stream = if let Some(meter) = &meter {
+                MeteringStream::new(stream, Arc::clone(meter), Arc::clone(&app_state.event_manager)).boxed()
+            } else {
+                stream
+            };
             Some(wrap_timed_client_stream_if_needed(app_state, stream, fingerprint.addr, virtual_id))
         }
     };
@@ -1594,5 +1604,54 @@ mod tests {
 
         app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
         app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_active_client_stream_immediate_provider_stream_emits_meter_batches() {
+        let app_state = create_test_app_state();
+        let mut meter_events = app_state.event_manager.get_meter_channel();
+        app_state.event_manager.stream_meter_subscriber_connected();
+
+        let addr = "127.0.0.1:55030".parse().unwrap_or_else(|_| unreachable!());
+        let test_user = create_test_user("meter-user");
+        let test_fingerprint = create_test_fingerprint(addr);
+        let provider_stream = futures::stream::iter(vec![Ok::<Bytes, StreamError>(Bytes::from_static(&[0_u8; 3072]))])
+            .chain(futures::stream::pending())
+            .boxed();
+        let stream_details = StreamDetails::from_stream(provider_stream, GracePeriodOptions::default());
+
+        let stream = create_active_client_stream(ActiveClientStreamParams {
+            stream_details,
+            app_state: &app_state,
+            user: &test_user,
+            connection_permission: UserConnectionPermission::Allowed,
+            fingerprint: &test_fingerprint,
+            stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
+            session_token: None,
+            req_headers: &HeaderMap::default(),
+            meter_uid: 55,
+            meter_stream: true,
+        })
+        .await;
+        pin_mut!(stream);
+
+        let first_chunk = stream.next().await;
+        assert!(
+            matches!(first_chunk, Some(Ok(ref bytes)) if bytes.len() == 3072),
+            "immediate provider stream should yield the metered payload chunk"
+        );
+
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        let entries = tokio::time::timeout(Duration::from_millis(1), meter_events.recv())
+            .await
+            .expect("immediate provider stream should publish a meter batch after bytes are sent")
+            .expect("meter channel should stay open while the stream is active");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meter_uid, 55);
+        assert_eq!(entries[0].uids, vec![1]);
+        assert_eq!(entries[0].rate_kbps, 1);
+        assert_eq!(entries[0].total_kb, 3);
     }
 }
