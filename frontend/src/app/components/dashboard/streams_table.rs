@@ -155,7 +155,9 @@ struct StreamMeterCellProps {
 #[derive(Clone, PartialEq, Eq, Default)]
 struct StreamMeterCellState {
     rate_kbps: u32,
-    meter_totals_kb: HashMap<u32, u32>,
+    transferred_total_kb: u32,
+    current_meter_uid: u32,
+    current_meter_total_kb: u32,
 }
 
 fn apply_stream_meter_entry(
@@ -164,12 +166,16 @@ fn apply_stream_meter_entry(
     entry: &StreamMeterEntry,
 ) -> StreamMeterCellState {
     let mut next = state.clone();
-    next.meter_totals_kb
-        .entry(entry.meter_uid)
-        .and_modify(|total_kb| *total_kb = (*total_kb).max(entry.total_kb))
-        .or_insert(entry.total_kb);
     if entry.meter_uid == current_meter_uid {
+        if next.current_meter_uid != current_meter_uid {
+            next.transferred_total_kb = next.transferred_total_kb.saturating_add(next.current_meter_total_kb);
+            next.current_meter_uid = current_meter_uid;
+            next.current_meter_total_kb = 0;
+        }
+        next.current_meter_total_kb = next.current_meter_total_kb.max(entry.total_kb);
         next.rate_kbps = entry.rate_kbps;
+    } else {
+        next.transferred_total_kb = next.transferred_total_kb.saturating_add(entry.total_kb);
     }
 
     next
@@ -217,7 +223,7 @@ fn StreamMeterCell(props: &StreamMeterCellProps) -> Html {
     }
 
     let rate_kbps = meter_state.rate_kbps;
-    let total_kb = meter_state.meter_totals_kb.values().copied().sum::<u32>();
+    let total_kb = meter_state.transferred_total_kb.saturating_add(meter_state.current_meter_total_kb);
     match props.kind {
         MeterDisplayKind::Bandwidth => html! { format_bandwidth(rate_kbps) },
         MeterDisplayKind::Transferred => html! { format_transferred(total_kb) },
@@ -825,7 +831,7 @@ mod tests {
         let state = apply_stream_meter_entry(&state, 202, &second);
 
         assert_eq!(state.rate_kbps, 25);
-        assert_eq!(state.meter_totals_kb.values().copied().sum::<u32>(), 130);
+        assert_eq!(state.transferred_total_kb.saturating_add(state.current_meter_total_kb), 130);
     }
 
     #[test]
@@ -837,6 +843,19 @@ mod tests {
         let state = apply_stream_meter_entry(&state, 202, &stale);
 
         assert_eq!(state.rate_kbps, 40);
-        assert_eq!(state.meter_totals_kb.values().copied().sum::<u32>(), 180);
+        assert_eq!(state.transferred_total_kb.saturating_add(state.current_meter_total_kb), 180);
+    }
+
+    #[test]
+    fn test_apply_stream_meter_entry_does_not_grow_state_per_historical_meter() {
+        let first = StreamMeterEntry { meter_uid: 101, uids: vec![7], rate_kbps: 50, total_kb: 100 };
+        let second = StreamMeterEntry { meter_uid: 202, uids: vec![7], rate_kbps: 25, total_kb: 30 };
+
+        let state = apply_stream_meter_entry(&StreamMeterCellState::default(), 101, &first);
+        let state = apply_stream_meter_entry(&state, 202, &second);
+
+        assert_eq!(state.current_meter_uid, 202);
+        assert_eq!(state.transferred_total_kb, 100);
+        assert_eq!(state.current_meter_total_kb, 30);
     }
 }

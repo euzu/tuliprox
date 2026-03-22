@@ -118,6 +118,13 @@ struct AdaptiveExpiryEntry {
     uid: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct AdaptiveExpiryKey {
+    username: String,
+    session_token: String,
+    uid: u32,
+}
+
 pub struct ReleasedConnection {
     pub addr_removed: bool,
     pub removed_streams: Vec<StreamInfo>,
@@ -162,6 +169,7 @@ pub struct ActiveUserManager {
     gc_ts: Option<AtomicU64>,
     connections: RwLock<UserConnections>,
     adaptive_expiry_queue: Arc<Mutex<BinaryHeap<Reverse<AdaptiveExpiryEntry>>>>,
+    adaptive_expiry_index: Arc<Mutex<HashMap<AdaptiveExpiryKey, u64>>>,
     adaptive_expiry_notify: Arc<Notify>,
     adaptive_expiry_cancel: CancellationToken,
     adaptive_expiry_worker_started: AtomicBool,
@@ -220,6 +228,7 @@ impl ActiveUserManager {
             log_active_user: AtomicBool::new(log_active_user),
             connections: RwLock::new(UserConnections::default()),
             adaptive_expiry_queue: Arc::new(Mutex::new(BinaryHeap::new())),
+            adaptive_expiry_index: Arc::new(Mutex::new(HashMap::new())),
             adaptive_expiry_notify: Arc::new(Notify::new()),
             adaptive_expiry_cancel: CancellationToken::new(),
             adaptive_expiry_worker_started: AtomicBool::new(false),
@@ -665,6 +674,16 @@ impl ActiveUserManager {
     }
 
     async fn enqueue_adaptive_expiry(&self, entry: AdaptiveExpiryEntry) {
+        let key = AdaptiveExpiryKey {
+            username: entry.username.clone(),
+            session_token: entry.session_token.clone(),
+            uid: entry.uid,
+        };
+
+        let mut expiry_index = self.adaptive_expiry_index.lock().await;
+        expiry_index.insert(key, entry.expires_at);
+        drop(expiry_index);
+
         let mut queue = self.adaptive_expiry_queue.lock().await;
         let wake_worker = queue.peek().is_none_or(|current| entry.expires_at < current.0.expires_at);
         queue.push(Reverse(entry));
@@ -952,8 +971,21 @@ impl ActiveUserManager {
             return;
         }
 
+        let mut expiry_index = self.adaptive_expiry_index.lock().await;
         let mut user_connections = self.connections.write().await;
         for entry in due_entries {
+            let key = AdaptiveExpiryKey {
+                username: entry.username.clone(),
+                session_token: entry.session_token.clone(),
+                uid: entry.uid,
+            };
+            let Some(current_expires_at) = expiry_index.get(&key).copied() else {
+                continue;
+            };
+            if current_expires_at != entry.expires_at {
+                continue;
+            }
+
             let mut remove_user = false;
             if let Some(connection_data) = user_connections.by_key.get_mut(&entry.username) {
                 let should_remove = connection_data
@@ -979,6 +1011,7 @@ impl ActiveUserManager {
                             && stream.session_token.as_deref() == Some(entry.session_token.as_str())
                     }) {
                         connection_data.streams.swap_remove(stream_idx);
+                        expiry_index.remove(&key);
                     }
                 }
 
@@ -1394,6 +1427,81 @@ mod tests {
             .process_due_adaptive_expiry_entries(current_time_secs().saturating_add(default_hls_session_ttl_secs() + 1))
             .await;
         assert!(manager.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_repeated_preserve_for_same_adaptive_session_keeps_single_current_expiry_index() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr_a: SocketAddr = "127.0.0.1:55071".parse().unwrap();
+        let addr_b: SocketAddr = "127.0.0.1:55072".parse().unwrap();
+        let fp_a = Fingerprint::new("fp-key-a".to_string(), "127.0.0.1".to_string(), addr_a);
+        let fp_b = Fingerprint::new("fp-key-b".to_string(), "127.0.0.1".to_string(), addr_b);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
+
+        manager.add_connection(&addr_a).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-reuse",
+                virtual_id: 7001,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-a.m3u8",
+                addr: &addr_a,
+                connection_permission: UserConnectionPermission::Allowed,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 88,
+                meter_uid: 188,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fp_a,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveHls,
+                    ..test_channel(7001)
+                },
+                user_agent: Cow::Borrowed("ua-a"),
+                session_token: Some("tok-reuse"),
+            })
+            .await;
+        let released = manager.release_connection(&addr_a).await;
+        assert!(released.addr_removed);
+
+        manager.add_connection(&addr_b).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 99,
+                meter_uid: 199,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fp_b,
+                provider: "provider-b",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveDash,
+                    ..test_channel(7002)
+                },
+                user_agent: Cow::Borrowed("ua-b"),
+                session_token: Some("tok-reuse"),
+            })
+            .await;
+        let released = manager.release_connection(&addr_b).await;
+        assert!(released.addr_removed);
+
+        let expiry_index = manager.adaptive_expiry_index.lock().await;
+        assert_eq!(expiry_index.len(), 1);
+        assert!(expiry_index.contains_key(&AdaptiveExpiryKey {
+            username: String::from("user1"),
+            session_token: String::from("tok-reuse"),
+            uid: 88,
+        }));
     }
 
     #[tokio::test]
