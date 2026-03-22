@@ -118,17 +118,3 @@ Main entry points:
 - [`Deployment`](docs/src/deployment.md)
 - [`Examples And Recipes`](docs/src/examples-and-recipes.md)
 
-## Documentation strategy
-
-The recommended format is:
-
-- source in Markdown
-- generated as static HTML
-- shipped together with the frontend/web root
-
-For this repository, `mdBook` is the best fit:
-
-- Markdown stays easy to edit in Git
-- static HTML output is simple to host
-- it fits a Rust project better than a Node-heavy doc stack
-- navigation and search come out of the box
