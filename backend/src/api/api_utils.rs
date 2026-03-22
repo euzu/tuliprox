@@ -199,6 +199,7 @@ macro_rules! try_result_not_found {
 use crate::api::panel_api::{can_provision_on_exhausted, create_panel_api_provisioning_stream_details};
 pub use internal_server_error;
 use shared::error::TuliproxError;
+use shared::utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
 pub use try_option_bad_request;
 pub use try_option_forbidden;
 pub use try_result_bad_request;
@@ -1339,23 +1340,26 @@ async fn prepare_stream_metering(
     StreamMeteringConfig::default()
 }
 
-fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64) -> u64 {
-    app_state
-        .app_config
-        .config
-        .load()
-        .reverse_proxy
-        .as_ref()
-        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or(0, selector)
+fn resolve_stream_config_u64(
+    stream_config: Option<&crate::model::StreamConfig>,
+    selector: impl FnOnce(&crate::model::StreamConfig) -> u64,
+    default_value: u64,
+) -> u64 {
+    stream_config.map_or(default_value, selector)
+}
+
+fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64, default_value: u64) -> u64 {
+    let config = app_state.app_config.config.load();
+    let stream_config = config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.stream.as_ref());
+    resolve_stream_config_u64(stream_config, selector, default_value)
 }
 
 pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
-    get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs)
+    get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs())
 }
 
 pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
-    get_stream_config_u64(app_state, |stream| stream.catchup_session_ttl_secs)
+    get_stream_config_u64(app_state, |stream| stream.catchup_session_ttl_secs, default_catchup_session_ttl_secs())
 }
 
 pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_type: PlaylistItemType) -> u64 {
@@ -2032,7 +2036,10 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, Response};
-    use shared::model::XtreamCluster;
+    use shared::{
+        model::XtreamCluster,
+        utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
+    };
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -2071,5 +2078,25 @@ mod tests {
         let response = Response::new(());
 
         assert!(should_compress_response(&response));
+    }
+
+    #[test]
+    fn test_get_stream_config_u64_uses_default_when_stream_config_missing() {
+        assert_eq!(
+            resolve_stream_config_u64(
+                None,
+                |stream| stream.hls_session_ttl_secs,
+                default_hls_session_ttl_secs()
+            ),
+            default_hls_session_ttl_secs()
+        );
+        assert_eq!(
+            resolve_stream_config_u64(
+                None,
+                |stream| stream.catchup_session_ttl_secs,
+                default_catchup_session_ttl_secs()
+            ),
+            default_catchup_session_ttl_secs()
+        );
     }
 }

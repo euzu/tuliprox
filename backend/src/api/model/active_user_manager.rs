@@ -213,9 +213,15 @@ impl ActiveUserManager {
             let mut removed_stream = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                 if let Some(stream_idx) = connection_data.streams.iter().position(|c| c.addr == *addr) {
-                    removed_stream = Some(connection_data.streams.swap_remove(stream_idx));
-                    if connection_data.connections > 0 {
-                        connection_data.connections -= 1;
+                    if Self::should_preserve_session_stream(&connection_data.streams[stream_idx]) {
+                        if connection_data.connections > 0 {
+                            connection_data.connections -= 1;
+                        }
+                    } else {
+                        removed_stream = Some(connection_data.streams.swap_remove(stream_idx));
+                        if connection_data.connections > 0 {
+                            connection_data.connections -= 1;
+                        }
                     }
                     if connection_data.connections < connection_data.max_connections {
                         connection_data.granted_grace = false;
@@ -248,18 +254,23 @@ impl ActiveUserManager {
                 let mut removed_streams = Vec::new();
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                     let mut remaining_streams = Vec::with_capacity(connection_data.streams.len());
+                    let mut released_count = 0_usize;
                     for stream_info in connection_data.streams.drain(..) {
                         if stream_info.addr == *addr {
-                            removed_streams.push(stream_info);
+                            released_count += 1;
+                            if Self::should_preserve_session_stream(&stream_info) {
+                                remaining_streams.push(stream_info);
+                            } else {
+                                removed_streams.push(stream_info);
+                            }
                         } else {
                             remaining_streams.push(stream_info);
                         }
                     }
-                    let removed_count = removed_streams.len();
                     connection_data.streams = remaining_streams;
-                    if removed_count > 0 && connection_data.connections > 0 {
+                    if released_count > 0 && connection_data.connections > 0 {
                         connection_data.connections =
-                            connection_data.connections.saturating_sub(u32::try_from(removed_count).unwrap_or(0));
+                            connection_data.connections.saturating_sub(u32::try_from(released_count).unwrap_or(0));
                     }
 
                     if connection_data.connections < connection_data.max_connections {
@@ -495,6 +506,8 @@ impl ActiveUserManager {
                 })
                 .map(|stream_info| {
                     let client_ip = fingerprint.client_ip.clone();
+                    let preserve_started_at = stream_info.session_token.is_some()
+                        && (stream_info.channel.item_type.is_live_adaptive() || stream_channel.item_type.is_live_adaptive());
                     stream_info.meter_uid = meter_uid;
                     stream_info.addr = fingerprint.addr;
                     stream_info.client_ip.clone_from(&client_ip);
@@ -502,7 +515,9 @@ impl ActiveUserManager {
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
-                    stream_info.ts = current_time_secs();
+                    if !preserve_started_at {
+                        stream_info.ts = current_time_secs();
+                    }
 
                     if let Some(token) = session_token {
                         stream_info.session_token = Some(token.to_string());
@@ -750,6 +765,10 @@ impl ActiveUserManager {
             .map(|registration| registration.username.clone())
     }
 
+    fn should_preserve_session_stream(stream: &StreamInfo) -> bool {
+        stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
+    }
+
     fn gc(&self) {
         if let Some(gc_ts) = &self.gc_ts {
             let ts = gc_ts.load(Ordering::Acquire);
@@ -967,6 +986,72 @@ mod tests {
         assert_eq!(streams[0].meter_uid, 202);
         assert_eq!(streams[0].provider, "provider-b");
         assert_eq!(streams[0].channel.virtual_id, 3002);
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_session_release_connection_preserves_logical_stream_and_start_time() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55041".parse().unwrap();
+        let next_addr: SocketAddr = "127.0.0.1:55042".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-key-4".to_string(), "127.0.0.1".to_string(), addr);
+        let next_fingerprint = Fingerprint::new("fp-key-5".to_string(), "127.0.0.1".to_string(), next_addr);
+
+        manager.add_connection(&addr).await;
+        let first = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 44,
+                meter_uid: 144,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveHls,
+                    ..test_channel(4001)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-hls"),
+            })
+            .await
+            .expect("initial adaptive session should register");
+
+        let released = manager.release_connection(&addr).await;
+        assert!(released.addr_removed);
+        assert!(released.removed_streams.is_empty(), "adaptive session should remain logically active");
+        assert_eq!(manager.user_connections("user1").await, 0);
+
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].uid, 44);
+        assert_eq!(streams[0].ts, first.ts);
+
+        manager.add_connection(&next_addr).await;
+        let second = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 55,
+                meter_uid: 155,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &next_fingerprint,
+                provider: "provider-b",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveDash,
+                    ..test_channel(4002)
+                },
+                user_agent: Cow::Borrowed("ua-2"),
+                session_token: Some("tok-hls"),
+            })
+            .await
+            .expect("adaptive session should reuse logical stream");
+
+        assert_eq!(second.uid, 44);
+        assert_eq!(second.ts, first.ts, "adaptive session duration must stay session-based");
+        assert_eq!(second.addr, next_addr);
+        assert_eq!(second.meter_uid, 155);
     }
 
     #[tokio::test]

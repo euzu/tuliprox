@@ -169,6 +169,28 @@ impl EventManager {
         }
     }
 
+    pub async fn flush_and_unregister_meter(&self, meter_uid: u32) {
+        if meter_uid == 0 {
+            return;
+        }
+
+        let final_entry = {
+            let mut registry = self.meter_registry.write().await;
+            let meter = registry.meters.remove(&meter_uid);
+            let client_uids = registry.meter_to_clients.remove(&meter_uid).unwrap_or_default();
+
+            for client_uid in &client_uids {
+                registry.client_to_meter.remove(client_uid);
+            }
+
+            meter.and_then(|meter| build_meter_entry(meter.snapshot(), client_uids))
+        };
+
+        if let Some(entry) = final_entry {
+            self.send_meter_batch(vec![entry]);
+        }
+    }
+
     pub async fn register_meter_client(&self, client_uid: u32, meter_uid: u32) {
         if client_uid == 0 || meter_uid == 0 {
             return;
@@ -342,5 +364,24 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].meter_uid, 5);
         assert_eq!(entries[0].uids, vec![11]);
+    }
+
+    #[tokio::test]
+    async fn flush_and_unregister_meter_sends_final_totals_before_removal() {
+        let manager = EventManager::new();
+        let meter = Arc::new(StreamMeterHandle::new(12));
+        manager.register_meter(Arc::clone(&meter)).await;
+        manager.register_meter_client(91, 12).await;
+        manager.stream_meter_subscriber_connected();
+        let mut meter_events = manager.get_meter_channel();
+
+        meter.record_bytes(2048);
+        manager.flush_and_unregister_meter(12).await;
+
+        let entries = meter_events.recv().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meter_uid, 12);
+        assert_eq!(entries[0].uids, vec![91]);
+        assert_eq!(entries[0].total_kb, 2);
     }
 }

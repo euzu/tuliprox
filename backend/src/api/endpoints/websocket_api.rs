@@ -62,6 +62,10 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
     !auth_required || mem.permissions.contains(Permission::SystemRead)
 }
 
+fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory) -> bool {
+    mem.role.is_admin() || mem.permissions.contains(Permission::SystemRead)
+}
+
 fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
     if !auth {
         return None;
@@ -274,7 +278,7 @@ async fn handle_event_message(
     match handler {
         ProtocolHandler::Version(_) => {}
         ProtocolHandler::Default(mem) => {
-            if mem.role.is_admin() {
+            if websocket_can_receive_runtime_events(mem) {
                 match event {
                     EventMessage::ServerError(error) => {
                         if supports_server_error_messages(mem.peer_version) {
@@ -428,5 +432,22 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
                 app_state.app_config.config.load().web_ui.as_ref().map_or_else(default_kick_secs, |wc| wc.kick_secs);
             app_state.connection_manager.kick_connection(&addr, virtual_id, kick_secs).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::websocket_can_receive_runtime_events;
+    use shared::model::{Permission, ProtocolHandlerMemory, UserRole};
+
+    #[test]
+    fn test_websocket_runtime_events_allowed_for_system_read_user() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::SystemRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(websocket_can_receive_runtime_events(&mem));
     }
 }

@@ -211,7 +211,7 @@ impl ConnectionManager {
         }
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, true).await;
-        if removed.addr_removed {
+        if removed.addr_removed && !removed.removed_streams.is_empty() {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
         }
         notify_capacity(self.capacity_notify.as_ref());

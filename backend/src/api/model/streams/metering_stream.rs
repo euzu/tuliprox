@@ -86,7 +86,7 @@ impl Drop for MeteringStream {
         let meter_uid = self.meter.meter_uid();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                event_manager.unregister_meter(meter_uid).await;
+                event_manager.flush_and_unregister_meter(meter_uid).await;
             });
         }
     }

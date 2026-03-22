@@ -117,4 +117,3 @@ Main entry points:
 - [`Mapping And Templates`](docs/src/mapping-and-templates.md)
 - [`Deployment`](docs/src/deployment.md)
 - [`Examples And Recipes`](docs/src/examples-and-recipes.md)
-
