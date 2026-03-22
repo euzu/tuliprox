@@ -333,15 +333,16 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
     {
         let adaptive_last_seen = adaptive_last_seen.clone();
         let streams = props.streams.clone();
-        let cleanup_now_secs = *cleanup_now_secs;
-        use_effect_with((streams, cleanup_now_secs), move |(streams, _cleanup_now_secs)| {
+        use_effect_with(streams, move |streams| {
             let now = current_time_secs();
             let mut next = (*adaptive_last_seen).clone();
 
             if let Some(streams) = streams {
                 for stream in streams {
                     if is_adaptive_session_stream(stream) {
-                        next.insert(stream.uid, now);
+                        if !stream.preserved || !next.contains_key(&stream.uid) {
+                            next.insert(stream.uid, now);
+                        }
                     } else {
                         next.remove(&stream.uid);
                     }
@@ -692,7 +693,10 @@ impl FromStr for StreamsTableAction {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_stream_meter_entry, build_technical_chips, filter_visible_streams, StreamMeterCellState};
+    use super::{
+        apply_stream_meter_entry, build_technical_chips, filter_visible_streams, is_adaptive_session_stream,
+        StreamMeterCellState,
+    };
     use shared::{
         model::{PlaylistItemType, StreamChannel, StreamInfo, StreamMeterEntry, StreamTechnicalInfo, XtreamCluster},
         utils::Internable,
@@ -727,6 +731,23 @@ mod tests {
         })
     }
 
+    fn refresh_adaptive_last_seen(
+        mut current: HashMap<u32, u64>,
+        streams: &[Rc<StreamInfo>],
+        now: u64,
+    ) -> HashMap<u32, u64> {
+        for stream in streams {
+            if is_adaptive_session_stream(stream) {
+                if !stream.preserved || !current.contains_key(&stream.uid) {
+                    current.insert(stream.uid, now);
+                }
+            } else {
+                current.remove(&stream.uid);
+            }
+        }
+        current
+    }
+
     #[test]
     fn test_filter_visible_streams_keeps_adaptive_stream_until_ttl_buffer_expires() {
         let stream = test_stream(7, PlaylistItemType::LiveHls, Some("tok"));
@@ -756,6 +777,23 @@ mod tests {
         let visible =
             filter_visible_streams(Some(vec![stream]), &HashMap::new(), 200, 15).unwrap_or_else(|| unreachable!());
         assert_eq!(visible.len(), 1);
+    }
+
+    #[test]
+    fn test_preserved_adaptive_stream_does_not_refresh_last_seen_on_status_refresh() {
+        let first = test_stream(7, PlaylistItemType::LiveHls, Some("tok-a"));
+        let mut second = (*test_stream(9, PlaylistItemType::LiveHls, Some("tok-b"))).clone();
+        second.preserved = true;
+        let second = Rc::new(second);
+
+        let mut adaptive_last_seen = HashMap::new();
+        adaptive_last_seen.insert(7, 100);
+        adaptive_last_seen.insert(9, 50);
+
+        let refreshed = refresh_adaptive_last_seen(adaptive_last_seen, &[first, second], 120);
+
+        assert_eq!(refreshed.get(&7), Some(&120));
+        assert_eq!(refreshed.get(&9), Some(&50));
     }
 
     #[test]

@@ -10,20 +10,23 @@ use log::{debug, info};
 use shared::{
     model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, StreamTechnicalInfo, UserConnectionPermission, VirtualId},
     utils::{
-        current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, sanitize_sensitive_info,
-        strip_port, Internable,
+        current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs,
+        default_hls_session_ttl_secs, sanitize_sensitive_info, strip_port, Internable,
     },
 };
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap, HashSet},
     net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, Notify, RwLock};
+use tokio_util::sync::CancellationToken;
 
 const USER_GC_TTL: u64 = 900; // 15 Min
 const USER_CON_TTL: u64 = 10_800; // 3 hours
@@ -37,6 +40,14 @@ fn get_grace_options(config: &Config) -> (u64, u64) {
             |s| (s.grace_period_millis, s.grace_period_timeout_secs),
         );
     (grace_period_millis, grace_period_timeout_secs)
+}
+
+fn get_adaptive_session_ttl_secs(config: &Config) -> u64 {
+    config
+        .reverse_proxy
+        .as_ref()
+        .and_then(|r| r.stream.as_ref())
+        .map_or_else(default_hls_session_ttl_secs, |s| s.hls_session_ttl_secs)
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +110,14 @@ struct SocketRegistration {
     ts: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct AdaptiveExpiryEntry {
+    expires_at: u64,
+    username: String,
+    session_token: String,
+    uid: u32,
+}
+
 pub struct ReleasedConnection {
     pub addr_removed: bool,
     pub removed_streams: Vec<StreamInfo>,
@@ -138,9 +157,14 @@ impl SocketRegistration {
 pub struct ActiveUserManager {
     grace_period_millis: AtomicU64,
     grace_period_timeout_secs: AtomicU64,
+    adaptive_session_ttl_secs: AtomicU64,
     log_active_user: AtomicBool,
     gc_ts: Option<AtomicU64>,
     connections: RwLock<UserConnections>,
+    adaptive_expiry_queue: Arc<Mutex<BinaryHeap<Reverse<AdaptiveExpiryEntry>>>>,
+    adaptive_expiry_notify: Arc<Notify>,
+    adaptive_expiry_cancel: CancellationToken,
+    adaptive_expiry_worker_started: AtomicBool,
     event_manager: Arc<EventManager>,
     geo_ip: Arc<ArcSwapOption<GeoIp>>,
     last_logged_user_count: AtomicUsize,
@@ -148,6 +172,25 @@ pub struct ActiveUserManager {
 }
 
 impl ActiveUserManager {
+    pub fn shutdown(&self) {
+        self.adaptive_expiry_cancel.cancel();
+    }
+
+    pub fn start_adaptive_expiry_worker(self: &Arc<Self>) {
+        if self
+            .adaptive_expiry_worker_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            manager.run_adaptive_expiry_worker().await;
+        });
+    }
+
     fn lookup_country(&self, client_ip: &str) -> Option<String> {
         let geoip = self.geo_ip.load();
         (*geoip)
@@ -173,8 +216,13 @@ impl ActiveUserManager {
         Self {
             grace_period_millis: AtomicU64::new(grace_period_millis),
             grace_period_timeout_secs: AtomicU64::new(grace_period_timeout_secs),
+            adaptive_session_ttl_secs: AtomicU64::new(get_adaptive_session_ttl_secs(config)),
             log_active_user: AtomicBool::new(log_active_user),
             connections: RwLock::new(UserConnections::default()),
+            adaptive_expiry_queue: Arc::new(Mutex::new(BinaryHeap::new())),
+            adaptive_expiry_notify: Arc::new(Notify::new()),
+            adaptive_expiry_cancel: CancellationToken::new(),
+            adaptive_expiry_worker_started: AtomicBool::new(false),
             gc_ts: Some(AtomicU64::new(current_time_secs())),
             geo_ip: Arc::clone(geoip),
             event_manager: Arc::clone(event_manager),
@@ -205,12 +253,13 @@ impl ActiveUserManager {
     /// socket registration (`key_by_addr`). This is used when a stream ends while
     /// the underlying HTTP connection may still remain open.
     pub async fn release_stream(&self, addr: &SocketAddr) -> Option<StreamInfo> {
-        let (removed_stream, username) = {
+        let (removed_stream, username, expiry_entry) = {
             let mut user_connections = self.connections.write().await;
 
             let username = user_connections.key_by_addr.get(addr).map(|reg| reg.username.clone())?;
 
             let mut removed_stream = None;
+            let mut expiry_entry = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                 if let Some(stream_idx) = connection_data
                     .streams
@@ -219,6 +268,11 @@ impl ActiveUserManager {
                 {
                     if Self::should_preserve_session_stream(&connection_data.streams[stream_idx]) {
                         connection_data.streams[stream_idx].preserved = true;
+                        expiry_entry = self.build_preserved_stream_expiry(
+                            &username,
+                            &connection_data.streams[stream_idx],
+                            &connection_data.sessions,
+                        );
                     } else {
                         removed_stream = Some(connection_data.streams.swap_remove(stream_idx));
                     }
@@ -231,8 +285,12 @@ impl ActiveUserManager {
                     }
                 }
             }
-            (removed_stream, username)
+            (removed_stream, username, expiry_entry)
 };
+
+        if let Some(entry) = expiry_entry {
+            self.enqueue_adaptive_expiry(entry).await;
+        }
 
         if removed_stream.is_some() {
             if !username.is_empty() {
@@ -248,12 +306,13 @@ impl ActiveUserManager {
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) -> ReleasedConnection {
-        let (addr_removed, disconnected_user, removed_streams) = {
+        let (addr_removed, disconnected_user, removed_streams, expiry_entries) = {
             let mut user_connections = self.connections.write().await;
 
             if let Some(registration) = user_connections.key_by_addr.remove(addr) {
                 let username = registration.username;
                 let mut removed_streams = Vec::new();
+                let mut expiry_entries = Vec::new();
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                     let mut remaining_streams = Vec::with_capacity(connection_data.streams.len());
                     let mut released_count = 0_u32;
@@ -264,6 +323,11 @@ impl ActiveUserManager {
                                     released_count = released_count.saturating_add(1);
                                 }
                                 stream_info.preserved = true;
+                                if let Some(entry) =
+                                    self.build_preserved_stream_expiry(&username, &stream_info, &connection_data.sessions)
+                                {
+                                    expiry_entries.push(entry);
+                                }
                                 remaining_streams.push(stream_info);
                             } else {
                                 if !stream_info.preserved {
@@ -285,11 +349,15 @@ impl ActiveUserManager {
                         connection_data.grace_ts = 0;
                     }
                 }
-                (true, Some(username), removed_streams)
+                (true, Some(username), removed_streams, expiry_entries)
             } else {
-                (false, None, Vec::new())
+                (false, None, Vec::new(), Vec::new())
             }
         };
+
+        for entry in expiry_entries {
+            self.enqueue_adaptive_expiry(entry).await;
+        }
 
         if let Some(username) = disconnected_user {
             if !username.is_empty() {
@@ -312,6 +380,8 @@ impl ActiveUserManager {
         let (grace_period_millis, grace_period_timeout_secs) = get_grace_options(config);
         self.grace_period_millis.store(grace_period_millis, Ordering::Relaxed);
         self.grace_period_timeout_secs.store(grace_period_timeout_secs, Ordering::Relaxed);
+        self.adaptive_session_ttl_secs
+            .store(get_adaptive_session_ttl_secs(config), Ordering::Relaxed);
         self.log_active_user.store(log_active_user, Ordering::Relaxed);
     }
 
@@ -421,6 +491,7 @@ impl ActiveUserManager {
     }
 
     pub async fn active_users_and_connections(&self) -> (usize, usize) {
+        self.gc();
         let user_connections = self.connections.read().await;
         user_connections
             .by_key
@@ -574,6 +645,34 @@ impl ActiveUserManager {
 
     fn is_log_user_enabled(&self) -> bool { self.log_active_user.load(Ordering::Relaxed) }
 
+    fn build_preserved_stream_expiry(
+        &self,
+        username: &str,
+        stream: &StreamInfo,
+        sessions: &[UserSession],
+    ) -> Option<AdaptiveExpiryEntry> {
+        let session_token = stream.session_token.as_deref()?;
+        let session = sessions.iter().find(|session| session.token == session_token)?;
+
+        let ttl_secs = self.adaptive_session_ttl_secs.load(Ordering::Relaxed);
+        let expires_at = session.ts.saturating_add(ttl_secs);
+        Some(AdaptiveExpiryEntry {
+            expires_at,
+            username: username.to_string(),
+            session_token: session_token.to_string(),
+            uid: stream.uid,
+        })
+    }
+
+    async fn enqueue_adaptive_expiry(&self, entry: AdaptiveExpiryEntry) {
+        let mut queue = self.adaptive_expiry_queue.lock().await;
+        let wake_worker = queue.peek().is_none_or(|current| entry.expires_at < current.0.expires_at);
+        queue.push(Reverse(entry));
+        if wake_worker {
+            self.adaptive_expiry_notify.notify_one();
+        }
+    }
+
     fn new_user_session(
         session_token: &str,
         virtual_id: u32,
@@ -698,6 +797,7 @@ impl ActiveUserManager {
     }
 
     pub async fn active_streams(&self) -> Vec<StreamInfo> {
+        self.gc();
         let user_connections = self.connections.read().await;
         let mut streams = Vec::new();
         for connection_data in user_connections.by_key.values() {
@@ -781,6 +881,118 @@ impl ActiveUserManager {
         stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
     }
 
+    fn is_preserved_stream_expired(
+        &self,
+        stream: &StreamInfo,
+        sessions: &[UserSession],
+        now: u64,
+    ) -> bool {
+        if !stream.preserved || !Self::should_preserve_session_stream(stream) {
+            return false;
+        }
+
+        let ttl_secs = self.adaptive_session_ttl_secs.load(Ordering::Relaxed);
+        let Some(session_token) = stream.session_token.as_deref() else {
+            return true;
+        };
+
+        let Some(session) = sessions.iter().find(|session| session.token == session_token) else {
+            return true;
+        };
+
+        now.saturating_sub(session.ts) >= ttl_secs
+    }
+
+    async fn run_adaptive_expiry_worker(self: Arc<Self>) {
+        loop {
+            let next_expiry = {
+                let queue = self.adaptive_expiry_queue.lock().await;
+                queue.peek().map(|entry| entry.0.expires_at)
+            };
+
+            match next_expiry {
+                None => {
+                    tokio::select! {
+                        () = self.adaptive_expiry_notify.notified() => {}
+                        () = self.adaptive_expiry_cancel.cancelled() => break,
+                    }
+                }
+                Some(expires_at) => {
+                    let now = current_time_secs();
+                    if expires_at <= now {
+                        self.process_due_adaptive_expiry_entries(now).await;
+                        continue;
+                    }
+
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_secs(expires_at.saturating_sub(now))) => {}
+                        () = self.adaptive_expiry_notify.notified() => {}
+                        () = self.adaptive_expiry_cancel.cancelled() => break,
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_due_adaptive_expiry_entries(&self, now: u64) {
+        let mut due_entries = Vec::new();
+        {
+            let mut queue = self.adaptive_expiry_queue.lock().await;
+            while let Some(entry) = queue.peek() {
+                if entry.0.expires_at > now {
+                    break;
+                }
+                if let Some(Reverse(entry)) = queue.pop() {
+                    due_entries.push(entry);
+                }
+            }
+        }
+
+        if due_entries.is_empty() {
+            return;
+        }
+
+        let mut user_connections = self.connections.write().await;
+        for entry in due_entries {
+            let mut remove_user = false;
+            if let Some(connection_data) = user_connections.by_key.get_mut(&entry.username) {
+                let should_remove = connection_data
+                    .streams
+                    .iter()
+                    .position(|stream| {
+                        stream.uid == entry.uid
+                            && stream.preserved
+                            && stream.session_token.as_deref() == Some(entry.session_token.as_str())
+                    })
+                    .is_some_and(|stream_idx| {
+                        self.is_preserved_stream_expired(
+                            &connection_data.streams[stream_idx],
+                            &connection_data.sessions,
+                            now,
+                        )
+                    });
+
+                if should_remove {
+                    if let Some(stream_idx) = connection_data.streams.iter().position(|stream| {
+                        stream.uid == entry.uid
+                            && stream.preserved
+                            && stream.session_token.as_deref() == Some(entry.session_token.as_str())
+                    }) {
+                        connection_data.streams.swap_remove(stream_idx);
+                    }
+                }
+
+                remove_user = connection_data.connections == 0
+                    && connection_data.streams.is_empty()
+                    && connection_data.sessions.is_empty();
+            }
+
+            if remove_user {
+                user_connections.by_key.remove(&entry.username);
+            }
+        }
+    }
+
     fn gc(&self) {
         if let Some(gc_ts) = &self.gc_ts {
             let ts = gc_ts.load(Ordering::Acquire);
@@ -793,7 +1005,7 @@ impl ActiveUserManager {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
                     user_connections
                         .by_key
-                        .retain(|_k, v| now.saturating_sub(v.ts) < USER_CON_TTL && v.connections > 0);
+                        .retain(|_k, v| now.saturating_sub(v.ts) < USER_CON_TTL && (v.connections > 0 || !v.streams.is_empty()));
                     for connection_data in user_connections.by_key.values_mut() {
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
                     }
@@ -812,7 +1024,7 @@ impl ActiveUserManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{api::model::EventManager, auth::Fingerprint, model::Config};
+    use crate::{api::model::EventManager, auth::Fingerprint, model::{Config, ProxyUserCredentials}};
     use arc_swap::ArcSwapOption;
     use shared::{
         model::{PlaylistItemType, StreamChannel, XtreamCluster},
@@ -1011,8 +1223,22 @@ mod tests {
         let next_addr: SocketAddr = "127.0.0.1:55042".parse().unwrap();
         let fingerprint = Fingerprint::new("fp-key-4".to_string(), "127.0.0.1".to_string(), addr);
         let next_fingerprint = Fingerprint::new("fp-key-5".to_string(), "127.0.0.1".to_string(), next_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
 
         manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls",
+                virtual_id: 4001,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+            })
+            .await;
         let first = manager
             .update_connection(ActiveUserConnectionParams {
                 uid: 44,
@@ -1104,6 +1330,70 @@ mod tests {
         assert!(released.addr_removed);
         assert!(released.removed_streams.is_empty());
         assert!(manager.release_stream(&addr).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_preserved_adaptive_stream_is_pruned_after_session_ttl() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55061".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-key-7".to_string(), "127.0.0.1".to_string(), addr);
+
+        manager.add_connection(&addr).await;
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-expire",
+                virtual_id: 6001,
+                provider: "provider-a",
+                stream_url: "http://localhost/hls.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 77,
+                meter_uid: 177,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveHls,
+                    ..test_channel(6001)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-expire"),
+            })
+            .await;
+        let released = manager.release_connection(&addr).await;
+        assert!(released.addr_removed);
+
+        {
+            let mut connections = manager.connections.write().await;
+            let connection_data = connections.by_key.get_mut("user1").unwrap();
+            let session = connection_data
+                .sessions
+                .iter_mut()
+                .find(|session| session.token == "tok-expire")
+                .unwrap();
+            session.ts = session.ts.saturating_sub(default_hls_session_ttl_secs() + 1);
+        }
+        if let Some(gc_ts) = &manager.gc_ts {
+            gc_ts.store(current_time_secs().saturating_sub(USER_GC_TTL + 1), Ordering::Release);
+        }
+
+        manager
+            .process_due_adaptive_expiry_entries(current_time_secs().saturating_add(default_hls_session_ttl_secs() + 1))
+            .await;
+        assert!(manager.active_streams().await.is_empty());
     }
 
     #[tokio::test]

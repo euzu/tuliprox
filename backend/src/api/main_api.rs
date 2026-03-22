@@ -227,6 +227,7 @@ async fn create_shared_data(
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
     active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+    active_users.start_adaptive_expiry_worker();
     let connection_manager =
         Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
 
@@ -293,6 +294,7 @@ fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.hdhomerun.cancel();
     cancel_tokens.file_watch.cancel();
     cancel_tokens.provider_dns.cancel();
+    app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
     app_state.metadata_manager.shutdown();
