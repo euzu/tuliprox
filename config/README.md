@@ -12,4 +12,4 @@ Generate password hashes with `tuliprox --genpwd`.
 ## RBAC groups
 
 The optional `groups.txt` file defines permission groups in `group_name:permission1,permission2,...` format.
-See the [Config Reference](docs/src/configuration/main-config.md) for the full permission list and file format.
+See the [Config Reference](docs/src/configuration/config.md) for the full permission list and file format.
