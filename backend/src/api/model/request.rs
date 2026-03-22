@@ -33,7 +33,7 @@ pub struct UserApiRequest {
 impl UserApiRequest {
     pub fn merge_prefer_primary(primary: &Self, fallback: &Self) -> Self {
         fn pick(primary: &str, fallback: &str) -> String {
-            if primary.is_empty() {
+            if primary.trim().is_empty() {
                 fallback.to_string()
             } else {
                 primary.to_string()
@@ -90,5 +90,58 @@ mod tests {
         assert_eq!(merged.username, "xtr");
         assert_eq!(merged.password, "xtr");
         assert_eq!(merged.action, "get_live_categories");
+    }
+
+    #[test]
+    fn merge_prefer_primary_uses_fallback_for_whitespace_only_fields() {
+        let primary = UserApiRequest {
+            username: String::from("   "),
+            password: String::from("\t"),
+            token: String::from("\n"),
+            action: String::from("  "),
+            series_id: String::from(" "),
+            vod_id: String::from(" "),
+            stream_id: String::from(" "),
+            category_id: String::from(" "),
+            limit: String::from(" "),
+            start: String::from(" "),
+            end: String::from(" "),
+            stream: String::from(" "),
+            duration: String::from(" "),
+            content_type: String::from(" "),
+        };
+        let fallback = UserApiRequest {
+            username: String::from("user"),
+            password: String::from("pass"),
+            token: String::from("token"),
+            action: String::from("action"),
+            series_id: String::from("series"),
+            vod_id: String::from("vod"),
+            stream_id: String::from("stream"),
+            category_id: String::from("category"),
+            limit: String::from("10"),
+            start: String::from("100"),
+            end: String::from("200"),
+            stream: String::from("300"),
+            duration: String::from("60"),
+            content_type: String::from("m3u_plus"),
+        };
+
+        let merged = UserApiRequest::merge_prefer_primary(&primary, &fallback);
+
+        assert_eq!(merged.username, "user");
+        assert_eq!(merged.password, "pass");
+        assert_eq!(merged.token, "token");
+        assert_eq!(merged.action, "action");
+        assert_eq!(merged.series_id, "series");
+        assert_eq!(merged.vod_id, "vod");
+        assert_eq!(merged.stream_id, "stream");
+        assert_eq!(merged.category_id, "category");
+        assert_eq!(merged.limit, "10");
+        assert_eq!(merged.start, "100");
+        assert_eq!(merged.end, "200");
+        assert_eq!(merged.stream, "300");
+        assert_eq!(merged.duration, "60");
+        assert_eq!(merged.content_type, "m3u_plus");
     }
 }

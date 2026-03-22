@@ -1306,9 +1306,10 @@ async fn xtream_player_api_get(
 async fn xtream_player_api_post(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
-    axum::extract::Form(api_form_req): axum::extract::Form<UserApiRequest>,
+    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
 ) -> impl IntoResponse + Send {
-    let api_req = UserApiRequest::merge_prefer_primary(&api_form_req, &api_query_req);
+    let form_req = api_form_req.ok().map(|form| form.0).unwrap_or_default();
+    let api_req = UserApiRequest::merge_prefer_primary(&form_req, &api_query_req);
     xtream_player_api(api_req, &app_state).await
 }
 
@@ -1399,4 +1400,26 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
             ("series", xtream_player_api_series_resource)
         ]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::model::UserApiRequest;
+
+    #[test]
+    fn post_query_only_request_prefers_query_when_form_is_missing() {
+        let api_query_req = UserApiRequest {
+            username: String::from("query-user"),
+            password: String::from("query-pass"),
+            action: String::from("get_live_streams"),
+            ..UserApiRequest::default()
+        };
+
+        let form_req = Option::<UserApiRequest>::None.unwrap_or_default();
+        let api_req = UserApiRequest::merge_prefer_primary(&form_req, &api_query_req);
+
+        assert_eq!(api_req.username, "query-user");
+        assert_eq!(api_req.password, "query-pass");
+        assert_eq!(api_req.action, "get_live_streams");
+    }
 }
