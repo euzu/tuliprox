@@ -58,6 +58,10 @@ impl UserApiRequest {
         }
     }
 
+    pub fn merge_query_over_form(query: &Self, form: Option<&Self>) -> Self {
+        form.map_or_else(|| query.clone(), |form_req| Self::merge_prefer_primary(query, form_req))
+    }
+
     pub fn get_limit(&self) -> u32 {
         if self.limit.is_empty() {
             0
@@ -143,5 +147,27 @@ mod tests {
         assert_eq!(merged.stream, "300");
         assert_eq!(merged.duration, "60");
         assert_eq!(merged.content_type, "m3u_plus");
+    }
+
+    #[test]
+    fn merge_query_over_form_prefers_query_fields() {
+        let query = UserApiRequest {
+            username: String::from("query-user"),
+            token: String::from("query-token"),
+            action: String::from("query-action"),
+            ..UserApiRequest::default()
+        };
+        let form = UserApiRequest {
+            username: String::from("form-user"),
+            token: String::from("form-token"),
+            action: String::from("form-action"),
+            ..UserApiRequest::default()
+        };
+
+        let merged = UserApiRequest::merge_query_over_form(&query, Some(&form));
+
+        assert_eq!(merged.username, "query-user");
+        assert_eq!(merged.token, "query-token");
+        assert_eq!(merged.action, "query-action");
     }
 }

@@ -72,8 +72,8 @@ async fn m3u_api_post(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
 ) -> impl IntoResponse + Send {
-    let form_req = api_form_req.ok().map(|form| form.0).unwrap_or_default();
-    let api_req = UserApiRequest::merge_prefer_primary(&form_req, &api_query_req);
+    let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
+    let api_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
     m3u_api(&api_req, &app_state).await.into_response()
 }
 
@@ -406,11 +406,29 @@ mod tests {
             ..UserApiRequest::default()
         };
 
-        let form_req = Option::<UserApiRequest>::None.unwrap_or_default();
-        let api_req = UserApiRequest::merge_prefer_primary(&form_req, &api_query_req);
+        let api_req = UserApiRequest::merge_query_over_form(&api_query_req, None);
 
         assert_eq!(api_req.username, "query-user");
         assert_eq!(api_req.password, "query-pass");
         assert_eq!(api_req.content_type, "m3u_plus");
+    }
+
+    #[test]
+    fn post_request_prefers_query_over_form() {
+        let api_query_req = UserApiRequest {
+            username: String::from("query-user"),
+            content_type: String::from("query-type"),
+            ..UserApiRequest::default()
+        };
+        let form_req = UserApiRequest {
+            username: String::from("form-user"),
+            content_type: String::from("form-type"),
+            ..UserApiRequest::default()
+        };
+
+        let api_req = UserApiRequest::merge_query_over_form(&api_query_req, Some(&form_req));
+
+        assert_eq!(api_req.username, "query-user");
+        assert_eq!(api_req.content_type, "query-type");
     }
 }
