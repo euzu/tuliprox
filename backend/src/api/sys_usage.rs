@@ -57,31 +57,45 @@ impl CpuTracker {
 fn cpu_percent(cpu_delta_secs: f64, elapsed_secs: f64) -> f32 { ((cpu_delta_secs / elapsed_secs) * 100.0) as f32 }
 
 enum SystemUsageSampler {
-    Platform(platform::Sampler),
+    Platform(Box<platform::Sampler>),
+    Unavailable,
+    #[cfg(not(target_os = "linux"))]
     Fallback(Box<FallbackSampler>),
 }
 
 impl SystemUsageSampler {
     fn new() -> Self {
-        platform::Sampler::new().map_or_else(
-            || Self::Fallback(Box::new(FallbackSampler::new())),
-            Self::Platform,
-        )
+        #[cfg(target_os = "linux")]
+        {
+            platform::Sampler::new().map_or(Self::Unavailable, |sampler| Self::Platform(Box::new(sampler)))
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            platform::Sampler::new().map_or_else(
+                || Self::Fallback(Box::new(FallbackSampler::new())),
+                |sampler| Self::Platform(Box::new(sampler)),
+            )
+        }
     }
 
     fn sample(&mut self) -> Option<SystemInfo> {
         match self {
             Self::Platform(sampler) => sampler.sample(),
+            Self::Unavailable => None,
+            #[cfg(not(target_os = "linux"))]
             Self::Fallback(sampler) => sampler.sample(),
         }
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 struct FallbackSampler {
     inner: sysinfo::System,
     pid: sysinfo::Pid,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl FallbackSampler {
     fn new() -> Self {
         let refresh_kind = sysinfo::RefreshKind::nothing()
@@ -114,11 +128,14 @@ mod platform {
         io::{Read, Seek, SeekFrom},
     };
 
+    const PROC_STAT_BUF_LEN: usize = 1024;
+    const PROC_STATM_BUF_LEN: usize = 128;
+
     pub(super) struct Sampler {
         proc_stat_file: File,
         resident_pages_file: File,
-        proc_stat_buf: Vec<u8>,
-        resident_pages_buf: Vec<u8>,
+        proc_stat_buf: [u8; PROC_STAT_BUF_LEN],
+        resident_pages_buf: [u8; PROC_STATM_BUF_LEN],
         page_size: u64,
         clock_ticks_per_sec: u64,
         memory_total: u64,
@@ -132,12 +149,13 @@ mod platform {
             let memory_total = read_linux_mem_total_bytes()?;
             let page_size = read_positive_sysconf(libc::_SC_PAGESIZE)?;
             let clock_ticks_per_sec = read_positive_sysconf(libc::_SC_CLK_TCK)?;
-            let mut proc_stat_buf = Vec::with_capacity(256);
-            let mut resident_pages_buf = Vec::with_capacity(64);
-            read_file(&mut proc_stat_file, &mut proc_stat_buf).ok()?;
-            read_file(&mut resident_pages_file, &mut resident_pages_buf).ok()?;
+            let mut proc_stat_buf = [0_u8; PROC_STAT_BUF_LEN];
+            let mut resident_pages_buf = [0_u8; PROC_STATM_BUF_LEN];
+            let proc_stat_len = read_into_buffer(&mut proc_stat_file, &mut proc_stat_buf).ok()?;
+            read_into_buffer(&mut resident_pages_file, &mut resident_pages_buf).ok()?;
             let cpu_time_secs =
-                parse_linux_proc_stat(&proc_stat_buf).map(|(utime, stime)| ticks_to_cpu_secs(utime, stime, clock_ticks_per_sec))?;
+                parse_linux_proc_stat(&proc_stat_buf[..proc_stat_len])
+                    .map(|(utime, stime)| ticks_to_cpu_secs(utime, stime, clock_ticks_per_sec))?;
 
             Some(Self {
                 proc_stat_file,
@@ -152,11 +170,12 @@ mod platform {
         }
 
         pub(super) fn sample(&mut self) -> Option<SystemInfo> {
-            read_file(&mut self.proc_stat_file, &mut self.proc_stat_buf).ok()?;
-            read_file(&mut self.resident_pages_file, &mut self.resident_pages_buf).ok()?;
+            let proc_stat_len = read_into_buffer(&mut self.proc_stat_file, &mut self.proc_stat_buf).ok()?;
+            let resident_pages_len =
+                read_into_buffer(&mut self.resident_pages_file, &mut self.resident_pages_buf).ok()?;
 
-            let (utime, stime) = parse_linux_proc_stat(&self.proc_stat_buf)?;
-            let resident_pages = parse_linux_proc_statm(&self.resident_pages_buf)?;
+            let (utime, stime) = parse_linux_proc_stat(&self.proc_stat_buf[..proc_stat_len])?;
+            let resident_pages = parse_linux_proc_statm(&self.resident_pages_buf[..resident_pages_len])?;
             let cpu_time_secs = ticks_to_cpu_secs(utime, stime, self.clock_ticks_per_sec);
 
             Some(SystemInfo {
@@ -168,8 +187,18 @@ mod platform {
     }
 
     fn read_linux_mem_total_bytes() -> Option<u64> {
-        let meminfo = std::fs::read("/proc/meminfo").ok()?;
-        parse_linux_mem_total_kib(&meminfo).map(|kib| kib.saturating_mul(1024))
+        use std::{
+            fs::File,
+            io::{Read, Seek, SeekFrom},
+        };
+
+        const PROC_MEMINFO_BUF_LEN: usize = 2048;
+
+        let mut file = File::open("/proc/meminfo").ok()?;
+        let mut buf = [0_u8; PROC_MEMINFO_BUF_LEN];
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let len = file.read(&mut buf).ok()?;
+        parse_linux_mem_total_kib(&buf[..len]).map(|kib| kib.saturating_mul(1024))
     }
 
     fn read_positive_sysconf(name: libc::c_int) -> Option<u64> {
@@ -178,11 +207,9 @@ mod platform {
         u64::try_from(value).ok().filter(|v| *v > 0)
     }
 
-    fn read_file(file: &mut File, buf: &mut Vec<u8>) -> std::io::Result<()> {
+    pub(super) fn read_into_buffer(file: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
         file.seek(SeekFrom::Start(0))?;
-        buf.clear();
-        file.read_to_end(buf)?;
-        Ok(())
+        file.read(buf)
     }
 
     pub(super) fn parse_linux_proc_stat(bytes: &[u8]) -> Option<(u64, u64)> {
@@ -209,7 +236,21 @@ mod platform {
             .and_then(parse_u64_token)
     }
 
-    fn parse_u64_token(token: &[u8]) -> Option<u64> { std::str::from_utf8(token).ok()?.parse::<u64>().ok() }
+    fn parse_u64_token(token: &[u8]) -> Option<u64> {
+        if token.is_empty() {
+            return None;
+        }
+
+        let mut value = 0_u64;
+        for byte in token {
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value = value.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
+        }
+
+        Some(value)
+    }
 
     fn split_ascii_whitespace(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
         bytes
@@ -432,7 +473,11 @@ mod platform {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        fs::{remove_file, File},
+        io::Write,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn test_parse_linux_proc_stat_extracts_utime_and_stime_after_comm() {
@@ -453,6 +498,27 @@ mod tests {
         let meminfo = b"MemTotal:       16384256 kB\nMemFree:         1234567 kB\n";
         let total_kib = super::platform::parse_linux_mem_total_kib(meminfo);
         assert_eq!(total_kib, Some(16_384_256));
+    }
+
+    #[test]
+    fn test_read_into_buffer_reuses_fixed_capacity_without_read_to_end() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map_or(0_u128, |duration| duration.as_nanos());
+        let path = std::env::temp_dir().join(format!("tuliprox-sys-usage-{unique}.tmp"));
+        let mut temp = File::create(&path).unwrap_or_else(|_| unreachable!());
+        temp.write_all(b"1234567890").unwrap_or_else(|_| unreachable!());
+        drop(temp);
+
+        let mut file = File::open(&path).unwrap_or_else(|_| unreachable!());
+        let mut buf = [0_u8; 4];
+        let len = super::platform::read_into_buffer(&mut file, &mut buf).unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(len, 4);
+        assert_eq!(&buf, b"1234");
+
+        let _ = remove_file(path);
     }
 
     #[test]

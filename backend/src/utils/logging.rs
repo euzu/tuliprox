@@ -7,11 +7,13 @@ use std::fs::File;
 use std::io::Write;
 
 const LOG_ERROR_LEVEL_MOD: &[&str] = &[
-    "reqwest::async_impl::client",
-    "reqwest::connect",
-    "hyper_util::client",
-    "tungstenite::protocol",
-    "rustls_platform_verifier::verification"
+    "reqwest",
+    "hyper_util",
+    "tungstenite",
+    "rustls_platform_verifier",
+    "tokio_tungstenite",
+    "notify",
+    "mio",
 ];
 
 fn get_log_level(log_level: &str) -> LevelFilter {

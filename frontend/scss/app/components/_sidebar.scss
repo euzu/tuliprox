@@ -51,6 +51,16 @@
   display: flex;
   flex-flow: column;
   gap: var(--gap-default);
+  min-height: 0;
+  height: 100vh;
+  overflow: hidden;
+
+  &__scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
 
   .tp__menu-item {
     .icon-Live {

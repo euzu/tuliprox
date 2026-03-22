@@ -28,6 +28,14 @@ pub struct SidebarProps {
     pub show_streams_page: bool,
 }
 
+fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
+    if matches!(collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
+        "collapsed"
+    } else {
+        "expanded"
+    }
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
@@ -231,7 +239,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__app-sidebar", if matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) { "collapsed" } else { "expanded" })}>
+        <div class={classes!("tp__app-sidebar", sidebar_variant_class(*collapsed))}>
             <div class="tp__app-sidebar__header tp__app-header">
               {
                 if *block_sidebar_toggle || matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded) {
@@ -255,6 +263,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                   { <IconButton name="ToggleSidebar" icon={"Sidebar"} onclick={toggle_sidebar} /> }
                 )}
             </div>
+            <div class="tp__app-sidebar__scroll">
                 {
                     if matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
                         render_collapsed()
@@ -262,6 +271,24 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                         render_expanded()
                     }
                 }
+            </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sidebar_variant_class, CollapseState};
+
+    #[test]
+    fn sidebar_variant_class_reports_collapsed_variants() {
+        assert_eq!(sidebar_variant_class(CollapseState::AutoCollapsed), "collapsed");
+        assert_eq!(sidebar_variant_class(CollapseState::ManualCollapsed), "collapsed");
+    }
+
+    #[test]
+    fn sidebar_variant_class_reports_expanded_variants() {
+        assert_eq!(sidebar_variant_class(CollapseState::AutoExpanded), "expanded");
+        assert_eq!(sidebar_variant_class(CollapseState::ManualExpanded), "expanded");
     }
 }
