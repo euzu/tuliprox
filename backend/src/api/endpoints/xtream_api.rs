@@ -1305,8 +1305,10 @@ async fn xtream_player_api_get(
 
 async fn xtream_player_api_post(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Form(api_req): axum::extract::Form<UserApiRequest>,
+    axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
+    axum::extract::Form(api_form_req): axum::extract::Form<UserApiRequest>,
 ) -> impl IntoResponse + Send {
+    let api_req = UserApiRequest::merge_prefer_primary(&api_form_req, &api_query_req);
     xtream_player_api(api_req, &app_state).await
 }
 
