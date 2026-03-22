@@ -168,6 +168,7 @@ mod tests {
             ts: 1,
             country: None,
             session_token: session_token.map(ToOwned::to_owned),
+            preserved: false,
         }
     }
 

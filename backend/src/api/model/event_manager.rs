@@ -300,8 +300,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stream_meter_batch_expands_to_client_uids() {
-        let manager = EventManager::new();
-        let meter = Arc::new(StreamMeterHandle::new(7));
+        let manager = Arc::new(EventManager::new());
+        let meter = Arc::new(StreamMeterHandle::new(7, Arc::downgrade(&manager)));
         manager.register_meter(Arc::clone(&meter)).await;
         manager.register_meter_client(41, 7).await;
         manager.register_meter_client(42, 7).await;
@@ -321,8 +321,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn late_stream_meter_subscribe_samples_already_running_stream() {
-        let manager = EventManager::new();
-        let meter = Arc::new(StreamMeterHandle::new(9));
+        let manager = Arc::new(EventManager::new());
+        let meter = Arc::new(StreamMeterHandle::new(9, Arc::downgrade(&manager)));
         manager.register_meter(Arc::clone(&meter)).await;
         manager.register_meter_client(77, 9).await;
 
@@ -348,8 +348,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stream_meter_batches_do_not_pollute_main_event_channel() {
-        let manager = EventManager::new();
-        let meter = Arc::new(StreamMeterHandle::new(5));
+        let manager = Arc::new(EventManager::new());
+        let meter = Arc::new(StreamMeterHandle::new(5, Arc::downgrade(&manager)));
         manager.register_meter(Arc::clone(&meter)).await;
         manager.register_meter_client(11, 5).await;
         let mut main_events = manager.get_event_channel();
@@ -368,8 +368,8 @@ mod tests {
 
     #[tokio::test]
     async fn flush_and_unregister_meter_sends_final_totals_before_removal() {
-        let manager = EventManager::new();
-        let meter = Arc::new(StreamMeterHandle::new(12));
+        let manager = Arc::new(EventManager::new());
+        let meter = Arc::new(StreamMeterHandle::new(12, Arc::downgrade(&manager)));
         manager.register_meter(Arc::clone(&meter)).await;
         manager.register_meter_client(91, 12).await;
         manager.stream_meter_subscriber_connected();

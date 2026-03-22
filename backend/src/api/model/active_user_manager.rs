@@ -212,16 +212,18 @@ impl ActiveUserManager {
 
             let mut removed_stream = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
-                if let Some(stream_idx) = connection_data.streams.iter().position(|c| c.addr == *addr) {
+                if let Some(stream_idx) = connection_data
+                    .streams
+                    .iter()
+                    .position(|stream| stream.addr == *addr && !stream.preserved)
+                {
                     if Self::should_preserve_session_stream(&connection_data.streams[stream_idx]) {
-                        if connection_data.connections > 0 {
-                            connection_data.connections -= 1;
-                        }
+                        connection_data.streams[stream_idx].preserved = true;
                     } else {
                         removed_stream = Some(connection_data.streams.swap_remove(stream_idx));
-                        if connection_data.connections > 0 {
-                            connection_data.connections -= 1;
-                        }
+                    }
+                    if connection_data.connections > 0 {
+                        connection_data.connections -= 1;
                     }
                     if connection_data.connections < connection_data.max_connections {
                         connection_data.granted_grace = false;
@@ -254,13 +256,19 @@ impl ActiveUserManager {
                 let mut removed_streams = Vec::new();
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                     let mut remaining_streams = Vec::with_capacity(connection_data.streams.len());
-                    let mut released_count = 0_usize;
-                    for stream_info in connection_data.streams.drain(..) {
+                    let mut released_count = 0_u32;
+                    for mut stream_info in connection_data.streams.drain(..) {
                         if stream_info.addr == *addr {
-                            released_count += 1;
                             if Self::should_preserve_session_stream(&stream_info) {
+                                if !stream_info.preserved {
+                                    released_count = released_count.saturating_add(1);
+                                }
+                                stream_info.preserved = true;
                                 remaining_streams.push(stream_info);
                             } else {
+                                if !stream_info.preserved {
+                                    released_count = released_count.saturating_add(1);
+                                }
                                 removed_streams.push(stream_info);
                             }
                         } else {
@@ -269,8 +277,7 @@ impl ActiveUserManager {
                     }
                     connection_data.streams = remaining_streams;
                     if released_count > 0 && connection_data.connections > 0 {
-                        connection_data.connections =
-                            connection_data.connections.saturating_sub(u32::try_from(released_count).unwrap_or(0));
+                        connection_data.connections = connection_data.connections.saturating_sub(released_count);
                     }
 
                     if connection_data.connections < connection_data.max_connections {
@@ -508,6 +515,7 @@ impl ActiveUserManager {
                     let client_ip = fingerprint.client_ip.clone();
                     let preserve_started_at = stream_info.session_token.is_some()
                         && (stream_info.channel.item_type.is_live_adaptive() || stream_channel.item_type.is_live_adaptive());
+                    let was_preserved = stream_info.preserved;
                     stream_info.meter_uid = meter_uid;
                     stream_info.addr = fingerprint.addr;
                     stream_info.client_ip.clone_from(&client_ip);
@@ -521,6 +529,10 @@ impl ActiveUserManager {
 
                     if let Some(token) = session_token {
                         stream_info.session_token = Some(token.to_string());
+                    }
+                    if was_preserved {
+                        stream_info.preserved = false;
+                        connection_data.connections = connection_data.connections.saturating_add(1);
                     }
                     stream_info.clone()
                 });
@@ -1028,6 +1040,7 @@ mod tests {
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].uid, 44);
         assert_eq!(streams[0].ts, first.ts);
+        assert!(streams[0].preserved);
 
         manager.add_connection(&next_addr).await;
         let second = manager
@@ -1052,6 +1065,45 @@ mod tests {
         assert_eq!(second.ts, first.ts, "adaptive session duration must stay session-based");
         assert_eq!(second.addr, next_addr);
         assert_eq!(second.meter_uid, 155);
+        assert_eq!(manager.user_connections("user1").await, 1);
+
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert!(!streams[0].preserved);
+    }
+
+    #[tokio::test]
+    async fn test_release_stream_ignores_preserved_adaptive_entry() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55051".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-key-6".to_string(), "127.0.0.1".to_string(), addr);
+
+        manager.add_connection(&addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 66,
+                meter_uid: 166,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveHls,
+                    ..test_channel(5001)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-hls"),
+            })
+            .await;
+
+        let released = manager.release_connection(&addr).await;
+        assert!(released.addr_removed);
+        assert!(released.removed_streams.is_empty());
+        assert!(manager.release_stream(&addr).await.is_none());
     }
 
     #[tokio::test]

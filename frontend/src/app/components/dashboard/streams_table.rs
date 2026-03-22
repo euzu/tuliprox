@@ -97,7 +97,7 @@ fn filter_visible_streams(
                     return true;
                 }
 
-                adaptive_last_seen.get(&stream.uid).is_some_and(|last_seen| {
+                adaptive_last_seen.get(&stream.uid).is_none_or(|last_seen| {
                     now_secs.saturating_sub(*last_seen)
                         <= adaptive_ttl_secs.saturating_add(ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS)
                 })
@@ -168,8 +168,9 @@ fn apply_stream_meter_entry(
         .entry(entry.meter_uid)
         .and_modify(|total_kb| *total_kb = (*total_kb).max(entry.total_kb))
         .or_insert(entry.total_kb);
-    let _ = current_meter_uid;
-    next.rate_kbps = entry.rate_kbps;
+    if entry.meter_uid == current_meter_uid {
+        next.rate_kbps = entry.rate_kbps;
+    }
 
     next
 }
@@ -332,7 +333,8 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
     {
         let adaptive_last_seen = adaptive_last_seen.clone();
         let streams = props.streams.clone();
-        use_effect_with(streams, move |streams| {
+        let cleanup_now_secs = *cleanup_now_secs;
+        use_effect_with((streams, cleanup_now_secs), move |(streams, _cleanup_now_secs)| {
             let now = current_time_secs();
             let mut next = (*adaptive_last_seen).clone();
 
@@ -721,6 +723,7 @@ mod tests {
             ts: 1,
             country: None,
             session_token: session_token.map(ToOwned::to_owned),
+            preserved: false,
         })
     }
 
@@ -744,6 +747,15 @@ mod tests {
         let visible =
             filter_visible_streams(Some(vec![stream]), &adaptive_last_seen, 121, 15).unwrap_or_else(|| unreachable!());
         assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn test_filter_visible_streams_keeps_new_adaptive_stream_without_last_seen_entry() {
+        let stream = test_stream(8, PlaylistItemType::LiveHls, Some("tok-new"));
+
+        let visible =
+            filter_visible_streams(Some(vec![stream]), &HashMap::new(), 200, 15).unwrap_or_else(|| unreachable!());
+        assert_eq!(visible.len(), 1);
     }
 
     #[test]
@@ -776,5 +788,17 @@ mod tests {
 
         assert_eq!(state.rate_kbps, 25);
         assert_eq!(state.meter_totals_kb.values().copied().sum::<u32>(), 130);
+    }
+
+    #[test]
+    fn test_apply_stream_meter_entry_ignores_stale_rate_from_old_meter() {
+        let current = StreamMeterEntry { meter_uid: 202, uids: vec![7], rate_kbps: 40, total_kb: 60 };
+        let stale = StreamMeterEntry { meter_uid: 101, uids: vec![7], rate_kbps: 99, total_kb: 120 };
+
+        let state = apply_stream_meter_entry(&StreamMeterCellState::default(), 202, &current);
+        let state = apply_stream_meter_entry(&state, 202, &stale);
+
+        assert_eq!(state.rate_kbps, 40);
+        assert_eq!(state.meter_totals_kb.values().copied().sum::<u32>(), 180);
     }
 }

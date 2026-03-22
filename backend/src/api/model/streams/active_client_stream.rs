@@ -695,7 +695,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     }
 
     let meter = if meter_stream && meter_uid != 0 {
-        let meter = Arc::new(StreamMeterHandle::new(meter_uid));
+        let meter = Arc::new(StreamMeterHandle::new(meter_uid, Arc::downgrade(&app_state.event_manager)));
         app_state.event_manager.register_meter(Arc::clone(&meter)).await;
         Some(meter)
     } else {

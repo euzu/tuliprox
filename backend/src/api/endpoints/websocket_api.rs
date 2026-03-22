@@ -63,7 +63,7 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
 }
 
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory) -> bool {
-    mem.role.is_admin() || mem.permissions.contains(Permission::SystemRead)
+    mem.permissions.contains(Permission::SystemRead)
 }
 
 fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
@@ -441,6 +441,17 @@ mod tests {
     use shared::model::{Permission, ProtocolHandlerMemory, UserRole};
 
     #[test]
+    fn test_websocket_runtime_events_allowed_for_admin() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::SystemRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::Admin;
+
+        assert!(websocket_can_receive_runtime_events(&mem));
+    }
+
+    #[test]
     fn test_websocket_runtime_events_allowed_for_system_read_user() {
         let mut mem = ProtocolHandlerMemory {
             permissions: Permission::SystemRead.into(),
@@ -449,5 +460,24 @@ mod tests {
         mem.role = UserRole::User;
 
         assert!(websocket_can_receive_runtime_events(&mem));
+    }
+
+    #[test]
+    fn test_websocket_runtime_events_denied_without_system_read() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::ConfigRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(!websocket_can_receive_runtime_events(&mem));
+    }
+
+    #[test]
+    fn test_websocket_runtime_events_denied_for_default_permissions() {
+        let mut mem = ProtocolHandlerMemory::default();
+        mem.role = UserRole::User;
+
+        assert!(!websocket_can_receive_runtime_events(&mem));
     }
 }
