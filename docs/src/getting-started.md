@@ -1,4 +1,5 @@
 # Getting Started
+
 ## Recommended reading order
 
 1. [Installation](installation.md)
@@ -48,6 +49,7 @@ For a new setup, the usual first goal is:
 5. only then add mapping, filtering, reverse proxy and metadata features
 
 That keeps failures local and makes provider-specific issues much easier to diagnose.
+
 ## Run modes
 
 Tuliprox has two main modes:
