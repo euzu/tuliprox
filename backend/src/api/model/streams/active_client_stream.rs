@@ -1126,6 +1126,7 @@ mod tests {
             &provider_manager,
             &shared_manager,
             &event_manager,
+            None,
         ))
     }
 
@@ -1139,8 +1140,13 @@ mod tests {
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
         let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
-        let connection_manager =
-            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+        let connection_manager = Arc::new(ConnectionManager::new(
+            &active_users,
+            &active_provider,
+            &shared_stream_manager,
+            &event_manager,
+            None,
+        ));
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));

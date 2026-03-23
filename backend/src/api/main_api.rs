@@ -16,9 +16,10 @@ use crate::{
         hdhomerun_proprietary::spawn_proprietary_tasks,
         hdhomerun_ssdp::spawn_ssdp_discover_task,
         model::{
-            create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns, ActiveProviderManager,
-            ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage,
-            HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, UpdateGuard,
+            create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns,
+            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue,
+            EventManager, EventMessage, HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState,
+            SharedStreamManager, UpdateGuard,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
         scheduler::{exec_interner_prune, exec_scheduler},
@@ -228,8 +229,15 @@ async fn create_shared_data(
     active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     active_users.start_adaptive_expiry_worker();
-    let connection_manager =
-        Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+
+    let history_config = config.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref());
+    let connection_manager = Arc::new(ConnectionManager::new(
+        &active_users,
+        &active_provider,
+        &shared_stream_manager,
+        &event_manager,
+        history_config,
+    ));
 
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
@@ -288,7 +296,7 @@ async fn run_manual_update_worker(
     }
 }
 
-fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
+async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     let cancel_tokens = app_state.cancel_tokens.load();
     cancel_tokens.scheduler.cancel();
     cancel_tokens.hdhomerun.cancel();
@@ -298,6 +306,7 @@ fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
     app_state.metadata_manager.shutdown();
+    app_state.connection_manager.shutdown().await;
 }
 
 fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {
@@ -570,7 +579,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         match tokio::signal::ctrl_c().await {
             Ok(()) => {
                 info!("Received shutdown signal (Ctrl+C), cancelling all background services");
-                cancel_all_service_tokens(&app_state_signal);
+                cancel_all_service_tokens(&app_state_signal).await;
                 server_cancel_token_signal.cancel();
             }
             Err(err) => {
@@ -582,7 +591,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     serve(listener, router, Some(server_cancel_token), &shared_data.connection_manager).await;
 
     // Final shutdown safeguard for all background services (idempotent).
-    cancel_all_service_tokens(&shared_data);
+    cancel_all_service_tokens(&shared_data).await;
     Ok(())
 }
 

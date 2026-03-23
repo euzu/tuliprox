@@ -3,12 +3,15 @@ use crate::{
         ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, CustomVideoStreamType, EventManager,
         EventMessage, ProviderHandle, SharedStreamManager,
     },
+    model::StreamHistoryConfig,
+    repository::{EventType, StreamHistoryRecord},
     auth::Fingerprint,
     utils::debug_if_enabled,
 };
+use arc_swap::ArcSwapOption;
 use log::{debug, warn};
 use shared::{
-    model::{ActiveUserConnectionChange, StreamChannel, VirtualId},
+    model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, VirtualId},
     utils::sanitize_sensitive_info,
 };
 use std::{
@@ -20,6 +23,7 @@ use std::{
     },
 };
 use tokio::sync::{mpsc, Notify};
+use crate::repository::{now_utc_secs, recover_pending_files, StreamHistoryWriter};
 
 const CLEANUP_QUEUE_CAPACITY: usize = 4096;
 fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters(); }
@@ -48,6 +52,7 @@ pub struct ConnectionManager {
     cleanup_tx: mpsc::Sender<CleanupEvent>,
     capacity_notify: Arc<Notify>,
     stream_uid_counter: AtomicU32,
+    history_writer: Arc<ArcSwapOption<StreamHistoryWriter>>,
 }
 
 pub struct ConnectionParams<'a> {
@@ -67,7 +72,9 @@ impl ConnectionManager {
         provider_manager: &Arc<ActiveProviderManager>,
         shared_stream_manager: &Arc<SharedStreamManager>,
         event_manager: &Arc<EventManager>,
+        history_config: Option<&StreamHistoryConfig>,
     ) -> Self {
+        let history_writer = Arc::new(ArcSwapOption::new(build_history_writer(history_config)));
         let (close_socket_signal_tx, _) = tokio::sync::broadcast::channel(256);
         let (cleanup_tx, cleanup_rx) = mpsc::channel(CLEANUP_QUEUE_CAPACITY);
         let capacity_notify = Arc::new(Notify::new());
@@ -80,6 +87,7 @@ impl ConnectionManager {
             cleanup_tx,
             capacity_notify: Arc::clone(&capacity_notify),
             stream_uid_counter: AtomicU32::new(1),
+            history_writer: Arc::clone(&history_writer),
         };
 
         Self::spawn_cleanup_worker(
@@ -89,9 +97,20 @@ impl ConnectionManager {
             Arc::clone(shared_stream_manager),
             Arc::clone(event_manager),
             Arc::clone(&capacity_notify),
+            history_writer,
         );
 
         mgr
+    }
+
+    /// Reload the history writer on config change. Shuts down the old writer (flushing pending
+    /// records) and atomically replaces it with a new one — or `None` if disabled.
+    pub async fn reload_history_writer(&self, config: Option<&StreamHistoryConfig>) {
+        let new_writer = build_history_writer(config);
+        let old_writer = self.history_writer.swap(new_writer);
+        if let Some(w) = old_writer {
+            w.shutdown().await;
+        }
     }
 
     fn spawn_cleanup_worker(
@@ -101,6 +120,7 @@ impl ConnectionManager {
         shared_stream_manager: Arc<SharedStreamManager>,
         event_manager: Arc<EventManager>,
         capacity_notify: Arc<Notify>,
+        history_writer: Arc<ArcSwapOption<StreamHistoryWriter>>,
     ) {
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
@@ -108,6 +128,7 @@ impl ConnectionManager {
                     CleanupEvent::ReleaseStream { addr } => {
                         if let Some(stream_info) = user_manager.release_stream(&addr).await {
                             event_manager.unregister_meter_client(stream_info.uid).await;
+                            emit_disconnect_record(&history_writer, &stream_info);
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
@@ -134,6 +155,7 @@ impl ConnectionManager {
                         let stream_released = released_stream.is_some();
                         if let Some(stream_info) = released_stream {
                             event_manager.unregister_meter_client(stream_info.uid).await;
+                            emit_disconnect_record(&history_writer, &stream_info);
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
@@ -208,6 +230,7 @@ impl ConnectionManager {
         let removed = self.user_manager.release_connection(addr).await;
         for stream_info in &removed.removed_streams {
             self.event_manager.unregister_meter_client(stream_info.uid).await;
+            emit_disconnect_record(&self.history_writer, stream_info);
         }
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, true).await;
@@ -226,6 +249,7 @@ impl ConnectionManager {
     pub async fn release_stream(&self, addr: &SocketAddr) {
         if let Some(stream_info) = self.user_manager.release_stream(addr).await {
             self.event_manager.unregister_meter_client(stream_info.uid).await;
+            emit_disconnect_record(&self.history_writer, &stream_info);
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
             notify_capacity(self.capacity_notify.as_ref());
         }
@@ -249,6 +273,13 @@ impl ConnectionManager {
 
     pub fn capacity_notified(&self) -> Arc<Notify> {
         Arc::clone(&self.capacity_notify)
+    }
+
+    /// Flush and finalize the stream history writer. Call once at graceful shutdown.
+    pub async fn shutdown(&self) {
+        if let Some(w) = self.history_writer.load_full() {
+            w.shutdown().await;
+        }
     }
 
     pub async fn add_connection(&self, addr: &SocketAddr) { self.user_manager.add_connection(addr).await; }
@@ -275,6 +306,7 @@ impl ConnectionManager {
             self.event_manager
                 .register_meter_client(stream_info.uid, stream_info.meter_uid)
                 .await;
+            emit_connect_record(&self.history_writer, &stream_info);
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         } else {
             warn!("Failed to register connection for user {username} at {}; disconnecting client", fingerprint.addr);
@@ -291,4 +323,40 @@ impl ConnectionManager {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         }
     }
+}
+
+/// Build a new `StreamHistoryWriter` from the given config, running file recovery first.
+/// Returns `None` if history is disabled or no config is provided.
+fn build_history_writer(config: Option<&StreamHistoryConfig>) -> Option<Arc<StreamHistoryWriter>> {
+    let cfg = config?;
+    if !cfg.stream_history_enabled {
+        return None;
+    }
+    if let Err(e) = recover_pending_files(&cfg.stream_history_directory) {
+        log::warn!("Stream history recovery failed: {e}");
+    }
+    Some(Arc::new(StreamHistoryWriter::new(cfg)))
+}
+
+fn emit_connect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &StreamInfo) {
+    let guard = writer.load();
+    let Some(w) = guard.as_ref() else { return };
+    let mut record = StreamHistoryRecord::from(info);
+    record.event_type = EventType::Connect;
+    record.connect_ts_utc = Some(info.ts);
+    w.send_record(record);
+}
+
+fn emit_disconnect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &StreamInfo) {
+    let guard = writer.load();
+    let Some(w) = guard.as_ref() else { return };
+    let now_secs = now_utc_secs();
+    let connect_secs = info.ts;
+    let duration_secs = now_secs - connect_secs;
+    let mut record = StreamHistoryRecord::from(info);
+    record.event_type = EventType::Disconnect;
+    record.connect_ts_utc = Some(connect_secs);
+    record.disconnect_ts_utc = Some(now_secs);
+    record.session_duration = Some(duration_secs);
+    w.send_record(record);
 }

@@ -321,6 +321,7 @@ impl From<&ConfigDto> for Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use shared::model::ConfigDto;
     use tempfile::tempdir;
 
     #[test]
@@ -372,5 +373,33 @@ mod tests {
             config.api.web_root,
             absolute_web_root.to_string_lossy()
         );
+    }
+
+    #[test]
+    fn config_from_preserves_reverse_proxy_stream_history_settings() {
+        let dto = ConfigDto {
+            reverse_proxy: Some(shared::model::ReverseProxyConfigDto {
+                resource_rewrite_disabled: false,
+                rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+                stream_history: Some(shared::model::StreamHistoryConfigDto {
+                    stream_history_enabled: true,
+                    stream_history_batch_size: 64,
+                    stream_history_retention_days: 14,
+                    stream_history_directory: "/var/lib/tuliprox/history".to_string(),
+                }),
+                ..Default::default()
+            }),
+            ..ConfigDto::default()
+        };
+
+        let config = Config::from(&dto);
+
+        let reverse_proxy = config.reverse_proxy.expect("reverse_proxy should exist");
+        let stream_history = reverse_proxy.stream_history.expect("stream_history should exist");
+
+        assert!(stream_history.stream_history_enabled);
+        assert_eq!(stream_history.stream_history_batch_size, 64);
+        assert_eq!(stream_history.stream_history_retention_days, 14);
+        assert_eq!(stream_history.stream_history_directory, "/var/lib/tuliprox/history");
     }
 }
