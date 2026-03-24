@@ -612,7 +612,7 @@ async fn process_source(
                 disabled_inputs.push(input.name.clone());
             }
         }
-        if !disabled_inputs.is_empty() && source_playlists.is_empty() {
+        if !disabled_inputs.is_empty() && !source_downloaded {
             warn!(
                 "Source at index {source_idx} has no enabled inputs for the given targets. Disabled: {}",
                 disabled_inputs.iter().map(std::convert::AsRef::as_ref).collect::<Vec<&str>>().join(", ")

@@ -315,8 +315,18 @@ impl ConfigFile {
             return Err(err);
         }
 
-        // Preserve forced_targets across reloads (they come from CLI arguments, not config)
-        app_state.forced_targets.store(previous_forced_targets);
+        // Preserve forced_targets across reloads (they come from CLI arguments, not config).
+        // Re-validate target names against the new sources so numeric IDs are current after
+        // a sources reload (target IDs are positional and can shift when source order changes).
+        if previous_forced_targets.enabled && !previous_forced_targets.target_names.is_empty() {
+            let new_sources = app_state.app_config.sources.load();
+            match new_sources.validate_targets(Some(&previous_forced_targets.target_names)) {
+                Ok(refreshed) => app_state.forced_targets.store(Arc::new(refreshed)),
+                Err(_) => app_state.forced_targets.store(previous_forced_targets),
+            }
+        } else {
+            app_state.forced_targets.store(previous_forced_targets);
+        }
 
         info!("Loaded config file {config_file}");
         Ok(())
