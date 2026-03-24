@@ -147,6 +147,9 @@ impl WriterWorker {
                     if record.partition_day_utc != state.current_day {
                         if let Err(e) = state.flush_and_rollover(&self.config, self.writer_instance_id) {
                             error!("Stream history day rollover failed: {e}");
+                            let dropped = dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+                            warn!("Stream history record dropped due to rollover failure (total dropped: {dropped})");
+                            continue;
                         }
                     }
 

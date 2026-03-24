@@ -579,8 +579,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         match tokio::signal::ctrl_c().await {
             Ok(()) => {
                 info!("Received shutdown signal (Ctrl+C), cancelling all background services");
-                cancel_all_service_tokens(&app_state_signal).await;
                 server_cancel_token_signal.cancel();
+                cancel_all_service_tokens(&app_state_signal).await;
             }
             Err(err) => {
                 error!("Failed to listen for Ctrl+C: {err}");

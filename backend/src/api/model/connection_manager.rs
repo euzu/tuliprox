@@ -352,7 +352,7 @@ fn emit_disconnect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &St
     let Some(w) = guard.as_ref() else { return };
     let now_secs = now_utc_secs();
     let connect_secs = info.ts;
-    let duration_secs = now_secs - connect_secs;
+    let duration_secs = now_secs.saturating_sub(connect_secs);
     let mut record = StreamHistoryRecord::from(info);
     record.event_type = EventType::Disconnect;
     record.connect_ts_utc = Some(connect_secs);
