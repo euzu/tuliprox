@@ -322,7 +322,13 @@ impl ConfigFile {
             let new_sources = app_state.app_config.sources.load();
             match new_sources.validate_targets(Some(&previous_forced_targets.target_names)) {
                 Ok(refreshed) => app_state.forced_targets.store(Arc::new(refreshed)),
-                Err(_) => app_state.forced_targets.store(previous_forced_targets),
+                Err(err) => {
+                    log::warn!(
+                        "Failed to re-validate CLI-forced targets {:?} against new sources: {err}. Keeping previous target IDs.",
+                        previous_forced_targets.target_names
+                    );
+                    app_state.forced_targets.store(previous_forced_targets);
+                }
             }
         } else {
             app_state.forced_targets.store(previous_forced_targets);
