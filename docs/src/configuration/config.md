@@ -71,7 +71,7 @@ metadata_update:
 | `proxy` | SOCKS5/HTTP proxy settings for outgoing requests. | [See section](#9-outgoing-proxy-proxy) |
 | `ipcheck` | IP detection to verify in the Web UI which public IP Tuliprox is currently using. | [See section](#10-ip-check-ipcheck) |
 | `hdhomerun` | Virtual DVB-C/T network tuner emulation. | [See section](#11-hdhomerun-emulation-hdhomerun) |
-| `library` | Local Media Library integration. | [See Local Library](../local-library.md) |
+| `library` | Local Media Library integration. | [See Local Library](./local-library.md) |
 | `reverse_proxy` | Streaming buffers, rate limits, caching. | [See Reverse Proxy](./reverse-proxy.md) |
 | `metadata_update` | TMDB matching, FFprobe processing, Job Queues. | [See Metadata Update](./metadata-update.md) |
 

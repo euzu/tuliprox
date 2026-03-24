@@ -7,7 +7,7 @@
 - [Configuration & Setup (Overview)](./configuration/overview.md)
   - [config.yml (Core System)](./configuration/config.md)
     - [Streaming & Proxy Behavior](./configuration/reverse-proxy.md)
-    - [Metadata Updater & FFprobe)](./configuration/metadata-update.md)
+    - [Metadata Updater & FFprobe](./configuration/metadata-update.md)
     - [Local Media Library](./configuration/local-library.md)
   - [source.yml (Inputs, Panel API & Targets)](./configuration/source.md)
   - [api-proxy.yml (Server, Users & RBAC)](./configuration/api-proxy.md)

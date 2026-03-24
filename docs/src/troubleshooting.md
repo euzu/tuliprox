@@ -29,8 +29,8 @@ reverse_proxy:
 **What happens now?**
 Tuliprox detects the bottleneck and grants a temporary "grace" state:
 
-* **Hold State:** Because `hold_stream: true` is set, Tuliprox keeps the client connection "warm" but waits before requesting new bytes from the
-  provider.
+* **Hold State:** Because `grace_period_hold_stream: true` is set, Tuliprox keeps the client connection "warm" but
+  waits before requesting new bytes from the provider.
 * **The Handover:** It waits for `grace_period_millis` (2000ms) to give the provider's server time to register the old connection as closed.
 * **Resolution:**
   * **Success:** If the old "ghost" connection dies within the window ➔ The new stream flows instantly.
