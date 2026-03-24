@@ -23,6 +23,7 @@ services:
       - /opt/tuliprox/data:/app/data
       - /opt/tuliprox/backup:/app/backup
       - /opt/tuliprox/downloads:/app/downloads
+      - /opt/tuliprox/cache:/app/cache
     environment:
       - TZ=Europe/Berlin
     ports:
