@@ -6,16 +6,12 @@ for your IPTV clients.
 
 ## Core Features
 
-* **Recursive Scanning:** Traverses directories looking for supported video formats (`.mkv`, `.mp4`, etc.).
-* **Auto-Classification:** Automatically detects whether a file is a Movie or a Series episode (e.g., `Breaking.Bad.S01E01.mkv`)
-  using the internal PTT (Parse Torrent Title) engine.
-* **Multi-Source Metadata:** Reads Kodi/Jellyfin/Emby compatible `.nfo` files. If no `.nfo` is present, it automatically queries
-  the TMDB API for covers, plots, cast, and trailers.
-* **Incremental Scans:** Uses file modification timestamps to only scan and process new or altered files, ensuring extremely fast
-  updates.
-* **Stable Virtual IDs:** Generates stable, deterministic UUIDs for local files, ensuring that channel/stream IDs in your IPTV
-  client remain constant across updates.
-
+* **Recursive Scanning:** Traverses directories looking for supported video formats (`.mkv`, `.mp4`, `.mov`, `.m4v`, `.webm`, etc.).
+* **Auto-Classification:** Automatically detects whether a file is a Movie or a Series episode (e.g., `Breaking.Bad.S01E01.mkv`) using the internal PTT (Parse Torrent Title) engine.
+* **Multi-Source Metadata:** Reads Kodi/Jellyfin/Emby/Plex compatible `.nfo` files. If no `.nfo` is present, it automatically queries the TMDB API for covers, plots, and cast.
+* **Stable Virtual IDs:** Generates stable, deterministic UUIDs for local files, ensuring that channel/stream IDs in your IPTV client remain constant across updates.
+* **Incremental Scans:** Uses file modification timestamps to only process new or altered files, ensuring extremely fast updates.
+* **Visuals:** Local series episode backgrounds in the Playlist Explorer use direct TMDB still-image URLs for a rich UI experience.
 ---
 
 ## Configuration (`config.yml`)
@@ -39,7 +35,10 @@ library:
     - "mp4"
     - "mkv"
     - "avi"
+    - "mov"
     - "ts"
+    - "m4v"
+    - "webm"
   metadata:
     fallback_to_filename: true # Uses parsed filename details if TMDB/NFO fails
     read_existing:
@@ -58,21 +57,23 @@ library:
 | Block / Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | Bool | `false` | Master switch to turn on the local media library feature. |
-| **`scan_directories`** | List | | Folders to monitor. |
-| ↳ `enabled` | Bool | `true` | Allows temporarily disabling specific folders. |
+| **`scan_directories`** | List | | Folders to monitor for media files. |
+| ↳ `enabled` | Bool | `true` | Allows temporarily disabling specific folders from being scanned. |
 | ↳ `path` | String | | The absolute or relative path to your media directory. |
-| ↳ `content_type` | Enum | `auto` | Forces classification. Options: `auto` (guess via filename), `movie`, `series`. |
-| ↳ `recursive` | Bool | `true` | If true, Tuliprox crawls all subdirectories within `path`. |
-| `supported_extensions` | List | `[mp4, mkv, avi, ts, ...]` | File extensions that Tuliprox considers as playable video files. |
-| **`metadata`** | Object | | Instructions on how to fetch or fallback for movie details. |
-| ↳ `fallback_to_filename` | Bool | `true` | If NFO or TMDB fails, uses the filename to construct basic metadata (Title, Year). |
-| ↳ `read_existing.kodi` | Bool | `true` | Attempts to read Kodi-compatible `.nfo` files residing next to the media. |
-| ↳ `read_existing.plex` | Bool | `false` | Attempts to read Plex metadata formats. |
-| ↳ `read_existing.jellyfin` | Bool | `false` | Attempts to read Jellyfin metadata formats. |
-| ↳ `formats` | List | `["nfo"]` | Metadata file formats to read when `read_existing` is enabled (e.g., `nfo`). |
+| ↳ `content_type` | Enum | `auto` | Classification mode. Options: `auto` (guess via PTT), `movie`, `series`. |
+| ↳ `recursive` | Bool | `true` | If true, Tuliprox crawls all subdirectories within the specified path. |
+| `supported_extensions`| List | `[...]` | Video extensions considered playable (e.g., `mp4`, `mkv`, `mov`, `webm`). |
+| **`metadata`** | Object | | Configuration for metadata resolution and fallback logic. |
+| ↳ `fallback_to_filename`| Bool | `true` | Uses the parsed filename if NFO or TMDB metadata is unavailable. |
+| ↳ `read_existing.kodi` | Bool | `true` | Reads Kodi-compatible `.nfo` files located alongside the media. |
+| ↳ `read_existing.plex` | Bool | `false` | Attempts to read Plex-specific metadata formats. |
+| ↳ `read_existing.jellyfin`| Bool | `false` | Attempts to read Jellyfin-specific metadata formats. |
+| ↳ `formats` | List | `[]` | List of metadata output formats (e.g., `nfo` to write Kodi-compatible files). |
+| **`playlist`** | Object | | Controls how library items appear in the resulting IPTV playlist. |
+| ↳ `movie_category` | String | `Local Movies` | The category name assigned to movies in M3U/Xtream outputs. |
+| ↳ `series_category` | String | `Local Series` | The category name assigned to TV shows in M3U/Xtream outputs. |
 
-*Note: For TMDB enrichments to work on local files, `metadata_update.tmdb.enabled: true` must be set in your config! The library
-utilizes the exact same API limits, API keys, and caches as the IPTV streams.*
+*Note: For TMDB enrichments to work, `metadata_update.tmdb.enabled: true` must be set!*
 
 ---
 
@@ -82,6 +83,7 @@ To make your local movies visible in your M3U/Xtream targets, you attach the lib
 in your `source.yml`:
 
 ```yaml
+# In source.yml
 inputs:
   - name: my_local_library
     type: library
@@ -102,15 +104,18 @@ In this setup, the target `mixed_target` now merges the Live-TV channels from yo
 into a single, clean Xtream API output for the client. The local files bypass the Reverse Proxy routing and stream directly off
 your disk when requested by the IPTV player!
 
----
+
+----
+&nbsp;
+
+# Additional Information
 
 ## Triggering Scans (CLI & API)
 
 By default, the library scan can be automated using standard Cron syntax under the `schedules:` block (`type: LibraryScan`).
 However, you can also force it manually.
 
-**Via CLI (Command Line):**
-
+**Manual Scans via CLI (Command Line):**
 ```bash
 # Incremental Delta-Scan (Only processes new/modified files)
 ./tuliprox --scan-library
@@ -134,5 +139,10 @@ Authorization: Bearer <TULIPROX_API_TOKEN>
 ```http
 GET /api/v1/library/status
 ```
-
 Returns JSON information about the number of detected files, errors, and the progress of the background scan.
+## Database Inspection (DBX/DBM/DBE):
+If you need to verify the internal database content for troubleshooting:
+```bash
+./tuliprox --dbx /opt/tuliprox/data/all_channels/xtream/video.db
+./tuliprox --dbm /opt/tuliprox/data/all_channels/m3u.db
+./tuliprox --dbe /opt/tuliprox/data/all_channels/xtream/epg.db
