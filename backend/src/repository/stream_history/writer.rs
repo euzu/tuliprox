@@ -36,7 +36,7 @@ pub(crate) fn current_utc_day() -> String {
     utc_day_from_secs(now_utc_secs())
 }
 
-/// Compute Unix milliseconds until the next UTC midnight after `from_ms`.
+/// Compute Unix seconds until the next UTC midnight after `from_ms`.
 pub fn secs_until_next_utc_midnight(from_secs: u64) -> u64 {
     let remaining = SECS_PER_DAY - (from_secs % SECS_PER_DAY);
     if remaining == 0 { SECS_PER_DAY } else { remaining }

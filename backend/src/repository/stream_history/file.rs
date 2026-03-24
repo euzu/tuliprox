@@ -55,7 +55,7 @@ pub struct FileHeaderBody {
     pub container_format_version: u8,
     pub record_schema_version: u8,
     pub source_kind: String,
-    /// Unix timestamp millis UTC when this file was created.
+    /// Unix timestamp seconds UTC when this file was created.
     pub created_at_ts_utc: u64,
     /// Logical partition day, e.g. `"2026-03-22"`.
     pub partition_day_ts_utc: String,
@@ -99,7 +99,7 @@ pub struct BlockHeaderBody {
 pub struct StreamHistoryRecord {
     pub schema_version: u8,
     pub event_type: EventType,
-    /// Unix timestamp millis UTC of when this event occurred.
+    /// Unix timestamp seconds UTC of when this event occurred.
     pub event_ts_utc: u64,
     /// UTC calendar day of this event, e.g. `"2026-03-22"`.
     pub partition_day_utc: String,
@@ -165,6 +165,12 @@ pub fn deserialize_named<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> io::Resu
 /// Layout: `[payload_len: u32 BE][payload_bytes][crc32: u32 BE]`
 pub fn write_framed<W: Write, T: Serialize>(writer: &mut W, value: &T) -> io::Result<()> {
     let payload = serialize_named(value)?;
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("payload too large: {} (max {MAX_FRAME_SIZE})", payload.len()),
+        ));
+    }
     let len = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "payload too large for framed write"))?;
     let crc = crc32fast::hash(&payload);

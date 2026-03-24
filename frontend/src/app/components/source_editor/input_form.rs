@@ -736,9 +736,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     { config_field_bool!(staged_input_state.form, translate.t(LABEL_ENABLED), enabled) }
                     { config_field!(staged_input_state.form, translate.t(LABEL_URL), url) }
+                    { html_if!(staged_input_state.form.input_type.is_xtream(), {
+                        <div class="tp__config-view__cols-2">
+                        { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
+                        { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
+                        </div>
+                    })}
                     <div class="tp__config-view__cols-2">
-                    { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
-                    { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
                     { config_field_custom!(translate.t(LABEL_FETCH_METHOD), staged_input_state.form.method.to_string()) }
                     { config_field_custom!(translate.t(LABEL_INPUT_TYPE), staged_input_state.form.input_type.to_string()) }
                     </div>
