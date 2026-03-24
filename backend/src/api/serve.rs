@@ -93,6 +93,23 @@ async fn handle_connection<M, S>(
         error!("Failed to set keepalive for {remote_addr}: {e}");
     }
 
+    // TCP_USER_TIMEOUT: max time (ms) that transmitted data may remain
+    // unacknowledged before the kernel forcibly closes the connection.
+    //
+    // TCP keepalive only fires on *idle* connections and therefore does NOT
+    // help for active live-streams where the server sends data continuously.
+    // When a client changes IP (e.g. WiFi → 4G) the old TCP connection dies
+    // without a FIN; without this option the kernel retransmits with
+    // exponential back-off for 2–15 minutes before giving up, holding the
+    // user connection slot occupied the entire time.
+    //
+    // With TCP_USER_TIMEOUT = 30 s the kernel closes the dead connection
+    // after at most 30 s of unacknowledged data, freeing the slot promptly.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = sock_ref.set_tcp_user_timeout(Some(Duration::from_secs(30))) {
+        error!("Failed to set TCP_USER_TIMEOUT for {remote_addr}: {e}");
+    }
+
     let Ok(socket) = tokio::net::TcpStream::from_std(tcp_stream_std) else {
         return;
     };

@@ -23,7 +23,7 @@ use crate::{
     processing::processor::exec_processing,
     repository::run_startup_migrations,
     utils::{
-        config_file_reader, db_viewer, init_bootstrap_logger, init_logger, request::create_client, resolve_env_var,
+        apply_config_log_level, config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var,
     },
 };
 use arc_swap::{access::Access, ArcSwap};
@@ -145,11 +145,9 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 async fn main() {
     let args = Args::parse();
 
-    // Initialize a minimal stdout logger immediately so that any error that
-    // occurs before `init_logger` (e.g. during path resolution) is visible.
-    // `init_logger` below will attempt a second `try_init` which silently
-    // fails; the format and module filters set here remain in effect.
-    init_bootstrap_logger(args.log_level.as_deref());
+    // initialize the logger from CLI arg / TULIPROX_LOG env var.
+    // Must happen before everything or we miss log output.
+    init_logger(args.log_level.as_deref());
 
     db_viewer(&args.db_viewer_args());
 
@@ -163,7 +161,8 @@ async fn main() {
 
     let mut config_paths = get_file_paths(&args);
 
-    init_logger(args.log_level.as_deref(), config_paths.config_file_path.as_str());
+    // Phase 2: apply config-file log level if not already set by CLI / env.
+    apply_config_log_level(args.log_level.as_deref(), config_paths.config_file_path.as_str());
 
     if args.healthcheck {
         let healthy = healthcheck(config_paths.config_file_path.as_str()).await;
