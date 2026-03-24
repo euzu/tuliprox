@@ -28,6 +28,7 @@ services:
       - /opt/tuliprox/data:/app/data
       - /opt/tuliprox/backup:/app/backup
       - /opt/tuliprox/downloads:/app/downloads
+      - - /opt/tuliprox/cache:/app/cache
     environment:
       - TZ=Europe/Berlin
     ports:
@@ -45,12 +46,13 @@ services:
 
 The separation of volumes is critical for security and performance:
 
-| Mount Point | Explanation & Technical Background |
-| :--- | :--- |
-| `/app/config` | Must contain your YAML files (`config.yml`, `source.yml`, etc.). Monitored by Tuliprox for file system events (`config_hot_reload`). |
-| `/app/data` | The `storage_dir`. Contains **Runtime Data**. Tuliprox recursively creates B+Tree databases (`*.db`), M3U caches, and TMDB metadata here. **THIS MUST BE PERSISTENT!** If lost during a restart, Tuliprox will attempt to redownload and FFprobe tens of thousands of streams, inevitably leading to provider bans. |
-| `/app/backup` | Destination folder for configuration backups triggered via the Web UI. |
-| `/app/downloads` | Destination folder for local video downloads initiated via the Web UI. |
+| Mount Point      | Explanation & Technical Background                                                                                                                                                                                                                                                                                  |
+|:-----------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `/app/config`    | Must contain your YAML files (`config.yml`, `source.yml`, etc.). Monitored by Tuliprox for file system events (`config_hot_reload`).                                                                                                                                                                                |
+| `/app/data`      | The `storage_dir`. Contains **Runtime Data**. Tuliprox recursively creates B+Tree databases (`*.db`), M3U caches, and TMDB metadata here. **THIS MUST BE PERSISTENT!** If lost during a restart, Tuliprox will attempt to redownload and FFprobe tens of thousands of streams, inevitably leading to provider bans. |
+| `/app/backup`    | Destination folder for configuration backups triggered via the Web UI.                                                                                                                                                                                                                                              |
+| `/app/downloads` | Destination folder for local video downloads initiated via the Web UI.                                                                                                                                                                                                                                              |
+| `/app/cache`     | Destination folder for local image downloads initiated via the xtream codes or m3u api use.                                                                                                                                                                                                                         |
 
 ### Docker Image Variants (`scratch` vs. `alpine`)
 

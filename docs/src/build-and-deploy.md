@@ -19,6 +19,34 @@ The repository ships with various helper scripts located under `bin/` to simplif
 * `bin/build_docker.sh`: Executes the multi-stage Docker build pipeline.
 * `bin/release.sh`: Orchestrates a full production release build.
 
+This project uses a `Makefile` to automate development tasks, tool installations, and build processes. This ensures a consistent  
+environment across different machines.
+
+**Tool installations:**
+
+* `make install-tools`: Full Setup: Installs Rustup, Cross, Trunk, wasm-bindgen, cargo-edit, mdBook, and markdownlint.
+* `make rustup`: Installs the Rust toolchain and Cargo.
+* `make cross`: Installs cross for multi-platform compilation.
+* `make trunk`: Installs trunk for managing frontend builds.
+* `make wasm-bindgen`: Installs the CLI tool for WebAssembly bindings.
+* `make cargo-set-version`: Installs cargo-edit for version management.
+* `make mdbook`: Installs mdBook for documentation generation.
+* `make markdownlint`: Installs markdownlint-cli2 (requires Node.js/npm).
+
+**Testing & Linting**:
+
+* `make test`: Runs all workspace tests using the Stable toolchain.
+* `make lint`: Runs clippy to find common mistakes and improve code quality.
+* `make lint-fix`: Automatically applies clippy suggestions (where possible).
+* `make markdown-lint`: Checks all .md files for formatting consistency.
+
+**Formatting**:
+
+We use specific Nightly rules to ensure the code style remains consistent across the project.
+
+* `make fmt`: Formats all code in the workspace.
+* `make fmt-check`: Verifies if the code is correctly formatted (used in CI).
+
 ---
 
 ## 1. Documentation Delivery & Generation
@@ -140,10 +168,6 @@ docker build --rm -f docker/Dockerfile -t tuliprox \
   --target scratch-final \
   --build-arg RUST_TARGET=armv7-unknown-linux-musleabihf .
 
-# Build for macOS (Darwin)
-docker build --rm -f docker/Dockerfile -t tuliprox \
-  --target scratch-final \
-  --build-arg RUST_TARGET=x86_64-apple-darwin .
 ```
 
 ### Manual Docker Image

@@ -27,6 +27,7 @@ tuliprox_home/
  ├─ data/user/      # User-specific configurations (like favorites)
  ├─ downloads/      # Downloaded VODs
  └─ web/            # Frontend assets for the Web UI
+ └─ cache/          # Cached resources
 ```
 
 *Example:* If your home is resolved to `/opt/tuliprox` and you define `backup_dir: ./backup` in `config.yml`, Tuliprox will

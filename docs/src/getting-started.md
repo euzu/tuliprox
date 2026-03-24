@@ -23,6 +23,7 @@ services:
       - /opt/tuliprox/data:/app/data
       - /opt/tuliprox/backup:/app/backup
       - /opt/tuliprox/downloads:/app/downloads
+      - /opt/tuliprox/cache:/app/cache
     environment:
       - TZ=Europe/Berlin
     ports:
@@ -131,5 +132,6 @@ Typical directories below that home:
 - `data/backup/`
 - `downloads/`
 - `web/`
+- `cache/`
 
 All relative paths in the configuration are resolved against that home directory.
