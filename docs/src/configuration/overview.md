@@ -1,18 +1,24 @@
 # ⚙️ Configuration & Setup (Overview)
 
-Tuliprox intentionally avoids a gigantic, monolithic configuration file. Instead, it follows the principle of **Separation of Concerns**. The setup consists of "5 Pillars" (files) that are logically separated.
+Tuliprox intentionally avoids a gigantic, monolithic configuration file. Instead, it follows the principle of **Separation of
+Concerns**. The setup consists of "5 Pillars" (files) that are logically separated.
 
 ## The Home-Directory Logic (Path Resolution)
 
-Before diving into the files, it is essential to understand how Tuliprox resolves file paths. Upon startup, Tuliprox determines a central **Home Directory**. All relative paths in your config files (e.g., `storage_dir: ./data` or `web_root: ./web`) are resolved strictly relative to this Home Directory.
+Before diving into the files, it is essential to understand how Tuliprox resolves file paths. Upon startup, Tuliprox determines
+a central **Home Directory**. All relative paths in your config files (e.g., `storage_dir: ./data` or `web_root: ./web`) are
+resolved strictly relative to this Home Directory.
 
 The resolution order for the Home Directory is:
+
 1. **CLI Argument:** `--home` or `-H` (Highest Priority)
 2. **Environment Variable:** `TULIPROX_HOME`
 3. **Fallback:** The physical directory where the executed `tuliprox` binary is located.
 
 ### Default Directory Structure
+
 By default, if you just run Tuliprox in an empty folder, it will create the following structure:
+
 ```text
 tuliprox_home/
  ├─ config/         # Contains config.yml, source.yml, mapping.yml, user.txt
@@ -23,7 +29,8 @@ tuliprox_home/
  └─ web/            # Frontend assets for the Web UI
 ```
 
-*Example:* If your home is resolved to `/opt/tuliprox` and you define `backup_dir: ./backup` in `config.yml`, Tuliprox will securely store backups exactly under `/opt/tuliprox/backup`.
+*Example:* If your home is resolved to `/opt/tuliprox` and you define `backup_dir: ./backup` in `config.yml`, Tuliprox will
+securely store backups exactly under `/opt/tuliprox/backup`.
 
 ---
 
