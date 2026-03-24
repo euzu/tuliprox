@@ -552,6 +552,7 @@ async fn process_source(
         let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
         // Download the sources
         let mut source_downloaded = false;
+        let mut disabled_inputs: Vec<Arc<str>> = vec![];
         for input_name in &source.inputs {
             let Some(input) = sources.get_input_by_name(input_name) else {
                 error!("Input {input_name} referenced by source {source_idx} does not exist");
@@ -607,7 +608,15 @@ async fn process_source(
                     input_name.clone(),
                     create_input_stat(group_count, channel_count, errors.len(), effective_input_type, input_name, elapsed),
                 );
+            } else {
+                disabled_inputs.push(input.name.clone());
             }
+        }
+        if !disabled_inputs.is_empty() && source_playlists.is_empty() {
+            warn!(
+                "Source at index {source_idx} has no enabled inputs for the given targets. Disabled: {}",
+                disabled_inputs.iter().map(std::convert::AsRef::as_ref).collect::<Vec<&str>>().join(", ")
+            );
         }
         if source_downloaded {
             if source_playlists.is_empty() {
@@ -816,6 +825,7 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
 
     let errors = Arc::new(Mutex::<Vec<TuliproxError>>::new(vec![]));
     let stats = Arc::new(Mutex::<Vec<SourceStats>>::new(vec![]));
+    let mut processed_any = false;
 
     for (index, source) in sources.sources.iter().enumerate() {
         if !source.should_process_for_user_targets(&processing_ctx.user_targets) {
@@ -833,6 +843,7 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
         let shared_stats = stats.clone();
         let ctx = processing_ctx.clone();
 
+        processed_any = true;
         if process_parallel {
             async_tasks.spawn(async move {
                 // Hold the per-source lock for the full duration of this update.
@@ -852,6 +863,14 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
             }
             drop(update_lock);
         }
+    }
+    if !processed_any {
+        warn!(
+            "No sources were processed for the given targets. Check that:\n\
+             - Sources have enabled targets matching your target selection\n\
+             - CLI -t filter or schedule.targets are correct\n\
+             - No playlist lock is blocking updates"
+        );
     }
     while let Some(result) = async_tasks.join_next().await {
         if let Err(err) = result {

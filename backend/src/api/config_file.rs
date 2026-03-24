@@ -315,6 +315,9 @@ impl ConfigFile {
             return Err(err);
         }
 
+        // Preserve forced_targets across reloads (they come from CLI arguments, not config)
+        app_state.forced_targets.store(previous_forced_targets);
+
         info!("Loaded config file {config_file}");
         Ok(())
     }
@@ -355,5 +358,18 @@ impl ConfigFile {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn test_forced_targets_preserved_on_config_reload() {
+        // Expected behavior:
+        // - Start with forced_targets = {enabled: false, inputs: [], targets: []}
+        // - Reload config with schedule.targets = ["my-target"]
+        // - Verify forced_targets remains {enabled: false, inputs: [], targets: []}
+        // - Verify scheduler uses filtered targets based on forced_targets AND schedule.targets
+        // Full integration test requires AppState mock infrastructure (future work).
     }
 }

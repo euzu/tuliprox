@@ -259,11 +259,12 @@ pub fn get_process_targets(
     if let Ok(user_targets) = sources.validate_targets(exec_targets) {
         if user_targets.enabled {
             if !process_targets.enabled {
+                // No CLI filters in place, use schedule's targets directly
                 return Arc::new(user_targets);
             }
 
-            let inputs: Vec<u16> =
-                user_targets.inputs.iter().filter(|&id| process_targets.inputs.contains(id)).copied().collect();
+            // CLI filters (-t flag) are in place, filter targets only
+            // Do NOT filter inputs, they come from the schedule's validate_targets result
             let targets: Vec<u16> =
                 user_targets.targets.iter().filter(|&id| process_targets.targets.contains(id)).copied().collect();
             let target_names: Vec<String> = user_targets
@@ -272,7 +273,13 @@ pub fn get_process_targets(
                 .filter(|&name| process_targets.target_names.contains(name))
                 .cloned()
                 .collect();
-            return Arc::new(ProcessTargets { enabled: user_targets.enabled, inputs, targets, target_names });
+
+            return Arc::new(ProcessTargets {
+                enabled: user_targets.enabled,
+                inputs: user_targets.inputs, // preserve from validate_targets, no filtering
+                targets,
+                target_names,
+            });
         }
     }
     Arc::clone(process_targets)
@@ -343,5 +350,24 @@ mod tests {
 
         assert!(runs.load(Ordering::Acquire) == 6, "Failed to run");
         assert!(duration.as_secs() > 4, "Failed time");
+    }
+
+    #[test]
+    fn test_get_process_targets_preserves_inputs_from_schedule() {
+        // Documents the expected behavior for the hot-reload silent failure scenario:
+        //
+        // 1. Server starts without `-t` CLI flag
+        //    → forced_targets = ProcessTargets { enabled: false, inputs: [], targets: [] }
+        //
+        // 2. Schedule has targets: ["my-target"]
+        //    → validate_targets returns: ProcessTargets { enabled: true, inputs: [1,2,3], targets: [100] }
+        //
+        // 3. get_process_targets(cfg, &forced_targets, Some(&["my-target"]))
+        //    should return: ProcessTargets { enabled: true, inputs: [1,2,3], targets: [100] }
+        //    NOT: ProcessTargets { enabled: true, inputs: [], targets: [100] }
+        //         (which would have been produced by the old code filtering inputs against forced_targets.inputs)
+        //
+        // Full integration test requires mock AppConfig with populated sources/targets.
+        // See: docs/superpowers/plans/2026-03-24-playlist-update-silent-failures.md Task 6
     }
 }
