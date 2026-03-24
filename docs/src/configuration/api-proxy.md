@@ -148,7 +148,7 @@ preempted/killed if any real user needs the slot.)*
 
 ## API Endpoints for Clients (Players)
 
-Once configured api-proxy, you can use these endpoints in players like TiviMate, IPTV Smarters, or VLC.
+After configuring the api-proxy, you can use these endpoints in players like TiviMate, IPTV Smarters, or VLC.
 
 *(Replace `<host>:<port>` with your Server definition).*
 

@@ -16,7 +16,7 @@ While Tuliprox is usually run via Docker, understanding the CLI flags is crucial
 | `-c, -i, -a, -m, -T` | Overrides specific config paths (e.g., `-c /etc/tuliprox/config.yml`). Useful for testing experimental configurations without altering the production setup. |
 | `-t, --target <NAME>` | **Targeted Processing:** Forces processing of the specified target *only*. **Crucial:** This bypasses the `enabled: false` state in the config! Extremely useful to quickly re-render a broken list via cron/shell without blocking the entire system with other heavy targets. |
 | `--genpwd` | Interactively generates a secure `Argon2id` password hash for the `user.txt` file. Never store plaintext passwords! |
-| `--healthcheck` | Docker Support: Pings the API over localhost. Returns Exit Code `0` if the server responds with `{status: "ok"}`. |
+| `--healthcheck` | Docker Support: Pings the API over localhost. Returns Exit Code `0` if the server responds with `{"status": "ok"}`. |
 | `--scan-library` | Triggers an incremental scan of the local media directory (if configured). |
 | `--force-library-rescan` | Ignores modification timestamps and forces a full TMDB/PTT re-evaluation of all local media files. |
 
@@ -64,7 +64,7 @@ You must point the flag directly at the corresponding `.db` file inside your `st
 | **`--dbx <PATH>`**<br>`./tuliprox --dbx ./data/input_name/xtream/video.db` | **Xtream DB:** Reads the metadata derived from the Xtream API. Shows you the final JSON payloads with resolved TMDB IDs, extracted video codecs (e.g., H264), and bitrates. |
 | **`--dbm <PATH>`**<br>`./tuliprox --dbm ./data/input_name/m3u.db` | **M3U Playlist DB:** Reads the raw M3U entries. Ideal for seeing how the fallback logic for `Tvg-ID` or `Virtual_ID` reacted to messy provider tags. |
 | **`--dbe <PATH>`**<br>`./tuliprox --dbe ./data/input_name/xtream/epg.db` | **EPG DB:** Prints the fully matched XMLTV grid. You see a list of all programmes with their correct Unix timestamps. |
-| **`--dbms <PATH>`**<br>`./tuliprox --dbms ./data/input_name/metadata_retry_state.db` | **Metadata Retry Status (Cooldowns):** Extremely important! Shows you the asynchronous backoff state. If TMDB finds no info for a stream, it lands in a cooldown here. Shows `attempts: 3`, `last_error: "404 Not Found"`, `cooldown_until: 1740000000`. This explains *why* a movie isn't being updated. |
+| **`--dbms <PATH>`**<br>`./tuliprox --dbms ./data/input_name/metadata_retry_state.db` | **Metadata Retry Status (Cooldowns):** Extremely important! Shows you the asynchronous backoff state. If TMDB finds no info for a stream, it lands in a cooldown here. Shows `attempts: 3`, `last_error: "404 Not Found"`, `cooldown_until_ts: 1740000000`. This explains *why* a movie isn't being updated. |
 | **`--dbv <PATH>`**<br>`./tuliprox --dbv ./data/target_name/id_mapping.db` | **Target-ID Mapping:** Tracks the stability of stream UUIDs across updates. Shows which original Provider-ID points to which internal Virtual-ID. |
 
 ### Example output via `--dbms`

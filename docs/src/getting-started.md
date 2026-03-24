@@ -37,7 +37,7 @@ services:
       start_period: 10s
 ```
 
-Open the Web UI afterwards and continue with the configuration.
+Open the Web UI afterward and continue with the configuration.
 
 ### First configuration steps
 

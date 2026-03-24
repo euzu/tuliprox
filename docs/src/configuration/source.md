@@ -254,7 +254,7 @@ Merge a perfectly maintained M3U file (e.g. from GitHub) for Live-TV with your X
 in Tuliprox!
 
 **Background:** You buy a Premium Xtream account for VODs. However, the Live-TV section of this provider is terribly sorted.
-But you have a perfectly maintained M3U file (e.g. found on a Github repository) for Live-TV.
+But you have a perfectly maintained M3U file (e.g. found on a GitHub repository) for Live-TV.
 With `staged`, you can logically merge these physical sources into a *single provider* in Tuliprox!
 
 ```yaml
@@ -267,7 +267,7 @@ With `staged`, you can logically merge these physical sources into a *single pro
       series_source: skip
 ```
 
-Here, Tuliprox pulls `live` from the m3u file on Github url and uses it for Live (Staged source), but continues to use your
+Here, Tuliprox pulls `live` from the m3u file on GitHub url and uses it for Live (Staged source), but continues to use your
 Xtream input for VOD.
 
 ---

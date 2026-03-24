@@ -69,7 +69,7 @@ library:
 | ↳ `read_existing.kodi` | Bool | `true` | Attempts to read Kodi-compatible `.nfo` files residing next to the media. |
 | ↳ `read_existing.plex` | Bool | `false` | Attempts to read Plex metadata formats. |
 | ↳ `read_existing.jellyfin` | Bool | `false` | Attempts to read Jellyfin metadata formats. |
-| ↳ `formats` | List | `["nfo"]` | |
+| ↳ `formats` | List | `["nfo"]` | Metadata file formats to read when `read_existing` is enabled (e.g., `nfo`). |
 
 *Note: For TMDB enrichments to work on local files, `metadata_update.tmdb.enabled: true` must be set in your config! The library
 utilizes the exact same API limits, API keys, and caches as the IPTV streams.*
