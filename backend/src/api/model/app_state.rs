@@ -125,9 +125,18 @@ pub async fn update_app_state_config(app_state: &Arc<AppState>, config: Config) 
     Ok(())
 }
 
-pub async fn update_app_state_sources(app_state: &Arc<AppState>, sources: SourcesConfig) -> Result<(), TuliproxError> {
-    let targets = sources.validate_targets(Some(&app_state.forced_targets.load().target_names))?;
-    app_state.forced_targets.store(Arc::new(targets));
+pub async fn update_app_state_sources(
+    app_state: &Arc<AppState>,
+    sources: SourcesConfig,
+    prevalidated_targets: Option<Arc<ProcessTargets>>,
+) -> Result<(), TuliproxError> {
+    let targets = if let Some(prevalidated) = prevalidated_targets {
+        prevalidated
+    } else {
+        let targets = sources.validate_targets(Some(&app_state.forced_targets.load().target_names))?;
+        Arc::new(targets)
+    };
+    app_state.forced_targets.store(targets);
     let updates = app_state.set_sources(sources).await?;
     update_target_caches(app_state, updates.targets.as_ref()).await;
     restart_services(app_state, &updates);

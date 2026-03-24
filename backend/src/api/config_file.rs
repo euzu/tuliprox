@@ -214,11 +214,7 @@ impl ConfigFile {
         let current_forced = app_state.forced_targets.load_full();
         let validated_forced = refresh_forced_targets(current_forced, &prepared.sources);
 
-        update_app_state_sources(app_state, prepared.sources).await?;
-        // update_app_state_sources calls validate_targets(Some(&target_names)) internally,
-        // which sets enabled=true even when target_names is empty, corrupting the flag.
-        // Always overwrite with our pre-validated value so the flag stays correct.
-        app_state.forced_targets.store(validated_forced);
+        update_app_state_sources(app_state, prepared.sources, Some(validated_forced)).await?;
         Self::apply_mapping_reload(app_state, prepared.mapping);
         info!("Loaded sources file {}", prepared.sources_file);
         Ok(())
@@ -350,15 +346,12 @@ impl ConfigFile {
                 );
             }
 
-            if let Err(rollback_err) = update_app_state_sources(app_state, previous_sources).await {
+            if let Err(rollback_err) = update_app_state_sources(app_state, previous_sources, Some(previous_forced_targets)).await {
                 error!("Failed to rollback sources after dependent reload failure: {rollback_err}");
                 error!(
                     "Source rollback failed after dependent reload error; runtime state may be inconsistent. Please restart the service."
                 );
             }
-            // Restore after update_app_state_sources so its internal validate_targets call
-            // (which can corrupt the enabled flag) does not overwrite the pre-reload value.
-            app_state.forced_targets.store(previous_forced_targets);
 
             return Err(err);
         }
