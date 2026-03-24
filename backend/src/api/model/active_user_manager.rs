@@ -6,7 +6,7 @@ use crate::{
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
-use log::{debug, info};
+use log::{debug, info, warn};
 use shared::{
     model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, StreamTechnicalInfo, UserConnectionPermission, VirtualId},
     utils::{
@@ -1027,11 +1027,20 @@ impl ActiveUserManager {
 
                     if should_remove {
                         let expired_stream = connection_data.streams.swap_remove(stream_idx);
+                        let expired_uid = expired_stream.uid;
                         expiry_index.remove(&key);
                         if let Some(tx) = self.cleanup_tx.get() {
-                            let _ = tx.try_send(CleanupEvent::AdaptiveSessionExpired {
+                            match tx.try_send(CleanupEvent::AdaptiveSessionExpired {
                                 stream_info: Box::new(expired_stream),
-                            });
+                            }) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    warn!("Adaptive session expiry queue full, dropping disconnect history for stream uid {expired_uid}");
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    debug!("Cleanup channel closed, dropping adaptive session expiry");
+                                }
+                            }
                         }
                     } else if let Some(replacement_entry) = self.build_preserved_stream_expiry(
                         &entry.username,

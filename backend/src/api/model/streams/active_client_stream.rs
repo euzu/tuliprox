@@ -560,8 +560,13 @@ impl Stream for ActiveClientStream {
                         Some(Poll::Ready(Some(Ok(bytes)))) => return Poll::Ready(Some(Ok(bytes))),
                         Some(Poll::Ready(Some(Err(e)))) => {
                             error!("Inner stream error: {e:?}");
+                            let _ = self.state.provider_end_reason.compare_exchange(
+                                PROVIDER_END_NOT_SET,
+                                PROVIDER_END_ERROR,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            );
                             if self.state.grace_task_handle.is_none() {
-                                self.state.provider_end_reason.store(PROVIDER_END_ERROR, Ordering::Relaxed);
                                 self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
                                 return Poll::Ready(None);
                             }
@@ -569,8 +574,13 @@ impl Stream for ActiveClientStream {
                             return Poll::Pending;
                         }
                         Some(Poll::Ready(None)) | None => {
+                            let _ = self.state.provider_end_reason.compare_exchange(
+                                PROVIDER_END_NOT_SET,
+                                PROVIDER_END_CLOSED,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            );
                             if self.state.grace_task_handle.is_none() {
-                                self.state.provider_end_reason.store(PROVIDER_END_CLOSED, Ordering::Relaxed);
                                 self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
                                 return Poll::Ready(None);
                             }
