@@ -337,6 +337,10 @@
     "DISCORD": {
       "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
     },
+    "DISCORD_MESSAGING_CONFIG": {
+      "TEMPLATES": "Handlebars templates for Discord message bodies.",
+      "URL": "Discord webhook URL for sending notification messages."
+    },
     "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
     "EPG_CONFIG": {
       "NAME_PREFIX_SEPARATOR": "List of characters (e.g. ':', '|') that separate channel prefixes from the main title during Smart Match.",
@@ -365,6 +369,20 @@
       "ENABLED": "Enables the HDHomeRun target output emulation.",
       "PROPRIETARY_DISCOVERY": "Enables proprietary HDHomeRun discovery protocols.",
       "SSDP_DISCOVERY": "Enables standard SSDP discovery for HDHomeRun emulation on the local network."
+    },
+    "HD_HOME_RUN_DEVICE_CONFIG": {
+      "DEVICE_ID": "Unique device ID used for HDHomeRun identification. Auto-generated if not set.",
+      "DEVICE_TYPE": "Device type string advertised to clients.",
+      "DEVICE_UDN": "Unique device name (UUID) for this virtual HDHomeRun device. Auto-generated if not set.",
+      "FIRMWARE_NAME": "Firmware filename advertised to HDHomeRun clients.",
+      "FIRMWARE_VERSION": "Firmware version string advertised to HDHomeRun clients.",
+      "FRIENDLY_NAME": "Human-readable display name shown to HDHomeRun clients.",
+      "MANUFACTURER": "Manufacturer name advertised to HDHomeRun clients.",
+      "MODEL_NAME": "Model name string advertised to HDHomeRun clients.",
+      "MODEL_NUMBER": "Model number string advertised to HDHomeRun clients.",
+      "NAME": "Internal identifier for this virtual HDHomeRun device. Must be unique.",
+      "PORT": "HTTP port this virtual device listens on. Auto-assigned if 0.",
+      "TUNER_COUNT": "Number of virtual tuners advertised by this device. Minimum 1."
     },
     "HD_HOME_RUN_TARGET_OUTPUT": {
       "DEVICE": "The virtual Device ID exposed by the HDHomeRun emulation.",
@@ -400,6 +418,7 @@
     },
     "LIBRARY_METADATA_READ_CONFIG": {
       "JELLYFIN": "Reads NFO metadata files formatted for Jellyfin.",
+      "KODI": "Reads NFO metadata files formatted for Kodi.",
       "PLEX": "Reads XML metadata files or sidecars formatted for Plex."
     },
     "LIBRARY_PLAYLIST_CONFIG": {
@@ -436,6 +455,7 @@
     },
     "MESSAGING_CONFIG": {
       "NOTIFY_ON": "Select events (e.g. 'info', 'stats', 'error') that trigger notifications for this specific type.",
+      "REST_HEADERS": "Custom HTTP headers sent with REST notification requests (JSON format).",
       "TELEGRAM_CHAT_IDS": "List of telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'."
     },
     "METADATA_LOG_CONFIG": {
@@ -445,7 +465,7 @@
       "SANITIZE_SENSITIVE_INFO": "Attempts to mask passwords and tokens in the logging output for security."
     },
     "METADATA_UPDATE_CONFIG": {
-      "METADATA_PATH": "Directory for metadata cache and retry-state files.\n\nRelative paths are resolved against `storage_dir`.\n\nExamples: `metadata`, `/app/data/metadata`.",
+      "CACHE_PATH": "Directory for metadata cache and retry-state files.\n\nRelative paths are resolved against `storage_dir`.\n\nExamples: `metadata`, `/app/data/metadata`.",
       "MAX_QUEUE_SIZE": "Maximum number of metadata tasks kept in memory for one input worker.\n\nWhen this limit is reached, additional tasks are rejected to protect system stability and memory usage.",
       "RETRY_DELAY": "Minimum delay for transient requeue scheduling.\n\nUse this to prevent immediate hot-loop retries when tasks are temporarily deferred.\n\nUse duration units like `2s`, `5s`, `10s`.",
       "WORKER_IDLE_TIMEOUT": "How long a metadata worker waits for new tasks while idle before it can stop itself.\n\nA lower value releases resources sooner; a higher value keeps workers warm for bursty workloads.\n\nUse duration units like `30s`, `1m`, `5m`.",
@@ -479,6 +499,11 @@
       "KEEP_VHOST": "If enabled, keeps the original hostname in the Host header while connecting by resolved IP.",
       "REFRESH_SECS": "DNS refresh interval in seconds for provider hostnames (minimum effective value is 10)."
     },
+    "PUSHOVER_MESSAGING_CONFIG": {
+      "TOKEN": "Pushover application API token.",
+      "URL": "Optional custom Pushover API URL. Leave empty to use the default.",
+      "USER": "Pushover user key identifying the notification recipient."
+    },
     "PROVIDER_FORM": {
       "URLS": "List of base URLs for this provider. They are used in order and rotated when failover is triggered.",
       "DNS": {
@@ -490,6 +515,7 @@
     },
     "PROBE": "Probe controls technical stream analysis retries.\n\nUse this group to define retry steps, retry limits, and cooldown behavior for FFprobe-based stream checks.",
     "PROBE_CONFIG": {
+      "BACKOFF_JITTER_PERCENT": "Random jitter added to probe retry delays.\n\nA value of 20 means delays vary by ±20%. Helps spread retries across workers to avoid thundering-herd problems.\n\nMust be between 0 and 95.",
       "COOLDOWN": "Pause time after probe retries are exhausted.\n\nDuring cooldown, that item is skipped for probing. After cooldown ends, probing can start again.\n\nExamples: `1d`, `3d`, `7d`.",
       "MAX_ATTEMPTS": "How many probe tries are allowed before cooldown starts.\n\nLower values reduce provider load, higher values can recover more transient failures.",
       "RETRY_BACKOFF_STEP_1": "Wait time after the first probe failure.\n\nUse this as a gentle first retry step.\n\nExample: `10m`.",
@@ -535,7 +561,10 @@
       "BACKOFF_MULTIPLIER": "Multiplies the base backoff after each failed attempt to create an exponential delay."
     },
     "REST_MESSAGING_CONFIG": {
-      "HEADERS": "Custom HTTP headers to send with the request (JSON format)."
+      "HEADERS": "Custom HTTP headers to send with the request (JSON format).",
+      "METHOD": "HTTP method used for the notification request (e.g. POST, PUT). Default: POST.",
+      "TEMPLATES": "Handlebars templates for REST notification message bodies.",
+      "URL": "Target URL that receives the notification webhook."
     },
     "REVERSE_PROXY_CONFIG": {
       "FAILOVER_REDIRECT_PATTERNS": "Regex patterns determining which HTTP error responses trigger an automatic failover rotation.",
@@ -589,6 +618,14 @@
       "PROCESSING_ORDER": "Determines the priority or the sequence in which target channels are matched and listed."
     },
     "TELEGRAM_CONFIG": {
+      "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
+      "MARKDOWN": "If enabled, messages are sent as MarkdownV2 formatted text.",
+      "TEMPLATES": "Handlebars templates for Telegram message bodies."
+    },
+    "TELEGRAM_MESSAGING_CONFIG": {
+      "BOT_TOKEN": "Telegram Bot API token. Obtain this from @BotFather.",
+      "CHAT_IDS": "List of Telegram chat IDs to receive notifications. Format: '<chat_id>' or '<chat_id>:<thread_id>'.",
+      "MARKDOWN": "If enabled, messages are sent as MarkdownV2 formatted text.",
       "TEMPLATES": "Handlebars templates for Telegram message bodies."
     },
     "TMDB_CONFIG": {
