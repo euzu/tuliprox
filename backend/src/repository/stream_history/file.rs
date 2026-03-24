@@ -42,6 +42,10 @@ pub enum DisconnectReason {
     DayRollover,
     Shutdown,
     Unknown,
+    ProviderError,
+    ProviderClosed,
+    Preempted,
+    SessionExpired,
 }
 
 /// Serialized as `MessagePack` named (map encoding) for schema evolution safety.
