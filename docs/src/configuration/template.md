@@ -1,18 +1,24 @@
 # 🧩 Pillar 5: `template.yml` (Macros & DRY)
 
-In a large IPTV setup, you will quickly realize that you are repeating the same regular expressions (Regex) or complex filters (like blocking Adult content) across dozens of targets and mappings.
+In a large IPTV setup, you will quickly realize that you are repeating the same regular expressions (Regex) or complex filters  
+(like blocking Adult content) across dozens of targets and mappings.
 
-This leads to unreadable and highly unmaintainable configurations. Tuliprox solves this elegantly using **Templates** (applying the DRY principle: Don't Repeat Yourself).
+This leads to unreadable and highly unmaintainable configurations. Tuliprox solves this elegantly using **Templates**  
+(applying the DRY principle: Don't Repeat Yourself).
 
-You define complex strings or regex patterns exactly once. Afterward, you can invoke them in all other configuration files (like `source.yml` or `mapping.yml`) by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
+You define complex strings or regex patterns exactly once. Afterward, you can invoke them in all other configuration files  
+(like `source.yml` or `mapping.yml`) by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
 
 ## Global Path (Recommended Setup)
 
 It is highly recommended to set the `template_path` in `config.yml` to a directory rather than a single file:
+
 ```yaml
 template_path: ./config/templates.d
 ```
-Upon startup, Tuliprox reads all `.yml` files in this directory in alphanumeric order (e.g., `01-regex.yml`, `02-filters.yml`) and merges them into one massive global macro catalog.
+
+Upon startup, Tuliprox reads all `.yml` files in this directory in alphanumeric order (e.g., `01-regex.yml`, `02-filters.yml`)  
+and merges them into one massive global macro catalog.
 
 *Important: The names of the templates (`name`) must be globally unique across all files!*
 
@@ -54,13 +60,15 @@ templates:
 ```
 
 Tuliprox recursively resolves the entire template tree during system startup.
-*(Security Feature: The system detects cyclic dependencies—Macro A calls Macro B, which calls Macro A—and aborts the startup with a log error to prevent infinite loops).*
+*(Security Feature: The system detects cyclic dependencies—Macro A calls Macro B, which calls Macro A—and aborts the startup  
+with a log error to prevent infinite loops).*
 
 ---
 
 ## Practical Application
 
 ### 1. In `source.yml` (As a Target Filter)
+
 Instead of writing a monstrous 500-character line into your target, you build it out of logical template blocks.
 
 ```yaml
@@ -70,7 +78,9 @@ targets:
 ```
 
 ### 2. In `source.yml` (As a Sequence Sort)
-For the "Sort Sequence" feature (sorting by the occurrence of tags in the name), templates defined as lists (`value:` as an array) can be injected directly into the sequence array.
+
+For the "Sort Sequence" feature (sorting by the occurrence of tags in the name), templates defined as lists (`value:` as an array)  
+can be injected directly into the sequence array.
 
 ```yaml
 sort:
@@ -84,6 +94,7 @@ sort:
 ```
 
 ### 3. In `mapping.yml` (As a Regex Component)
+
 In the Mapper DSL, Tuliprox injects the resolved regex pattern exactly where the exclamation mark macro is placed. This prevents complex regex typos.
 
 ```dsl

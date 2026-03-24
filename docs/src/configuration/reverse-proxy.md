@@ -1,8 +1,10 @@
 # 🌊 Reverse Proxy (Streaming, Caching & Rate Limits)
 
-This section documents the `reverse_proxy:` block inside `config.yml`. It is the most critical block for determining runtime behavior when Tuliprox actively proxies video streams to clients (Reverse Proxy Mode), rather than just redirecting them.
+This section documents the `reverse_proxy:` block inside `config.yml`. It is the most critical block for determining runtime
+behavior when Tuliprox actively proxies video streams to clients (Reverse Proxy Mode), rather than just redirecting them.
 
-It manages how Tuliprox establishes upstream connections, buffers video frames, handles sudden client disconnects, and caches static resources like EPG images and channel logos.
+It manages how Tuliprox establishes upstream connections, buffers video frames, handles sudden client disconnects, and caches
+static resources like EPG images and channel logos.
 
 ## Top-level entries
 
@@ -22,7 +24,7 @@ reverse_proxy:
 
 | Parameter | Type | Default | Technical Impact & Background |
 | :--- | :--- | :--- | :--- |
-| `resource_rewrite_disabled`| Bool | `false` | Normally, Tuliprox rewrites all image URLs in playlists to point to itself (e.g., `http://tuliprox:8901/resource/...`). If set to `true`, original URLs are kept (clients load images directly from the provider). **Warning:** Local caching will stop working if this is enabled! |
+| `resource_rewrite_disabled` | Bool | `false` | Normally, Tuliprox rewrites all image URLs in playlists to point to itself (e.g., `http://tuliprox:8901/resource/...`). If set to `true`, original URLs are kept (clients load images directly from the provider). **Warning:** Local caching will stop working if this is enabled! |
 | `rewrite_secret` | String | `""` | A 32-character Hex string (16 bytes). Tuliprox encrypts/signs the original image URLs during the rewrite process. To prevent image URLs from becoming invalid after a server restart, you MUST enter a static secret here (generate via `openssl rand -hex 16`). |
 
 ---
@@ -58,17 +60,18 @@ reverse_proxy:
 | `throttle_kbps` | Int | `0` | **Background:** Some players download VODs (Movies) at maximum line speed ("Bursting"). Providers often view this as abuse or scraping and will ban the IP. By throttling (e.g., to `12500` kbps), you force the download into a constant, inconspicuous flow. Supports units like `KB/s`, `MB/s`, `kbps`, `Mibps`. |
 | `metrics_enabled` | Bool | `false` | **Monitoring:** If active, Tuliprox samples the live bandwidth (in kbps) and transferred bytes for every active reverse-proxied stream and pushes them via WebSockets to the Web UI. It adds a tiny bit of CPU overhead but is invaluable for debugging buffering issues. |
 | `grace_period_millis` | Int | `2000` | The exact time window in ms where a temporary over-allocation is allowed (see notes on [The VLC Seek Problem](#the-vlc-seek-problem--grace-periods) for details). |
-| `grace_period_timeout_secs`| Int | `4` | A hard timeout limit for overlapping "ghost sessions" to expire. |
-| `grace_period_hold_stream`| Bool | `true` | Tuliprox artificially holds back the video data to the client, waiting for the grace check to finish, so it doesn't trigger the provider prematurely. |
+| `grace_period_timeout_secs` | Int | `4` | A hard timeout limit for overlapping "ghost sessions" to expire. |
+| `grace_period_hold_stream` | Bool | `true` | Tuliprox artificially holds back the video data to the client, waiting for the grace check to finish, so it doesn't trigger the provider prematurely. |
 | `hls_session_ttl_secs` | Int | `15` | Keeps the virtual provider slot open between HLS segment (`.ts`) requests to prevent provider bans for "Account Hopping". |
-| `catchup_session_ttl_secs`| Int | `45` | The same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
-| `shared_burst_buffer_mb`| Int | `12` | Minimum burst buffer size (in MB) used for shared live streams to immediately synchronize new clients without Keyframe dropouts. See notes on section [Shared Live Streams](#shared-streams) for details. |
+| `catchup_session_ttl_secs` | Int | `45` | The same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
+| `shared_burst_buffer_mb` | Int | `12` | Minimum burst buffer size (in MB) used for shared live streams to immediately synchronize new clients without Keyframe dropouts. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
 
 ---
 
 ## 2. Resource Caching (`cache`)
 
-Tuliprox caches channel logos, posters, and EPG images on your disk so your clients don't stress the provider's servers on every playlist reload.
+Tuliprox caches channel logos, posters, and EPG images on your disk so your clients don't stress the provider's servers on every
+playlist reload.
 
 ```yaml
 reverse_proxy:
@@ -78,7 +81,8 @@ reverse_proxy:
     directory: ./cache
 ```
 
-An LRU (Least Recently Used) disk cache. If it hits the limit (e.g., `1GB`), Tuliprox automatically deletes the oldest images. Note: Fails if `resource_rewrite_disabled` is true.
+An LRU (Least Recently Used) disk cache. If it hits the limit (e.g., `1GB`), Tuliprox automatically deletes the oldest images.
+Note: Fails if `resource_rewrite_disabled` is true.
 
 ---
 
@@ -91,13 +95,17 @@ reverse_proxy:
     period_millis: 500
     burst_size: 10
 ```
-Implements an IP-based Token-Bucket rate limiter. In this example, an IP can fire 10 requests immediately (`burst_size`). After that, it receives exactly one new token every 500ms (`period_millis`). This prevents DDOS attacks from malfunctioning scrapers. *(Ensure your upstream Nginx/Traefik passes `X-Forwarded-For` for this to work correctly!)*
+
+Implements an IP-based Token-Bucket rate limiter. In this example, an IP can fire 10 requests immediately (`burst_size`). After
+that, it receives exactly one new token every 500ms (`period_millis`). This prevents DDOS attacks from malfunctioning scrapers.
+*(Ensure your upstream Nginx/Traefik passes `X-Forwarded-For` for this to work correctly!)*
 
 ---
 
 ## 4. Header Stripping (`disabled_header`)
 
-When Tuliprox makes requests to the upstream provider, it can strip revealing headers that might expose which player you are actually using or the fact that you are proxying traffic.
+When Tuliprox makes requests to the upstream provider, it can strip revealing headers that might expose which player you are
+actually using or the fact that you are proxying traffic.
 
 ```yaml
 reverse_proxy:
@@ -124,8 +132,11 @@ reverse_proxy:
     failover_redirect_patterns:
       - "service-abuse"
 ```
+
 * **Retries:** After the first error, Tuliprox waits 250ms. After the second error, it waits `250 * 1.5 = 375ms`, and so on.
-* **`failover_redirect_patterns`:** A list of Regex patterns. If an upstream resource responds with an HTTP Redirect (302) containing these patterns (e.g., pointing to a "service-abuse" warning image from the provider), Tuliprox treats it as a failure instead of blindly serving the abuse image to your clients.
+* **`failover_redirect_patterns`:** A list of Regex patterns. If an upstream resource responds with an HTTP Redirect (302)
+  containing these patterns (e.g., pointing to a "service-abuse" warning image from the provider), Tuliprox treats it as a
+  failure instead of blindly serving the abuse image to your clients.
 
 ---
 
@@ -139,30 +150,53 @@ reverse_proxy:
     enabled: true
     url: "https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/asn-country/asn-country-ipv4.csv"
 ```
-The CSV file must have exactly 3 columns: `range_start,range_end,country_code`. (The DB is periodically updated via the `schedules` block using the `GeoIpUpdate` task type).
 
-----
+The CSV file must have exactly 3 columns: `range_start,range_end,country_code`. (The DB is periodically updated via the
+`schedules` block using the `GeoIpUpdate` task type).
+
+---
+
 &nbsp;
 
-# Additional Information
-## The "VLC Seek Problem" & Grace Periods
-When a user fast-forwards or rewinds a VOD, the player calculates the new byte offset, drops the old TCP connection, and immediately fires a new HTTP GET request (with a `Range` header) to Tuliprox.
+## Additional Information
 
-**The Problem:** It takes milliseconds to seconds for the upstream provider to realize the old connection is dead. If you have a `max_connections: 1` limit at the provider, they will view this new seek-request as a *second concurrent stream* and reject it with an HTTP 509 (Bandwidth Exceeded) or HTTP 401 error.
+## The "VLC Seek Problem" & Grace Periods
+
+When a user fast-forwards or rewinds a VOD, the player calculates the new byte offset, drops the old TCP connection, and
+immediately fires a new HTTP GET request (with a `Range` header) to Tuliprox.
+
+**The Problem:** It takes milliseconds to seconds for the upstream provider to realize the old connection is dead. If you have
+a `max_connections: 1` limit at the provider, they will view this new seek-request as a *second concurrent stream* and reject
+it with an HTTP 509 (Bandwidth Exceeded) or HTTP 401 error.
 
 **The Tuliprox Solution:**
+
 * `grace_period_millis: 2000`: Tuliprox grants the user a temporary over-allocation (Grace) for exactly this duration.
-* `grace_period_hold_stream: true`: Tuliprox artificially holds back the video data to the client, waiting for the grace check to finish, so it doesn't trigger the provider prematurely.
-* After the milliseconds expire, Tuliprox checks internally: Is the old connection truly gone now? If Yes ➔ Data flows. If No ➔ The new connection is hard-killed (serving the `user_connections_exhausted.ts` video) because the user is actually illegally watching twice.
+* `grace_period_hold_stream: true`: Tuliprox artificially holds back the video data to the client, waiting for the grace check
+  to finish, so it doesn't trigger the provider prematurely.
+* After the milliseconds expire, Tuliprox checks internally: Is the old connection truly gone now? If Yes ➔ Data flows.
+  If No ➔ The new connection is hard-killed (serving the `user_connections_exhausted.ts` video) because the user is actually
+  illegally watching twice.
 * `grace_period_timeout_secs: 4`: A hard timeout limit for overlapping "ghost sessions" to expire.
 
 ## Session TTLs for HLS (`.m3u8`) & Catchup
-HLS streams do not consist of an endless TCP pipe. Instead, the player downloads small `.ts` segments every few seconds (e.g., `seg1.ts`, `seg2.ts`).
 
-If Tuliprox released and re-acquired the provider slot for every single segment, providers would block the account for "Account Hopping" or spam. Tuliprox simulates a continuous session:
-* `hls_session_ttl_secs: 15`: After a `.ts` segment finishes downloading, the physical slot to the provider is closed, but the "Virtual Slot" for this specific user remains reserved for 15 seconds. No other user can steal this slot during this window. Channel switches from the same client can immediately take over the reservation.
-* The same principle applies to Archive/Catchup TV (`catchup_session_ttl_secs: 45`), which shares the same fragmentation and seeking issues.
+HLS streams do not consist of an endless TCP pipe. Instead, the player downloads small `.ts` segments every few seconds
+(e.g., `seg1.ts`, `seg2.ts`).
+
+If Tuliprox released and re-acquired the provider slot for every single segment, providers would block the account for "Account
+Hopping" or spam. Tuliprox simulates a continuous session:
+
+* `hls_session_ttl_secs: 15`: After a `.ts` segment finishes downloading, the physical slot to the provider is closed, but the
+  "Virtual Slot" for this specific user remains reserved for 15 seconds. No other user can steal this slot during this window.
+  Channel switches from the same client can immediately take over the reservation.
+* The same principle applies to Archive/Catchup TV (`catchup_session_ttl_secs: 45`), which shares the same fragmentation and
+  seeking issues.
 
 ## Shared Live Streams
-Tuliprox can share a live stream (`share_live_streams: true` in the target options of `source.yml`). If 5 users watch the same Live-TV channel, Tuliprox pulls the stream only 1x from the provider and multicasts the bytes locally to 5 clients.
-To ensure a user who tunes in 10 seconds later doesn't get player errors due to missing I-Frames/Keyframes, Tuliprox continuously keeps the last X Megabytes (`shared_burst_buffer_mb`, default `12`) in RAM. It fires this burst buffer at new subscribers so their decoders can instantly synchronize.
+
+Tuliprox can share a live stream (`share_live_streams: true` in the target options of `source.yml`). If 5 users watch the same
+Live-TV channel, Tuliprox pulls the stream only 1x from the provider and multicasts the bytes locally to 5 clients.
+To ensure a user who tunes in 10 seconds later doesn't get player errors due to missing I-Frames/Keyframes, Tuliprox
+continuously keeps the last X Megabytes (`shared_burst_buffer_mb`, default `12`) in RAM. It fires this burst buffer at new
+subscribers so their decoders can instantly synchronize.
