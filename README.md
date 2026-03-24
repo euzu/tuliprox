@@ -77,7 +77,6 @@ services:
     image: ghcr.io/euzu/tuliprox-alpine:latest
     working_dir: /app
     volumes:
-      - /home/tuliprox/tuliprox:/app/tuliprox
       - /home/tuliprox/config:/app/config
       - /home/tuliprox/data:/app/data
       - /home/tuliprox/cache:/app/cache

@@ -411,3 +411,91 @@ fn emit_disconnect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &St
     record.disconnect_reason = Some(reason);
     w.send_record(record);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster};
+    use shared::utils::Internable;
+    use std::net::SocketAddr;
+
+    fn make_stream_info(provider: &str, title: &str) -> StreamInfo {
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+        let channel = StreamChannel {
+            target_id: 1,
+            virtual_id: 1,
+            provider_id: 1,
+            item_type: PlaylistItemType::Live,
+            cluster: XtreamCluster::Live,
+            group: "".intern(),
+            title: title.intern(),
+            url: "".intern(),
+            shared: false,
+            technical: None,
+        };
+        StreamInfo::new(0, 0, "test", &addr, "127.0.0.1", provider, channel, String::new(), None, None)
+    }
+
+    #[test]
+    fn test_client_closed_when_no_provider_end() {
+        let info = make_stream_info("some_provider", "Some Channel");
+        let reason = resolve_disconnect_reason(PROVIDER_END_NOT_SET, &info);
+        assert_eq!(reason, DisconnectReason::ClientClosed);
+    }
+
+    #[test]
+    fn test_provider_closed_on_eof() {
+        let info = make_stream_info("some_provider", "Some Channel");
+        let reason = resolve_disconnect_reason(PROVIDER_END_CLOSED, &info);
+        assert_eq!(reason, DisconnectReason::ProviderClosed);
+    }
+
+    #[test]
+    fn test_provider_error_on_err() {
+        let info = make_stream_info("some_provider", "Some Channel");
+        let reason = resolve_disconnect_reason(PROVIDER_END_ERROR, &info);
+        assert_eq!(reason, DisconnectReason::ProviderError);
+    }
+
+    #[test]
+    fn test_preempted_from_custom_video_detail() {
+        let info = make_stream_info("tuliprox", "low_priority_preempted");
+        let reason = resolve_disconnect_reason(PROVIDER_END_NOT_SET, &info);
+        assert_eq!(reason, DisconnectReason::Preempted);
+    }
+
+    #[test]
+    fn test_channel_unavailable_with_eof_maps_to_provider_closed() {
+        let info = make_stream_info("tuliprox", "channel_unavailable");
+        let reason = resolve_disconnect_reason(PROVIDER_END_CLOSED, &info);
+        assert_eq!(reason, DisconnectReason::ProviderClosed);
+    }
+
+    #[test]
+    fn test_channel_unavailable_with_err_maps_to_provider_error() {
+        let info = make_stream_info("tuliprox", "channel_unavailable");
+        let reason = resolve_disconnect_reason(PROVIDER_END_ERROR, &info);
+        assert_eq!(reason, DisconnectReason::ProviderError);
+    }
+
+    #[test]
+    fn test_channel_unavailable_without_atomic_maps_to_provider_error() {
+        let info = make_stream_info("tuliprox", "channel_unavailable");
+        let reason = resolve_disconnect_reason(PROVIDER_END_NOT_SET, &info);
+        assert_eq!(reason, DisconnectReason::ProviderError);
+    }
+
+    #[test]
+    fn test_user_exhausted_custom_video_maps_to_client_closed() {
+        let info = make_stream_info("tuliprox", "user_connections_exhausted");
+        let reason = resolve_disconnect_reason(PROVIDER_END_NOT_SET, &info);
+        assert_eq!(reason, DisconnectReason::ClientClosed);
+    }
+
+    #[test]
+    fn test_unknown_tuliprox_title_falls_through_to_atomic() {
+        let info = make_stream_info("tuliprox", "some_unknown_video_type");
+        let reason = resolve_disconnect_reason(PROVIDER_END_CLOSED, &info);
+        assert_eq!(reason, DisconnectReason::ProviderClosed);
+    }
+}
