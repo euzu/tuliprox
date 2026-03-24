@@ -27,6 +27,37 @@ fn get_log_level(log_level: &str) -> LevelFilter {
     }
 }
 
+fn apply_log_format(builder: &mut Builder) {
+    builder.format(|buf, record| {
+        let now = Local::now();
+        let timestamp = now.to_rfc3339_opts(SecondsFormat::Secs, now.offset().fix().local_minus_utc() == 0);
+        writeln!(buf, "[{timestamp} {} {}] {}", record.level(), record.target(), record.args())
+    });
+}
+
+/// Initializes a minimal stdout logger early in startup so that errors before
+/// `init_logger` is called (e.g. during path resolution) are visible.
+/// Reads log level from the CLI argument and the `TULIPROX_LOG` env var only —
+/// config-file log level is not available yet at this point.
+/// `init_logger` will attempt a second `try_init` which silently fails;
+/// the format and module filters set here remain active.
+pub fn init_bootstrap_logger(user_log_level: Option<&str>) {
+    let env_log_level = std::env::var("TULIPROX_LOG").ok();
+    let log_level = user_log_level
+        .map(std::string::ToString::to_string)
+        .or(env_log_level)
+        .unwrap_or_else(|| "info".to_string());
+
+    let mut log_builder = Builder::from_default_env();
+    log_builder.target(Target::Stdout);
+    apply_log_format(&mut log_builder);
+    log_builder.filter_level(get_log_level(&log_level));
+    for module in LOG_ERROR_LEVEL_MOD {
+        log_builder.filter_module(module, LevelFilter::Error);
+    }
+    let _ = log_builder.try_init();
+}
+
 pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
     
     // tracing_subscriber::registry()
@@ -39,17 +70,7 @@ pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
 
     let mut log_builder = Builder::from_default_env();
     log_builder.target(Target::Stdout);
-    log_builder.format(move |buf, record| {
-        let now = Local::now();
-        let timestamp = now.to_rfc3339_opts(SecondsFormat::Secs, now.offset().fix().local_minus_utc() == 0);
-        writeln!(
-            buf,
-            "[{timestamp} {} {}] {}",
-            record.level(),
-            record.target(),
-            record.args()
-        )
-    });
+    apply_log_format(&mut log_builder);
 
     // priority  CLI-Argument, Env-Var, Config, Default
     let log_level = user_log_level
