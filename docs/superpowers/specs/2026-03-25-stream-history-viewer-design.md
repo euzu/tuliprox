@@ -19,6 +19,11 @@ Stream history is stored in `data/stream_history/` (default path):
 [hdr_len: u32 BE][hdr_bytes: N][hdr_crc: u32 BE][payload_bytes]
 ```
 
+**Intra-block record layout** (within `payload_bytes`):
+```
+[record_len: u32 BE][record_bytes: MessagePack named encoding]  (repeated record_count times)
+```
+
 **Key header fields for skip optimization**:
 - `FileHeaderBody.min_event_ts_utc` / `max_event_ts_utc` — file-level timestamp bounds (archive only, `None` for pending)
 - `BlockHeaderBody.first_event_ts_utc` / `last_event_ts_utc` — block-level timestamp bounds
@@ -79,7 +84,7 @@ pub stream_history: Option<String>,  // JSON inline or @file.json
 struct StreamHistoryQuery {
     from: Option<String>,
     to: Option<String>,
-    path: Option<String>,
+    path: Option<String>,   // Default: "data/stream_history/" relative to working directory
     filter: Option<HashMap<String, String>>,
 }
 ```
@@ -92,8 +97,8 @@ Accepts three formats:
 - **Datetime with seconds**: `"2026-03-22 14:30:00"` → exact UTC timestamp
 
 **Date logic**:
-- Only `from` OR only `to` given: dump only that single day's records
-- Both `from` and `to` given: inclusive range `[from, to]`
+- Only `from` OR only `to` given: dump only that single day's records. If a datetime is given (e.g. `"2026-03-22 14:30"`), the range expands to the full day (`00:00:00` to `23:59:59` UTC) — the time component is ignored for single-date queries
+- Both `from` and `to` given: inclusive range `[from, to]`. Date-only values expand: `from` → `00:00:00`, `to` → `23:59:59`. Since `event_ts_utc` has second precision, `23:59:59` captures all events of the day
 - Neither given: error with usage message
 
 ### Filter Syntax
@@ -105,7 +110,7 @@ Flat key-value map, multiple fields = implicit AND.
 - **With `~` prefix**: regex match
   - `"provider_name": "~^acme.*"` → `Regex::new("^acme.*").is_match(record.provider_name)`
 
-**Filterable fields**: all string fields of `StreamHistoryRecord` — `event_type`, `api_username`, `provider_name`, `provider_username`, `item_type`, `title`, `group`, `country`, `source_addr`, `disconnect_reason`.
+**Filterable fields**: all string fields of `StreamHistoryRecord` — `event_type`, `api_username`, `provider_name`, `provider_username`, `item_type`, `title`, `group`, `country`, `source_addr`, `disconnect_reason`. Filter values are matched against the serde-serialized form (e.g. `"connect"`, `"disconnect"`, `"client_closed"` — snake_case).
 
 **Pre-compilation**: All regex filters are compiled once at startup into a `CompiledFilter` struct. No regex compilation during record iteration.
 
@@ -141,11 +146,11 @@ fn discover_files(dir: &Path, time_range: Option<(u64, u64)>) -> io::Result<Vec<
 ```
 
 1. List all `.pending` and `.archive.gz` files in the history directory
-2. Read each file header → `partition_day_ts_utc`, `min_event_ts_utc`, `max_event_ts_utc`
-3. **File-level skip** (archive only): if `max_event_ts_utc < range_start` or `min_event_ts_utc > range_end`, skip file entirely (avoids full gzip decompression)
+2. Read each file header → `partition_day_ts_utc`, `min_event_ts_utc`, `max_event_ts_utc`. For `.archive.gz` files this requires briefly opening the gzip stream to read the header (a few hundred bytes), but avoids decompressing block data
+3. **File-level skip** (archive only): if `max_event_ts_utc < range_start` or `min_event_ts_utc > range_end`, skip file entirely — no further decompression of block data
 4. **Pending files**: `min/max` are `None` → always include
-5. Sort by `partition_day_ts_utc` ascending
-6. Return sorted list → sequential streaming produces chronologically ordered output
+5. Sort by `partition_day_ts_utc` ascending (lexicographic sort on `"YYYY-MM-DD"` produces correct chronological order)
+6. Return sorted list → sequential streaming produces approximately chronological output (records are in insertion order within each file, which is approximately but not strictly timestamp-sorted)
 
 ```rust
 struct HistoryFile {
@@ -175,7 +180,10 @@ impl<R: Read> Iterator for StreamHistoryFileReader<R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // 1. Records remaining in current block? → deserialize next
+            // 1. Records remaining in current block?
+            //    → read u32 BE record_len from payload_buf at payload_offset
+            //    → deserialize record_len bytes as StreamHistoryRecord (MessagePack named)
+            //    → advance payload_offset, decrement current_block_remaining
             // 2. Block exhausted? → read next block header
             //    a) Block timestamps outside range? → skip payload_len bytes
             //    b) Invalid block magic? → magic-recovery (scan for BLK\x01)
@@ -199,7 +207,11 @@ fn from_archive(path: &Path, time_range: Option<(u64, u64)>) -> io::Result<Self>
 
 **Block-level skip**: When `block_header.last_event_ts_utc < range_start` or `block_header.first_event_ts_utc > range_end`, skip `payload_len` bytes without deserializing records. For `.pending` (uncompressed): seek. For `.archive.gz`: read and discard (gzip is not seekable).
 
-**Magic-recovery**: On corrupt block (bad magic, CRC mismatch), scan byte-by-byte for next `BLK\x01` sequence. Log warning to stderr. Continue with next valid block.
+**Magic-recovery**: On corrupt block (bad magic, CRC mismatch):
+1. Read ahead in chunks (e.g. 4KB) into a scan buffer, search for `BLK\x01` (0x42 0x4C 0x4B 0x01) sequence
+2. When a candidate is found, attempt to read and validate the block header (deserialize framed `BlockHeaderBody`). If deserialization fails, continue scanning — `BLK\x01` may appear as coincidental bytes in record data
+3. Log warning to stderr with file path and approximate byte offset
+4. Continue with validated block
 
 ### Streaming Output
 
@@ -210,7 +222,10 @@ fn stream_output(files: Vec<HistoryFile>, time_range, filters: CompiledFilter) {
     println!("[");
     let mut first = true;
     for file in &files {
-        let reader = open_reader(file, time_range)?;
+        let reader = match open_reader(file, time_range) {
+            Ok(r) => r,
+            Err(e) => { eprintln!("Warning: skipping {}: {e}", file.path.display()); continue; }
+        };
         for result in reader {
             match result {
                 Ok(record) => {
@@ -330,12 +345,13 @@ tuliprox --sh '{"from":"2026-03-22","path":"/custom/path/history"}'
 
 ## Performance Design
 
-- **File-level skip**: Archive files with `max_event_ts_utc < range_start` or `min_event_ts_utc > range_end` are never decompressed
+- **File-level skip**: Archive files with `max_event_ts_utc < range_start` or `min_event_ts_utc > range_end` skip after reading only the gzip header (a few hundred bytes, no block decompression)
 - **Block-level skip**: Blocks outside time range skip `payload_len` bytes without deserializing records
 - **Pre-compiled filters**: Regex compiled once at startup, not per-record
 - **Streaming output**: Zero RAM accumulation, records printed and discarded immediately
-- **Chronological ordering**: Files sorted by partition day before streaming — no cross-file sort needed
+- **Approximate chronological ordering**: Files sorted by partition day before streaming. Within each file, records are in insertion order (approximately chronological). No cross-file sort needed
 - **Pending files**: Always read (no min/max in header), but block-level skip still applies
+- **Magic-recovery**: Chunk-based scanning (4KB) with two-phase validation to avoid false `BLK\x01` matches in record data
 
 ## Future Enhancements
 
