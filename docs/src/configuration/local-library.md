@@ -108,9 +108,9 @@ your disk when requested by the IPTV player!
 ----
 &nbsp;
 
-# Additional Information
+## Additional Information
 
-## Triggering Scans (CLI & API)
+### Triggering Scans (CLI & API)
 
 By default, the library scan can be automated using standard Cron syntax under the `schedules:` block (`type: LibraryScan`).
 However, you can also force it manually.
@@ -140,7 +140,7 @@ Authorization: Bearer <TULIPROX_API_TOKEN>
 GET /api/v1/library/status
 ```
 Returns JSON information about the number of detected files, errors, and the progress of the background scan.
-## Database Inspection (DBX/DBM/DBE):
+### Database Inspection (DBX/DBM/DBE):
 If you need to verify the internal database content for troubleshooting:
 ```bash
 ./tuliprox --dbx /opt/tuliprox/data/all_channels/xtream/video.db

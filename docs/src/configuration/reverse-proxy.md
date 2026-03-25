@@ -262,36 +262,30 @@ The CSV file must have exactly 3 columns: `range_start,range_end,country_code`. 
 
 &nbsp;
 
-# Additional Information
-## Session TTLs for HLS (`.m3u8`) & Catchup
+## Additional Information
+### Session TTLs for HLS (`.m3u8`) & Catchup
 HLS streams do not consist of an endless TCP pipe. Instead, the player downloads small `.ts` segments every few seconds (e.g., `seg1.ts`, `seg2.ts`).
 
 If Tuliprox released and re-acquired the provider slot for every single segment, providers would block the account for "Account Hopping" or spam. Tuliprox simulates a continuous session:
 * `hls_session_ttl_secs: 15`: After a `.ts` segment finishes downloading, the physical slot to the provider is closed, but the "Virtual Slot" for this specific user remains reserved for 15 seconds. No other user can steal this slot during this window. Channel switches from the same client can immediately take over the reservation.
 * The same principle applies to Archive/Catchup TV (`catchup_session_ttl_secs: 45`), which shares the same fragmentation and seeking issues.
 
-## Shared Live Streams
+### Shared Live Streams
 Tuliprox can share a live stream (`share_live_streams: true` in the target options of `source.yml`). If 5 users watch the same Live-TV channel, Tuliprox pulls the stream only 1x from the provider and multicasts the bytes locally to 5 clients.
 To ensure a user who tunes in 10 seconds later doesn't get player errors due to missing I-Frames/Keyframes, Tuliprox continuously keeps the last X Megabytes (`shared_burst_buffer_mb`, default `12`) in RAM. It fires this burst buffer at new subscribers so their decoders can instantly synchronize.
 
-## The "VLC Seek Problem" & Grace Periods
+### The "VLC Seek Problem" & Grace Periods
+
 When a user fast-forwards or rewinds a VOD, the player calculates the new byte offset, drops the old TCP connection, and immediately fires a new HTTP GET request (with a `Range` header) to Tuliprox.
 
-## The "VLC Seek Problem" & Grace Periods
-
-When a user fast-forwards or rewinds a VOD, the player calculates the new byte offset, drops the old TCP connection, and
-immediately fires a new HTTP GET request (with a `Range` header) to Tuliprox.
-
-**The Problem:** It takes milliseconds to seconds for the upstream provider to realize the old connection is dead. If you have
-a `max_connections: 1` limit at the provider, they will view this new seek-request as a *second concurrent stream* and reject
-it with an HTTP 509 (Bandwidth Exceeded) or HTTP 401 error.
+**The Problem:** It takes milliseconds to seconds for the upstream provider to realize the old connection is dead. If you have a `max_connections: 1` limit at the provider, they will view this new seek-request as a *second concurrent stream* and reject it with an HTTP 509 (Bandwidth Exceeded) or HTTP 401 error.
 
 **The Tuliprox Solution:**
 
 * `grace_period_millis: 2000`: Tuliprox grants the user a temporary over-allocation (Grace) for exactly this duration.
-* `grace_period_hold_stream: true`: Tuliprox artificially holds back the video data to the client, waiting for the grace check
-  to finish, so it doesn't trigger the provider prematurely.
-* After the milliseconds expire, Tuliprox checks internally: Is the old connection truly gone now? If Yes ➔ Data flows.
-  If No ➔ The new connection is hard-killed (serving the `user_connections_exhausted.ts` video) because the user is actually
+* `grace_period_hold_stream: true`: Tuliprox artificially holds back the video data to the client, waiting for the grace check to finish, so it doesn't trigger the provider prematurely.
+* After the milliseconds expire, Tuliprox checks internally: Is the old connection truly gone now? <br> 
+If Yes ➔ Data flows.<br> 
+If No ➔ The new connection is hard-killed (serving the `user_connections_exhausted.ts` video) because the user is actually
   illegally watching twice.
 * `grace_period_timeout_secs: 4`: A hard timeout limit for overlapping "ghost sessions" to expire.

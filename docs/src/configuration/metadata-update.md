@@ -30,21 +30,14 @@ metadata_update:
 
 | Parameter | Type | Default | Technical Impact & Background |
 | :--- | :--- | :--- | :--- |
-<<<<<<< Updated upstream
-| `cache_path` | String | `"metadata"` | Directory where TMDB cache files and metadata are stored. Relative paths are resolved against `storage_dir`. |
-| `retry_delay` | String | `"2s"` | General minimum wait time when the worker encounters temporary runtime errors (e.g., socket timeout). |
-| `worker_idle_timeout` | String | `"1m"` | Time of inactivity (empty queue) after which the background worker kills itself to free RAM/CPU. |
-| `max_queue_size` | Int | `100000` | RAM Safety Limit: Maximum number of metadata tasks kept in memory per input simultaneously. |
-| `no_change_cache_ttl_secs` | Int | `3600` | How long (seconds) a "No Change" status is cached to avoid unnecessary DB checks across subsequent playlist updates. |
-| `probe_fairness_resolve_burst` | Int | `200` | After 200 consecutive Resolve tasks, 1 Probe task is forcibly prioritized so probes don't starve. |
-=======
 | `cache_path` | String | `"metadata"`| Directory where TMDB cache files and metadata are stored. Relative paths are resolved against `storage_dir`. Used by all metadata resolution paths (Xtream VOD/Series, local library). |
 | `retry_delay` | Duration | `"2s"` | General minimum wait time when the worker encounters temporary runtime errors (e.g. socket timeout). Prevents very fast retry loops in case of transient network issues. |
 | `worker_idle_timeout`| Duration | `"1m"` | Time of inactivity (empty queue) after which the background worker kills itself to free RAM/CPU resources. |
 | `max_queue_size` | Int |`100000`| RAM Safety Limit: Maximum number of metadata tasks kept in memory per input simultaneously. New tasks are rejected once this limit is reached. |
 | `no_change_cache_ttl_secs`| Int | `3600` | How long (seconds) a "No Change" status is cached to avoid unnecessary DB checks across subsequent playlist updates. Identical reason sets are skipped while valid. |
 | `probe_fairness_resolve_burst`| Int| `200` | After 200 consecutive Resolve tasks (API), 1 Probe task (FFprobe) is forcibly prioritized so probes don't starve in large libraries. |
->>>>>>> Stashed changes
+
+> **Note on Durations:** Duration fields support `s`, `m`, `h`, `d` or plain seconds (e.g. `30s`, `10m`, `1h`, `7d`). Exception: `ffprobe.analyze_duration` and `ffprobe.live_analyze_duration` require explicit unit suffix. Size fields support `B`, `KB`, `MB`, `GB`, `TB` or plain bytes.
 
 ---
 
@@ -61,13 +54,8 @@ metadata_update:
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-<<<<<<< Updated upstream
-| `queue_interval` | String | `"30s"` | Interval to log the queue status (pending tasks). |
-| `progress_interval` | String | `"15s"` | Interval for progress reports (successful/failed resolves). |
-=======
 | `queue_interval` | Duration | `"30s"` | Interval to log the current queue size and pending task status of the metadata worker. |
 | `progress_interval`| Duration | `"15s"` | Interval for progress reports while tasks are being processed (successful/failed resolves). |
->>>>>>> Stashed changes
 
 ---
 
@@ -86,17 +74,10 @@ metadata_update:
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-<<<<<<< Updated upstream
-| `max_retry_backoff` | String | `"1h"` | Maximum time limit for exponential wait between API failures. |
-| `min_retry_base` | String | `"5s"` | Initial wait time on the very first failure. |
-| `max_attempts` | Int (u8) | `3` | Max attempts per cycle before a resolve task is marked as "exhausted". |
-| `exhaustion_reset_gap` | String | `"1h"` | Time window after a cycle completes before "exhausted" tasks are retried in the next run. |
-=======
 | `max_retry_backoff`| Duration | `"1h"` | Upper limit for exponential wait time between repeated API failures. |
 | `min_retry_base` | Duration | `"5s"` | Initial wait time on the very first failure before exponential backoff kicks in. |
 | `max_attempts` | Int (u8) | `3` | Max attempts per cycle before a resolve task is marked as "exhausted" for the current run. |
 | `exhaustion_reset_gap`| Duration | `"1h"` | Time window after a cycle completes before "exhausted" states are reset for the next run. |
->>>>>>> Stashed changes
 
 ---
 
@@ -119,16 +100,6 @@ metadata_update:
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-<<<<<<< Updated upstream
-| `cooldown` | String | `"7d"` | Hard lock time (cooldown) during which a broken stream is completely ignored to protect the provider. |
-| `retry_load_retry_delay` | String | `"1m"` | Wait time if loading the internal `metadata_retry_state.db` fails. |
-| `retry_backoff_step_1` | String | `"10m"` | Wait time after the 1st FFprobe failure. |
-| `retry_backoff_step_2` | String | `"30m"` | Wait time after the 2nd FFprobe failure. |
-| `retry_backoff_step_3` | String | `"1h"` | Wait time from the 3rd FFprobe failure onwards. |
-| `max_attempts` | Int (u8) | `3` | Max failures to probe a stream before it enters global long-term cooldown. |
-| `backoff_jitter_percent` | Int (u8) | `20` | Random time deviation in percent (Jitter) so hundreds of parallel retries don't hit the exact same second. |
-| `user_priority` | Int (i8) | `127` | Priority of the probe task on the Unix Nice-Scale. `127` is the absolute lowest. A real user will instantly evict the probe task. |
-=======
 | `cooldown` | Duration | `"7d"` | Hard lock time (cooldown) after probe attempts are exhausted. The stream is ignored for this period to protect the provider. |
 | `retry_load_retry_delay`| Duration | `"1m"` | Wait time before re-attempting to load the internal `metadata_retry_state.db` after a load failure. |
 | `retry_backoff_step_1`| Duration | `"10m"`| Wait time after the 1st FFprobe failure. |
@@ -137,7 +108,6 @@ metadata_update:
 | `max_attempts` | Int (u8) | `3` | Max failures to probe a stream before it enters global long-term cooldown. |
 | `backoff_jitter_percent`| Int (u8)| `20` | Random time deviation in percent (Jitter) so parallel retries don't hit the provider at the exact same second. |
 | `user_priority` | Int (i8) | `127` | Priority of the probe task on the Unix Nice-Scale. `127` is the absolute lowest. Probes at 127 are immediately cancelled/preempted if a real user needs the slot. |
->>>>>>> Stashed changes
 
 ---
 
@@ -160,21 +130,12 @@ metadata_update:
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | Bool | `false` | Global master switch for TMDB resolution. |
-<<<<<<< Updated upstream
-| `api_key` | String | *(Internal)* | Your own TMDB API Key. If omitted, Tuliprox uses a built-in default key. |
-| `rate_limit_ms` | Int (u64) | `250` | Throttling of TMDB API calls (in ms) to prevent TMDB IP bans. |
-| `cache_duration_days` | Int (u32) | `30` | How long successful TMDB results are kept in the internal cache. |
-| `language` | String | `"en-US"` | Preferred metadata language (e.g., `"de-DE"`). |
-| `cooldown` | String | `"7d"` | Lock time for a movie if the TMDB search was *successful* but returned *no match* for the title. |
-| `match_threshold` | Int (u16) | `86` | Minimum percentage score (Jaro-Winkler Distance) for a TMDB result to be accepted as a "Match". |
-=======
 | `api_key` | String | *(Internal)*| Your own TMDB API Key. If omitted, Tuliprox uses a built-in default placeholder. |
 | `rate_limit_ms` | Int (u64) | `250` | Minimum wait between TMDB API calls to prevent IP rate-limiting or bans. |
 | `cache_duration_days`| Int (u32) | `30` | How long successful TMDB results are kept in the cache. Use `0` for permanent caching. |
 | `language` | String | `"en-US"` | Preferred metadata language (e.g., `"de-DE"`) for plot and titles. |
 | `cooldown` | Duration | `"7d"` | Lock time for a movie if the TMDB search was successful but returned "no match" for the title. |
 | `match_threshold` | Int (u16) | `86` | Minimum similarity score (Jaro-Winkler) for a result to be accepted as a valid "Match". |
->>>>>>> Stashed changes
 
 ---
 
@@ -199,10 +160,13 @@ metadata_update:
 | `timeout` | Int (u64) | `60` | Hard timeout (in seconds) for the OS FFprobe process. Prevents zombie processes. |
 | `analyze_duration` | Duration | `"10s"` | Passes `-analyzeduration` to FFprobe for VODs/Series. *Warning: Requires an explicit suffix (`s`, `m`)!* |
 | `probe_size` | Size | `"10MB"`| Passes `-probesize` to FFprobe for VODs/Series (Data Limit). Supports units like KB, MB, GB. |
-| `live_analyze_duration`| Duration| `"5s"` | Stricter time limit for Live-TV streams to minimize latency and provider traffic. |
+| `live_analyze_duration`| Duration| `"5s"` | Stricter time limit for Live-TV streams to minimize latency and provider traffic. *Warning: Requires an explicit suffix!* |
 | `live_probe_size` | Size | `"5MB"` | Stricter data limit for Live-TV streams. |
 
-**Important Note on FFprobe split:** The split between VOD/Series and Live (`live_...`) is intentional. VODs can be analyzed generously for high-quality metadata, whereas Live-TV probes must be as fast as possible to avoid unnecessary provider slot occupation.
+**Why are there 4 FFprobe fields?**
+`ffprobe.analyze_duration` + `ffprobe.probe_size` are the default pair for non-live probes (VOD/Series).
+`ffprobe.live_analyze_duration` + `ffprobe.live_probe_size` are the live-specific pair for all live probes.
+This split is intentional because live probing usually needs lower values (less provider load / lower latency), while VOD/Series can use higher values for better metadata extraction quality.
 
 ---
 
@@ -279,7 +243,7 @@ Tuliprox is not just a proxy; it is a highly intelligent **Playlist Processing E
 update and metadata process that loads information from the provider, updates local databases, and fully automatically supplements
 missing metadata.
 
-## 1. The Complete Processing Pipeline
+### 1. The Complete Processing Pipeline
 
 When a playlist update starts (via Scheduler, API, or Boot), Tuliprox runs this pipeline:
 
@@ -296,12 +260,12 @@ When a playlist update starts (via Scheduler, API, or Boot), Tuliprox runs this 
 
 ---
 
-## 2. The `MetadataUpdateManager` (Architecture)
+### 2. The `MetadataUpdateManager` (Architecture)
 
 The `MetadataUpdateManager` is an asynchronous background engine (if `resolve_background: true` is set on the input) that
 prevents blocking the main playlist update.
 
-### Architecture & Logic
+#### Architecture & Logic
 
 * **Per-Input Worker:** A dedicated, isolated *Tokio Task (Worker)* is started for each Provider-Input. This prevents a slow
   provider from blocking another.
@@ -320,9 +284,9 @@ prevents blocking the main playlist update.
 
 ---
 
-## 3. Metadata Collection Mechanisms
+### 3. Metadata Collection Mechanisms
 
-### How is a stream queued for analysis?
+#### How is a stream queued for analysis?
 
 Tuliprox checks every stream for completeness (`has_details()`). A task is queued if the switches in `inputs.options` are
 active **and** one of these conditions is met:
@@ -333,7 +297,7 @@ active **and** one of these conditions is met:
 * **Probing (FFprobe):** * VOD/Series: Missing technical A/V parameters (`video_codec`, `audio_codec`, `resolution`).
   * Live-TV: The `last_probed_timestamp` is older than `probe_live_interval_hours`.
 
-### Collection Engines
+#### Collection Engines
 
 * **Release Year / Date (PTT):** Tuliprox uses a highly optimized internal parser (`PTT` - Parse Torrent Title). It locally analyzes the stream name and extracts the year (e.g., from *"My Movie (2023)"*). If this fails, it queries the TMDB API.
 * **TMDB Information:**
