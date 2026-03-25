@@ -357,13 +357,16 @@ impl ConfigSource {
     // Determines whether this source should be processed for the given user targets.
     //
     // Returns `true` if:
-    // - `user_targets.targets` is empty (process all sources), OR
-    // - At least one target in this source matches an ID in `user_targets.targets`
+    // - `user_targets.enabled` is false (no CLI `-t` filter active) AND source has any targets, OR
+    // - `user_targets.enabled` is true AND at least one target in this source matches an ID in `user_targets.targets`
     //
     // Returns `false` otherwise.
     pub fn should_process_for_user_targets(&self, user_targets: &ProcessTargets) -> bool {
-        user_targets.targets.is_empty()
-            || self.targets.iter().any(|t| user_targets.targets.contains(&t.id))
+        // Process if:
+        // - User targets not enabled (no CLI/target filters) AND source has any targets
+        // - OR user targets enabled AND source matches at least one user target
+        (!user_targets.enabled && !self.targets.is_empty())
+            || (user_targets.enabled && self.targets.iter().any(|t| user_targets.targets.contains(&t.id)))
     }
 }
 

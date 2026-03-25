@@ -310,7 +310,10 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
     let storage_path = if Path::new(&config_file).exists() {
         match utils::read_config_file(&config_file, true, false) {
             Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
-            Err(err) => exit!("Can't read config file {} while resolving storage path: {err}", config_file),
+            Err(err) => {
+                eprintln!("Can't read config file {config_file} while resolving storage path: {err}");
+                std::process::exit(1);
+            }
         }
     } else {
         resolve_storage_path(&home_path, None)

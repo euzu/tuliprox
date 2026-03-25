@@ -2,7 +2,7 @@ use crate::model::LogLevelConfig;
 use crate::utils::config_file_reader;
 use chrono::{Local, Offset, SecondsFormat};
 use env_logger::{Builder, Target};
-use log::{error, info, LevelFilter};
+use log::{info, LevelFilter};
 use std::fs::File;
 use std::io::Write;
 
@@ -28,8 +28,7 @@ fn get_log_level(log_level: &str) -> LevelFilter {
 }
 
 pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
-
-
+    
     // tracing_subscriber::registry()
     //     .with(console_subscriber::spawn()) // Console layer
     //     .with(EnvFilter::from_default_env())
@@ -59,7 +58,7 @@ pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
         .or_else(|| {               // config
             File::open(config_file).ok()
                 .and_then(|file| serde_saphyr::from_reader::<_, LogLevelConfig>(config_file_reader(file, true))
-                    .map_err(|e| error!("Failed to parse log config file: {e}"))
+                    .map_err(|e| eprintln!("Failed to parse log config file: {e}"))
                     .ok())
                 .and_then(|cfg| cfg.log.and_then(|l| l.log_level))
         })

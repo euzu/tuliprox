@@ -107,12 +107,31 @@ The detailed documentation lives in Markdown under `docs/` and is meant to be re
 
 Main entry points:
 
-- [`Getting Started`](docs/src/getting-started.md)
-- [`Core Features`](docs/src/features.md)
-- [`Config Reference`](docs/src/configuration/main-config.md)
-- [`Sources And Targets`](docs/src/configuration/sources-and-targets.md)
-- [`API Proxy`](docs/src/configuration/api-proxy.md)
-- [`Streaming And Proxy Behavior`](docs/src/streaming-and-proxy.md)
-- [`Mapping And Templates`](docs/src/mapping-and-templates.md)
-- [`Deployment`](docs/src/deployment.md)
-- [`Examples And Recipes`](docs/src/examples-and-recipes.md)
+- **[Getting Started](docs/src/getting-started.md)**
+- [Core Features](docs/src/features.md)
+- [Build & Deploy](docs/src/build-and-deploy.md)
+- **[Installation](docs/src/installation.md)**
+- **[Configuration Overview](docs/src/configuration/overview.md)**
+  - [Main Config](docs/src/configuration/config.md)
+  - [Sources & Targets](docs/src/configuration/source.md)
+  - [API Proxy](docs/src/configuration/api-proxy.md)
+  - [Streaming & Proxy Behavior](docs/src/configuration/reverse-proxy.md)
+  - [Mapping & Templates](docs/src/configuration/template.md)
+- [Examples & Recipes](docs/src/examples-recipes.md)
+- [Operations & Debugging](docs/src/operations-debugging.md)
+- [Troubleshooting & Resilience](docs/src/troubleshooting.md)
+
+## Documentation strategy
+
+The recommended format is:
+
+- source in Markdown
+- generated as static HTML
+- shipped together with the frontend/web root
+
+For this repository, `mdBook` is the best fit:
+
+- Markdown stays easy to edit in Git
+- static HTML output is simple to host
+- it fits a Rust project better than a Node-heavy doc stack
+- navigation and search come out of the box

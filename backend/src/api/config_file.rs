@@ -1,13 +1,13 @@
 use crate::{
     api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
-    model::{Config, Mappings, SourcesConfig},
+    model::{Config, Mappings, ProcessTargets, SourcesConfig},
     utils,
     utils::{
         prepare_sources_batch, read_config_file, read_mappings_file_unprepared, read_mappings_file_with_templates,
         read_sources_file, read_sources_file_from_path_with_templates, read_templates,
     },
 };
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use shared::{
     error::TuliproxError,
     model::{ConfigPaths, ConfigType, PatternTemplate},
@@ -47,6 +47,45 @@ enum PreparedFollowUp {
     Unchanged,
     Mapping(Option<PreparedMappingsReload>),
     Sources(PreparedSourcesReload),
+}
+
+/// Refreshes CLI-forced target IDs against an incoming `SourcesConfig`.
+///
+/// IDs are positional and can shift when source ordering changes. Targets that no
+/// longer exist are warned about and dropped; the remaining ones are re-validated to
+/// obtain their new IDs. The reload proceeds regardless — only the stale entries are
+/// removed from the filter.
+fn refresh_forced_targets(current: Arc<ProcessTargets>, sources: &SourcesConfig) -> Arc<ProcessTargets> {
+    if !current.enabled || current.target_names.is_empty() {
+        return current;
+    }
+
+    let (still_valid, missing): (Vec<String>, Vec<String>) = current
+        .target_names
+        .iter()
+        .cloned()
+        .partition(|name| sources.validate_targets(Some(&vec![name.clone()])).is_ok());
+
+    if !missing.is_empty() {
+        warn!("CLI-forced target(s) {missing:?} no longer exist in the updated sources and will be ignored.");
+    }
+
+    if still_valid.is_empty() {
+        // Every forced target was removed — disable the filter so nothing is blocked.
+        warn!("All CLI-forced targets have been removed from the updated sources; disabling target filter.");
+        match sources.validate_targets(None) {
+            Ok(disabled) => Arc::new(disabled),
+            Err(_) => current,
+        }
+    } else {
+        match sources.validate_targets(Some(&still_valid)) {
+            Ok(refreshed) => Arc::new(refreshed),
+            Err(err) => {
+                warn!("Failed to re-validate remaining CLI-forced targets {still_valid:?}: {err}. Keeping previous IDs.");
+                current
+            }
+        }
+    }
 }
 
 impl ConfigFile {
@@ -172,7 +211,10 @@ impl ConfigFile {
         app_state: &Arc<AppState>,
         prepared: PreparedSourcesReload,
     ) -> Result<(), TuliproxError> {
-        update_app_state_sources(app_state, prepared.sources).await?;
+        let current_forced = app_state.forced_targets.load_full();
+        let validated_forced = refresh_forced_targets(current_forced, &prepared.sources);
+
+        update_app_state_sources(app_state, prepared.sources, Some(validated_forced)).await?;
         Self::apply_mapping_reload(app_state, prepared.mapping);
         info!("Loaded sources file {}", prepared.sources_file);
         Ok(())
@@ -304,8 +346,7 @@ impl ConfigFile {
                 );
             }
 
-            app_state.forced_targets.store(previous_forced_targets);
-            if let Err(rollback_err) = update_app_state_sources(app_state, previous_sources).await {
+            if let Err(rollback_err) = update_app_state_sources(app_state, previous_sources, Some(previous_forced_targets)).await {
                 error!("Failed to rollback sources after dependent reload failure: {rollback_err}");
                 error!(
                     "Source rollback failed after dependent reload error; runtime state may be inconsistent. Please restart the service."
@@ -355,5 +396,19 @@ impl ConfigFile {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[ignore = "requires AppState mock infrastructure (future work)"]
+    #[tokio::test]
+    async fn test_forced_targets_preserved_on_config_reload() {
+        // Expected behavior:
+        // - Start with forced_targets = {enabled: false, inputs: [], targets: []}
+        // - Reload config with schedule.targets = ["my-target"]
+        // - Verify forced_targets remains {enabled: false, inputs: [], targets: []}
+        // - Verify scheduler uses filtered targets based on forced_targets AND schedule.targets
+        // Full integration test requires AppState mock infrastructure (future work).
     }
 }
