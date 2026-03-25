@@ -22,9 +22,7 @@ use crate::{
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::exec_processing,
     repository::run_startup_migrations,
-    utils::{
-        apply_config_log_level, config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var,
-    },
+    utils::{config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
@@ -116,6 +114,10 @@ struct Args {
 
     #[arg(long = "dbms")] // Metadata Retry Status
     db_mrs_file_name: Option<String>,
+
+    /// Query stream history (inline JSON or @file.json)
+    #[arg(long = "sh")]
+    stream_history: Option<String>,
 }
 
 impl Args {
@@ -145,11 +147,11 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 async fn main() {
     let args = Args::parse();
 
-    // initialize the logger from CLI arg / TULIPROX_LOG env var.
-    // Must happen before everything or we miss log output.
-    init_logger(args.log_level.as_deref());
-
     db_viewer(&args.db_viewer_args());
+
+    if let Some(ref sh_input) = args.stream_history {
+        utils::stream_history_viewer(sh_input);
+    }
 
     if args.genpwd {
         match generate_password() {
@@ -161,8 +163,7 @@ async fn main() {
 
     let mut config_paths = get_file_paths(&args);
 
-    // Phase 2: apply config-file log level if not already set by CLI / env.
-    apply_config_log_level(args.log_level.as_deref(), config_paths.config_file_path.as_str());
+    init_logger(args.log_level.as_deref(), config_paths.config_file_path.as_str());
 
     if args.healthcheck {
         let healthy = healthcheck(config_paths.config_file_path.as_str()).await;
@@ -318,7 +319,8 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         match utils::read_config_file(&config_file, true, false) {
             Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
             Err(err) => {
-                exit!("Can't read config file {config_file} while resolving storage path: {err}")
+                eprintln!("Can't read config file {config_file} while resolving storage path: {err}");
+                std::process::exit(1);
             }
         }
     } else {

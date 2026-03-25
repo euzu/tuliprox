@@ -13,14 +13,14 @@ use crate::{
         context::ConfigContext,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
-    edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u64,
-    edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
+    edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u16,
+    edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::{
     model::{
         CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
-        ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto, StreamConfigDto,
+        ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
     },
     utils::{default_secret, format_float_localized},
 };
@@ -32,6 +32,8 @@ const LABEL_SIZE: &str = "LABEL.SIZE";
 const LABEL_DIRECTORY: &str = "LABEL.DIRECTORY";
 
 const LABEL_STREAM: &str = "LABEL.STREAM";
+const LABEL_STREAM_GRACE: &str = "LABEL.STREAM_GRACE";
+const LABEL_STREAM_SESSION: &str = "LABEL.STREAM_SESSION";
 const LABEL_STREAM_METRICS_ENABLED: &str = "LABEL.STREAM_METRICS_ENABLED";
 const LABEL_RETRY: &str = "LABEL.RETRY";
 const LABEL_THROTTLE: &str = "LABEL.THROTTLE";
@@ -67,6 +69,11 @@ const LABEL_CUSTOM_HEADERS: &str = "LABEL.CUSTOM_HEADERS";
 const LABEL_ADD_HEADER: &str = "LABEL.ADD_HEADER";
 const LABEL_GEOIP: &str = "LABEL.GEOIP";
 const LABEL_URL: &str = "LABEL.URL";
+
+const LABEL_STREAM_HISTORY: &str = "LABEL.STREAM_HISTORY";
+const LABEL_STREAM_HISTORY_ENABLED: &str = "LABEL.STREAM_HISTORY_ENABLED";
+const LABEL_STREAM_HISTORY_BATCH_SIZE: &str = "LABEL.STREAM_HISTORY_BATCH_SIZE";
+const LABEL_STREAM_HISTORY_RETENTION_DAYS: &str = "LABEL.STREAM_HISTORY_RETENTION_DAYS";
 
 generate_form_reducer!(
     state: CacheConfigFormState { form: CacheConfigDto },
@@ -152,6 +159,17 @@ generate_form_reducer!(
 );
 
 generate_form_reducer!(
+    state: StreamHistoryConfigFormState { form: StreamHistoryConfigDto },
+    action_name: StreamHistoryConfigFormAction,
+    fields {
+        Enabled => stream_history_enabled: bool,
+        BatchSize => stream_history_batch_size: usize,
+        RetentionDays => stream_history_retention_days: u16,
+        Directory => stream_history_directory: String,
+    }
+);
+
+generate_form_reducer!(
     state: ReverseProxyConfigFormState { form: ReverseProxyConfigDto },
     action_name: ReverseProxyConfigFormAction,
     fields {
@@ -204,6 +222,8 @@ pub fn ReverseProxyConfigView() -> Html {
 
     let failover_patterns_state: UseReducerHandle<FailoverPatternsFormState> =
         use_reducer(|| FailoverPatternsFormState { form: FailoverPatternsDto::default(), modified: false });
+    let stream_history_state: UseReducerHandle<StreamHistoryConfigFormState> =
+        use_reducer(|| StreamHistoryConfigFormState { form: StreamHistoryConfigDto::default(), modified: false });
     let last_emitted_form = use_mut_ref(|| None::<ConfigForm>);
 
     {
@@ -216,6 +236,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let geoip_state = geoip_state.clone();
         let stream_buffer_state = stream_buffer_state.clone();
         let failover_patterns_state = failover_patterns_state.clone();
+        let stream_history_state = stream_history_state.clone();
         let last_emitted_form = last_emitted_form.clone();
 
         use_emit_mapped_option(
@@ -230,6 +251,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     geoip_state.form.clone(),
                     stream_buffer_state.form.clone(),
                     failover_patterns_state.form.clone(),
+                    stream_history_state.form.clone(),
                 ),
                 (
                     reverse_proxy_state.modified,
@@ -241,11 +263,23 @@ pub fn ReverseProxyConfigView() -> Html {
                     geoip_state.modified,
                     stream_buffer_state.modified,
                     failover_patterns_state.modified,
+                    stream_history_state.modified,
                 ),
             ),
             config_view_ctx.on_form_change.clone(),
             move |(
-                (rp, disabled_header, cache, rl, resource_retry, stream, geoip, stream_buffer, failover_patterns),
+                (
+                    rp,
+                    disabled_header,
+                    cache,
+                    rl,
+                    resource_retry,
+                    stream,
+                    geoip,
+                    stream_buffer,
+                    failover_patterns,
+                    stream_history,
+                ),
                 (
                     rp_modified,
                     disabled_header_modified,
@@ -256,6 +290,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     geoip_modified,
                     stream_buffer_modified,
                     failover_patterns_modified,
+                    stream_history_modified,
                 ),
             )| {
                 let mut form = rp.clone();
@@ -271,6 +306,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 form.stream = Some(stream_form);
                 form.geoip = Some(geoip.clone());
                 form.disabled_header = if disabled_header.is_empty() { None } else { Some(disabled_header.clone()) };
+                form.stream_history = if stream_history.is_empty() { None } else { Some(stream_history.clone()) };
 
                 let modified = rp_modified
                     || disabled_header_modified
@@ -280,7 +316,8 @@ pub fn ReverseProxyConfigView() -> Html {
                     || stream_modified
                     || geoip_modified
                     || stream_buffer_modified
-                    || failover_patterns_modified;
+                    || failover_patterns_modified
+                    || stream_history_modified;
                 let next_form = ConfigForm::ReverseProxy(modified, form);
                 let mut last_form = last_emitted_form.borrow_mut();
                 if last_form.as_ref() != Some(&next_form) {
@@ -303,6 +340,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let geoip_state = geoip_state.clone();
         let stream_buffer_state = stream_buffer_state.clone();
         let failover_patterns_state = failover_patterns_state.clone();
+        let stream_history_state = stream_history_state.clone();
 
         let reverse_proxy_cfg = config_ctx.config.as_ref().and_then(|c| c.config.reverse_proxy.clone());
         use_effect_with((reverse_proxy_cfg, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
@@ -362,6 +400,12 @@ pub fn ReverseProxyConfigView() -> Html {
                 if failover_patterns_state.form != target_failover_patterns {
                     failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(target_failover_patterns));
                 }
+
+                let target_stream_history =
+                    rp.stream_history.as_ref().map_or_else(StreamHistoryConfigDto::default, |s| s.clone());
+                if stream_history_state.form != target_stream_history {
+                    stream_history_state.dispatch(StreamHistoryConfigFormAction::SetAll(target_stream_history));
+                }
             } else {
                 let target_reverse_proxy = ReverseProxyConfigDto::default();
                 if reverse_proxy_state.form != target_reverse_proxy {
@@ -408,6 +452,11 @@ pub fn ReverseProxyConfigView() -> Html {
                 if failover_patterns_state.form != target_failover_patterns {
                     failover_patterns_state.dispatch(FailoverPatternsFormAction::SetAll(target_failover_patterns));
                 }
+
+                let target_stream_history = StreamHistoryConfigDto::default();
+                if stream_history_state.form != target_stream_history {
+                    stream_history_state.dispatch(StreamHistoryConfigFormAction::SetAll(target_stream_history));
+                }
             }
             || ()
         });
@@ -425,19 +474,27 @@ pub fn ReverseProxyConfigView() -> Html {
     };
     let render_stream = || {
         html! {
+            <>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_STREAM)}</h1>
                 { config_field_bool!(stream_state.form, translate.t(LABEL_STREAM_METRICS_ENABLED), metrics_enabled) }
                 { config_field_bool!(stream_state.form, translate.t(LABEL_RETRY), retry) }
-                { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis) }
-                { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs) }
-                { config_field_bool!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream) }
-                { config_field!(stream_state.form, translate.t(LABEL_HLS_SESSION_TTL_SECS), hls_session_ttl_secs) }
-                { config_field!(stream_state.form, translate.t(LABEL_CATCHUP_SESSION_TTL_SECS), catchup_session_ttl_secs) }
                 { config_field_optional!(stream_state.form, translate.t(LABEL_THROTTLE), throttle) }
                 { config_field!(stream_state.form, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps) }
                 { config_field!(stream_state.form, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb) }
             </Card>
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_STREAM_GRACE)}</h1>
+                { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis) }
+                { config_field!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs) }
+                { config_field_bool!(stream_state.form, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream) }
+            </Card>
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_STREAM_SESSION)}</h1>
+                { config_field!(stream_state.form, translate.t(LABEL_HLS_SESSION_TTL_SECS), hls_session_ttl_secs) }
+                { config_field!(stream_state.form, translate.t(LABEL_CATCHUP_SESSION_TTL_SECS), catchup_session_ttl_secs) }
+            </Card>
+            </>
         }
     };
     let render_stream_buffer = || {
@@ -594,19 +651,27 @@ pub fn ReverseProxyConfigView() -> Html {
 
     let render_stream_edit = || {
         html! {
+            <>
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_STREAM)}</h1>
                 { edit_field_bool!(stream_state, translate.t(LABEL_STREAM_METRICS_ENABLED), metrics_enabled, StreamConfigFormAction::MetricsEnabled) }
                 { edit_field_bool!(stream_state, translate.t(LABEL_RETRY), retry, StreamConfigFormAction::Retry) }
-                { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis, StreamConfigFormAction::GracePeriodMillis) }
-                { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs, StreamConfigFormAction::GracePeriodTimeoutSecs) }
-                { edit_field_bool!(stream_state, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream, StreamConfigFormAction::GracePeriodHoldStream) }
-                { edit_field_number_u64!(stream_state, translate.t(LABEL_HLS_SESSION_TTL_SECS), hls_session_ttl_secs, StreamConfigFormAction::HlsSessionTtlSecs) }
-                { edit_field_number_u64!(stream_state, translate.t(LABEL_CATCHUP_SESSION_TTL_SECS), catchup_session_ttl_secs, StreamConfigFormAction::CatchupSessionTtlSecs) }
                 { edit_field_text_option!(stream_state, translate.t(LABEL_THROTTLE), throttle, StreamConfigFormAction::Throttle) }
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_THROTTLE_KBPS), throttle_kbps, StreamConfigFormAction::ThrottleKbps) }
                 { edit_field_number_u64!(stream_state, translate.t(LABEL_SHARED_BURST_BUFFER_MB), shared_burst_buffer_mb, StreamConfigFormAction::SharedBurstBufferMb) }
             </Card>
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_STREAM_GRACE)}</h1>
+                { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_MILLIS), grace_period_millis, StreamConfigFormAction::GracePeriodMillis) }
+                { edit_field_number_u64!(stream_state, translate.t(LABEL_GRACE_PERIOD_TIMEOUT_SECS), grace_period_timeout_secs, StreamConfigFormAction::GracePeriodTimeoutSecs) }
+                { edit_field_bool!(stream_state, translate.t(LABEL_GRACE_PERIOD_HOLD_STREAM), grace_period_hold_stream, StreamConfigFormAction::GracePeriodHoldStream) }
+            </Card>
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_STREAM_SESSION)}</h1>
+                { edit_field_number_u64!(stream_state, translate.t(LABEL_HLS_SESSION_TTL_SECS), hls_session_ttl_secs, StreamConfigFormAction::HlsSessionTtlSecs) }
+                { edit_field_number_u64!(stream_state, translate.t(LABEL_CATCHUP_SESSION_TTL_SECS), catchup_session_ttl_secs, StreamConfigFormAction::CatchupSessionTtlSecs) }
+            </Card>
+            </>
         }
     };
     let render_stream_buffer_edit = || {
@@ -615,6 +680,30 @@ pub fn ReverseProxyConfigView() -> Html {
                 <h1>{translate.t(LABEL_STREAM_BUFFER)}</h1>
                 { edit_field_bool!(stream_buffer_state, translate.t(LABEL_BUFFER_ENABLED), enabled, StreamBufferConfigFormAction::Enabled) }
                 { edit_field_number_usize!(stream_buffer_state, translate.t(LABEL_BUFFER_SIZE), size, StreamBufferConfigFormAction::Size) }
+            </Card>
+        }
+    };
+
+    let render_stream_history = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_STREAM_HISTORY)}</h1>
+                { config_field_bool!(stream_history_state.form, translate.t(LABEL_STREAM_HISTORY_ENABLED), stream_history_enabled) }
+                { config_field!(stream_history_state.form, translate.t(LABEL_STREAM_HISTORY_BATCH_SIZE), stream_history_batch_size) }
+                { config_field!(stream_history_state.form, translate.t(LABEL_STREAM_HISTORY_RETENTION_DAYS), stream_history_retention_days) }
+                { config_field!(stream_history_state.form, translate.t(LABEL_DIRECTORY), stream_history_directory) }
+            </Card>
+        }
+    };
+
+    let render_stream_history_edit = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_STREAM_HISTORY)}</h1>
+                { edit_field_bool!(stream_history_state, translate.t(LABEL_STREAM_HISTORY_ENABLED), stream_history_enabled, StreamHistoryConfigFormAction::Enabled) }
+                { edit_field_number_usize!(stream_history_state, translate.t(LABEL_STREAM_HISTORY_BATCH_SIZE), stream_history_batch_size, StreamHistoryConfigFormAction::BatchSize) }
+                { edit_field_number_u16!(stream_history_state, translate.t(LABEL_STREAM_HISTORY_RETENTION_DAYS), stream_history_retention_days, StreamHistoryConfigFormAction::RetentionDays) }
+                { edit_field_text!(stream_history_state, translate.t(LABEL_DIRECTORY), stream_history_directory, StreamHistoryConfigFormAction::Directory) }
             </Card>
         }
     };
@@ -630,6 +719,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { render_rate_limit() }
                 { render_stream() }
                 { render_stream_buffer() }
+                { render_stream_history() }
             </div>
         }
     };
@@ -645,6 +735,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { render_rate_limit_edit() }
                 { render_stream_edit() }
                 { render_stream_buffer_edit() }
+                { render_stream_history_edit() }
             </div>
         }
     };

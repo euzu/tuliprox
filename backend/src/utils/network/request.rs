@@ -1878,6 +1878,7 @@ mod tests {
             cache: None,
             rate_limit: None,
             geoip: None,
+            stream_history: None,
         });
         let app_config = make_test_app_config(cfg);
         let client = reqwest::Client::builder()

@@ -11,19 +11,10 @@ mod binary_utils;
 mod telegram;
 mod geoip;
 mod db_viewer;
+mod stream_history_viewer;
 mod epg_parser;
 mod ordinal;
 pub mod ffmpeg;
-
-pub use self::binary_utils::*;
-pub use self::logging::*;
-pub use self::trakt::*;
-pub use self::telegram::*;
-pub use self::geoip::*;
-pub use self::db_viewer::*;
-pub use shared::utils::*;
-pub use self::epg_parser::*;
-pub use self::ordinal::*;
 
 #[macro_export]
 macro_rules! debug_if_enabled {
@@ -78,3 +69,14 @@ pub use self::file::*;
 pub use self::network::*;
 pub use self::crypto_utils::*;
 pub use self::step_measure::*;
+
+pub use self::binary_utils::*;
+pub use self::logging::*;
+pub use self::trakt::*;
+pub use self::telegram::*;
+pub use self::geoip::*;
+pub use self::db_viewer::*;
+pub use self::stream_history_viewer::stream_history_viewer;
+pub use shared::utils::*;
+pub use self::epg_parser::*;
+pub use self::ordinal::*;

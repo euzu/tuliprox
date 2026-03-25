@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, ErrorKind};
 use std::path::{Path, PathBuf};
 
-use log::{debug, error, warn};
+use log::{debug, error, trace, warn};
 use shared::error::{info_err_res, TuliproxError};
 use shared::model::permission::{permission_from_name, PermissionSet, PERM_ALL};
 use shared::model::WebAuthConfigDto;
@@ -126,7 +126,7 @@ impl WebAuthConfig {
         } else {
             PathBuf::from(&groupfile_name)
         };
-        debug!(
+        trace!(
             "Web auth prepare: config_path='{}', userfile='{}', resolved_userfile='{}', groupfile='{}', resolved_groupfile='{}'",
             config_path,
             userfile_name,

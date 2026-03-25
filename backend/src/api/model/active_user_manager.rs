@@ -6,7 +6,7 @@ use crate::{
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
-use log::{debug, info};
+use log::{debug, info, warn};
 use shared::{
     model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, StreamTechnicalInfo, UserConnectionPermission, VirtualId},
     utils::{
@@ -25,7 +25,8 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use crate::api::model::connection_manager::CleanupEvent;
 use tokio_util::sync::CancellationToken;
 
 const USER_GC_TTL: u64 = 900; // 15 Min
@@ -177,6 +178,7 @@ pub struct ActiveUserManager {
     geo_ip: Arc<ArcSwapOption<GeoIp>>,
     last_logged_user_count: AtomicUsize,
     last_logged_user_connection_count: AtomicUsize,
+    cleanup_tx: tokio::sync::OnceCell<mpsc::Sender<CleanupEvent>>,
 }
 
 impl ActiveUserManager {
@@ -237,7 +239,12 @@ impl ActiveUserManager {
             event_manager: Arc::clone(event_manager),
             last_logged_user_count: AtomicUsize::new(0),
             last_logged_user_connection_count: AtomicUsize::new(0),
+            cleanup_tx: tokio::sync::OnceCell::new(),
         }
+    }
+
+    pub(crate) fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) {
+        let _ = self.cleanup_tx.set(tx);
     }
 
     async fn log_active_user(&self) {
@@ -535,6 +542,9 @@ impl ActiveUserManager {
         if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
             for stream in &mut connection_data.streams {
                 if &stream.addr == addr {
+                    // IMPORTANT: `resolve_disconnect_reason` in connection_manager.rs parses
+                    // `channel.title` back via `CustomVideoStreamType::from_str` to determine QoS
+                    // disconnect reasons. If these values change, update that function too.
                     stream.provider = String::from("tuliprox");
                     stream.channel.title = video_type.to_string().into();
                     stream.channel.group = "".intern();
@@ -1016,8 +1026,22 @@ impl ActiveUserManager {
                     );
 
                     if should_remove {
-                        connection_data.streams.swap_remove(stream_idx);
+                        let expired_stream = connection_data.streams.swap_remove(stream_idx);
+                        let expired_uid = expired_stream.uid;
                         expiry_index.remove(&key);
+                        if let Some(tx) = self.cleanup_tx.get() {
+                            match tx.try_send(CleanupEvent::AdaptiveSessionExpired {
+                                stream_info: Box::new(expired_stream),
+                            }) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    warn!("Adaptive session expiry queue full, dropping disconnect history for stream uid {expired_uid}");
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    debug!("Cleanup channel closed, dropping adaptive session expiry");
+                                }
+                            }
+                        }
                     } else if let Some(replacement_entry) = self.build_preserved_stream_expiry(
                         &entry.username,
                         &connection_data.streams[stream_idx],

@@ -736,9 +736,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     { config_field_bool!(staged_input_state.form, translate.t(LABEL_ENABLED), enabled) }
                     { config_field!(staged_input_state.form, translate.t(LABEL_URL), url) }
+                    { html_if!(staged_input_state.form.input_type.is_xtream(), {
+                        <div class="tp__config-view__cols-2">
+                        { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
+                        { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
+                        </div>
+                    })}
                     <div class="tp__config-view__cols-2">
-                    { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
-                    { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
                     { config_field_custom!(translate.t(LABEL_FETCH_METHOD), staged_input_state.form.method.to_string()) }
                     { config_field_custom!(translate.t(LABEL_INPUT_TYPE), staged_input_state.form.input_type.to_string()) }
                     </div>
@@ -758,9 +762,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
                 { edit_field_text!(staged_input_state, translate.t(LABEL_URL),  url, StagedInputFormAction::Url) }
+                { html_if!(staged_input_state.form.input_type.is_xtream(), {
+                  <div class="tp__config-view__cols-2">
+                  { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
+                  { edit_field_text_option!(staged_input_state, translate.t(LABEL_PASSWORD), password, StagedInputFormAction::Password, true) }
+                  </div>
+                })}
                 <div class="tp__config-view__cols-2">
-                { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
-                { edit_field_text_option!(staged_input_state, translate.t(LABEL_PASSWORD), password, StagedInputFormAction::Password, true) }
                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
 
                    html! {
@@ -957,8 +965,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     <>
                      { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
                      <div class="tp__config-view__cols-2">
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
-                     { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
+                     { html_if!(xtream_input, {
+                       <>
+                       { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
+                       { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
+                       </>
+                     })}
                      { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
                      { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
                      { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
@@ -981,8 +993,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <>
                  { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
                  <div class="tp__config-view__cols-2">
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
+                 { html_if!(xtream_input, {
+                   <>
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
+                   </>
+                 })}
                  { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
                  { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
                  { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }

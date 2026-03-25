@@ -1,7 +1,7 @@
 use super::bplustree::{BPlusTree, MAGIC, STORAGE_VERSION};
 use super::storage_const;
 use fs2::FileExt as _;
-use log::{info, warn};
+use log::{info, trace, warn};
 use shared::model::{ConfigPaths, ProxyType, ProxyUserStatus};
 use std::{
     collections::{HashSet, VecDeque},
@@ -390,7 +390,6 @@ pub fn migrate_bplustree_databases_with_marker(
 
 fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}") }
 
-// ─── User DB schema migration ─────────────────────────────────────────────────
 //
 // The user database has gone through three serialization schemas (MessagePack,
 // positional/sequence encoding via rmp_serde):
@@ -558,8 +557,6 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
     ))
 }
 
-// ─── Combined startup migration ───────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllStartupMigrationStats {
     pub bplustree: BPlusTreeMigrationStats,
@@ -608,7 +605,7 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
     match run_all_startup_migrations(&roots, &storage_dir, &config_dir) {
         Ok(stats) => {
             if stats.bplustree.skipped_by_marker {
-                info!("B+Tree startup migration skipped (marker already present)");
+                trace!("B+Tree startup migration skipped (marker already present)");
             } else if stats.bplustree.migrated_files > 0 {
                 info!(
                     "B+Tree startup migration completed: migrated {} file(s) ({} B+Tree files checked, {} .db files scanned)",
