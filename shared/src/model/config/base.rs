@@ -631,4 +631,22 @@ api:
 
         assert!(cfg.reverse_proxy.is_none());
     }
+
+    #[test]
+    fn stream_history_defaults_to_none_when_reverse_proxy_present_but_stream_history_omitted() {
+        let raw = r#"
+api:
+  host: 127.0.0.1
+  port: 8901
+  web_root: ./web
+reverse_proxy:
+  resource_rewrite_disabled: false
+  rewrite_secret: "00112233445566778899aabbccddeeff"
+"#;
+
+        let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config should deserialize");
+
+        assert!(cfg.reverse_proxy.is_some());
+        assert!(cfg.reverse_proxy.as_ref().and_then(|rp| rp.stream_history.as_ref()).is_none());
+    }
 }

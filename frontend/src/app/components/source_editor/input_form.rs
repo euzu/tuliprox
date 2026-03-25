@@ -210,6 +210,12 @@ fn apply_parsed_input_type(staged_input_state: &UseReducerHandle<StagedInputDtoF
         selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_state.form.input_type);
     if staged_input_state.form.input_type != input_type {
         staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
+        // Clear Xtream-specific credentials when switching to a non-Xtream type
+        // so they don't persist invisibly in the DTO.
+        if !input_type.is_xtream() {
+            staged_input_state.dispatch(StagedInputFormAction::Username(None));
+            staged_input_state.dispatch(StagedInputFormAction::Password(None));
+        }
     }
 }
 

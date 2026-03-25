@@ -206,6 +206,8 @@ mod tests {
         let config = ReverseProxyConfig::from(&dto);
         let stream_history = config.stream_history.expect("stream history should exist");
         assert!(stream_history.stream_history_enabled);
+        assert_eq!(stream_history.stream_history_batch_size, 64);
+        assert_eq!(stream_history.stream_history_retention_days, 14);
         assert_eq!(stream_history.stream_history_directory, "/var/lib/tuliprox/history");
     }
 }

@@ -4,7 +4,7 @@ use crate::{
         EventMessage, ProviderHandle, SharedStreamManager,
     },
     model::StreamHistoryConfig,
-    repository::{DisconnectReason, EventType, StreamHistoryRecord},
+    repository::{DisconnectReason, StreamHistoryRecord},
     auth::Fingerprint,
     utils::debug_if_enabled,
 };
@@ -24,7 +24,7 @@ use std::{
     },
 };
 use tokio::sync::{mpsc, Notify};
-use crate::repository::{now_utc_secs, recover_pending_files, StreamHistoryWriter};
+use crate::repository::{recover_pending_files, StreamHistoryWriter};
 
 const CLEANUP_QUEUE_CAPACITY: usize = 4096;
 pub(crate) const PROVIDER_END_NOT_SET: u8 = 0;
@@ -391,25 +391,13 @@ fn resolve_disconnect_reason(provider_end_reason: u8, stream_info: &StreamInfo) 
 fn emit_connect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &StreamInfo) {
     let guard = writer.load();
     let Some(w) = guard.as_ref() else { return };
-    let mut record = StreamHistoryRecord::from(info);
-    record.event_type = EventType::Connect;
-    record.connect_ts_utc = Some(info.ts);
-    w.send_record(record);
+    w.send_record(StreamHistoryRecord::from_connect(info));
 }
 
 fn emit_disconnect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &StreamInfo, reason: DisconnectReason) {
     let guard = writer.load();
     let Some(w) = guard.as_ref() else { return };
-    let now_secs = now_utc_secs();
-    let connect_secs = info.ts;
-    let duration_secs = now_secs.saturating_sub(connect_secs);
-    let mut record = StreamHistoryRecord::from(info);
-    record.event_type = EventType::Disconnect;
-    record.connect_ts_utc = Some(connect_secs);
-    record.disconnect_ts_utc = Some(now_secs);
-    record.session_duration = Some(duration_secs);
-    record.disconnect_reason = Some(reason);
-    w.send_record(record);
+    w.send_record(StreamHistoryRecord::from_disconnect(info, reason));
 }
 
 #[cfg(test)]

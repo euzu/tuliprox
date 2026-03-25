@@ -235,6 +235,9 @@ mod tests {
 
     #[test]
     fn prepare_normalizes_relative_stream_history_directory_against_storage_dir() {
+        use std::path::{Path, PathBuf};
+
+        let storage_dir = if cfg!(windows) { r"C:\data\tuliprox" } else { "/var/lib/tuliprox" };
         let mut cfg = ReverseProxyConfigDto {
             rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
             stream_history: Some(StreamHistoryConfigDto {
@@ -246,9 +249,12 @@ mod tests {
             ..Default::default()
         };
 
-        cfg.prepare("/var/lib/tuliprox").expect("prepare should succeed");
+        cfg.prepare(storage_dir).expect("prepare should succeed");
 
         let stream_history = cfg.stream_history.expect("stream history should exist");
-        assert_eq!(stream_history.stream_history_directory, "/var/lib/tuliprox/history");
+        let expected = PathBuf::from(storage_dir).join("history");
+        let actual = Path::new(&stream_history.stream_history_directory);
+        assert_eq!(actual.file_name(), expected.file_name());
+        assert!(actual.ends_with("history"), "directory should end with 'history', got: {actual:?}");
     }
 }

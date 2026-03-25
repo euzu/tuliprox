@@ -28,7 +28,7 @@ fn get_log_level(log_level: &str) -> LevelFilter {
 }
 
 pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {
-    
+
     // tracing_subscriber::registry()
     //     .with(console_subscriber::spawn()) // Console layer
     //     .with(EnvFilter::from_default_env())

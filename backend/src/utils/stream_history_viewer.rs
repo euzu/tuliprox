@@ -350,7 +350,10 @@ fn stream_output(
         }
     }
 
-    println!("\n]");
+    if !first {
+        println!();
+    }
+    println!("]");
 }
 
 fn exit_viewer(code: i32) -> ! {

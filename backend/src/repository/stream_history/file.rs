@@ -129,11 +129,12 @@ pub struct StreamHistoryRecord {
     pub disconnect_reason: Option<DisconnectReason>,
 }
 
-impl From<&StreamInfo> for StreamHistoryRecord {
-    fn from(info: &StreamInfo) -> Self {
+impl StreamHistoryRecord {
+    /// Build a common base from a `StreamInfo`, leaving event-specific fields to the caller.
+    fn base(info: &StreamInfo) -> Self {
         Self {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect,
+            event_type: EventType::Connect, // overridden by callers
             event_ts_utc: now_utc_secs(),
             partition_day_utc: current_utc_day(),
             session_id: u64::from(info.uid),
@@ -152,6 +153,25 @@ impl From<&StreamInfo> for StreamHistoryRecord {
             bytes_sent: None,
             disconnect_reason: None,
         }
+    }
+
+    pub fn from_connect(info: &StreamInfo) -> Self {
+        let mut record = Self::base(info);
+        record.event_type = EventType::Connect;
+        record.connect_ts_utc = Some(info.ts);
+        record
+    }
+
+    pub fn from_disconnect(info: &StreamInfo, reason: DisconnectReason) -> Self {
+        let now_secs = now_utc_secs();
+        let connect_secs = info.ts;
+        let mut record = Self::base(info);
+        record.event_type = EventType::Disconnect;
+        record.connect_ts_utc = Some(connect_secs);
+        record.disconnect_ts_utc = Some(now_secs);
+        record.session_duration = Some(now_secs.saturating_sub(connect_secs));
+        record.disconnect_reason = Some(reason);
+        record
     }
 }
 

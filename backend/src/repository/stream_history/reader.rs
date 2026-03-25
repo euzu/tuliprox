@@ -217,7 +217,7 @@ impl<R: Read> Iterator for StreamHistoryFileReader<R> {
                     self.current_block_remaining = 0;
                     continue;
                 }
-                // SAFETY: bounds check on line 212 guarantees exactly 4 bytes are available
+                // SAFETY: bounds check above guarantees exactly 4 bytes are available
                 let mut record_len_bytes = [0u8; 4];
                 record_len_bytes.copy_from_slice(&self.payload_buf[self.payload_offset..self.payload_offset + 4]);
                 let record_len = u32::from_be_bytes(record_len_bytes) as usize;
