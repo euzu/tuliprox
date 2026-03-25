@@ -1,9 +1,15 @@
 # 🔌 Pillar 2: `source.yml` (Inputs, Panel API & Targets)
-The `source.yml` serves as the central orchestration hub for all data flows within Tuliprox. It defines the lifecycle of a stream—from the upstream provider to the end-user device—through three primary architectural layers:
 
-* **`providers` (Resilience Layer):** Defines backend endpoints and failover logic. Use this to implement intelligent URL rotation and ensure high availability across multiple mirrors.
-* **`inputs` (Ingestion Layer):** Manages upstream data sources. This layer handles credential management, connection pooling via **Aliases**, and automated account lifecycle management through **Panel API** integration.
-* **`sources` & `targets` (Egress Layer):** The final mapping stage where ingested data is filtered, transformed, and routed to specific **Targets** (M3U, Xtream, Strm or HDHomeRun) for consumption by end devices.
+The `source.yml` serves as the central orchestration hub for all data flows within Tuliprox.
+It defines the lifecycle of a stream—from the upstream provider to the end-user device—through three primary architectural layers:
+
+* **`providers` (Resilience Layer):** Defines backend endpoints and failover logic.
+  Use this to implement intelligent URL rotation and ensure high availability across multiple mirrors.
+* **`inputs` (Ingestion Layer):** Manages upstream data sources. This layer handles credential management, connection pooling via **Aliases**,
+  and automated account lifecycle management through **Panel API** integration.
+* **`sources` & `targets` (Egress Layer):** The final mapping stage where ingested data is filtered, transformed,
+  and routed to specific **Targets** (M3U, Xtream, Strm or HDHomeRun) for consumption by end devices.
+
 ## Top-level entries
 
 ```yaml
@@ -61,7 +67,11 @@ provider:
 | `on_connect_error` | Enum | `try_next_ip` | Policy on TCP connection failure. Options: `try_next_ip` (cycles to the next resolved IP for the same host), `rotate_provider_url` (instantly fails over to the next URL in the `urls` list). |
 
 ### 1.1 DNS Resolved IP Persistence
-Resolved IPs are persisted to `{storage_dir}/provider_dns_resolved.json` (not to `source.yml`). This file is written atomically after each DNS refresh cycle and read at startup to seed DNS caches before the background resolver completes its first cycle. On config hot-reloads, DNS caches are carried over from previous provider instances so that resolved IPs are available immediately.
+
+Resolved IPs are persisted to `{storage_dir}/provider_dns_resolved.json` (not to `source.yml`).
+This file is written atomically after each DNS refresh cycle and read at startup to seed DNS caches before the background resolver
+completes its first cycle.
+On config hot-reloads, DNS caches are carried over from previous provider instances so that resolved IPs are available immediately.
 
 ### Failover Triggers
 
@@ -76,7 +86,6 @@ Failover **DOES NOT** trigger on:
 
 * HTTP 401 / 403 (Authentication errors, to avoid rotating due to a banned account).
 
----
 ## 2. Inputs (Data Sources) (`inputs`)
 
 An `input` represents an upstream provider or a local media library.
@@ -120,10 +129,10 @@ inputs:
 | `staged` | Object | No | | Hybrid architecture feature (see [below](#input-subsections-object-keys)). |
 | `panel_api` | Object | No | | Automated reseller account generation (see [below](#input-subsections-object-keys)). |
 
-
 #### Input URL Schemes (`inputs[].url`)
 
-Tuliprox utilizes a flexible URI-based system to define where input data originates. Depending on the prefix used, the engine switches between remote downloads, local file access, or internal failover logic.
+Tuliprox utilizes a flexible URI-based system to define where input data originates.
+Depending on the prefix used, the engine switches between remote downloads, local file access, or internal failover logic.
 
 | Scheme | Target Type | Technical Impact & Background |
 | :--- | :--- | :--- |
@@ -132,11 +141,14 @@ Tuliprox utilizes a flexible URI-based system to define where input data origina
 | **`provider://`** | Failover System | Resolves the URL via internal `provider` definitions. **Pro-Tip:** Use this to implement automatic rotation or failover between multiple mirrors/gateways of the same provider. |
 | **`batch://`** | CSV File | Dedicated scheme for bulk alias management. Points to a local `;` separated CSV file (e.g., `batch://./aliases.csv`). |
 
-**Additional Notes**
+### Additional Notes
 
-* **Automatic Type Conversion:** If the input `type` is set to `m3u` or `xtream` but the `url` starts with the `batch://` prefix, Tuliprox automatically upgrades the input to `m3u_batch` or `xtream_batch` respectively.
-* **Batch Constraints:** For `m3u_batch` and `xtream_batch`, only **local** CSV sources are permitted. You must use either the `batch://` scheme or a plain absolute/relative filesystem path.
-* **Protocol Restrictions:** To ensure stability in batch processing, URI schemes such as `provider://`, `http(s)://`, or `file://` are strictly rejected when used within a batch context.
+* **Automatic Type Conversion:** If the input `type` is set to `m3u` or `xtream` but the `url` starts with the `batch://` prefix,
+  Tuliprox automatically upgrades the input to `m3u_batch` or `xtream_batch` respectively.
+* **Batch Constraints:** For `m3u_batch` and `xtream_batch`, only **local** CSV sources are permitted.
+  You must use either the `batch://` scheme or a plain absolute/relative filesystem path.
+* **Protocol Restrictions:** To ensure stability in batch processing, URI schemes such as `provider://`, `http(s)://`,
+  or `file://` are strictly rejected when used within a batch context.
 
 ### Input Subsections (Object Keys)
 
@@ -148,15 +160,18 @@ Tuliprox utilizes a flexible URI-based system to define where input data origina
 | `aliases` | Connection pooling for multiple subscriptions from the same provider. | [See Aliases](#24-provider-aliases-aliases--batch) |
 | `staged` | Hybrid architecture for sideloading external playlists into an input. | [See Staged](#25-staged-sources-staged) |
 | `panel_api` | Automated reseller panel integration (provisioning/renewal). | [See Panel API](#26-provider-panel-api-panel_api) |
+
 ---
 
 ### 2.1 Headers (`headers`)
-Allows the injection of custom HTTP headers into outgoing requests for this specific provider. This is often required for providers that enforce `User-Agent` whitelisting or specific authorization tokens.
+
+Allows the injection of custom HTTP headers into outgoing requests for this specific provider.
+This is often required for providers that enforce `User-Agent` whitelisting or specific authorization tokens.
 
 | Parameter | Type | Technical Impact & Background |
 | :--- | :--- | :--- |
 | `User-Agent` | String | Mimics a specific player or browser to prevent 403 Forbidden errors. |
-| `Authorization`| String | Manual token injection if required by the upstream API. |
+| `Authorization` | String | Manual token injection if required by the upstream API. |
 | `Referer` | String | Can be used to bypass basic hotlink protections. |
 
 ```yaml
@@ -166,7 +181,9 @@ headers:
 ```
 
 ---
+
 ### 2.2 Input Options (`options`)
+
 Controls the behavior during download and asynchronous metadata resolution (see the *Metadata Update* chapter) for this specific provider.
 
 | Parameter | Type | Default | Technical Impact & Background |
@@ -176,7 +193,7 @@ Controls the behavior during download and asynchronous metadata resolution (see 
 | `xtream_live_stream_use_prefix` | Bool | `true` | Injects the `/live/` prefix into URLs. |
 | `disable_hls_streaming` | Bool | `false` | Forces Tuliprox to play Live-TV as a raw MPEG-TS (`.ts`) stream, skipping HLS (`.m3u8`) reverse-proxy handling, and forcing direct TS endpoints. |
 | `resolve_tmdb` | Bool | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years. |
-| `probe_stream` | Bool | `false` |Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`. |
+| `probe_stream` | Bool | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`. |
 | `resolve_background` | Bool | `true` | Metadata scans run asynchronously in the background so the general playlist update (which blocks clients) finishes instantly. |
 | `resolve_series` / `resolve_vod` | Bool | `false` | Fetches missing details like Plot or Cast via the Provider's API (`get_vod_info` / `get_series_info`). |
 | `probe_series` / `probe_vod` | Bool | `false` | Allows explicit FFprobe analysis of movies or entire TV show seasons. |
@@ -187,11 +204,15 @@ Controls the behavior during download and asynchronous metadata resolution (see 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are updated.
 
 ---
+
 ### 2.3 EPG Assignment & Smart Match (`epg`)
 
-Tuliprox can load external XMLTV files and map them intelligently using advanced fuzzy matching to streams that are missing a valid EPG ID. Within the `epg` block, you can define multiple XMLTV providers. Tuliprox aggregates these sources and assigns EPG data based on priority and matching rules.
+Tuliprox can load external XMLTV files and map them intelligently using advanced fuzzy matching to streams that are missing a valid EPG ID.
+Within the `epg` block, you can define multiple XMLTV providers.
+Tuliprox aggregates these sources and assigns EPG data based on priority and matching rules.
 
 #### Example Configuration
+
 ```yaml
 epg:
   sources:
@@ -214,13 +235,17 @@ epg:
     strip: ["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]
     normalize_regex: '[^a-zA-Z0-9\-]'
 ```
+
 #### EPG Source Parameters (`sources`)
+
 | Parameter | Type | Required | Default | Technical Impact & Background |
 | :--- | :--- | :---: | :--- | :--- |
 | **`url`** | String | Yes | | The XMLTV endpoint. Use **`auto`** for Xtream inputs to automatically generate the native XMLTV URL using your credentials. Supports local paths and `http(s)` links. |
 | **`priority`** | Int | No | `0` | Determines the lookup order. **Lower numbers have higher priority.** For example, `-2` is processed before `0`. Use negative numbers for primary sources. |
-| **`logo_override`**| Bool | No | `false` | If set to `true`, channel logos from the provider are replaced by the icons found in the XMLTV file. |
+| **`logo_override`** | Bool | No | `false` | If set to `true`, channel logos from the provider are replaced by the icons found in the XMLTV file. |
+
 #### Smart Match Parameters (`smart_match`)
+
 The fuzzy matching logic attempts to "guess" the EPG ID by generating search keys based on the channel name.
 
 | Parameter | Type | Default | Technical Impact |
@@ -228,14 +253,16 @@ The fuzzy matching logic attempts to "guess" the EPG ID by generating search key
 | `enabled` | Bool | `false` | Activates the Smart Match engine for streams without a fixed `tvg-id`. |
 | `fuzzy_matching` | Bool | `false` | Fallback to phonetic and Jaro-Winkler similarity matching if exact ID match fails. |
 | `match_threshold` | Int | `80` | Minimum similarity score (10-100) required to accept a fuzzy match. |
-| `best_match_threshold`| Int | `99` | Score at which Tuliprox stops searching and immediately accepts the EPG assignment. |
+| `best_match_threshold` | Int | `99` | Score at which Tuliprox stops searching and immediately accepts the EPG assignment. |
 | `name_prefix` | Object | `ignore` | Options: `ignore`, `suffix`, `prefix`. For `suffix`/`prefix`, a concat string (e.g., `{ suffix: "." }`) is required. |
-| `name_prefix_separator`| List | `[':', '\|', '-']` | Characters used by providers to delimit country codes (e.g., `US:`, `FR\|`). |
+| `name_prefix_separator` | List | `[':', '\|', '-']` | Characters used by providers to delimit country codes (e.g., `US:`, `FR\|`). |
 | `strip` | List | *(HD/4K tags)* | Default: `["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]`. Terms stripped before matching. |
 | `normalize_regex` | String | `[^a-zA-Z0-9\-]` | Default pattern to strip non-alphanumeric characters (except dashes) for cleaner matching. |
 
 #### How Smart-Matching works
+
 If a stream is missing the `tvg-id`, Tuliprox performs the following steps:
+
 1. **Normalization:** The channel name (e.g., `US: HBO HD 4K`) is processed.
 2. **Prefix Extraction:** Using `name_prefix_separator`, Tuliprox identifies `:` and splits the name. It recognizes `US` as the country prefix.
 3. **Cleaning:** It strips terms defined in `strip` ("4K", "HD") and applies the `normalize_regex`. The core name becomes `hbo`.
@@ -247,9 +274,12 @@ If a stream is missing the `tvg-id`, Tuliprox performs the following steps:
 
 ### 2.4 Provider Aliases (`aliases` & `batch://`)
 
-Tuliprox allows you to pool multiple subscriptions from the same provider into a single logical source. By merging these "aliases," Tuliprox tracks connection availability across all accounts, ensuring that if one subscription is at its limit, the next available connection from the pool is used.
+Tuliprox allows you to pool multiple subscriptions from the same provider into a single logical source.
+By merging these "aliases," Tuliprox tracks connection availability across all accounts, ensuring that if one subscription is at its limit,
+the next available connection from the pool is used.
 
 #### Defining Aliases in YAML
+
 Aliases are ideal for a small number of fixed accounts. Note that in YAML, `max_connections: 0` signifies "unlimited," which is the default setting.
 
 ```yaml
@@ -267,10 +297,13 @@ inputs:
         password: pw2
         max_connections: 2
 ```
+
 **Result:** Tuliprox treats this as a single provider source with a total pool of 1 + 2 = **3** concurrent connections.
 
 ---
+
 #### Batch CSV Offloading (`batch://`)
+
 For managing dozens or hundreds of accounts, Tuliprox supports offloading alias definitions to local CSV files using the `batch://` scheme.
 
 | Scheme | Description |
@@ -278,14 +311,17 @@ For managing dozens or hundreds of accounts, Tuliprox supports offloading alias 
 | `batch://./file.csv` | Relative path to the CSV file. |
 | `batch:///path/file.csv` | Absolute path to the CSV file. |
 
-> **Note:** Batch inputs only support local filesystem paths. Schemes like `http(s)://`, `file://`, or `provider://` are rejected for batch URL definitions. If an input `url` starts with `batch://`, Tuliprox automatically sets the type to `xtream_batch` or `m3u_batch`.
+> **Note:** Batch inputs only support local filesystem paths. Schemes like `http(s)://`, `file://`, or `provider://`
+> are rejected for batch URL definitions. If an input `url` starts with `batch://`,
+> Tuliprox automatically sets the type to `xtream_batch` or `m3u_batch`.
 
 #### Batch CSV Formats
 
 Batch files use a semicolon (`;`) as a separator. Unlike standard YAML config, the default for `max_connections` in CSV files is **1**.
 
 ##### `XtreamBatch`
-Used for Xtream Codes API accounts. 
+
+Used for Xtream Codes API accounts.
 
 ```yaml
 inputs:
@@ -295,6 +331,7 @@ inputs:
 ```
 
 **CSV Structure:**
+
 ```csv
 #name;username;password;url;max_connections;priority;exp_date
 my_provider_1;user1;password1;[http://p1.com:80](http://p1.com:80);1;0;2028-11-23 12:34:23
@@ -302,6 +339,7 @@ my_provider_2;user2;password2;[http://p2.com:8080](http://p2.com:8080);1;1;17323
 ```
 
 ##### `M3uBatch`
+
 Used for plain M3U playlist URLs.
 
 ```yaml
@@ -312,35 +350,46 @@ inputs:
 ```
 
 **CSV Structure:**
+
 ```csv
 #url;max_connections;priority
 [http://p1.com/get.php?username=u1&password=p1;1;0](http://p1.com/get.php?username=u1&password=p1;1;0)
 [http://p2.com/get.php?username=u2&password=p2;1;5](http://p2.com/get.php?username=u2&password=p2;1;5)
 ```
+
 #### Field Specifications
 
 | Parameter | Technical Impact & Details |
 | :--- | :--- |
 | **`name`** | **Crucial:** The first alias is automatically renamed with the `name` from the input definition (e.g., `my_provider_1` gets `my_provider`). This is necessary for stable playlist UUID generation and consistent channel numbering across updates. |
-| **`max_connections`**| Defines allowed concurrent streams. Default in CSV is **1**. |
+| **`max_connections`** | Defines allowed concurrent streams. Default in CSV is **1**. |
 | **`priority`** | Lower numbers = higher priority. `0` is higher than `1`. Negative numbers (e.g., `-1`) are allowed for top-tier priority. Items with the lowest values are processed first. |
 | **`exp_date`** | Account expiration. Supports "YYYY-MM-DD HH:MM:SS" (e.g., `2028-11-30 12:00:00`) or Unix timestamps (seconds). Used for auto-cleanup or Panel API sync. |
 
 ---
+
 ### 2.5 Staged Sources (`staged`)
 
-The **"Staged Source"** acts as a structural template for an input's playlist. Instead of manually mapping and sorting channels within Tuliprox, this feature allows you to "inject" a pre-configured external playlist (e.g., from a GitHub repository or a third-party playlist editor) to define the layout while keeping the actual delivery linked to your main provider.
+The **"Staged Source"** acts as a structural template for an input's playlist.
+Instead of manually mapping and sorting channels within Tuliprox, this feature allows you to "inject" a pre-configured external playlist
+(e.g., from a GitHub repository or a third-party playlist editor) to define the layout while keeping the actual delivery linked to your main provider.
 
 **The Hybrid Mechanism:**
-* **Structure Provider (Staged):** The external source dictates the channel order, selection, and group naming during the update process. It is used **temporarily** only for updating the playlist structure.
-* **Data Provider (Main Input):** Regular queries (streaming, authentication, EPG mapping, and metadata fetching) still go through the main provider defined in the root of the input. 
+
+* **Structure Provider (Staged):** The external source dictates the channel order, selection, and group naming during the update process.
+  It is used **temporarily** only for updating the playlist structure.
+* **Data Provider (Main Input):** Regular queries (streaming, authentication, EPG mapping, and metadata fetching)
+  still go through the main provider defined in the root of the input.
 
 **Use Case:**
-If you have a perfectly maintained playlist in another online tool or want to bypass Tuliprox's internal mapping for a specific provider, you can "plug in" that playlist as a staged source. It won’t replace your main provider; it simply acts as a blueprint for the update cycle.
+
+If you have a perfectly maintained playlist in another online tool or want to bypass Tuliprox's internal mapping for a specific provider,
+you can "plug in" that playlist as a staged source. It won’t replace your main provider; it simply acts as a blueprint for the update cycle.
 
 #### Configuration Example (Xtream Main + Staged Xtream)
 
-In this setup, Tuliprox uses an external provider's structure for Live-TV, but keeps the local provider's data for VOD and ignores the series section entirely.
+In this setup, Tuliprox uses an external provider's structure for Live-TV,
+but keeps the local provider's data for VOD and ignores the series section entirely.
 
 ```yaml
 inputs:
@@ -363,6 +412,7 @@ inputs:
       vod_source: input
       series_source: skip
 ```
+
 #### Parameters
 
 | Parameter | Type | Required | Default | Technical Impact & Background |
@@ -374,32 +424,41 @@ inputs:
 | `method` | Enum | No | `GET` | HTTP request method (`GET` or `POST`). |
 | `headers` | Dict | No | | Custom HTTP headers for the staged download. |
 | `live_source` | Enum | No | `staged` | Source for the Live-TV section: `staged`, `input`, or `skip`. |
-| `vod_source` | Enum | No | *(Varies)*| Source for the VOD section: `staged`, `input`, or `skip`. |
-| `series_source` | Enum | No | *(Varies)*| Source for the Series section: `staged`, `input`, or `skip`. |
+| `vod_source` | Enum | No | *(Varies)* | Source for the VOD section: `staged`, `input`, or `skip`. |
+| `series_source` | Enum | No | *(Varies)* | Source for the Series section: `staged`, `input`, or `skip`. |
 
 #### Staged Cluster Source Behavior & Logic
 
 The selection of data sources for different clusters (Live, VOD, Series) follows specific validation and priority rules:
 
-1.  **Global Skip Priority:** If `input.options.xtream_skip_live|vod|series` is set to `true`, that section is skipped entirely, regardless of the `staged` settings.
-2.  **Xtream Main Inputs:** * At least one cluster (`live`, `vod`, or `series`) must be set to `staged`. If all effective values resolve to `input` or `skip`, the configuration is considered invalid.
-    * **Default Behavior:** If staged `type` is `xtream`, all clusters default to `staged`.
-3.  **M3U Staged Sources:**
-    * M3U sources cannot provide structured VOD or Series metadata for Xtream clusters. Therefore, `vod_source: staged` and `series_source: staged` are **invalid** if the staged type is `m3u`.
-    * **Default Behavior:** If staged `type` is `m3u`, it defaults to `live_source: staged`, `vod_source: input`, and `series_source: input`.
-4.  **M3U Main Inputs:** If the primary input `type` is `m3u`, the cluster source fields (`live_source`, etc.) are ignored.
+1. **Global Skip Priority:** If `input.options.xtream_skip_live|vod|series` is set to `true`, that section is skipped entirely,
+   regardless of the `staged` settings.
+2. **Xtream Main Inputs:**
+   * At least one cluster (`live`, `vod`, or `series`) must be set to `staged`.
+     If all effective values resolve to `input` or `skip`, the configuration is considered invalid.
+   * **Default Behavior:** If staged `type` is `xtream`, all clusters default to `staged`.
+3. **M3U Staged Sources:**
+   * M3U sources cannot provide structured VOD or Series metadata for Xtream clusters.
+     Therefore, `vod_source: staged` and `series_source: staged` are **invalid** if the staged type is `m3u`.
+   * **Default Behavior:** If staged `type` is `m3u`, it defaults to `live_source: staged`, `vod_source: input`, and `series_source: input`.
+4. **M3U Main Inputs:** If the primary input `type` is `m3u`, the cluster source fields (`live_source`, etc.) are ignored.
 
 #### File Persistence (`persist`)
+
 When using `persist` to save the staged data, follow these filename conventions:
+
 * **For `m3u`:** Use a full filename template like `./staged_playlist_{}.m3u`.
 * **For `xtream`:** Use a prefix template like `./staged_playlist_`.
 
 ---
+
 ### 2.6 Provider Panel API (`panel_api`)
 
-Tuliprox can optionally interface with a provider's reseller panel API to automate account lifecycle management. This allows the system to fetch credit balances, sync expiration dates, and automatically provision or renew alias accounts based on demand.
+Tuliprox can optionally interface with a provider's reseller panel API to automate account lifecycle management.
+This allows the system to fetch credit balances, sync expiration dates, and automatically provision or renew alias accounts based on demand.
 
-> **Important:** Panel API accounts are managed as individual connections/aliases. Tuliprox does **not** assume unlimited provider access; each alias consumes a slot or credit according to your provider's rules.
+> **Important:** Panel API accounts are managed as individual connections/aliases.
+> Tuliprox does **not** assume unlimited provider access; each alias consumes a slot or credit according to your provider's rules.
 
 ```yaml
     panel_api:
@@ -454,7 +513,7 @@ Tuliprox can optionally interface with a provider's reseller panel API to automa
 | **`alias_pool`** | Object | | Controls the lifecycle of active aliases. |
 | ↳ `size.min` | Mixed | `1` | Min accounts to keep. `number` or `auto`. If `auto`, it uses the count of enabled Tuliprox users (Active/Trial, not expired) mapped to this input's targets. |
 | ↳ `size.max` | Mixed | `1` | Upper bound for aliases. If `auto`, checks are triggered upon user add/update. |
-| ↳ `remove_expired`| Bool | `false` | If `true`, removes expired accounts from `source.yml` or batch CSVs during boot/update. (The root input is never removed). |
+| ↳ `remove_expired` | Bool | `false` | If `true`, removes expired accounts from `source.yml` or batch CSVs during boot/update. (The root input is never removed). |
 | **`provisioning`** | Object | | Verification and renewal logic. |
 | ↳ `offset` | String | `None` | Pre-expiry window. If `now + offset > exp_date`, Tuliprox fires `client_renew` (falls back to `client_new`). |
 | ↳ `timeout_sec` | Int | `65` | Max wait time for probing a new account before continuing boot/update. |
@@ -462,27 +521,32 @@ Tuliprox can optionally interface with a provider's reseller panel API to automa
 | ↳ `cooldown_sec` | Int | `0` | Extra wait time after a successful probe to mitigate 5XX errors during provider provisioning. |
 
 ---
+
 #### Runtime Logic & Dynamic Values (`auto`)
 
 The keyword `auto` acts as a placeholder for Tuliprox to inject runtime values dynamically into query parameters:
+
 * **`api_key: auto`**: Replaced by `panel_api.api_key`.
 * **`username / password: auto`**: Replaced by the specific credentials of the account being queried, renewed, or probed.
 
 #### Response Evaluation & Fallback Logic
+
 Tuliprox processes all Panel API responses as JSON and strictly requires `status: true`.
 
 * **`account_info`**: Extracts the `credits` field and persists it. Uses root input credentials if `auto` is specified.
 * **`client_info`**: Syncs the `expire` field, normalizing the timestamp/date to UTC.
-* **`client_new`**: Attempts to extract `username` and `password` directly. 
-    * **Fallback:** If fields are missing, Tuliprox parses a `url` field within the JSON response to extract credentials from the query string.
-    * Failure to derive credentials results in a failed operation and no alias persistence.
+* **`client_new`**: Attempts to extract `username` and `password` directly.
+  * **Fallback:** If fields are missing, Tuliprox parses a `url` field within the JSON response to extract credentials from the query string.
+  * Failure to derive credentials results in a failed operation and no alias persistence.
 * **`client_renew`**: Updates the expiration date without modifying existing credentials.
-* **`client_adult_content`**: Optionally executed after `client_new` or `client_renew` to toggle adult content settings on the provider side. Requires `status: true` for success.
+* **`client_adult_content`**: Optionally executed after `client_new` or `client_renew` to toggle adult content settings
+  on the provider side. Requires `status: true` for success.
 
 ---
+
 ## 3. Routing & Targets (`sources`)
 
-This block links your inputs to one or more output targets and defines how Tuliprox transforms, filters, sorts, and exports the resulting playlist.  
+This block links your inputs to one or more output targets and defines how Tuliprox transforms, filters, sorts, and exports the resulting playlist.
 Under `sources:`, you connect `inputs` from the `inputs` section of `source.yml` with one or more `targets`.
 
 ```yaml
@@ -496,7 +560,6 @@ sources:
           - type: m3u
 ```
 
----
 ### 3.1 `inputs`
 
 `inputs` is a list of input names referencing entries defined in the `inputs` section of `source.yml`.
@@ -510,10 +573,9 @@ sources:
 
 > **Note:** The `inputs` list only references previously defined input names. It does not define input behavior itself.
 
----
 ### 3.2 `targets`
 
-A `target` defines the final transformed playlist that clients consume.  
+A `target` defines the final transformed playlist that clients consume.
 Tuliprox supports multiple targets per source, and each target can export to multiple output formats simultaneously.
 
 ```yaml
@@ -538,7 +600,6 @@ sources:
         watch: []
         use_memory_cache: false
 
-
   targets:
     - name: my_target
       processing_order: rmf
@@ -552,6 +613,7 @@ sources:
       output:
         - type: m3u
 ```
+
 #### Target Parameters
 
 | Parameter | Type | Required | Default | Technical Impact & Background |
@@ -575,48 +637,55 @@ sources:
 
 The processing order defines how Tuliprox applies:
 
-- **F**ilter
-- **R**ename
-- **M**ap
+* **F**ilter
+* **R**ename
+* **M**ap
 
 Valid values are:
 
-- `frm` (default)
-- `fmr`
-- `rfm`
-- `rmf`
-- `mfr`
-- `mrf`
+* `frm` (default)
+* `fmr`
+* `rfm`
+* `rmf`
+* `mfr`
+* `mrf`
 
-> **Note:** The selected processing order can change the final result significantly. For example, if renaming occurs before filtering, the filter must match the renamed state rather than the original source value.
+> **Note:** The selected processing order can change the final result significantly.
+> For example, if renaming occurs before filtering, the filter must match the renamed state rather than the original source value.
 
 ---
 
-> **Note:** The following sections are intended to be inserted **between** `### 3.2.4 Output Formats (\`output\`)` and the existing `Favourites` / `Watch` subsections.
+> **Note:** The following sections are intended to be inserted **between** `### 3.2.4 Output Formats (output)`
+> and the existing `Favourites` / `Watch` subsections.
 > If you keep strict numbering, the existing `Favourites` and `Watch` sections should be renumbered accordingly.
 
 ---
+
 ### 3.2.2 `filter`
 
-The target-level `filter` is a string-based expression using Tuliprox's filter DSL.  
+The target-level `filter` is a string-based expression using Tuliprox's filter DSL.
 It defines which entries remain in the final target after the selected processing stages have been applied.
 
-You can define complex strings or regex patterns exactly once in [template.yml](./configuration/template.md) and call them by wrapping the template name in exclamation marks: `!MACRO_NAME!`. For less verbose expression definitions, inline filter definitions are also supported.
+You can define complex strings or regex patterns exactly once in [template.yml](./configuration/template.md)
+and call them by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
+For less verbose expression definitions, inline filter definitions are also supported.
 
 Tuliprox supports the following filter expression types:
 
-- Use `NOT` for exclusion logic
-- Use `AND` / `OR` for boolean combinations
-- Type Comparison: `Type = vod` or `Type = live` or `Type = series`
-- Regular expression comparison: `([fieldanme]) ~ "regexp"` <br>
-  The [fieldanme] can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input` or `Type`.
+* Use `NOT` for exclusion logic
+* Use `AND` / `OR` for boolean combinations
+* Type Comparison: `Type = vod` or `Type = live` or `Type = series`
+* Regular expression comparison: `([fieldanme]) ~ "regexp"` <br>
+  The `[fieldanme]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input` or `Type`.
 
->**Note:** 
-* If you use special characters like `+ | [ ] ( )` inside the filter expression you must escape them correctly with backslashes.
-* When testing expressions externally, e.g. [regex101.com](https://regex101.com/), select the **Rust** flavor. This helps avoid mismatches between development-time testing and Tuliprox runtime behavior.
-
-> **⚠️ Warning:** Filter expressions are evaluated using Rust-style regex behavior. Unsupported features such as lookarounds and backreferences are not available, so patterns copied from PCRE-based tools may need adjustment.
-
+> **Note:**
+>
+> * If you use special characters like `+ | [ ] ( )` inside the filter expression you must escape them correctly with backslashes.
+> * When testing expressions externally, e.g. [regex101.com](https://regex101.com/), select the **Rust** flavor.
+>   This helps avoid mismatches between development-time testing and Tuliprox runtime behavior.
+>
+> > **⚠️ Warning:** Filter expressions are evaluated using Rust-style regex behavior.
+> Unsupported features such as lookarounds and backreferences are not available, so patterns copied from PCRE-based tools may need adjustment.
 
 #### Example Filter
 
@@ -630,25 +699,28 @@ targets:
 
 This example keeps:
 
-- entries from groups starting with `DE`, except titles containing `Shopping`
-- all entries from groups starting with `AU`
+* entries from groups starting with `DE`, except titles containing `Shopping`
+* all entries from groups starting with `AU`
 
 ---
 
 ### 3.2.3 `rename`
 
-The `rename` block is a list of rename rules applied to selected fields.  
+The `rename` block is a list of rename rules applied to selected fields.
 Each rule performs regex-based search and replace using capture groups where needed.
+
 #### Rename Parameters
 
 | Parameter | Type | Required | Default | Technical Impact & Background |
 | :--- | :--- | :---: | :--- | :--- |
-| `field` | Enum | Yes | | Field to transform, can be  `group`, `title`, `name`, `caption`  or `url`. This determines which part of the playlist entry Tuliprox rewrites before later stages such as sorting or final export. |
+| `field` | Enum | Yes | | Field to transform, can be `group`, `title`, `name`, `caption` or `url`. This determines which part of the playlist entry Tuliprox rewrites before later stages such as sorting or final export. |
 | `pattern` | String (Regex) | Yes | | Regular expression used to match the current value of the selected field. This enables structural normalization of inconsistent source naming schemes. |
 | `new_name` | String | Yes | | Replacement string. It can reference regex capture groups via `$1`, `$2`, and so on. This allows Tuliprox to preserve selected original content while reformatting labels. |
 
 #### Rename Example
-Eample:
+
+Example:
+
 ```yaml
 rename:
   - field: group
@@ -658,12 +730,13 @@ rename:
 
 In above example, every group beginning with `DE` is renamed to start with `1.`, for example:
 
-- `DE Sports` → `1. DE Sports`
-- `DE Movies` → `1. DE Movies`
+* `DE Sports` → `1. DE Sports`
+* `DE Movies` → `1. DE Movies`
 
 This can be useful for players that ignore provider order and perform their own alphabetical sorting.
 
-> **Note:** The effective value that `rename` sees depends on `processing_order`. If mapping runs before renaming, your rename pattern must match the already mapped value rather than the original source value.
+> **Note:** The effective value that `rename` sees depends on `processing_order`.
+> If mapping runs before renaming, your rename pattern must match the already mapped value rather than the original source value.
 
 ---
 
@@ -677,6 +750,7 @@ mapping:
   - map_regional_groups
   - map_vod_enrichment
 ```
+
 #### Mapping Parameters
 
 | Parameter | Type | Required | Default | Technical Impact & Background |
@@ -686,14 +760,15 @@ mapping:
 To define a new mapping IDs see details in chapter [Mapper DSL & Logic](./mapping-dsl.md).
 
 ---
+
 ### 3.2.5 `sort`
 
 The `sort` block defines ordering rules for groups and channels.
 
 It has the following top-level attributes:
 
-- `match_as_ascii` _optional_, default `false`
-- `rules`
+* `match_as_ascii` *optional*, default `false`
+* `rules`
 
 #### Sort Parameters
 
@@ -714,7 +789,9 @@ Each sort rule supports the following entries:
 | `order` | Enum | Yes | | `asc`, `desc`, or `none`. `none` preserves source order for matched entries and is useful when provider order should remain untouched. |
 | `sequence` | List | No | | Ordered regex list used for index-based sorting. When present, Tuliprox prioritizes regex sequence position over `order`, enabling explicit semantic ordering such as quality tiers or curated group precedence. |
 
->**Note:** Sort rules must be written with the configured `processing_order` in mind, because sorting operates on the transformed state that exists at that point in the pipeline.
+> **Note:** Sort rules must be written with the configured `processing_order` in mind,
+> because sorting operates on the transformed state that exists at that point in the pipeline.
+
 #### Sort Example
 
 ```yaml
@@ -740,20 +817,25 @@ sort:
         - '(?P<c1>.*?)\bHD\b'
         - '(?P<c1>.*?)\bSD\b'
 ```
+
 **Named Capture Groups** in `sequence`
 
 To sort by specific parts of a value, use named capture groups such as:
+
 1. `c1`
 2. `c2`
 3. `c3`
->**Note:** 
->* The numeric suffix defines priority. c1 > c2 > c3
+
+> **Note:**
+>
+> * The numeric suffix defines priority. c1 > c2 > c3
 
 This allows Tuliprox to perform structured multi-level sorting based on extracted fragments of a channel title or label.
 
 In the example above:
-- groups are ordered according to the explicit `sequence`
-- Channels within the `Freetv` group are first sorted by `quality` (as matched by the regexp sequence), and then by the `captured prefix`.
+
+* groups are ordered according to the explicit `sequence`
+* Channels within the `Freetv` group are first sorted by `quality` (as matched by the regexp sequence), and then by the `captured prefix`.
 
 ---
 
@@ -790,17 +872,20 @@ targets:
 | `remove_duplicates` | Bool | No | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output. |
 | `force_redirect` | Bool | No | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model. |
 
-> **⚠️ Warning:** When `share_live_streams` is enabled, each shared channel consumes at least **12 MB** of memory, regardless of the number of connected clients.
-> If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.  
+> **⚠️ Warning:** When `share_live_streams` is enabled, each shared channel consumes at least **12 MB** of memory,
+> regardless of the number of connected clients.
+> If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.
 > Example: with a buffer size of `2024`, each shared channel consumes at least **24 MB**.
 
 ---
 
 ### 3.2.7 Output Formats (`output`)
 
-A target can be exported to multiple formats simultaneously. The target-level filter, rename, mapping, and sort logic are applied first, and each output then formats the result differently.
+A target can be exported to multiple formats simultaneously. The target-level filter, rename, mapping, and sort
+logic are applied first, and each output then formats the result differently.
 
-> **Note:** Output-specific filters are applied **after all transformations have completed**. Therefore, any filter inside an individual output block must refer to the **final playlist state**.
+> **Note:** Output-specific filters are applied **after all transformations have completed**.
+> Therefore, any filter inside an individual output block must refer to the **final playlist state**.
 
 #### Output Block Parameters
 
@@ -848,13 +933,19 @@ output:
 | `trakt` | Object | No | | Trakt.tv integration block. Tuliprox can fetch Trakt lists, fuzzy-match them against playlist entries, and inject matched VOD or series entries into generated virtual categories. |
 | `filter` | String | No | | Optional output-level filter for the Xtream export only. Useful when the same target should expose different subsets to different output formats. |
 
->**Note:** IPTV players vary in how they resolve streams: some use the direct-source attribute, while others reconstruct URLs  from server metadata. To ensure Tuliprox maintains control over the stream routing (Proxy/Redirect), the Direct Source Handling (skip_*_direct_source) attributes default to true.
-> **⚠️ Warning:** Setting `skip_*_direct_source` to `false` forces the player to use the provider's original `direct-source` URL. This effectively **bypasses Tuliprox**, which will disable internal features like connection tracking, IP masking, and failover logic for those streams.
+> **Note:** IPTV players vary in how they resolve streams: some use the direct-source attribute, while others reconstruct URLs
+> from server metadata. To ensure Tuliprox maintains control over the stream routing (Proxy/Redirect),
+> the Direct Source Handling (skip_*_direct_source) attributes default to true.
+>
+> **⚠️ Warning:** Setting `skip_*_direct_source` to `false` forces the player to use the provider's original `direct-source` URL.
+> This effectively **bypasses Tuliprox**, which will disable internal features like connection tracking,
+> IP masking, and failover logic for those streams.
 
 #### `trakt` Object in Xtream Output
 
-Trakt.tv is an online platform for tracking, organizing, and discovering movies and TV shows.  
-Tuliprox can query Trakt lists and match playlist entries using Jaro-Winkler-style fuzzy matching. Matching entries are then added to new virtual categories inside the Xtream output.
+Trakt.tv is an online platform for tracking, organizing, and discovering movies and TV shows.
+Tuliprox can query Trakt lists and match playlist entries using Jaro-Winkler-style fuzzy matching.
+Matching entries are then added to new virtual categories inside the Xtream output.
 
 You can define a `Trakt` config like
 
@@ -933,7 +1024,8 @@ output:
 | `mask_redirect_url` | Bool | No | `false` | If enabled, Tuliprox uses URLs from `api_proxy.yml` for users operating in `redirect` proxy mode. This is important for multi-provider failover or cycling setups where exposing the provider URL directly would bypass Tuliprox's routing logic too early. |
 | `filter` | String | No | | Optional M3U-only post-transformation filter. This allows M3U consumers to receive a narrower subset than other output formats derived from the same target. |
 
-> **Note:** `mask_redirect_url` should be enabled if you use multiple providers and want Tuliprox to preserve redirect-mode routing and cycling behavior without exposing the direct upstream endpoint in the initial playlist URL.
+> **Note:** `mask_redirect_url` should be enabled if you use multiple providers and want Tuliprox to preserve redirect-mode
+> routing and cycling behavior without exposing the direct upstream endpoint in the initial playlist URL.
 
 ### 3. Type `strm`
 
@@ -972,21 +1064,22 @@ Generates local `.strm` files for Plex, Emby, Jellyfin, or Kodi-based library in
 
 #### Supported `style` Conventions
 
-- **Kodi:** `Movie Name (Year) {tmdb=ID}/Movie Name (Year).strm`
-- **Plex:** `Movie Name (Year) {tmdb-ID}/Movie Name (Year).strm`
-- **Emby:** `Movie Name (Year) [tmdbid=ID]/Movie Name (Year).strm`
-- **Jellyfin:** `Movie Name (Year) [tmdbid-ID]/Movie Name (Year).strm`
+* **Kodi:** `Movie Name (Year) {tmdb=ID}/Movie Name (Year).strm`
+* **Plex:** `Movie Name (Year) {tmdb-ID}/Movie Name (Year).strm`
+* **Emby:** `Movie Name (Year) [tmdbid=ID]/Movie Name (Year).strm`
+* **Jellyfin:** `Movie Name (Year) [tmdbid-ID]/Movie Name (Year).strm`
 
 ##### Kodi-Specific Behavior
 
 If `style: kodi` is selected:
 
-- `#KODIPROP:seekable=true|false` is added automatically
-- if `strm_props` is not specified, Tuliprox additionally sets:
-  - `#KODIPROP:inputstream=inputstream.ffmpeg`
-  - `#KODIPROP:http-reconnect=true`
+* `#KODIPROP:seekable=true|false` is added automatically
+* if `strm_props` is not specified, Tuliprox additionally sets:
+  * `#KODIPROP:inputstream=inputstream.ffmpeg`
+  * `#KODIPROP:http-reconnect=true`
 
-> **⚠️ Warning:** If `cleanup` is enabled, do **not** point `directory` at a real media library folder. Tuliprox may delete files that are no longer part of the generated target.
+> **⚠️ Warning:** If `cleanup` is enabled, do **not** point `directory` at a real media library folder.
+> Tuliprox may delete files that are no longer part of the generated target.
 
 ### 4. Type `hdhomerun`
 
@@ -1010,9 +1103,11 @@ This binds the target to a configured HDHomeRun virtual tuner device from `confi
 | `use_output` | Enum | No | | Selects whether the HDHomeRun stream URLs are based on `m3u` or `xtream` output behavior. This affects how playback URLs are generated and which delivery semantics back the tuner lineup. |
 
 ---
+
 ### 3.2.8 Favourites (`favourites`)
 
-`favourites` lets you duplicate final transformed channels into dedicated favorite groups **after** filtering, renaming, mapping, and other transformations are complete.
+`favourites` lets you duplicate final transformed channels into dedicated favorite groups **after**
+filtering, renaming, mapping, and other transformations are complete.
 
 ```yaml
 favourites:
@@ -1034,12 +1129,14 @@ favourites:
 ---
 
 ### 3.2.9 Watch (`watch`)
-For each target with a _unique name_, you can define watched groups. It is a list of group patterns Tuliprox monitors for content changes during updates.
+
+For each target with a *unique name*, you can define watched groups.
+It is a list of group patterns Tuliprox monitors for content changes during updates.
 
 If matching groups gain or lose channels, Tuliprox emits a Messaging event such as:
 
-- channels added
-- channels removed
+* channels added
+* channels removed
 
 ```yaml
 watch:
@@ -1053,4 +1150,5 @@ watch:
 | :--- | :--- | :---: | :--- | :--- |
 | `group` | String (Regex) | Yes | | Regex pattern matched against final group names. This allows Tuliprox to detect meaningful content changes in selected areas of the playlist and notify operators automatically through the configured messaging backends. |
 
-> **Note:** `watch` is especially useful for monitoring premium groups, VOD collections, or unstable provider segments where additions and removals should generate operational alerts.
+> **Note:** `watch` is especially useful for monitoring premium groups, VOD collections,
+> or unstable provider segments where additions and removals should generate operational alerts.

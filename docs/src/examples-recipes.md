@@ -6,6 +6,7 @@ with the ultimate Docker deployment stack.
 ## 1. Quickstart: Minimal Provider Setup
 
 To use Tuliprox, you need to configure at least three core files:
+
 1. `config.yml`: Defines the core server settings.
 2. `source.yml`: Defines the upstream provider and your output targets.
 3. `api-proxy.yml`: Defines your local/external server addresses and the users who can access the targets.
@@ -15,6 +16,7 @@ To use Tuliprox, you need to configure at least three core files:
 You have an Xtream provider (`http://fantastic.provider.xyz:8080`) and want to simply "pass through" the streams while utilizing the Web UI.
 
 **1. `config.yml` (Core Engine):**
+
 ```yaml
 api:
   host: 0.0.0.0
@@ -23,9 +25,12 @@ api:
 storage_dir: ./data
 update_on_boot: true
 ```
-*This configuration starts Tuliprox on port 8901. Downloaded playlists are stored inside the `data` folder. Setting `update_on_boot: true` is helpful during initial setup to immediately pull provider data.*
+
+*This configuration starts Tuliprox on port 8901. Downloaded playlists are stored inside the `data` folder.*
+*Setting `update_on_boot: true` is helpful during initial setup to immediately pull provider data.*
 
 **2. `source.yml` (Inputs & Targets):**
+
 ```yaml
 templates:
   - name: ALL_CHAN
@@ -47,9 +52,11 @@ sources:
           - type: xtream
         filter: "!ALL_CHAN!" # Lets everything through
 ```
+
 *Here we define the input source based on the provider's information and create a 1:1 mapped target (`clean_list`).*
 
 **3. `api-proxy.yml` (Servers & Users):**
+
 ```yaml
 server:
   - name: default
@@ -73,10 +80,13 @@ user:
         proxy: redirect  # Tuliprox only redirects the player; it does not proxy the video stream
         server: default
 ```
-*We define two server endpoints (internal LAN and external HTTPS). We then bind a user to the `clean_list` target. Using `proxy: redirect` saves bandwidth on your server during initial testing.*
+
+*We define two server endpoints (internal LAN and external HTTPS). We then bind a user to the `clean_list` target.*
+*Using `proxy: redirect` saves bandwidth on your server during initial testing.*
 
 **Resulting Client Endpoints:**
 You can now enter the following credentials into your IPTV player (e.g., TiviMate, IPTV Smarters):
+
 * **Portal URL:** `http://192.168.1.41:8901`
 * **Username:** `me`
 * **Password:** `mypass`
@@ -85,9 +95,11 @@ Start `tuliprox`,  fire up your IPTV-Application, enter credentials and watch.
 
 ### Scenario: Minimal M3U Setup
 
-If your provider uses standard M3U instead of the Xtream Codes API, simply adjust the input type in `source.yml`. Tuliprox automatically extracts credentials from the URL if present.
+If your provider uses standard M3U instead of the Xtream Codes API, simply adjust the input type in `source.yml`.
+Tuliprox automatically extracts credentials from the URL if present.
 
 **`source.yml` (M3U Variation):**
+
 ```yaml
 inputs:
   - type: m3u
@@ -100,12 +112,15 @@ inputs:
 
 ## 2. Advanced Filtering (Exclusion Logic & Templates)
 
-A 1:1 pass-through is rarely what you want. Upstream provider lists are often cluttered with countries or VOD sections you don't need. 
+A 1:1 pass-through is rarely what you want. Upstream provider lists are often cluttered with countries or VOD sections you don't need.
 
-Tuliprox uses a custom DSL (Domain Specific Language) for filtering. You need a basic understanding of Regular Expressions (Regex). A good site for learning and testing is[regex101.com](https://regex101.com/) (ensure you select the **Rust** flavor).
+Tuliprox uses a custom DSL (Domain Specific Language) for filtering. You need a basic understanding of Regular Expressions (Regex).
+A good site for learning and testing is[regex101.com](https://regex101.com/) (ensure you select the **Rust** flavor).
 
 ### The Basics
-DSL filters are applied in `source.yml` at the `target` level. The tilde `~` operator executes a Regex match. Evaluatable fields include `Group`, `Title`, `Name`, `Url`, and `Type`.
+
+DSL filters are applied in `source.yml` at the `target` level. The tilde `~` operator executes a Regex match.
+Evaluatable fields include `Group`, `Title`, `Name`, `Url`, and `Type`.
 
 * **Simple Inclusion:**
   Include all categories: `Group ~ ".*"`
@@ -118,6 +133,7 @@ DSL filters are applied in `source.yml` at the `target` level. The tilde `~` ope
   `NOT (Title ~ "FR: TV5Monde" AND Group ~ "FR: TF1")`
 
 ### Complex Matrix (Bracket Logic)
+
 Allow everything from Germany (DE) and France (FR), except Series and Commercials. Always allow Australia (AU).
 
 ```text
@@ -125,7 +141,10 @@ Allow everything from Germany (DE) and France (FR), except Series and Commercial
 ```
 
 ### Refactoring with Templates (The DRY Principle)
-As you can see, filter strings can quickly become massive and unmaintainable. This is where **Templates**[**Templates**](./configuration/template.md) come into play. You can disassemble a monolithic filter into smaller, readable parts and combine them.
+
+As you can see, filter strings can quickly become massive and unmaintainable.
+This is where **Templates**[**Templates**](./configuration/template.md) come into play.
+You can disassemble a monolithic filter into smaller, readable parts and combine them.
 
 ```yaml
 templates:
@@ -139,7 +158,7 @@ templates:
     value: 'NOT (Group ~ "FR: TF1" AND Title ~ "FR: TV5Monde")'
   - name: EXCLUDED_CHANNELS
     value: '!NO_TV5MONDE_IN_TF1! AND !NO_SHOPPING!'
-  
+
   # Final combination
   - name: MY_CHANNELS
     value: '!EXCLUDED_CHANNELS! AND (!GERMAN_CHANNELS! OR !FRENCH_CHANNELS!)'
@@ -158,6 +177,7 @@ sources:
           - type: xtream
         filter: "!MY_CHANNELS!"
 ```
+
 *The resulting playlist now cleanly contains all French and German channels, minus any shopping channels or specifically blacklisted streams.*
 
 ---

@@ -19,7 +19,7 @@ The repository ships with various helper scripts located under `bin/` to simplif
 * `bin/build_docker.sh`: Executes the multi-stage Docker build pipeline.
 * `bin/release.sh`: Orchestrates a full production release build.
 
-This project uses a `Makefile` to automate development tasks, tool installations, and build processes. This ensures a consistent  
+This project uses a `Makefile` to automate development tasks, tool installations, and build processes. This ensures a consistent
 environment across different machines.
 
 **Tool installations:**
@@ -104,13 +104,15 @@ If you need to run Tuliprox on specific hardware (e.g., Raspberry Pi) or want a 
 
 For a portable Linux binary, the `musl` target is recommended. You can either use the `cross` toolchain (easiest) or manually install the prerequisites.
 
-**Option A: Using `cross` (Recommended)**
+#### Option A: Using `cross` (Recommended)
+
 ```bash
 cargo install cross
 cross build -p tuliprox --release --target x86_64-unknown-linux-musl
 ```
 
-**Option B: Manual compilation on Debian/Ubuntu**
+#### Option B: Manual compilation on Debian/Ubuntu
+
 ```bash
 rustup update
 sudo apt-get install pkg-config musl-tools libssl-dev
@@ -147,7 +149,7 @@ cargo build -p tuliprox --release --target x86_64-pc-windows-gnu
 ## 4. Custom Docker Builds
 
 Tuliprox utilizes an advanced Multi-Stage Docker build to compile the Rust backend, the Yew frontend, and extract static FFmpeg resources in a
-single pipeline. 
+single pipeline.
 
 ### Standard Build
 
@@ -159,7 +161,8 @@ docker build --rm -f docker/Dockerfile -t tuliprox .
 
 ### Multi-Arch & Specific Targets
 
-This setup distinguishes between the **Docker Stage** (image flavor) and the **Rust Compilation Target** (CPU architecture). You can strictly target specific environments using the `--target` and `--build-arg` flags:
+This setup distinguishes between the **Docker Stage** (image flavor) and the **Rust Compilation Target** (CPU architecture).
+You can strictly target specific environments using the `--target` and `--build-arg` flags:
 
 * **`--target`**: Choose the image base. Use `scratch-final` for a hardened, minimal footprint or `alpine-final` if you need a shell for debugging.
 * **`--build-arg RUST_TARGET`**: Defines the Instruction Set Architecture (ISA) for the binary.
@@ -183,7 +186,8 @@ docker build --rm -f docker/Dockerfile -t tuliprox \
 
 ### Running the Custom Image (`docker-compose.yml`)
 
-When running your custom local image via `docker-compose`, ensure you change `image: ghcr.io/euzu/tuliprox:latest` to `image: tuliprox`. The configuration also includes a lightweight CLI-based healthcheck.
+When running your custom local image via `docker-compose`, ensure you change `image: ghcr.io/euzu/tuliprox:latest` to `image: tuliprox`.
+The configuration also includes a lightweight CLI-based healthcheck.
 
 ```yaml
 version: '3'
