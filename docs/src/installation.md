@@ -46,8 +46,8 @@ services:
 
 The separation of volumes is critical for security and performance:
 
-| Mount Point      | Explanation & Technical Background                                                                                                                                                                                                                                                                                  |
-|:-----------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Mount Point | Explanation & Technical Background |
+| :--- | :--- |
 | `/app/config`    | Must contain your YAML files (`config.yml`, `source.yml`, etc.). Monitored by Tuliprox for file system events (`config_hot_reload`).                                                                                                                                                                                |
 | `/app/data`      | The `storage_dir`. Contains **Runtime Data**. Tuliprox recursively creates B+Tree databases (`*.db`), M3U caches, and TMDB metadata here. **THIS MUST BE PERSISTENT!** If lost during a restart, Tuliprox will attempt to redownload and FFprobe tens of thousands of streams, inevitably leading to provider bans. |
 | `/app/backup`    | Destination folder for configuration backups triggered via the Web UI.                                                                                                                                                                                                                                              |
