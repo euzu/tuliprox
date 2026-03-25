@@ -4,8 +4,7 @@ use crate::repository::stream_history::{
     write_file_magic, write_framed,
 };
 use crate::repository::stream_history::writer::{apply_retention, current_utc_day, now_utc_secs};
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use lz4_flex::frame::FrameEncoder;
 use log::{info, warn};
 use std::{
     fs::{self, File},
@@ -75,10 +74,10 @@ fn scan_pending_file(path: &Path) -> io::Result<PendingSummary> {
     Ok(PendingSummary { header, total_blocks, total_records, min_event_ts: min_ts, max_event_ts: max_ts, blocks_start })
 }
 
-/// Finalize a `.pending` file into a `.archive.gz` file, then delete the pending.
+/// Finalize a `.pending` file into a `.archive.lz4` file, then delete the pending.
 ///
 /// The archive is self-describing: it contains a new file header with `finalized=true`
-/// and all summary statistics, followed by the original block data, all gzip-compressed.
+/// and all summary statistics, followed by the original block data, all lz4-compressed.
 pub fn archive_pending_file(path: &Path) -> io::Result<PathBuf> {
     let summary = scan_pending_file(path)?;
 
@@ -90,7 +89,7 @@ pub fn archive_pending_file(path: &Path) -> io::Result<PathBuf> {
         partition_day_ts_utc: summary.header.partition_day_ts_utc.clone(),
         writer_instance_id: summary.header.writer_instance_id,
         host_id: summary.header.host_id.clone(),
-        compression_kind: CompressionKind::Gzip,
+        compression_kind: CompressionKind::Lz4,
         finalized: true,
         record_encoding_kind: RecordEncodingKind::MessagePackNamed,
         finalized_at_ts_utc: Some(now_utc_secs()),
@@ -104,18 +103,18 @@ pub fn archive_pending_file(path: &Path) -> io::Result<PathBuf> {
     // which is user-manipulable and must not be trusted.
     let archive_path = archive_path_for(path, &summary.header.partition_day_ts_utc);
     let archive_file = File::create(&archive_path)?;
-    let mut gz = GzEncoder::new(archive_file, Compression::default());
+    let mut lz4 = FrameEncoder::new(archive_file);
 
     // Write the finalized file header
-    write_file_magic(&mut gz)?;
-    write_framed(&mut gz, &finalized_header)?;
+    write_file_magic(&mut lz4)?;
+    write_framed(&mut lz4, &finalized_header)?;
 
     // Stream the block data from the pending file
     let mut pending = File::open(path)?;
     pending.seek(std::io::SeekFrom::Start(summary.blocks_start))?;
-    io::copy(&mut pending, &mut gz)?;
+    io::copy(&mut pending, &mut lz4)?;
 
-    gz.finish()?;
+    lz4.finish().map_err(io::Error::other)?;
     drop(pending);
 
     fs::remove_file(path)?;
@@ -132,7 +131,7 @@ pub fn archive_pending_file(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn archive_path_for(pending_path: &Path, partition_day: &str) -> PathBuf {
-    let name = format!("stream-history-{partition_day}.archive.gz");
+    let name = format!("stream-history-{partition_day}.archive.lz4");
     pending_path.parent().unwrap_or(Path::new(".")).join(name)
 }
 
@@ -211,7 +210,7 @@ mod tests {
     };
     use crate::repository::stream_history::writer::{StreamHistoryWriter, now_utc_secs, current_utc_day};
     use crate::model::StreamHistoryConfig;
-    use flate2::read::GzDecoder;
+    use lz4_flex::frame::FrameDecoder;
     use tempfile::TempDir;
 
     fn test_config(dir: &str, batch_size: usize) -> StreamHistoryConfig {
@@ -315,7 +314,7 @@ mod tests {
 
         assert!(!path.exists(), "pending file must be removed after archiving");
         assert!(archive_path.exists(), "archive file must exist");
-        assert!(archive_path.to_string_lossy().ends_with(".archive.gz"), "archive must have .archive.gz extension");
+        assert!(archive_path.to_string_lossy().ends_with(".archive.lz4"), "archive must have .archive.lz4 extension");
     }
 
     #[test]
@@ -328,16 +327,16 @@ mod tests {
         let archive_path = archive_pending_file(&path).unwrap();
 
         // Decompress and read the header
-        let gz_file = File::open(&archive_path).unwrap();
-        let mut gz = GzDecoder::new(gz_file);
-        read_and_verify_file_magic(&mut gz).expect("file magic must be valid in archive");
-        let header: FileHeaderBody = read_framed(&mut gz).expect("header must decode");
+        let lz4_file = File::open(&archive_path).unwrap();
+        let mut lz4 = FrameDecoder::new(lz4_file);
+        read_and_verify_file_magic(&mut lz4).expect("file magic must be valid in archive");
+        let header: FileHeaderBody = read_framed(&mut lz4).expect("header must decode");
 
         assert!(header.finalized, "archived header must have finalized=true");
         assert_eq!(header.partition_day_ts_utc, day);
         assert_eq!(header.total_block_count, Some(1));
         assert_eq!(header.total_record_count, Some(5));
-        assert_eq!(header.compression_kind, CompressionKind::Gzip);
+        assert_eq!(header.compression_kind, CompressionKind::Lz4);
         assert!(header.finalized_at_ts_utc.is_some());
     }
 
@@ -350,10 +349,10 @@ mod tests {
         let archive_path = archive_pending_file(&path).unwrap();
         assert!(archive_path.exists());
 
-        let gz_file = File::open(&archive_path).unwrap();
-        let mut gz = GzDecoder::new(gz_file);
-        read_and_verify_file_magic(&mut gz).expect("magic ok");
-        let header: FileHeaderBody = read_framed(&mut gz).expect("header ok");
+        let lz4_file = File::open(&archive_path).unwrap();
+        let mut lz4 = FrameDecoder::new(lz4_file);
+        read_and_verify_file_magic(&mut lz4).expect("magic ok");
+        let header: FileHeaderBody = read_framed(&mut lz4).expect("header ok");
         assert!(header.finalized);
         assert_eq!(header.total_block_count, Some(0));
         assert_eq!(header.total_record_count, Some(0));
@@ -373,7 +372,7 @@ mod tests {
 
         // Old pending must be archived and removed
         assert!(!old_path.exists(), "old pending must be removed by recovery");
-        let old_archive = tmp.path().join(format!("stream-history-{old_day}.archive.gz"));
+        let old_archive = tmp.path().join(format!("stream-history-{old_day}.archive.lz4"));
         assert!(old_archive.exists(), "old pending must become an archive");
 
         // Today's pending must be untouched

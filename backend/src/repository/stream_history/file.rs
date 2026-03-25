@@ -9,14 +9,15 @@ pub const BLOCK_MAGIC: [u8; 4] = *b"BLK\x01";
 pub const CONTAINER_FORMAT_VERSION: u8 = 1;
 pub const RECORD_SCHEMA_VERSION: u8 = 1;
 pub const SOURCE_KIND_STREAM_HISTORY: &str = "stream_history";
-/// Maximum allowed frame payload size when reading. Prevents memory exhaustion on corrupt/malicious input.
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
+/// Maximum allowed block payload size when reading. Prevents memory exhaustion on corrupt/malicious input during magic-recovery.
+pub const MAX_BLOCK_PAYLOAD_SIZE: usize = 2 * MAX_FRAME_SIZE; // 16 MiB
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompressionKind {
     None,
-    Gzip,
+    Lz4,
     Zstd,
 }
 

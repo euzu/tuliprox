@@ -374,7 +374,7 @@ pub fn apply_retention(directory: &str, retention_days: u16) -> io::Result<()> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
-        // Match "stream-history-YYYY-MM-DD.pending" or "stream-history-YYYY-MM-DD.archive.gz"
+        // Match "stream-history-YYYY-MM-DD.pending" or "stream-history-YYYY-MM-DD.archive.lz4"
         if let Some(day) = extract_day_from_filename(&name) {
             if day < cutoff_day.as_str() {
                 let path = entry.path();
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn stream_history_retention_extract_day_from_filename() {
         assert_eq!(extract_day_from_filename("stream-history-2026-03-22.pending"), Some("2026-03-22"));
-        assert_eq!(extract_day_from_filename("stream-history-2026-03-22.archive.gz"), Some("2026-03-22"));
+        assert_eq!(extract_day_from_filename("stream-history-2026-03-22.archive.lz4"), Some("2026-03-22"));
         assert_eq!(extract_day_from_filename("unrelated.txt"), None);
     }
 
