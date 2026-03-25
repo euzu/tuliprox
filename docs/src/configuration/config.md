@@ -66,7 +66,6 @@ If you use **Bind-Mounts** (e.g., in `fstab` or Docker), the filesystem watcher 
 * **Behavior:** If you configure Tuliprox to watch `/config`, the watcher might still trigger events using the path `/home/tuliprox/config`.
 * **Solution:** Ensure your internal Tuliprox paths match the paths reported by the OS kernel to ensure the hot-reload trigger fires correctly.
 
----
 ### Subsections (Object Keys)
 
 | Block | Description | Link |
@@ -270,8 +269,6 @@ Tuliprox uses a standard cron syntax but **strictly requires 7 fields**, startin
   0   0   8    *   *   *   * 
 ```
 
----
-
 ### Configuration
 In current versions, schedules are defined as a list of tasks.
 
@@ -300,8 +297,6 @@ schedules:
 | `schedule` | String | - | Cron expression with 7 fields (Seconds included at the start). |
 | `type` | Enum | `PlaylistUpdate` | The task to execute. See [Task Types](#task-types) below. |
 | `targets` | List | - | *(Optional, only for PlaylistUpdate)* List of target names to restrict the update to. If omitted, all enabled targets are updated. |
-
----
 
 ### Task Types
 
@@ -362,8 +357,6 @@ messaging:
       error: '{"text": "Alert: {{message}}", "type": "{{kind}}"}'
 ```
 
----
-
 ### 5.2 Templating (Handlebars)
 For **Telegram**, **Discord**, and **REST**, Tuliprox uses [Handlebars](https://handlebarsjs.com/) to format message bodies. This allows for rich, structured notifications (e.g., Discord Embeds or Markdown tables).
 
@@ -391,8 +384,6 @@ The Handlebars engine provides a rich context object. Depending on the `kind` of
 * `{{watch}}`: **Change Tracking Data.** Specifically available for the `watch` event kind. It contains a diff-style object showing exactly which groups or channels were added, removed, or modified compared to the previous state.
     * **Access:** Iterate over the change sets using loops. Common keys include `added`, `removed`, and `modified`.
     * **Example:** Use `{{#each watch.added}} • {{name}} {{/each}}` to list all new channels detected in the monitored groups.
-
-
 
 #### Template Examples:
 
@@ -525,7 +516,6 @@ hdhomerun:
       device_udn: "uuid:..."  # Unique Device Name (Port 1900). Recommended to leave blank for auto-generation.
       friendly_name: "Tuliprox Living Room"
 ```
----
 
 ### Configuration Parameters
 

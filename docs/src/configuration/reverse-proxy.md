@@ -270,10 +270,12 @@ If Tuliprox released and re-acquired the provider slot for every single segment,
 * `hls_session_ttl_secs: 15`: After a `.ts` segment finishes downloading, the physical slot to the provider is closed, but the "Virtual Slot" for this specific user remains reserved for 15 seconds. No other user can steal this slot during this window. Channel switches from the same client can immediately take over the reservation.
 * The same principle applies to Archive/Catchup TV (`catchup_session_ttl_secs: 45`), which shares the same fragmentation and seeking issues.
 
+---
 ### Shared Live Streams
 Tuliprox can share a live stream (`share_live_streams: true` in the target options of `source.yml`). If 5 users watch the same Live-TV channel, Tuliprox pulls the stream only 1x from the provider and multicasts the bytes locally to 5 clients.
 To ensure a user who tunes in 10 seconds later doesn't get player errors due to missing I-Frames/Keyframes, Tuliprox continuously keeps the last X Megabytes (`shared_burst_buffer_mb`, default `12`) in RAM. It fires this burst buffer at new subscribers so their decoders can instantly synchronize.
 
+---
 ### The "VLC Seek Problem" & Grace Periods
 
 When a user fast-forwards or rewinds a VOD, the player calculates the new byte offset, drops the old TCP connection, and immediately fires a new HTTP GET request (with a `Range` header) to Tuliprox.

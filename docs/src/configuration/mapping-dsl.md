@@ -73,8 +73,6 @@ mappings:
 | **`mapper`** | List | A list of scripts (executed sequentially) containing the DSL logic. Can optionally be gated by a `filter`. [See Mapper DSL](#the-mapper-dsl-mapper). |
 | **`counter`** | List | Logic for assigning channel numbers sequentially. [See Counters](#counters-sequential-numbering-counter). |
 
----
-
 ## Filter & Operator Basics
 
 Before writing advanced scripts, you must understand the logical operators available for evaluating `filter` strings (Applies to `source.yml` & `mapping.yml`):
@@ -86,8 +84,6 @@ Before writing advanced scripts, you must understand the logical operators avail
 **Evaluatable Fields:** `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input`, `Type`
 
 *Example:* `((Group ~ "^DE.*") AND (NOT Title ~ ".*Shopping.*")) OR (Group ~ "^AU.*")`
-
----
 
 ## 2.1 The Mapper DSL (`mapper`)
 
@@ -373,6 +369,7 @@ The other groups should get a numerical prefix for ordering.
    - `@Group` receives the normalized, ordered category label
    - `@Caption` receives the cleaned channel title without the original structural prefix
 
+---
 ### Grouping by release year
 
 We want to automatically group movie channels by their release year, using the following logic:
@@ -427,6 +424,7 @@ The result should look like:
 5. **Final Group Assignment**  
    The result is appended to the fixed prefix `FR | MOVIES ` and written back into `@Group`.
 
+---
 ### URL Rewriting
 
 If you want to proxy streams but your provider uses dynamic token query parameters that must be preserved, or if you want to alter the domain structure inside the playlist while keeping the original path/query part unchanged, URL rewriting is a useful technique.

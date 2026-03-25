@@ -138,8 +138,6 @@ Tuliprox utilizes a flexible URI-based system to define where input data origina
 * **Batch Constraints:** For `m3u_batch` and `xtream_batch`, only **local** CSV sources are permitted. You must use either the `batch://` scheme or a plain absolute/relative filesystem path.
 * **Protocol Restrictions:** To ensure stability in batch processing, URI schemes such as `provider://`, `http(s)://`, or `file://` are strictly rejected when used within a batch context.
 
----
-
 ### Input Subsections (Object Keys)
 
 | Block | Description | Link |
@@ -152,7 +150,7 @@ Tuliprox utilizes a flexible URI-based system to define where input data origina
 | `panel_api` | Automated reseller panel integration (provisioning/renewal). | [See Panel API](#26-provider-panel-api-panel_api) |
 ---
 
-#### 2.1 Headers (`headers`)
+### 2.1 Headers (`headers`)
 Allows the injection of custom HTTP headers into outgoing requests for this specific provider. This is often required for providers that enforce `User-Agent` whitelisting or specific authorization tokens.
 
 | Parameter | Type | Technical Impact & Background |
@@ -167,6 +165,7 @@ headers:
   X-Custom-Auth: "my-secret-token"
 ```
 
+---
 ### 2.2 Input Options (`options`)
 Controls the behavior during download and asynchronous metadata resolution (see the *Metadata Update* chapter) for this specific provider.
 
@@ -188,7 +187,6 @@ Controls the behavior during download and asynchronous metadata resolution (see 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are updated.
 
 ---
-
 ### 2.3 EPG Assignment & Smart Match (`epg`)
 
 Tuliprox can load external XMLTV files and map them intelligently using advanced fuzzy matching to streams that are missing a valid EPG ID. Within the `epg` block, you can define multiple XMLTV providers. Tuliprox aggregates these sources and assigns EPG data based on priority and matching rules.
@@ -498,6 +496,7 @@ sources:
           - type: m3u
 ```
 
+---
 ### 3.1 `inputs`
 
 `inputs` is a list of input names referencing entries defined in the `inputs` section of `source.yml`.
@@ -511,6 +510,7 @@ sources:
 
 > **Note:** The `inputs` list only references previously defined input names. It does not define input behavior itself.
 
+---
 ### 3.2 `targets`
 
 A `target` defines the final transformed playlist that clients consume.  
@@ -595,6 +595,7 @@ Valid values are:
 > **Note:** The following sections are intended to be inserted **between** `### 3.2.4 Output Formats (\`output\`)` and the existing `Favourites` / `Watch` subsections.
 > If you keep strict numbering, the existing `Favourites` and `Watch` sections should be renumbered accordingly.
 
+---
 ### 3.2.2 `filter`
 
 The target-level `filter` is a string-based expression using Tuliprox's filter DSL.  
@@ -683,6 +684,8 @@ mapping:
 | `mapping` | List of Strings | No | | Ordered list of mapping IDs to apply. Each referenced mapping can perform deep transformations on the playlist structure, metadata, grouping, or labels, making this one of the most powerful target-level processing stages in Tuliprox. |
 
 To define a new mapping IDs see details in chapter [Mapper DSL & Logic](./mapping-dsl.md).
+
+---
 ### 3.2.5 `sort`
 
 The `sort` block defines ordering rules for groups and channels.
@@ -909,7 +912,6 @@ This configuration creates two additional virtual categories populated with matc
 | `lists[].content_type` | Enum | Yes | | `vod` or `series`. This determines which class of playlist entries Tuliprox will attempt to match and inject into the generated category. |
 | `lists[].fuzzy_match_threshold` | Integer | No | | Fuzzy matching threshold for title matching. Higher values reduce false positives but may miss loosely matching items. |
 
----
 ### 2. Type `m3u`
 
 ```yaml
@@ -932,8 +934,6 @@ output:
 | `filter` | String | No | | Optional M3U-only post-transformation filter. This allows M3U consumers to receive a narrower subset than other output formats derived from the same target. |
 
 > **Note:** `mask_redirect_url` should be enabled if you use multiple providers and want Tuliprox to preserve redirect-mode routing and cycling behavior without exposing the direct upstream endpoint in the initial playlist URL.
-
----
 
 ### 3. Type `strm`
 
@@ -987,8 +987,6 @@ If `style: kodi` is selected:
   - `#KODIPROP:http-reconnect=true`
 
 > **⚠️ Warning:** If `cleanup` is enabled, do **not** point `directory` at a real media library folder. Tuliprox may delete files that are no longer part of the generated target.
-
----
 
 ### 4. Type `hdhomerun`
 

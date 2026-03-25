@@ -203,8 +203,6 @@ targets:
 
 > **Note on Probing:** Probing respects the `max_connections` limit of your provider input. If no connection slot is available, the item is skipped and retried during the next update cycle.
 
----
-
 ### Glossary & Data Types
 
 To ensure precise configuration, the following terms and data formats are used throughout the metadata module:

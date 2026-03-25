@@ -83,8 +83,6 @@ You can now enter the following credentials into your IPTV player (e.g., TiviMat
 
 Start `tuliprox`,  fire up your IPTV-Application, enter credentials and watch.
 
----
-
 ### Scenario: Minimal M3U Setup
 
 If your provider uses standard M3U instead of the Xtream Codes API, simply adjust the input type in `source.yml`. Tuliprox automatically extracts credentials from the URL if present.

@@ -77,7 +77,7 @@ library:
 
 ---
 
-## Integration as an Input (`source.yml`)
+### Integration as an Input (`source.yml`)
 
 To make your local movies visible in your M3U/Xtream targets, you attach the library as a standard `input` of `type: library`
 in your `source.yml`:

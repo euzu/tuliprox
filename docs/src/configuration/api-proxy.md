@@ -185,6 +185,7 @@ Tuliprox also offers **REST-friendly aliases** in case restrictive firewalls or 
 * `/m3u` instead of `get.php`
 * `/epg` instead of `xmltv.php`
 
+---
 ### Reverse Proxy in front of Tuliprox
 
 If another proxy sits in front of Tuliprox (like Nginx or Traefik), you must ensure it forwards the correct headers. Without these, Tuliprox's IP-based rate limiting, Geo-IP validation, and connection kicking will see the proxy's internal IP instead of the actual client.
