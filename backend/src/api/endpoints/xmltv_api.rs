@@ -494,6 +494,9 @@ async fn xmltv_api_post(
     axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
     api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
 ) -> impl IntoResponse + Send {
+    if let Err(ref rejection) = api_form_req {
+        debug!("xmltv_api_post: form parsing failed: {rejection:?}");
+    }
     let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
     let api_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
     xmltv_api(api_req, &app_state).await
