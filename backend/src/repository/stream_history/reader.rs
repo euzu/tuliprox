@@ -130,35 +130,39 @@ impl<R: Read> StreamHistoryFileReader<R> {
         }
     }
 
+    /// Scan forward through corrupted data looking for the next valid `BLOCK_MAGIC`.
+    /// Uses a sliding window with carry bytes across read boundaries.
+    /// When a candidate is found, the unconsumed buffer tail is chained with the
+    /// underlying reader so that `read_framed` reads from the correct position.
     fn magic_recovery(&mut self) -> io::Result<Option<()>> {
         let mut scan_buf = [0u8; 4096];
         let magic = BLOCK_MAGIC;
-        let mut carry = [0u8; 3]; // carry bytes across chunk boundaries
+        let mut carry = [0u8; 3];
         let mut carry_len = 0usize;
 
         loop {
             let n = match self.reader.read(&mut scan_buf) {
-                Ok(0) => return Ok(None), // EOF
+                Ok(0) => return Ok(None),
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
                 Err(e) => return Err(e),
             };
 
-            // Search for BLOCK_MAGIC in carry + scan_buf
+            // Build a combined view: carry bytes + newly read bytes
             let search_len = carry_len + n;
 
-            // Simple approach: check each position
             for i in 0..search_len.saturating_sub(3) {
                 let b = |idx: usize| -> u8 {
                     if idx < carry_len { carry[idx] } else { scan_buf[idx - carry_len] }
                 };
                 if b(i) == magic[0] && b(i + 1) == magic[1] && b(i + 2) == magic[2] && b(i + 3) == magic[3] {
-                    // Found candidate — remaining bytes after magic are already consumed
-                    // We need to "put back" bytes after the magic sequence
-                    // Since we can't unread, we attempt to read the block header directly
-                    // The bytes after position i+4 in our buffer are unconsumed data
-                    // For simplicity in the recovery path, try reading the next block header
-                    let block_header: BlockHeaderBody = match read_framed::<_, BlockHeaderBody>(&mut self.reader) {
+                    // Bytes after the magic within our buffer that haven't been consumed
+                    // by the underlying reader yet — chain them before self.reader.
+                    let tail_start = (i + 4).saturating_sub(carry_len);
+                    let tail = &scan_buf[tail_start..n];
+                    let mut chained = io::Cursor::new(tail).chain(&mut self.reader);
+
+                    let block_header: BlockHeaderBody = match read_framed::<_, BlockHeaderBody>(&mut chained) {
                         Ok(h) if (h.payload_len as usize) <= MAX_BLOCK_PAYLOAD_SIZE => {
                             eprintln!("Warning: {}: recovered at block with {} records", self.file_path, h.record_count);
                             h
@@ -167,24 +171,23 @@ impl<R: Read> StreamHistoryFileReader<R> {
                             eprintln!("Warning: {}: recovery candidate rejected (payload_len={})", self.file_path, h.payload_len);
                             continue;
                         }
-                        Err(_) => continue, // Not a real block header, keep scanning
+                        Err(_) => continue,
                     };
 
-                    // Read and validate payload
+                    // Read and validate payload from the chained reader
                     self.payload_buf.resize(block_header.payload_len as usize, 0);
-                    self.reader.read_exact(&mut self.payload_buf)?;
+                    chained.read_exact(&mut self.payload_buf)?;
                     self.current_block_remaining = block_header.record_count;
                     self.payload_offset = 0;
                     return Ok(Some(()));
                 }
             }
 
-            // Keep last 3 bytes as carry for cross-boundary detection
+            // Keep last 3 bytes as carry for cross-boundary magic detection
             if n >= 3 {
                 carry[..3].copy_from_slice(&scan_buf[n - 3..n]);
                 carry_len = 3;
             } else {
-                // Shift carry and append new bytes
                 let total = carry_len + n;
                 let keep = total.min(3);
                 let mut tmp = [0u8; 6];
@@ -214,11 +217,10 @@ impl<R: Read> Iterator for StreamHistoryFileReader<R> {
                     self.current_block_remaining = 0;
                     continue;
                 }
-                let record_len = u32::from_be_bytes(
-                    self.payload_buf[self.payload_offset..self.payload_offset + 4]
-                        .try_into()
-                        .unwrap()
-                ) as usize;
+                // SAFETY: bounds check on line 212 guarantees exactly 4 bytes are available
+                let mut record_len_bytes = [0u8; 4];
+                record_len_bytes.copy_from_slice(&self.payload_buf[self.payload_offset..self.payload_offset + 4]);
+                let record_len = u32::from_be_bytes(record_len_bytes) as usize;
                 self.payload_offset += 4;
 
                 if self.payload_offset + record_len > self.payload_buf.len() {

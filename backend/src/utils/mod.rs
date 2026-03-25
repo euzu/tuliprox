@@ -76,7 +76,7 @@ pub use self::trakt::*;
 pub use self::telegram::*;
 pub use self::geoip::*;
 pub use self::db_viewer::*;
-pub use self::stream_history_viewer::*;
+pub use self::stream_history_viewer::stream_history_viewer;
 pub use shared::utils::*;
 pub use self::epg_parser::*;
 pub use self::ordinal::*;

@@ -8,10 +8,10 @@ use chrono;
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::repository::{StreamHistoryRecord, EventType, DisconnectReason, StreamHistoryFileReader, FileHeaderBody, read_and_verify_file_magic, read_framed};
+use crate::repository::{StreamHistoryRecord, EventType, DisconnectReason, StreamHistoryFileReader, FileHeaderBody, read_and_verify_file_magic, read_framed, extract_day_from_filename};
 
 #[derive(Deserialize)]
-pub struct StreamHistoryQuery {
+struct StreamHistoryQuery {
     pub from: Option<String>,
     pub to: Option<String>,
     pub path: Option<String>,
@@ -19,13 +19,13 @@ pub struct StreamHistoryQuery {
 }
 
 /// Parsed time range as (`start_ts_utc`, `end_ts_utc`) in seconds
-pub type TimeRange = (u64, u64);
+type TimeRange = (u64, u64);
 
 const SECS_PER_DAY: u64 = 86400;
 
 /// Parse a date or datetime string into a UTC unix timestamp.
 /// Accepts: "YYYY-MM-DD", "YYYY-MM-DD HH:MM", "YYYY-MM-DD HH:MM:SS"
-pub fn parse_date_or_datetime(input: &str) -> Result<u64, String> {
+fn parse_date_or_datetime(input: &str) -> Result<u64, String> {
     let trimmed = input.trim();
 
     // Try date only: YYYY-MM-DD
@@ -56,7 +56,7 @@ fn is_date_only(input: &str) -> bool {
 }
 
 /// Resolve the query's from/to into a concrete time range.
-pub fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange, String> {
+fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange, String> {
     match (&query.from, &query.to) {
         (Some(from), Some(to)) => {
             let start = parse_date_or_datetime(from)?;
@@ -93,18 +93,18 @@ pub fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange, Strin
 
 const NUMERIC_FIELDS: &[&str] = &["session_id"];
 
-pub enum FilterValue {
+enum FilterValue {
     Exact(String),
     Regex(Regex),
     NumericExact(u64),
 }
 
-pub struct CompiledFilter {
-    pub fields: Vec<(String, FilterValue)>,
+struct CompiledFilter {
+    fields: Vec<(String, FilterValue)>,
 }
 
 impl CompiledFilter {
-    pub fn compile(raw: &HashMap<String, String>) -> Result<Self, String> {
+    fn compile(raw: &HashMap<String, String>) -> Result<Self, String> {
         let mut fields = Vec::with_capacity(raw.len());
         for (key, value) in raw {
             let filter_value = if NUMERIC_FIELDS.contains(&key.as_str()) {
@@ -125,7 +125,7 @@ impl CompiledFilter {
         Ok(Self { fields })
     }
 
-    pub fn matches(&self, record: &StreamHistoryRecord) -> bool {
+    fn matches(&self, record: &StreamHistoryRecord) -> bool {
         self.fields.iter().all(|(key, value)| {
             match get_record_field(record, key) {
                 RecordFieldValue::String(Some(s)) => match value {
@@ -186,7 +186,7 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
 }
 
 /// Load query from inline JSON or @file reference
-pub fn load_query(input: &str) -> Result<StreamHistoryQuery, String> {
+fn load_query(input: &str) -> Result<StreamHistoryQuery, String> {
     let json_str = if let Some(file_path) = input.strip_prefix('@') {
         fs::read_to_string(file_path)
             .map_err(|e| format!("Failed to read query file '{file_path}': {e}"))?
@@ -199,13 +199,13 @@ pub fn load_query(input: &str) -> Result<StreamHistoryQuery, String> {
 }
 
 
-pub struct HistoryFile {
-    pub path: PathBuf,
-    pub partition_day: String,
-    pub is_archive: bool,
+struct HistoryFile {
+    path: PathBuf,
+    partition_day: String,
+    is_archive: bool,
 }
 
-pub fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<HistoryFile>> {
+fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<HistoryFile>> {
     if !dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -228,7 +228,18 @@ pub fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<Hist
             continue;
         }
 
-        // Read file header to get partition day and timestamps
+        // Fast filename-based pre-filter: skip files whose partition day
+        // is clearly outside the query range without reading headers.
+        if let Some(day) = extract_day_from_filename(&name) {
+            if let Ok(day_start) = parse_date_or_datetime(day) {
+                let day_end = day_start + SECS_PER_DAY - 1;
+                if day_end < range_start || day_start > range_end {
+                    continue;
+                }
+            }
+        }
+
+        // Read file header for archive-level timestamp bounds
         let header = match read_file_header(&path, is_archive) {
             Ok(h) => h,
             Err(e) => {
@@ -241,17 +252,8 @@ pub fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<Hist
         if is_archive {
             if let (Some(min_ts), Some(max_ts)) = (header.min_event_ts_utc, header.max_event_ts_utc) {
                 if max_ts < range_start || min_ts > range_end {
-                    continue; // Entire file outside range
+                    continue;
                 }
-            }
-        }
-
-        // Partition-day level check
-        // Convert partition_day "YYYY-MM-DD" to timestamp range and check overlap
-        if let Ok(day_start) = parse_date_or_datetime(&header.partition_day_ts_utc) {
-            let day_end = day_start + SECS_PER_DAY - 1;
-            if day_end < range_start || day_start > range_end {
-                continue;
             }
         }
 
@@ -293,11 +295,11 @@ fn read_file_header(path: &Path, is_archive: bool) -> io::Result<FileHeaderBody>
     }
 }
 
-pub fn stream_output(
+fn stream_output(
     files: &[HistoryFile],
     time_range: &TimeRange,
     filters: &CompiledFilter,
-) -> io::Result<()> {
+) {
     let (range_start, range_end) = *time_range;
     println!("[");
     let mut first = true;
@@ -349,7 +351,6 @@ pub fn stream_output(
     }
 
     println!("\n]");
-    Ok(())
 }
 
 fn exit_viewer(code: i32) -> ! {
@@ -399,10 +400,7 @@ pub fn stream_history_viewer(input: &str) {
         }
     };
 
-    if let Err(e) = stream_output(files.as_slice(), &time_range, &filters) {
-        eprintln!("Error: {e}");
-        exit_viewer(1);
-    }
+    stream_output(files.as_slice(), &time_range, &filters);
 
     exit_viewer(0);
 }

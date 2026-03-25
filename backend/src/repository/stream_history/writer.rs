@@ -100,7 +100,10 @@ impl StreamHistoryWriter {
         let Some(tx) = &self.tx else { return Ok(()) };
         let (resp_tx, resp_rx) = oneshot::channel();
         let _ = tx.send(WriterCommand::Flush(resp_tx)).await;
-        resp_rx.await.unwrap_or(Ok(()))
+        resp_rx.await.unwrap_or_else(|_| {
+            log::warn!("Stream history flush: worker channel closed");
+            Ok(())
+        })
     }
 
     /// Flush and shut down the writer, waiting for the worker to finish.
@@ -232,6 +235,10 @@ impl WriterState {
         self.batch.push(record);
     }
 
+    /// Flush buffered records to the pending file.
+    /// NOTE: This performs blocking file I/O on the tokio runtime. Acceptable because
+    /// the writer runs on its own task and stream history is best-effort — a slow disk
+    /// only delays history persistence, never the streaming hot path.
     fn flush_batch(&mut self) -> io::Result<()> {
         if self.batch.is_empty() {
             return Ok(());
@@ -365,7 +372,7 @@ pub fn apply_retention(directory: &str, retention_days: u16) -> io::Result<()> {
 
     let cutoff_day = {
         let now_secs = now_utc_secs();
-        let cutoff_secs = now_secs - u64::from(retention_days) * SECS_PER_DAY;
+        let cutoff_secs = now_secs.saturating_sub(u64::from(retention_days) * SECS_PER_DAY);
         utc_day_from_secs(cutoff_secs)
     };
 
@@ -390,7 +397,7 @@ pub fn apply_retention(directory: &str, retention_days: u16) -> io::Result<()> {
     Ok(())
 }
 
-fn extract_day_from_filename(name: &str) -> Option<&str> {
+pub fn extract_day_from_filename(name: &str) -> Option<&str> {
     let stripped = name.strip_prefix("stream-history-")?;
     // Day is the first 10 chars: "YYYY-MM-DD"
     if stripped.len() >= 10 {
