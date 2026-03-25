@@ -1355,8 +1355,7 @@ macro_rules! register_xtream_api_timeshift {
      ($router:expr, [$($path:expr),*]) => {{
          $router
        $(
-          .route($path, axum::routing::get(xtream_player_api_timeshift_query_stream))
-          .route($path, axum::routing::post(xtream_player_api_timeshift_query_stream))
+          .route($path, axum::routing::get(xtream_player_api_timeshift_query_stream).post(xtream_player_api_timeshift_query_stream))
             //$cfg.service(web::resource($path).route(web::get().to(xtream_player_api_timeshift_stream)).route(web::post().to(xtream_player_api_timeshift_stream)));
         )*
     }};

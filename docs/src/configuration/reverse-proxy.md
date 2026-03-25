@@ -105,7 +105,6 @@ Prevents provider bans by limiting "bursting" players. Supported units: `KB/s`, 
 
 | Resolution | Framerate | Bitrate (kbps) | Quality |
 | :--- | :--- | :--- | :--- |
-| :--- | :--- | :--- | :--- |
 | 480p (854x480) | 30 fps | 819 – 2,457 | Low-Quality |
 | 720p (1280x720) | 30 fps | 2,457 – 5,737 | HD-Streams |
 | 1080p (1920x1080) | 30 fps | 5,737 – 12,288 | Full-HD |
