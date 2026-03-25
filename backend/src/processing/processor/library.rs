@@ -1,4 +1,5 @@
 use crate::library::{MediaMetadata, MetadataAsyncIter, MetadataCacheEntry};
+use crate::library::resolve_metadata_storage_path;
 use crate::model::{AppConfig, ConfigInput};
 use shared::concat_string;
 use shared::error::TuliproxError;
@@ -14,8 +15,7 @@ pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &A
     let Some(library_config) = config.library.as_ref() else { return (vec![], vec![]) };
     if !library_config.enabled { return (vec![], vec![]); }
 
-    let storage_path = config.metadata_update.as_ref()
-        .map_or_else(|| std::path::PathBuf::from(shared::utils::default_metadata_path()), |m| std::path::PathBuf::from(&m.cache_path))
+    let storage_path = resolve_metadata_storage_path(config.metadata_update.as_ref(), &config.storage_dir)
         .join("library");
     let mut metadata_iter = MetadataAsyncIter::new(&storage_path).await;
     let mut group_movies = PlaylistGroup {

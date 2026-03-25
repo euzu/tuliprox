@@ -37,7 +37,7 @@ Often, you do not want to set the entire system to `trace` (which would flood yo
 You can pass comma-separated module paths:
 
 ```bash
-# Everything on Info, but the internal Mapper on Trace 
+# Everything on Info, but the internal Mapper on Trace
 # (Useful to make print() commands from the DSL visible!):
 ./tuliprox -s -l "info,tuliprox::foundation::mapper=trace"
 

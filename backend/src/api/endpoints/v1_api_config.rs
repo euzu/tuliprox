@@ -130,7 +130,7 @@ pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
     match utils::save_api_proxy(file_path, backup_dir, api_proxy).await {
         Ok(()) => {}
         Err(err) => {
-            error!("Failed to save api_proxy.yml {err}");
+            error!("Failed to save api-proxy.yml {err}");
             return Some(err);
         }
     }
@@ -614,8 +614,7 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
         .route("/config/xtream/login-info", axum::routing::post(get_xtream_login_info))
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/sources", axum::routing::post(save_config_sources))
-        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config_public))
-        .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
+        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config_public).put(save_config_api_proxy_config))
 }
 pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let base_read = Router::new()
