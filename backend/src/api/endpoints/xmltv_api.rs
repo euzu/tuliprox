@@ -459,19 +459,16 @@ pub async fn serve_short_epg(
 /// let router = xmltv_api_register();
 /// // A GET request to /xmltv.php with valid query parameters will invoke this handler.
 /// ```
-async fn xmltv_api(
-    axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl IntoResponse + Send {
+async fn xmltv_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
-        get_user_target(&api_req, &app_state),
+        get_user_target(&api_req, app_state),
         auth_status,
         false,
         format!("Could not find any user for xmltv api {}", api_req.username)
     );
 
-    if user.permission_denied(&app_state) {
+    if user.permission_denied(app_state) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -482,7 +479,27 @@ async fn xmltv_api(
         return get_empty_epg_response();
     };
 
-    serve_epg(&app_state, &epg_path, &user, &target, None).await
+    serve_epg(app_state, &epg_path, &user, &target, None).await
+}
+
+async fn xmltv_api_get(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
+) -> impl IntoResponse + Send {
+    xmltv_api(api_req, &app_state).await
+}
+
+async fn xmltv_api_post(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
+    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
+) -> impl IntoResponse + Send {
+    if let Err(ref rejection) = api_form_req {
+        debug!("xmltv_api_post: form parsing failed: {rejection:?}");
+    }
+    let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
+    let api_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
+    xmltv_api(api_req, &app_state).await
 }
 
 async fn epg_api_resource(
@@ -522,9 +539,9 @@ async fn epg_api_resource(
 /// ```
 pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
-        .route("/xmltv.php", axum::routing::get(xmltv_api))
-        .route("/epg", axum::routing::get(xmltv_api))
-        .route("/update/epg.php", axum::routing::get(xmltv_api))
+        .route("/xmltv.php", axum::routing::get(xmltv_api_get).post(xmltv_api_post))
+        .route("/epg", axum::routing::get(xmltv_api_get).post(xmltv_api_post))
+        .route("/update/epg.php", axum::routing::get(xmltv_api_get).post(xmltv_api_post))
         .route(
             &format!("/{}/{{username}}/{{password}}/{{resource}}", storage_const::EPG_RESOURCE_PATH),
             axum::routing::get(epg_api_resource),
