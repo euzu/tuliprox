@@ -286,7 +286,7 @@ labels:
 
   # ----- Middlewares -----
   # Strip prefixes so Tuliprox receives requests at root ("/")
-  - "traefik.http.middlewares.tuliprox-strip.stripprefix.prefixes=/tv, /tuliprox"
+  - "traefik.http.middlewares.tuliprox-strip.stripprefix.prefixes=/tv,/tuliprox"
 
   # Apply stripping and forward real client IPs
   - "traefik.http.routers.tuliprox.middlewares=tuliprox-strip@docker,forward-real-ip@file"

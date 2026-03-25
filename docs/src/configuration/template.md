@@ -102,7 +102,7 @@ For complex IPTV setups, it is highly recommended to set the `template_path` to 
 If `template_path` points to a directory, Tuliprox reads all `*.yml` files in **alphanumeric** order and merges them into one massive global macro catalog.
 
 ```yaml
-template_path: ./config/templates.d
+template_path: ./config/template.d
 ```
 
 *Important: The names of the templates (`name`) must be globally unique across all files!*

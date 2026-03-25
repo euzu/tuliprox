@@ -12,7 +12,7 @@ for your IPTV clients.
   `.webm`, etc.).
 * **Auto-Classification:** Automatically detects whether a file is a Movie or a Series episode (e.g.,
   `Breaking.Bad.S01E01.mkv`) using the internal PTT (Parse Torrent Title) engine.
-* **Multi-Source Metadata:** Reads Kodi/Jellyfin/Emby/Plex compatible `.nfo` files. If no `.nfo` is present, it
+* **Multi-Source Metadata:** Reads Kodi/Jellyfin/Emby/Plex-compatible `.nfo` files. If no `.nfo` is present, it
   automatically queries the TMDB API for covers, plots, and cast.
 * **Stable Virtual IDs:** Generates stable, deterministic UUIDs for local files, ensuring that channel/stream IDs in
   your IPTV client remain constant across updates.
@@ -64,24 +64,24 @@ library:
 
 ### Library Configuration Parameters
 
-| Block / Parameter          | Type   | Default        | Description                                                                   |
-|:---------------------------|:-------|:---------------|:------------------------------------------------------------------------------|
-| `enabled`                  | Bool   | `false`        | Master switch to turn on the local media library feature.                     |
-| **`scan_directories`**     | List   |                | Folders to monitor for media files.                                           |
-| ↳ `enabled`                | Bool   | `true`         | Allows temporarily disabling specific folders from being scanned.             |
-| ↳ `path`                   | String |                | The absolute or relative path to your media directory.                        |
-| ↳ `content_type`           | Enum   | `auto`         | Classification mode. Options: `auto` (guess via PTT), `movie`, `series`.      |
-| ↳ `recursive`              | Bool   | `true`         | If true, Tuliprox crawls all subdirectories within the specified path.        |
-| `supported_extensions`     | List   | `[...]`        | Video extensions considered playable (e.g., `mp4`, `mkv`, `mov`, `webm`).     |
-| **`metadata`**             | Object |                | Configuration for metadata resolution and fallback logic.                     |
-| ↳ `fallback_to_filename`   | Bool   | `true`         | Uses the parsed filename if NFO or TMDB metadata is unavailable.              |
-| ↳ `read_existing.kodi`     | Bool   | `true`         | Reads Kodi-compatible `.nfo` files located alongside the media.               |
-| ↳ `read_existing.plex`     | Bool   | `false`        | Attempts to read Plex-specific metadata formats.                              |
-| ↳ `read_existing.jellyfin` | Bool   | `false`        | Attempts to read Jellyfin-specific metadata formats.                          |
-| ↳ `formats`                | List   | `[]`           | List of metadata output formats (e.g., `nfo` to write Kodi-compatible files). |
-| **`playlist`**             | Object |                | Controls how library items appear in the resulting IPTV playlist.             |
-| ↳ `movie_category`         | String | `Local Movies` | The category name assigned to movies in M3U/Xtream outputs.                   |
-| ↳ `series_category`        | String | `Local Series` | The category name assigned to TV shows in M3U/Xtream outputs.                 |
+| Block / Parameter          | Type   | Default          | Description                                                                   |
+|:---------------------------|:-------|:-----------------|:------------------------------------------------------------------------------|
+| `enabled`                  | Bool   | `false`          | Master switch to turn on the local media library feature.                     |
+| **`scan_directories`**     | List   |                  | Folders to monitor for media files.                                           |
+| ↳ `enabled`                | Bool   | `true`           | Allows temporarily disabling specific folders from being scanned.             |
+| ↳ `path`                   | String |                  | The absolute or relative path to your media directory.                        |
+| ↳ `content_type`           | Enum   | `auto`           | Classification mode. Options: `auto` (guess via PTT), `movie`, `series`.      |
+| ↳ `recursive`              | Bool   | `true`           | If true, Tuliprox crawls all subdirectories within the specified path.        |
+| `supported_extensions`     | List   | `[...]`          | Video extensions considered playable (e.g., `mp4`, `mkv`, `mov`, `webm`).     |
+| **`metadata`**             | Object |                  | Configuration for metadata resolution and fallback logic.                     |
+| ↳ `fallback_to_filename`   | Bool   | `true`           | Uses the parsed filename if NFO or TMDB metadata is unavailable.              |
+| ↳ `read_existing.kodi`     | Bool   | `true`           | Reads Kodi-compatible `.nfo` files located alongside the media.               |
+| ↳ `read_existing.plex`     | Bool   | `false`          | Attempts to read Plex-specific metadata formats.                              |
+| ↳ `read_existing.jellyfin` | Bool   | `false`          | Attempts to read Jellyfin-specific metadata formats.                          |
+| ↳ `formats`                | List   | `[]`             | List of metadata output formats (e.g., `nfo` to write Kodi-compatible files). |
+| **`playlist`**             | Object |                  | Controls how library items appear in the resulting IPTV playlist.             |
+| ↳ `movie_category`         | String | `Local Movies`   | The category name assigned to movies in M3U/Xtream outputs.                   |
+| ↳ `series_category`        | String | `Local TV Shows` | The category name assigned to TV shows in M3U/Xtream outputs.                 |
 
 *Note: For TMDB enrichments to work, `metadata_update.tmdb.enabled: true` must be set!*
 

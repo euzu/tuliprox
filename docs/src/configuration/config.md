@@ -386,11 +386,11 @@ messaging:
   pushover:
     token: "<API_TOKEN>"
     user: "<USER_KEY>"
-    # url: "[https://api.pushover.net/1/messages.json](https://api.pushover.net/1/messages.json)" # Optional default
+    # url: "https://api.pushover.net/1/messages.json" # Optional default
 
   # REST: Generic Webhook/API support
   rest:
-    url: "[https://my-api.local/alert](https://my-api.local/alert)"
+    url: "https://my-api.local/alert"
     method: "POST" # Optional, defaults to POST
     headers:
       - "Content-Type: application/json"
