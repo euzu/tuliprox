@@ -174,8 +174,7 @@ pub fn user_api_register(app_state: &Arc<AppState>, web_ui_path: &str) -> axum::
         &concat_path_leading_slash(web_ui_path, "/api/v1/user"),
         axum::Router::new()
             .route("/playlist/categories", axum::routing::get(playlist_categories))
-            .route("/playlist/bouquet", axum::routing::get(playlist_bouquet))
-            .route("/playlist/bouquet", axum::routing::post(save_playlist_bouquet))
+            .route("/playlist/bouquet", axum::routing::get(playlist_bouquet).post(save_playlist_bouquet))
             .route_layer(axum::middleware::from_fn_with_state(Arc::clone(app_state), validator_api_user)),
     )
 

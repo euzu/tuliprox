@@ -367,8 +367,7 @@ macro_rules! register_m3u_api_routes {
     ($router:expr, [$($path:expr),*]) => {{
         $router
         $(
-            .route(&format!("/{}", $path), axum::routing::get(m3u_api_get))
-            .route(&format!("/{}", $path), axum::routing::post(m3u_api_post))
+            .route(&format!("/{}", $path), axum::routing::get(m3u_api_get).post(m3u_api_post))
             // $cfg.service(web::resource(format!("/{}", $path)).route(web::get().to(m3u_api_get)).route(web::post().to(m3u_api_post)));
         )*
     }};
