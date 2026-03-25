@@ -1325,8 +1325,7 @@ macro_rules! register_xtream_api {
     ($router:expr, [$($path:expr),*]) => {{
         $router
        $(
-          .route($path, axum::routing::get(xtream_player_api_get))
-          .route($path, axum::routing::post(xtream_player_api_post))
+          .route($path, axum::routing::get(xtream_player_api_get).post(xtream_player_api_post))
             // $router.service(web::resource($path).route(web::get().to(xtream_player_api_get)).route(web::post().to(xtream_player_api_post)))
         )*
     }};

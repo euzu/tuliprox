@@ -539,12 +539,9 @@ async fn epg_api_resource(
 /// ```
 pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
-        .route("/xmltv.php", axum::routing::get(xmltv_api_get))
-        .route("/xmltv.php", axum::routing::post(xmltv_api_post))
-        .route("/epg", axum::routing::get(xmltv_api_get))
-        .route("/epg", axum::routing::post(xmltv_api_post))
-        .route("/update/epg.php", axum::routing::get(xmltv_api_get))
-        .route("/update/epg.php", axum::routing::post(xmltv_api_post))
+        .route("/xmltv.php", axum::routing::get(xmltv_api_get).post(xmltv_api_post))
+        .route("/epg", axum::routing::get(xmltv_api_get).post(xmltv_api_post))
+        .route("/update/epg.php", axum::routing::get(xmltv_api_get).post(xmltv_api_post))
         .route(
             &format!("/{}/{{username}}/{{password}}/{{resource}}", storage_const::EPG_RESOURCE_PATH),
             axum::routing::get(epg_api_resource),
