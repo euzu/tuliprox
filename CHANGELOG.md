@@ -587,7 +587,7 @@ epg:
 ```
 
 - Fixed mapper transform capitalize.
-- Auto hot reload for `mapping.yml`and `api_proxy.yml`
+- Auto hot reload for `mapping.yml`and `api-proxy.yml`
   To enable set `config_hot_reload: true` in `config.yml`
 - Added config.d-style mapping support.
   You can now place multiple mapping files inside a directory like `mapping.d` and specify it using the `-m` option, for example:

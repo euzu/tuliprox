@@ -110,7 +110,7 @@ metadata_update:
 | `retry_backoff_step_2`   | Duration | `"30m"` | Wait time after the 2nd FFprobe failure.                                                                                                                          |
 | `retry_backoff_step_3`   | Duration | `"1h"`  | Wait time from the 3rd FFprobe failure onwards.                                                                                                                   |
 | `max_attempts`           | Int (u8) | `3`     | Max failures to probe a stream before it enters global long-term cooldown.                                                                                        |
-| `backoff_jitter_percent` | Int (u8) | `20`    | Random time deviation in percent (Jitter) so parallel retries don't hit the provider at the exact same second.                                                    |
+| `backoff_jitter_percent` | Int (u8) | `20`    | Random time deviation in percent (Jitter) so parallel retries don't hit the provider at the same second.                                                          |
 | `user_priority`          | Int (i8) | `127`   | Priority of the probe task on the Unix Nice-Scale. `127` is the absolute lowest. Probes at 127 are immediately cancelled/preempted if a real user needs the slot. |
 
 ---
@@ -135,7 +135,7 @@ metadata_update:
 |:----------------------|:----------|:-------------|:-----------------------------------------------------------------------------------------------|
 | `enabled`             | Bool      | `false`      | Global master switch for TMDB resolution.                                                      |
 | `api_key`             | String    | *(Internal)* | Your own TMDB API Key. If omitted, Tuliprox uses a built-in default placeholder.               |
-| `rate_limit_ms`       | Int (u64) | `250`        | Minimum wait between TMDB API calls to prevent IP rate-limiting or bans.                       |
+| `rate_limit_ms`       | Int (u64) | `250`        | Minimum wait between TMDB API calls to prevent IP rate-limiting or bans (milliseconds).        |
 | `cache_duration_days` | Int (u32) | `30`         | How long successful TMDB results are kept in the cache. Use `0` for permanent caching.         |
 | `language`            | String    | `"en-US"`    | Preferred metadata language (e.g., `"de-DE"`) for plot and titles.                             |
 | `cooldown`            | Duration  | `"7d"`       | Lock time for a movie if the TMDB search was successful but returned "no match" for the title. |

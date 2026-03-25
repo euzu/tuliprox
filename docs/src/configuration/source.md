@@ -372,8 +372,8 @@ inputs:
 
 ```csv
 #url;max_connections;priority
-[http://p1.com/get.php?username=u1&password=p1;1;0](http://p1.com/get.php?username=u1&password=p1;1;0)
-[http://p2.com/get.php?username=u2&password=p2;1;5](http://p2.com/get.php?username=u2&password=p2;1;5)
+http://p1.com/get.php?username=u1&password=p1;1;0
+http://p2.com/get.php?username=u2&password=p2;1;5
 ```
 
 #### Field Specifications
@@ -1056,7 +1056,7 @@ output:
 | `type`                | Enum   |   Yes    |         | Must be `m3u`. Generates a traditional playlist file suitable for IPTV players and related clients.                                                                                                                                                         |
 | `filename`            | String |    No    |         | Optional custom output filename. This affects how Tuliprox writes or exposes the generated playlist artifact.                                                                                                                                               |
 | `include_type_in_url` | Bool   |    No    | `false` | If enabled, Tuliprox adds the stream type (`live`, `movie`, `series`) into generated stream URLs. This can improve downstream routing clarity and compatibility with clients that distinguish path structure by media type.                                 |
-| `mask_redirect_url`   | Bool   |    No    | `false` | If enabled, Tuliprox uses URLs from `api_proxy.yml` for users operating in `redirect` proxy mode. This is important for multi-provider failover or cycling setups where exposing the provider URL directly would bypass Tuliprox's routing logic too early. |
+| `mask_redirect_url`   | Bool   |    No    | `false` | If enabled, Tuliprox uses URLs from `api-proxy.yml` for users operating in `redirect` proxy mode. This is important for multi-provider failover or cycling setups where exposing the provider URL directly would bypass Tuliprox's routing logic too early. |
 | `filter`              | String |    No    |         | Optional M3U-only post-transformation filter. This allows M3U consumers to receive a narrower subset than other output formats derived from the same target.                                                                                                |
 
 > **Note:** `mask_redirect_url` should be enabled if you use multiple providers and want Tuliprox to preserve

@@ -247,7 +247,7 @@ git clone https://github.com/euzu/tuliprox.git
 
 # Build Backend
 cd /opt/tuliprox/bin
-./build_lin.sh
+./build_local.sh
 ln -s /opt/tuliprox/target/release/tuliprox /bin/tuliprox
 
 # Build Frontend
@@ -307,12 +307,12 @@ and CrowdSec protection.
 
 ### Legend & Port Overview
 
-| Template     | Folder      | Purpose                                                                                                                        | Notable Ports (Internal)                                               |
-|:-------------|:------------|:-------------------------------------------------------------------------------------------------------------------------------|:-----------------------------------------------------------------------|
-| **Traefik**  | `traefik/`  | Reverse proxy & TLS (ACME/DNS), dashboard, dynamic security middlewares, optional CrowdSec bouncer.                            | 80 `web`, 443 `websecure`                                              |
-| **Gluetun**  | `gluetun/`  | VPN egress via WireGuard; sidecars provide **SOCKS5**, **HTTP**, and **Shadowsocks** proxies bound to Gluetun’s network stack. | 1080/tcp (HTTP)<br>1388/tcp+udp (SOCKS5)<br>9388/tcp+udp (Shadowsocks) |
-| **CrowdSec** | `crowdsec/` | LAPI + bouncers (Traefik & firewall) to protect services from brute-force and L7 attacks.                                      | LAPI on `127.0.0.1:8080` (host)                                        |
-| **Tuliprox** | `tuliprox/` | Example application container with Traefik labels and `expose: 8901` for reverse proxying.                                     | 8901 (internal)                                                        |
+| Template     | Folder      | Purpose                                                                                                                        | Notable Ports (Internal)                                                                                                                        |
+|:-------------|:------------|:-------------------------------------------------------------------------------------------------------------------------------|:------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Traefik**  | `traefik/`  | Reverse proxy & TLS (ACME/DNS), dashboard, dynamic security middlewares, optional CrowdSec bouncer.                            | 80 `web`, 443 `websecure`                                                                                                                       |
+| **Gluetun**  | `gluetun/`  | VPN egress via WireGuard; sidecars provide **SOCKS5**, **HTTP**, and **Shadowsocks** proxies bound to Gluetun’s network stack. | 1080/tcp (HTTP)<br>1388/tcp+udp (SOCKS5)<br>9388/tcp+udp (Shadowsocks)                                                                          |
+| **CrowdSec** | `crowdsec/` | LAPI + bouncers (Traefik & firewall) to protect services from brute-force and L7 attacks.                                      | LAPI on 127.0.0.1:8080. AppSec must bind to 0.0.0.0:7422; binding to localhost will make AppSec unreachable from Traefik and break enforcement. |
+| **Tuliprox** | `tuliprox/` | Example application container with Traefik labels and `expose: 8901` for reverse proxying.                                     | 8901 (internal)                                                                                                                                 |
 
 ### Wiring up the Stack
 

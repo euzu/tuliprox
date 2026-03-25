@@ -130,7 +130,7 @@ pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
     match utils::save_api_proxy(file_path, backup_dir, api_proxy).await {
         Ok(()) => {}
         Err(err) => {
-            error!("Failed to save api_proxy.yml {err}");
+            error!("Failed to save api-proxy.yml {err}");
             return Some(err);
         }
     }
