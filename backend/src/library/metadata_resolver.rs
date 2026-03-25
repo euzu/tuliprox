@@ -140,7 +140,7 @@ impl MetadataResolver {
             if let Some(f) = file {
                 debug!("Using filename-based metadata for: {}", f.file_path);
             }
-            Some(Self::resolve_from_filename(is_movie, metadata))
+            Some(Self::resolve_from_filename(is_movie, metadata, file))
         } else {
             if let Some(f) = file {
                 warn!("No metadata found for: {}", f.file_path);
@@ -179,13 +179,24 @@ impl MetadataResolver {
         }
     }
 
-    // Creates basic metadata from filename parsing
-    fn resolve_from_filename(movie: bool, metadata: &PttMetadata) -> MediaMetadata {
+    // Creates basic metadata from filename parsing.
+    // Falls back to the file stem when the parsed title is empty or purely numeric
+    // (e.g. date-based filenames like "2026-02-15 10-21-20.mkv" where PTT extracts "15").
+    fn resolve_from_filename(movie: bool, metadata: &PttMetadata, file: Option<&ScannedMediaFile>) -> MediaMetadata {
         let timestamp = chrono::Utc::now().timestamp();
+
+        let title = if metadata.title.is_empty() || metadata.title.chars().all(|c| c.is_ascii_digit()) {
+            file.map_or_else(|| metadata.title.clone(), |f| f.path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&f.file_name)
+                .to_string())
+        } else {
+            metadata.title.clone()
+        };
 
         if movie {
             MediaMetadata::Movie(MovieMetadata {
-                title: metadata.title.clone(),
+                title,
                 year: metadata.year,
                 tmdb_id: metadata.tmdb,
                 tvdb_id: metadata.tvdb,
@@ -195,7 +206,7 @@ impl MetadataResolver {
             })
         } else {
             MediaMetadata::Series(SeriesMetadata {
-                title: metadata.title.clone(),
+                title,
                 year: metadata.year,
                 tmdb_id: metadata.tmdb,
                 tvdb_id: metadata.tvdb,
