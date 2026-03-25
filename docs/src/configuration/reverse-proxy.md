@@ -6,6 +6,7 @@ for determining runtime behavior when Tuliprox actively proxies video streams to
 
 It manages how Tuliprox establishes upstream connections, buffers video frames, handles sudden
 client disconnects, and caches static resources like EPG images and channel logos.
+
 ## Top-level entries
 
 ```yaml
@@ -290,6 +291,7 @@ The CSV file must have exactly 3 columns: `range_start,range_end,country_code`.
 &nbsp;
 
 ### Session TTLs for HLS (`.m3u8`) & Catchup
+
 HLS streams do not consist of an endless TCP pipe. Instead, the player downloads small `.ts` segments every few seconds (e.g., `seg1.ts`, `seg2.ts`).
 
 If Tuliprox released and re-acquired the slot for every single segment, providers would block
