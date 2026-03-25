@@ -2,7 +2,7 @@ use crate::model::LogLevelConfig;
 use crate::utils::config_file_reader;
 use chrono::{Local, Offset, SecondsFormat};
 use env_logger::{Builder, Target};
-use log::{error, info, LevelFilter};
+use log::{info, LevelFilter};
 use std::fs::File;
 use std::io::Write;
 
