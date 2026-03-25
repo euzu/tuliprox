@@ -62,7 +62,7 @@ sequenceDiagram
     RP->>WAF: Validate Request (Bouncer)
     WAF-->>RP: Allow
     RP->>Tuli: Forward Request (HTTP)
-    
+
     alt Connection Limit Reached?
         Tuli->>Tuli: Check Preemption & Grace Period
         Tuli-->>Client: Serve "Exhausted" Custom Video
@@ -70,7 +70,7 @@ sequenceDiagram
         Tuli->>VPN: Fetch Stream via Socks5/HTTP Proxy
         VPN->>Prov: Encrypted WireGuard Tunnel
         Prov-->>VPN: MPEG-TS / HLS Stream
-        VPN-->>Tuli: 
+        VPN-->>Tuli:
         Tuli->>Tuli: Buffer & Throttle Stream
         Tuli-->>RP: Piped Video Stream
         RP-->>Client: Seamless Playback
