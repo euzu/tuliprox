@@ -29,6 +29,7 @@ use shared::{
 use std::sync::Arc;
 
 async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoResponse + Send {
+    api_req.log_sanitized("m3u_api");
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
         get_user_target(api_req, app_state),

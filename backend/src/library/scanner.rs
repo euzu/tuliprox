@@ -1,5 +1,6 @@
 use crate::library::{MediaClassification, MediaClassifier};
 use crate::model::{LibraryConfig, LibraryScanDirectory};
+use shared::model::LibraryContentType;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -59,12 +60,17 @@ pub struct SeriesEpisodeFile {
 pub struct MediaGrouper;
 
 impl MediaGrouper {
-    pub fn group(files: Vec<ScannedMediaFile>) -> Vec<MediaGroup> {
+    pub fn group(mut files: Vec<ScannedMediaFile>) -> Vec<MediaGroup> {
         let mut series_map: HashMap<SeriesKey, Vec<SeriesEpisodeFile>> = HashMap::new();
         let mut movies = Vec::new();
 
+        // Sort by path before classification so fallback episode numbering
+        // matches the final display order deterministically.
+        files.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
+        let mut episode_counters = HashMap::new();
         for file in files {
-            let classification = MediaClassifier::classify(&file);
+            let classification = MediaClassifier::classify(&file, &mut episode_counters);
             match classification {
                 MediaClassification::Movie { metadata } => {
                     movies.push(MediaGroup::Movie { file, metadata: Box::new(metadata) });
@@ -115,11 +121,12 @@ pub struct ScannedMediaFile {
     pub extension: String,
     pub size_bytes: u64,
     pub modified_timestamp: i64,
+    pub content_type: LibraryContentType,
 }
 
 impl ScannedMediaFile {
     /// Creates a new `ScannedMediaFile` from a path and metadata
-    pub async fn from_path(path: &Path) -> io::Result<Self> {
+    pub async fn from_path(path: &Path, content_type: LibraryContentType) -> io::Result<Self> {
         let metadata = fs::metadata(path).await?;
         let file_name = path
             .file_name()
@@ -146,6 +153,7 @@ impl ScannedMediaFile {
             extension,
             size_bytes: metadata.len(),
             modified_timestamp,
+            content_type,
         })
     }
 }
@@ -206,7 +214,7 @@ impl LibraryScanner {
         }
 
         let mut files = Vec::new();
-        self.scan_directory_recursive(path, scan_directory.recursive, &mut files).await?;
+        self.scan_directory_recursive(path, scan_directory.recursive, scan_directory.content_type, &mut files).await?;
         Ok(files)
     }
 
@@ -214,6 +222,7 @@ impl LibraryScanner {
         &'a self,
         path: &'a Path,
         recursive: bool,
+        content_type: LibraryContentType,
         files: &'a mut Vec<ScannedMediaFile>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output=io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
@@ -232,7 +241,7 @@ impl LibraryScanner {
                 if metadata.is_dir() {
                     if recursive {
                         // Recursively scan subdirectories
-                        if let Err(err) = self.scan_directory_recursive(&entry_path, recursive, files).await {
+                        if let Err(err) = self.scan_directory_recursive(&entry_path, recursive, content_type, files).await {
                             error!("Failed to scan subdirectory {}: {err}", entry_path.display());
                         }
                     }
@@ -241,7 +250,7 @@ impl LibraryScanner {
                     if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
                         let ext_lower = ext.to_lowercase();
                         if self.config.supported_extensions.contains(&ext_lower) {
-                            match ScannedMediaFile::from_path(&entry_path).await {
+                            match ScannedMediaFile::from_path(&entry_path, content_type).await {
                                 Ok(video_file) => {
                                     trace!("Found video file: {}", video_file.file_path);
                                     files.push(video_file);

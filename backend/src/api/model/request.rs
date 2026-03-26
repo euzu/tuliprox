@@ -1,3 +1,5 @@
+use log::log_enabled;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct UserApiRequest {
     #[serde(default)]
@@ -60,6 +62,28 @@ impl UserApiRequest {
 
     pub fn merge_query_over_form(query: &Self, form: Option<&Self>) -> Self {
         form.map_or_else(|| query.clone(), |form_req| Self::merge_prefer_primary(query, form_req))
+    }
+
+    pub fn log_sanitized(&self, endpoint: &str) {
+        if log_enabled!(log::Level::Debug) {
+            use std::fmt::Write;
+            let mut msg = endpoint.to_string();
+            if !self.username.is_empty() { let _ = write!(msg, " username={}", self.username); }
+            if !self.password.is_empty() { msg.push_str(" password=***"); }
+            if !self.token.is_empty() { msg.push_str(" token=***"); }
+            if !self.action.is_empty() { let _ = write!(msg, " action={}", self.action); }
+            if !self.series_id.is_empty() { let _ = write!(msg, " series_id={}", self.series_id); }
+            if !self.vod_id.is_empty() { let _ = write!(msg, " vod_id={}", self.vod_id); }
+            if !self.stream_id.is_empty() { let _ = write!(msg, " stream_id={}", self.stream_id); }
+            if !self.category_id.is_empty() { let _ = write!(msg, " category_id={}", self.category_id); }
+            if !self.limit.is_empty() { let _ = write!(msg, " limit={}", self.limit); }
+            if !self.start.is_empty() { let _ = write!(msg, " start={}", self.start); }
+            if !self.end.is_empty() { let _ = write!(msg, " end={}", self.end); }
+            if !self.stream.is_empty() { let _ = write!(msg, " stream={}", self.stream); }
+            if !self.duration.is_empty() { let _ = write!(msg, " duration={}", self.duration); }
+            if !self.content_type.is_empty() { let _ = write!(msg, " type={}", self.content_type); }
+            log::debug!("{msg}");
+        }
     }
 
     pub fn get_limit(&self) -> u32 {
