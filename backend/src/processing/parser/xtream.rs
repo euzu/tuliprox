@@ -11,8 +11,14 @@ use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup
                     SeriesStreamProperties, StreamProperties, VideoStreamProperties,
                     XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{generate_playlist_uuid, trim_last_slash, Internable};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
+
+/// Bucket size for composite ordinal encoding in the streaming parser.
+/// Layout: `cat_position * CAT_BUCKET + within_cat_counter`.
+/// Supports up to ~42 900 categories with up to 100 000 streams each.
+const CAT_BUCKET: u32 = 100_000;
 
 async fn map_to_xtream_category(categories: DynReader, input_name: &Arc<str>) -> Result<Vec<XtreamCategory>, TuliproxError> {
     let input_name_clone = Arc::clone(input_name);
@@ -174,12 +180,12 @@ pub async fn parse_xtream(input: &ConfigInput,
                         input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension),
                     );
 
-                    for (ord_counter, stream) in (1_u32..).zip(xtream_streams) {
+                    for stream in xtream_streams {
                         let group = group_map.get_mut(&stream.get_category_id()).unwrap_or(&mut unknown_grp);
                         let category_name = &group.category_name;
                         let stream_url = create_xtream_url(xtream_cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
                         let item_type = PlaylistItemType::from(xtream_cluster);
-                        let mut item = PlaylistItem {
+                        let item = PlaylistItem {
                             header: PlaylistItemHeader {
                                 id: stream.get_stream_id().intern(),
                                 uuid: generate_playlist_uuid(&input_name, &stream.get_stream_id().to_string(), item_type, &stream_url),
@@ -197,14 +203,23 @@ pub async fn parse_xtream(input: &ConfigInput,
                                 ..Default::default()
                             },
                         };
-                        item.header.source_ordinal = ord_counter;
                         group.add(item);
                     }
 
-
-                    let has_channels = !unknown_grp.channels.is_empty();
-                    if has_channels {
+                    if !unknown_grp.channels.is_empty() {
                         group_map.insert(0, unknown_grp);
+                    }
+
+                    // Assign source_ordinal in category-list order (primary)
+                    // with stream-list position within each category (secondary).
+                    // The IndexMap preserves the provider's category ordering,
+                    // so a single sequential pass produces the correct ordinals.
+                    let mut ordinal: u32 = 0;
+                    for category in group_map.values_mut() {
+                        for channel in &mut category.channels {
+                            ordinal += 1;
+                            channel.header.source_ordinal = ordinal;
+                        }
                     }
 
                     Ok(Some(group_map.values().filter(|category| !category.channels.is_empty())
@@ -251,42 +266,62 @@ where
     let group_map: IndexMap<u32, Arc<str>> = xtream_categories.iter().map(|c| (c.category_id, c.category_name.clone())).collect();
     let unknown_group_name = "Unknown".intern();
 
+    // Category position lookup for source_ordinal: streams are ordered by
+    // category-list position (primary) then arrival order within that
+    // category (secondary). We encode both into a single u32 so the
+    // downstream sort-by-source_ordinal reproduces the provider's category
+    // ordering without any extra fields or a second sort pass.
+    //
+    // Layout:  cat_position * CAT_BUCKET + within_cat_counter
+    // With CAT_BUCKET = 100_000 this supports up to ~42_900 categories
+    // with up to 100 000 streams each — well beyond real-world sizes.
+    let cat_order: HashMap<u32, u32> = group_map.keys().enumerate()
+        .map(|(idx, &cat_id)| (cat_id, u32::try_from(idx).unwrap_or(u32::MAX)))
+        .collect();
+    let unknown_cat_pos = u32::try_from(cat_order.len()).unwrap_or(u32::MAX);
+
     spawn_blocking(move || {
         let reader = tokio_util::io::SyncIoBridge::new(streams);
         let mut deserializer = serde_json::Deserializer::from_reader(reader);
 
-        let mut source_ordinal = 0u32;
+        let mut cat_counters: HashMap<u32, u32> = HashMap::new();
+        let mut cat_source_ordinal = |cat_id: u32| -> u32 {
+            let cat_pos = cat_order.get(&cat_id).copied().unwrap_or(unknown_cat_pos);
+            let counter = cat_counters.entry(cat_id).or_insert(0);
+            *counter += 1;
+            cat_pos * CAT_BUCKET + *counter
+        };
 
         match xtream_cluster {
             XtreamCluster::Live => {
                 let mut on_stream = |stream: LiveStreamProperties| {
-                    source_ordinal += 1;
+                    let ordinal = cat_source_ordinal(stream.category_id);
                     let stream_prop = StreamProperties::Live(Box::new(stream));
                     process_stream_item(&input_name, &url, &username, &password,
                                         xtream_cluster, &group_map, &unknown_group_name,
-                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, source_ordinal)
+                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
                 deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
             }
             XtreamCluster::Video => {
                 let mut on_stream = |stream: VideoStreamProperties| {
-                    source_ordinal += 1;
+                    let ordinal = cat_source_ordinal(stream.category_id);
                     let stream_prop = StreamProperties::Video(Box::new(stream));
                     process_stream_item(&input_name, &url, &username, &password,
                                         xtream_cluster, &group_map, &unknown_group_name,
-                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, source_ordinal)
+                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
                 deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
             }
             XtreamCluster::Series => {
                 let mut on_stream = |stream: SeriesStreamProperties| {
-                    source_ordinal += 1;
+                    let ordinal = cat_source_ordinal(stream.category_id);
                     let stream_prop = StreamProperties::Series(Box::new(stream));
                     process_stream_item(&input_name, &url, &username, &password,
                                         xtream_cluster, &group_map, &unknown_group_name,
-                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, source_ordinal)
+                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
                 deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
@@ -390,17 +425,40 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::parse_xtream_series_info;
+    use super::CAT_BUCKET;
+    use super::{parse_xtream, parse_xtream_series_info, parse_xtream_streaming};
     use crate::processing::parser::xtream::map_to_xtream_streams;
     use crate::model::ConfigInput;
-    use crate::utils::async_file_reader;
+    use crate::utils::{async_file_reader, request::DynReader};
     use shared::model::{
         UUIDType,
         SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties,
-        XtreamCluster, XtreamSeriesInfo,
+        XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
     };
     use shared::utils::Internable;
     use std::fs;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt;
+
+    fn make_reader(content: &str) -> DynReader {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let bytes = content.as_bytes().to_vec();
+        tokio::spawn(async move {
+            writer.write_all(&bytes).await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+        Box::pin(reader)
+    }
+
+    fn test_input() -> ConfigInput {
+        ConfigInput {
+            name: "input".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..ConfigInput::default()
+        }
+    }
 
     #[test]
     fn test_read_json_file_into_struct() {
@@ -497,13 +555,7 @@ mod tests {
 
     #[test]
     fn test_parse_xtream_series_info_keeps_zero_parent_source_ordinal() {
-        let input = ConfigInput {
-            name: "input".intern(),
-            url: "http://provider.example".to_string(),
-            username: Some("user".to_string()),
-            password: Some("pass".to_string()),
-            ..ConfigInput::default()
-        };
+        let input = test_input();
 
         let episode: SeriesStreamDetailEpisodeProperties = serde_json::from_str(
             r#"{"id":101,"episode_num":1,"season":1,"title":"S01E01","container_extension":"mp4"}"#,
@@ -532,5 +584,91 @@ mod tests {
         .expect("episodes should be parsed");
 
         assert_eq!(episodes[0].header.source_ordinal, 0);
+    }
+
+    #[tokio::test]
+    async fn test_parse_xtream_streaming_source_ordinal_uses_category_then_channel_position() {
+        let categories = r#"
+            [
+                {"category_id":"20","category_name":"News"},
+                {"category_id":"10","category_name":"Sports"}
+            ]
+        "#;
+        let streams = r#"
+            [
+                {"name":"sports-1","stream_id":101,"category_id":"10","added":"0"},
+                {"name":"news-1","stream_id":201,"category_id":"20","added":"0"},
+                {"name":"sports-2","stream_id":102,"category_id":"10","added":"0"},
+                {"name":"news-2","stream_id":202,"category_id":"20","added":"0"}
+            ]
+        "#;
+
+        let items: Arc<Mutex<Vec<XtreamPlaylistItem>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&items);
+
+        parse_xtream_streaming(
+            &test_input(),
+            XtreamCluster::Live,
+            make_reader(categories),
+            make_reader(streams),
+            move |item| {
+                sink.lock().unwrap().push(item);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut items = items.lock().unwrap().clone();
+        items.sort_by_key(|item| item.source_ordinal);
+
+        let names: Vec<&str> = items.iter().map(|item| item.name.as_ref()).collect();
+        assert_eq!(names, vec!["news-1", "news-2", "sports-1", "sports-2"]);
+        assert_eq!(items[0].source_ordinal, 1);
+        assert_eq!(items[1].source_ordinal, 2);
+        assert_eq!(items[2].source_ordinal, CAT_BUCKET + 1);
+        assert_eq!(items[3].source_ordinal, CAT_BUCKET + 2);
+    }
+
+    #[tokio::test]
+    async fn test_parse_xtream_groups_multiple_unknown_categories_into_unknown_group() {
+        let categories = r#"
+            [
+                {"category_id":"20","category_name":"Known"}
+            ]
+        "#;
+        let streams = r#"
+            [
+                {"name":"unknown-999","stream_id":301,"category_id":"999","added":"0"},
+                {"name":"known-1","stream_id":201,"category_id":"20","added":"0"},
+                {"name":"unknown-888","stream_id":302,"category_id":"888","added":"0"}
+            ]
+        "#;
+
+        let groups = parse_xtream(
+            &test_input(),
+            XtreamCluster::Live,
+            make_reader(categories),
+            make_reader(streams),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title.as_ref(), "Known");
+        assert_eq!(groups[0].channels.len(), 1);
+        assert_eq!(groups[0].channels[0].header.name.as_ref(), "known-1");
+        assert_eq!(groups[0].channels[0].header.source_ordinal, 1);
+
+        assert_eq!(groups[1].title.as_ref(), "Unknown");
+        let unknown_names: Vec<&str> = groups[1]
+            .channels
+            .iter()
+            .map(|item| item.header.name.as_ref())
+            .collect();
+        assert_eq!(unknown_names, vec!["unknown-999", "unknown-888"]);
+        assert_eq!(groups[1].channels[0].header.source_ordinal, 2);
+        assert_eq!(groups[1].channels[1].header.source_ordinal, 3);
     }
 }
