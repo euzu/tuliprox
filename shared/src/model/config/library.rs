@@ -8,7 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryConfigDto {
     #[serde(default)]
@@ -136,9 +136,26 @@ impl Default for LibraryPlaylistConfigDto {
     }
 }
 
+impl Default for LibraryConfigDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_directories: Vec::new(),
+            supported_extensions: default_supported_library_extensions(),
+            metadata: LibraryMetadataConfigDto::default(),
+            playlist: LibraryPlaylistConfigDto::default(),
+        }
+    }
+}
+
 impl LibraryConfigDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.playlist.prepare();
+
+        // Restore default extensions if none configured
+        if self.supported_extensions.is_empty() {
+            self.supported_extensions = default_supported_library_extensions();
+        }
 
         // Validate enabled state
         if self.enabled && self.scan_directories.is_empty() {
