@@ -4,23 +4,31 @@ use path_clean::PathClean;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 const THUMBNAILS_PATH: &str = "thumbnails";
 const LIBRARY_PATH: &str = "library";
+const THUMBNAIL_CLEANUP_GRACE_PERIOD: Duration = Duration::from_secs(30);
 
 // Metadata storage for local VOD files
 // Stores metadata as JSON files with UUID-based filenames
 #[derive(Clone)]
 pub struct MetadataStorage {
     storage_dir: PathBuf,
+    mutation_guard: Arc<Mutex<()>>,
 }
 
 impl MetadataStorage {
     // Creates a new metadata storage instance
     pub fn new(storage_dir: PathBuf) -> Self {
-        Self { storage_dir }
+        Self {
+            storage_dir,
+            mutation_guard: Arc::new(Mutex::new(())),
+        }
     }
 
     // Initializes the storage directory
@@ -36,6 +44,7 @@ impl MetadataStorage {
 
     // Stores metadata for a video file
     pub async fn store(&self, entry: &MetadataCacheEntry) -> std::io::Result<()> {
+        let _guard = self.mutation_guard.lock().await;
         let file_path = self.get_library_metadata_file_path(&entry.uuid);
 
         debug!("Storing metadata for {}: {}", entry.file_path, file_path.clean().display());
@@ -81,7 +90,7 @@ impl MetadataStorage {
     // Loads all metadata entries from storage
     pub async fn load_all(&self) -> Vec<MetadataCacheEntry> {
         let mut entries = Vec::new();
-        let library_dir = self.storage_dir.join("library");
+        let library_dir = self.storage_dir.join(LIBRARY_PATH);
 
         let mut read_dir = match fs::read_dir(&library_dir).await {
             Ok(dir) => dir,
@@ -113,6 +122,7 @@ impl MetadataStorage {
 
     // Deletes metadata for a specific UUID
     pub async fn delete_by_uuid(&self, uuid: &str) -> std::io::Result<()> {
+        let _guard = self.mutation_guard.lock().await;
         let entry = self.load_by_uuid(uuid).await;
         let file_path = self.get_library_metadata_file_path(uuid);
 
@@ -195,6 +205,7 @@ impl MetadataStorage {
     }
 
     pub async fn store_thumbnail(&self, hash: &str, data: &[u8]) -> std::io::Result<()> {
+        let _guard = self.mutation_guard.lock().await;
         let path = self.get_thumbnail_path(hash);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
@@ -212,7 +223,8 @@ impl MetadataStorage {
 
     /// Removes thumbnail files that are not referenced by any metadata entry.
     pub async fn cleanup_orphaned_thumbnails(&self) {
-        let thumb_dir = self.storage_dir.join("thumbnails");
+        let _guard = self.mutation_guard.lock().await;
+        let thumb_dir = self.storage_dir.join(THUMBNAILS_PATH);
         if !fs::try_exists(&thumb_dir).await.unwrap_or(false) {
             return;
         }
@@ -229,7 +241,7 @@ impl MetadataStorage {
         while let Ok(Some(entry)) = dir.next_entry().await {
             let path = entry.path();
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if !referenced.contains(stem) {
+                if !referenced.contains(stem) && !is_recent_thumbnail(&path).await {
                     debug!("Removing orphaned thumbnail: {}", path.display());
                     let _ = fs::remove_file(&path).await;
                 }
@@ -400,6 +412,21 @@ impl MetadataStorage {
     }
 }
 
+async fn is_recent_thumbnail(path: &std::path::Path) -> bool {
+    let Ok(metadata) = fs::metadata(path).await else {
+        return false;
+    };
+
+    let reference_time = metadata.modified().or_else(|_| metadata.created());
+    let Ok(reference_time) = reference_time else {
+        return false;
+    };
+
+    SystemTime::now()
+        .duration_since(reference_time)
+        .is_ok_and(|age| age < THUMBNAIL_CLEANUP_GRACE_PERIOD)
+}
+
 fn referenced_thumbnail_ids_for_entry(entry: &MetadataCacheEntry) -> Vec<String> {
     let mut ids = Vec::new();
     if let Some(hash) = entry.thumbnail_hash.as_ref() {
@@ -428,6 +455,8 @@ fn entry_references_thumbnail(entry: &MetadataCacheEntry, hash: &str) -> bool {
 mod tests {
     use super::*;
     use crate::library::metadata::{MetadataSource, MovieMetadata};
+    use filetime::{set_file_mtime, FileTime};
+    use std::time::{Duration, SystemTime};
 
     #[tokio::test]
     async fn test_store_and_load() {
@@ -532,5 +561,34 @@ mod tests {
         storage.delete_by_uuid(&entry_a.uuid).await.unwrap();
 
         assert!(storage.has_thumbnail("shared-thumb").await);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_thumbnails_keeps_recent_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = MetadataStorage::new(dir.path().to_path_buf());
+        storage.initialize().await.unwrap();
+
+        storage.store_thumbnail("fresh-orphan", b"jpeg").await.unwrap();
+
+        storage.cleanup_orphaned_thumbnails().await;
+
+        assert!(storage.has_thumbnail("fresh-orphan").await);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_thumbnails_removes_stale_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = MetadataStorage::new(dir.path().to_path_buf());
+        storage.initialize().await.unwrap();
+
+        storage.store_thumbnail("stale-orphan", b"jpeg").await.unwrap();
+        let thumbnail_path = storage.get_thumbnail_path("stale-orphan");
+        let stale_time = FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        set_file_mtime(&thumbnail_path, stale_time).unwrap();
+
+        storage.cleanup_orphaned_thumbnails().await;
+
+        assert!(!storage.has_thumbnail("stale-orphan").await);
     }
 }

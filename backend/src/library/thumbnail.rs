@@ -64,7 +64,7 @@ impl ThumbnailExtractor {
                 "-i", input_path,
                 "-frames:v", "1",
                 "-vf", &scale_filter,
-                "-q:v1",
+                "-q:v", "1",
                 "-y",
                 &output_path.to_string_lossy(),
             ]).await
@@ -74,13 +74,13 @@ impl ThumbnailExtractor {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Retry at position 0 if seeking past end of short video
             if stderr.contains("Output file is empty") || stderr.contains("nothing was encoded") {
-                debug!("Video shorter than 10s, retrying at position 0: {input_path}");
+                debug!("Video shorter than 180s, retrying at position 0: {input_path}");
                 let output = self.run_ffmpeg_with_timeout(&[
                         "-ss", "0",
                         "-i", input_path,
                         "-frames:v", "1",
                         "-vf", &scale_filter,
-                        "-q:v1",
+                        "-q:v", "1",
                         "-y",
                         &output_path.to_string_lossy(),
                     ]).await

@@ -646,7 +646,7 @@ impl XtreamMappingOptions {
 
     fn is_trusted_web_ui_resource_path(resource_url: &str) -> bool {
         const TRUSTED_WEB_UI_RESOURCE_PREFIXES: [&str; 1] = ["/api/v1/library/thumbnail/"];
-        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.starts_with(prefix))
+        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.contains(prefix))
     }
 
     fn build_reverse_proxy_base_url(
@@ -756,10 +756,10 @@ mod tests {
                 XtreamCluster::Series,
                 PlaylistItemType::Series,
                 1,
-                "/api/v1/library/thumbnail/by-hash/abc",
+                "/api/v1/library/thumbnail/abc",
                 "logo",
             ),
-            "/api/v1/library/thumbnail/by-hash/abc",
+            "/api/v1/library/thumbnail/abc",
         );
     }
 
@@ -772,11 +772,11 @@ mod tests {
                 XtreamCluster::Series,
                 PlaylistItemType::Series,
                 1,
-                "/api/v1/library/thumbnail/by-hash/backdrop",
+                "/api/v1/library/thumbnail/backdrop",
                 "backdrop_",
                 0,
             ),
-            "/api/v1/library/thumbnail/by-hash/backdrop",
+            "/api/v1/library/thumbnail/backdrop",
         );
     }
 

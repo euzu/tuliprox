@@ -64,7 +64,6 @@ library:
     enabled: true
     width: 320
     height: 180
-    quality: 75
 ```
 
 ### Thumbnail Extraction
@@ -80,7 +79,6 @@ via a local API endpoint.
 | `enabled` | Bool   | `false` | Enable automatic thumbnail extraction |
 | `width`   | Number | `320`   | Output width in pixels (16:9)         |
 | `height`  | Number | `180`   | Output height in pixels               |
-| `quality` | Number | `75`    | JPEG compression quality (1-100)      |
 
 Thumbnails are extracted at ~10 seconds into the video (falls back to 0s for short clips).
 They are re-extracted automatically when the source file changes. Orphaned thumbnails
