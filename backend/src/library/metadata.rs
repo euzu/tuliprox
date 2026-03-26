@@ -134,7 +134,7 @@ pub struct SeriesMetadata {
 }
 
 // Episode metadata for TV series
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EpisodeMetadata {
     #[serde(default)]
     pub id: u32,
@@ -158,6 +158,8 @@ pub struct EpisodeMetadata {
     pub rating: Option<f64>,
     #[serde(default)]
     pub thumb: Option<String>,
+    #[serde(default)]
+    pub thumbnail_id: Option<String>,
     pub file_path: String,
     pub file_size: u64,
     pub file_modified: i64,
@@ -270,6 +272,10 @@ pub struct MetadataCacheEntry {
     pub file_size: u64,
     pub file_modified: i64,
     pub metadata: MediaMetadata,
+    #[serde(default)]
+    pub thumbnail_hash: Option<String>,
+    #[serde(default)]
+    pub thumbnail_mtime: Option<i64>,
 }
 
 impl MetadataCacheEntry {
@@ -286,6 +292,8 @@ impl MetadataCacheEntry {
             file_size,
             file_modified,
             metadata,
+            thumbnail_hash: None,
+            thumbnail_mtime: None,
         }
     }
 

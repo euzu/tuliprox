@@ -3,12 +3,13 @@ use crate::{
     info_err_res,
     utils::{
         default_as_true, default_movie_category, default_series_category, default_storage_formats,
-        default_supported_library_extensions, is_default_supported_library_extensions, is_true,
+        default_supported_library_extensions, default_thumbnail_height, default_thumbnail_width,
+        is_default_supported_library_extensions, is_true,
     },
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryConfigDto {
     #[serde(default)]
@@ -24,6 +25,8 @@ pub struct LibraryConfigDto {
     pub metadata: LibraryMetadataConfigDto,
     #[serde(default)]
     pub playlist: LibraryPlaylistConfigDto,
+    #[serde(default, skip_serializing_if = "ThumbnailConfigDto::is_empty")]
+    pub thumbnails: ThumbnailConfigDto,
 }
 
 impl LibraryConfigDto {
@@ -33,6 +36,7 @@ impl LibraryConfigDto {
             && is_default_supported_library_extensions(&self.supported_extensions)
             && self.metadata.is_empty()
             && self.playlist.is_empty()
+            && self.thumbnails.is_empty()
     }
     pub fn clean(&mut self) {
         self.scan_directories.retain(|d| !d.path.trim().is_empty());
@@ -130,15 +134,56 @@ impl LibraryPlaylistConfigDto {
     pub fn clean(&mut self) { self.prepare(); }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThumbnailConfigDto {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_thumbnail_width")]
+    pub width: u32,
+    #[serde(default = "default_thumbnail_height")]
+    pub height: u32,
+}
+
+impl Default for ThumbnailConfigDto {
+    fn default() -> Self {
+        Self { enabled: false, width: default_thumbnail_width(), height: default_thumbnail_height() }
+    }
+}
+
+impl ThumbnailConfigDto {
+    pub fn is_empty(&self) -> bool {
+        !self.enabled && self.width == default_thumbnail_width() && self.height == default_thumbnail_height()
+    }
+}
+
 impl Default for LibraryPlaylistConfigDto {
     fn default() -> Self {
         Self { movie_category: default_movie_category(), series_category: default_series_category() }
     }
 }
 
+impl Default for LibraryConfigDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scan_directories: Vec::new(),
+            supported_extensions: default_supported_library_extensions(),
+            metadata: LibraryMetadataConfigDto::default(),
+            playlist: LibraryPlaylistConfigDto::default(),
+            thumbnails: ThumbnailConfigDto::default(),
+        }
+    }
+}
+
 impl LibraryConfigDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.playlist.prepare();
+
+        // Restore default extensions if none configured
+        if self.supported_extensions.is_empty() {
+            self.supported_extensions = default_supported_library_extensions();
+        }
 
         // Validate enabled state
         if self.enabled && self.scan_directories.is_empty() {

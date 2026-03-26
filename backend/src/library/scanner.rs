@@ -54,19 +54,16 @@ pub struct SeriesEpisodeFile {
     pub file: ScannedMediaFile,
     pub season: u32,
     pub episode: u32,
+    pub auto_assigned_episode: bool,
     pub metadata: Box<PttMetadata>,
 }
 
 pub struct MediaGrouper;
 
 impl MediaGrouper {
-    pub fn group(mut files: Vec<ScannedMediaFile>) -> Vec<MediaGroup> {
+    pub fn group(files: Vec<ScannedMediaFile>) -> Vec<MediaGroup> {
         let mut series_map: HashMap<SeriesKey, Vec<SeriesEpisodeFile>> = HashMap::new();
         let mut movies = Vec::new();
-
-        // Sort by path before classification so fallback episode numbering
-        // matches the final display order deterministically.
-        files.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
         let mut episode_counters = HashMap::new();
         for file in files {
@@ -76,6 +73,7 @@ impl MediaGrouper {
                     movies.push(MediaGroup::Movie { file, metadata: Box::new(metadata) });
                 }
                 MediaClassification::Series { key, metadata, season, episode,.. } => {
+                    let auto_assigned_episode = metadata.episodes.is_empty() || metadata.seasons.is_empty();
                     series_map
                         .entry(key)
                         .or_default()
@@ -83,6 +81,7 @@ impl MediaGrouper {
                             file,
                             season,
                             episode,
+                            auto_assigned_episode,
                             metadata: Box::new(metadata),
                         });
                 }
@@ -93,7 +92,11 @@ impl MediaGrouper {
         result.extend(
             series_map.into_iter()
                 .map(|(key, mut episodes)| {
-                    episodes.sort_by(|a, b| a.file.file_path.cmp(&b.file.file_path));
+                    assign_fallback_episode_numbers(&mut episodes);
+                    episodes.sort_by(|a, b| {
+                        (a.season, a.episode, a.file.modified_timestamp, &a.file.file_path)
+                            .cmp(&(b.season, b.episode, b.file.modified_timestamp, &b.file.file_path))
+                    });
                     MediaGroup::Series {
                         show_key: key,
                         episodes,
@@ -108,6 +111,34 @@ impl MediaGrouper {
                 MediaGroup::Series { episodes, .. } => !episodes.is_empty(),
             }
         }).collect()
+    }
+}
+
+fn assign_fallback_episode_numbers(episodes: &mut [SeriesEpisodeFile]) {
+    let next_fallback_episode = episodes
+        .iter()
+        .filter(|episode| !episode.auto_assigned_episode && episode.season == 1)
+        .map(|episode| episode.episode)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    let mut fallback_indices: Vec<usize> = episodes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, episode)| episode.auto_assigned_episode.then_some(idx))
+        .collect();
+
+    fallback_indices.sort_by(|left, right| {
+        let left_episode = &episodes[*left];
+        let right_episode = &episodes[*right];
+        (left_episode.file.modified_timestamp, &left_episode.file.file_path)
+            .cmp(&(right_episode.file.modified_timestamp, &right_episode.file.file_path))
+    });
+
+    for (offset, idx) in fallback_indices.into_iter().enumerate() {
+        episodes[idx].season = 1;
+        episodes[idx].episode = next_fallback_episode.saturating_add(u32::try_from(offset).unwrap_or(0));
     }
 }
 
@@ -312,6 +343,29 @@ mod tests {
                 movie_category: "Local Movies".intern(),
                 series_category: "Local Series".intern(),
             },
+            thumbnails: crate::model::ThumbnailConfig {
+                enabled: false,
+                width: 320,
+                height: 180,
+            },
+        }
+    }
+
+    fn create_group_test_file(
+        file_name: &str,
+        parent_path: &str,
+        modified_timestamp: i64,
+        content_type: LibraryContentType,
+    ) -> ScannedMediaFile {
+        let path = PathBuf::from(parent_path).join(file_name);
+        ScannedMediaFile {
+            file_path: path.display().to_string(),
+            path,
+            file_name: file_name.to_string(),
+            extension: "mkv".to_string(),
+            size_bytes: 1024,
+            modified_timestamp,
+            content_type,
         }
     }
 
@@ -330,5 +384,28 @@ mod tests {
         let result = scanner.scan_all().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_group_assigns_fallback_episode_numbers_by_modified_time() {
+        let files = vec![
+            create_group_test_file("MyShow.2020.1080p.mkv", "/tv/MyShow", 200, LibraryContentType::Series),
+            create_group_test_file("MyShow.2020.S01E03.mkv", "/tv/MyShow", 300, LibraryContentType::Series),
+            create_group_test_file("MyShow.2021.720p.mkv", "/tv/MyShow", 100, LibraryContentType::Series),
+        ];
+
+        let groups = MediaGrouper::group(files);
+        let MediaGroup::Series { episodes, .. } = &groups[0] else {
+            panic!("Expected series group");
+        };
+
+        let episode_numbers: HashMap<_, _> = episodes
+            .iter()
+            .map(|episode| (episode.file.file_name.as_str(), episode.episode))
+            .collect();
+
+        assert_eq!(episode_numbers["MyShow.2020.S01E03.mkv"], 3);
+        assert_eq!(episode_numbers["MyShow.2021.720p.mkv"], 4);
+        assert_eq!(episode_numbers["MyShow.2020.1080p.mkv"], 5);
     }
 }
