@@ -8,7 +8,7 @@ use shared::{
         ApiProxyConfigDto, AppConfigDto, ConfigInputDto, ConfigTargetDto, ContentSecurityPolicyConfigDto,
         HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto, LibraryPlaylistConfigDto, LogConfigDto,
         ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, SourcesConfigDto, StreamConfigDto, TargetOutputDto,
-        TargetUserDto, WebAuthConfigDto, WebUiConfigDto,
+        TargetUserDto, ThumbnailConfigDto, WebAuthConfigDto, WebUiConfigDto,
     },
     utils::default_secret,
 };
@@ -205,6 +205,7 @@ fn is_setup_library_toggle_only_update(cfg: &LibraryConfigDto) -> bool {
         && cfg.supported_extensions.is_empty()
         && cfg.metadata == LibraryMetadataConfigDto::default()
         && cfg.playlist == LibraryPlaylistConfigDto::default()
+        && cfg.thumbnails == ThumbnailConfigDto::default()
 }
 
 fn apply_setup_hdhomerun_form(config: &mut shared::model::ConfigDto, hdhr_cfg: HdHomeRunConfigDto) {
@@ -587,6 +588,7 @@ mod tests {
         let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
         let library = app_cfg.config.library.expect("library config should be present");
         assert!(!library.enabled);
+        assert!(!library.thumbnails.enabled);
         assert_eq!(library.scan_directories.len(), 1);
         assert_eq!(library.scan_directories[0].path, "/media");
     }

@@ -130,6 +130,10 @@ pub fn default_storage_formats() -> Vec<LibraryMetadataFormat> { vec![] }
 pub fn default_movie_category() -> String { String::from("Local Movies") }
 pub fn default_series_category() -> String { String::from("Local TV Shows") }
 
+pub fn default_thumbnail_width() -> u32 { 320 }
+pub fn default_thumbnail_height() -> u32 { 180 }
+pub fn default_thumbnail_quality() -> u8 { 75 }
+
 pub const DEFAULT_SUPPORTED_LIBRARY_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "ts", "m4v", "webm"];
 
 pub fn default_supported_library_extensions() -> Vec<String> {

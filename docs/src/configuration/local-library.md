@@ -60,7 +60,34 @@ library:
   playlist:
     movie_category: "Local Movies"
     series_category: "Local Shows"
+  thumbnails:
+    enabled: true
+    width: 320
+    height: 180
+    quality: 75
 ```
+
+### Thumbnail Extraction
+
+When TMDB posters are unavailable, Tuliprox can automatically extract a thumbnail
+from the video file itself using `ffmpeg`. The extracted frame is cached and served
+via a local API endpoint.
+
+**Requires:** `ffmpeg` must be installed and available in the system `PATH`.
+
+| Parameter | Type   | Default | Description                           |
+|:----------|:-------|:--------|:--------------------------------------|
+| `enabled` | Bool   | `false` | Enable automatic thumbnail extraction |
+| `width`   | Number | `320`   | Output width in pixels (16:9)         |
+| `height`  | Number | `180`   | Output height in pixels               |
+| `quality` | Number | `75`    | JPEG compression quality (1-100)      |
+
+Thumbnails are extracted at ~10 seconds into the video (falls back to 0s for short clips).
+They are re-extracted automatically when the source file changes. Orphaned thumbnails
+are cleaned up during each library scan.
+
+Remote URL thumbnail extraction via HTTP range requests is not implemented yet.
+That remains a future feature.
 
 ### Library Configuration Parameters
 
@@ -127,10 +154,13 @@ your disk when requested by the IPTV player!
 
 The MediaClassifier logic respects the `content_type` defined for configured directories.
 
-* **auto** (default): Uses auto-detection to determine if a file is a movie or a series based on filename patterns (e.g. `S01E01`).
+* **auto** (default): Uses auto-detection to determine if a file is a movie or a series based on filename patterns (e.g.
+  `S01E01`).
 * **movie**: Forces all files to be classified as movies, overriding any auto-detection results.
-* **series**: Forces classification as a series. If episode/season patterns are detected in the filename (e.g. `S02E05`), those values are used.  
-  If no pattern is found, the file is still classified as a series with **season 1** and an **auto-incremented episode number**  
+* **series**: Forces classification as a series. If episode/season patterns are detected in the filename (e.g.
+  `S02E05`), those values are used.  
+  If no pattern is found, the file is still classified as a series with **season 1** and an **auto-incremented episode
+  number**  
   (starting at 1, in file scan order).
 
 ### Triggering Scans (CLI & API)

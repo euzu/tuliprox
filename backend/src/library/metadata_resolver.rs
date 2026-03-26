@@ -246,6 +246,12 @@ mod tests {
                 movie_category: "Movies".intern(),
                 series_category: "Series".intern(),
             },
+            thumbnails: crate::model::ThumbnailConfig {
+                enabled: false,
+                width: 320,
+                height: 180,
+                quality: 75,
+            },
         }
     }
 

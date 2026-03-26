@@ -8,6 +8,7 @@ mod metadata_resolver;
 mod processor;
 mod metadata_iterator;
 mod tmdb;
+mod thumbnail;
 
 pub use scanner::*;
 pub use classifier::*;
@@ -18,3 +19,4 @@ pub use metadata_storage::*;
 pub use metadata_resolver::*;
 pub use processor::*;
 pub use metadata_iterator::*;
+pub use thumbnail::*;

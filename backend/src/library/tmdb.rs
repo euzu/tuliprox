@@ -231,6 +231,7 @@ impl TmdbSeriesInfoEpisodeDetails {
             runtime: self.runtime,
             rating: Some(self.vote_average),
             thumb: self.still_path.as_ref().and_then(|path| resolve_tmdb_image_url(path)),
+            thumbnail_id: None,
             file_path: String::new(),
             file_size: 0,
             file_modified: 0,
@@ -518,4 +519,3 @@ mod tests {
     //     assert_eq!(a.id, 84892)
     // }
 }
-

@@ -12,13 +12,13 @@ use crate::{
         },
         context::ConfigContext,
     },
-    config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_list, edit_field_text,
-    generate_form_reducer,
+    config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_list, edit_field_number_u32,
+    edit_field_number_u8, edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{
     LibraryConfigDto, LibraryContentType, LibraryMetadataConfigDto, LibraryMetadataFormat,
-    LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto,
+    LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto, ThumbnailConfigDto,
 };
 use std::rc::Rc;
 use yew::prelude::*;
@@ -45,6 +45,10 @@ const LABEL_MOVIE: &str = "LABEL.MOVIE";
 const LABEL_SERIES: &str = "LABEL.SERIES";
 const LABEL_FORMATS: &str = "LABEL.FORMATS";
 const LABEL_ADD_FORMAT: &str = "LABEL.ADD_FORMAT";
+const LABEL_THUMBNAILS: &str = "Thumbnails";
+const LABEL_WIDTH: &str = "Width";
+const LABEL_HEIGHT: &str = "Height";
+const LABEL_QUALITY: &str = "Quality";
 
 const TYPE_AUTO: &str = "Auto";
 const TYPE_MOVIE: &str = "Movie";
@@ -88,6 +92,17 @@ generate_form_reducer!(
     }
 );
 
+generate_form_reducer!(
+    state: ThumbnailConfigFormState { form: ThumbnailConfigDto },
+    action_name: ThumbnailConfigFormAction,
+    fields {
+        Enabled => enabled: bool,
+        Width => width: u32,
+        Height => height: u32,
+        Quality => quality: u8,
+    }
+);
+
 #[component]
 pub fn LibraryConfigView() -> Html {
     let translate = use_translation();
@@ -106,12 +121,15 @@ pub fn LibraryConfigView() -> Html {
     let metadata_read_state: UseReducerHandle<LibraryMetadataReadConfigFormState> = use_reducer(|| {
         LibraryMetadataReadConfigFormState { form: LibraryMetadataReadConfigDto::default(), modified: false }
     });
+    let thumbnail_state: UseReducerHandle<ThumbnailConfigFormState> =
+        use_reducer(|| ThumbnailConfigFormState { form: ThumbnailConfigDto::default(), modified: false });
 
     {
         let form_state = form_state.clone();
         let playlist_state = playlist_state.clone();
         let metadata_state = metadata_state.clone();
         let metadata_read_state = metadata_read_state.clone();
+        let thumbnail_state = thumbnail_state.clone();
 
         let library_cfg = config_ctx.config.as_ref().and_then(|c| c.config.library.clone());
         use_effect_with((library_cfg, *config_view_ctx.edit_mode), move |(library_cfg, _mode)| {
@@ -121,12 +139,14 @@ pub fn LibraryConfigView() -> Html {
                 metadata_state.dispatch(LibraryMetadataConfigFormAction::SetAll(library.metadata.clone()));
                 metadata_read_state
                     .dispatch(LibraryMetadataReadConfigFormAction::SetAll(library.metadata.read_existing.clone()));
+                thumbnail_state.dispatch(ThumbnailConfigFormAction::SetAll(library.thumbnails.clone()));
             } else {
                 form_state.dispatch(LibraryConfigFormAction::SetAll(LibraryConfigDto::default()));
                 playlist_state.dispatch(LibraryPlaylistConfigFormAction::SetAll(LibraryPlaylistConfigDto::default()));
                 metadata_state.dispatch(LibraryMetadataConfigFormAction::SetAll(LibraryMetadataConfigDto::default()));
                 metadata_read_state
                     .dispatch(LibraryMetadataReadConfigFormAction::SetAll(LibraryMetadataReadConfigDto::default()));
+                thumbnail_state.dispatch(ThumbnailConfigFormAction::SetAll(ThumbnailConfigDto::default()));
             }
             || ()
         });
@@ -139,10 +159,12 @@ pub fn LibraryConfigView() -> Html {
                 playlist_state.form.clone(),
                 metadata_state.form.clone(),
                 metadata_read_state.form.clone(),
+                thumbnail_state.form.clone(),
                 form_state.modified,
                 playlist_state.modified,
                 metadata_state.modified,
                 metadata_read_state.modified,
+                thumbnail_state.modified,
             ),
             config_view_ctx.on_form_change.clone(),
             |(
@@ -150,16 +172,23 @@ pub fn LibraryConfigView() -> Html {
                 playlist,
                 metadata,
                 metadata_read,
+                thumbnails,
                 form_modified,
                 playlist_modified,
                 metadata_modified,
                 metadata_read_modified,
+                thumbnail_modified,
             )| {
                 let mut new_form = form;
                 new_form.playlist = playlist;
                 new_form.metadata = metadata;
                 new_form.metadata.read_existing = metadata_read;
-                let modified = form_modified || playlist_modified || metadata_modified || metadata_read_modified;
+                new_form.thumbnails = thumbnails;
+                let modified = form_modified
+                    || playlist_modified
+                    || metadata_modified
+                    || metadata_read_modified
+                    || thumbnail_modified;
 
                 ConfigForm::Library(modified, new_form)
             },
@@ -365,6 +394,7 @@ pub fn LibraryConfigView() -> Html {
         let metadata = &metadata_state.form;
         let playlist = &playlist_state.form;
         let read_existing = &metadata_read_state.form;
+        let thumbnails = &thumbnail_state.form;
 
         html! {
             <>
@@ -397,6 +427,14 @@ pub fn LibraryConfigView() -> Html {
                     <h1>{translate.t(LABEL_PLAYLIST)}</h1>
                      { config_field!(playlist, translate.t(LABEL_MOVIE_CATEGORY), movie_category) }
                      { config_field!(playlist, translate.t(LABEL_SERIES_CATEGORY), series_category) }
+                </Card>
+
+                <Card class="tp__config-view__card">
+                    <h1>{LABEL_THUMBNAILS}</h1>
+                    { config_field_bool!(thumbnails, translate.t(LABEL_ENABLED), enabled) }
+                    { config_field!(thumbnails, LABEL_WIDTH, width) }
+                    { config_field!(thumbnails, LABEL_HEIGHT, height) }
+                    { config_field!(thumbnails, LABEL_QUALITY, quality) }
                 </Card>
             </div>
             </>
@@ -461,6 +499,14 @@ pub fn LibraryConfigView() -> Html {
                     <h1>{translate.t(LABEL_PLAYLIST)}</h1>
                      { edit_field_text!(playlist_state, translate.t(LABEL_MOVIE_CATEGORY), movie_category, LibraryPlaylistConfigFormAction::MovieCategory) }
                      { edit_field_text!(playlist_state, translate.t(LABEL_SERIES_CATEGORY), series_category, LibraryPlaylistConfigFormAction::SeriesCategory) }
+                 </Card>
+
+                 <Card class="tp__config-view__card">
+                    <h1>{LABEL_THUMBNAILS}</h1>
+                    { edit_field_bool!(thumbnail_state, translate.t(LABEL_ENABLED), enabled, ThumbnailConfigFormAction::Enabled) }
+                    { edit_field_number_u32!(thumbnail_state, LABEL_WIDTH, width, ThumbnailConfigFormAction::Width) }
+                    { edit_field_number_u32!(thumbnail_state, LABEL_HEIGHT, height, ThumbnailConfigFormAction::Height) }
+                    { edit_field_number_u8!(thumbnail_state, LABEL_QUALITY, quality, ThumbnailConfigFormAction::Quality) }
                  </Card>
             </div>
             </>

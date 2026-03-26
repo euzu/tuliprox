@@ -677,6 +677,9 @@ impl XtreamMappingOptions {
             if resource_url.is_empty() {
                 return resource_url.to_string();
             }
+            if resource_url.starts_with('/') {
+                return resource_url.to_string();
+            }
             let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
             return rewrite_url;
         }
@@ -703,6 +706,9 @@ impl XtreamMappingOptions {
             if resource_url.is_empty() {
                 return resource_url.to_string();
             }
+            if resource_url.starts_with('/') {
+                return resource_url.to_string();
+            }
             let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
             return rewrite_url;
         }
@@ -715,6 +721,41 @@ impl XtreamMappingOptions {
             }
         }
         resource_url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{PlaylistItemType, XtreamCluster, XtreamMappingFlags};
+
+    fn sample_options() -> XtreamMappingOptions {
+        XtreamMappingOptions {
+            base_url: "/api/v1/playlist/resource".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            force_redirect: None,
+            reverse_item_types: PlaylistItemTypeSet::from_item(PlaylistItemType::Live),
+            web_ui_request: true,
+            flags: XtreamMappingFlags::RewriteResourceUrl.into(),
+            encrypt_secret: [3u8; 16],
+        }
+    }
+
+    #[test]
+    fn get_resource_url_keeps_internal_paths_for_web_ui_requests() {
+        let options = sample_options();
+
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                1,
+                "/api/v1/library/thumbnail/by-hash/abc",
+                "logo",
+            ),
+            "/api/v1/library/thumbnail/by-hash/abc",
+        );
     }
 }
 

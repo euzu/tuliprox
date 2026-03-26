@@ -3,7 +3,8 @@ use crate::{
     info_err_res,
     utils::{
         default_as_true, default_movie_category, default_series_category, default_storage_formats,
-        default_supported_library_extensions, is_default_supported_library_extensions, is_true,
+        default_supported_library_extensions, default_thumbnail_height, default_thumbnail_quality,
+        default_thumbnail_width, is_default_supported_library_extensions, is_true,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ pub struct LibraryConfigDto {
     pub metadata: LibraryMetadataConfigDto,
     #[serde(default)]
     pub playlist: LibraryPlaylistConfigDto,
+    #[serde(default, skip_serializing_if = "ThumbnailConfigDto::is_empty")]
+    pub thumbnails: ThumbnailConfigDto,
 }
 
 impl LibraryConfigDto {
@@ -33,6 +36,7 @@ impl LibraryConfigDto {
             && is_default_supported_library_extensions(&self.supported_extensions)
             && self.metadata.is_empty()
             && self.playlist.is_empty()
+            && self.thumbnails.is_empty()
     }
     pub fn clean(&mut self) {
         self.scan_directories.retain(|d| !d.path.trim().is_empty());
@@ -130,6 +134,34 @@ impl LibraryPlaylistConfigDto {
     pub fn clean(&mut self) { self.prepare(); }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ThumbnailConfigDto {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_thumbnail_width")]
+    pub width: u32,
+    #[serde(default = "default_thumbnail_height")]
+    pub height: u32,
+    #[serde(default = "default_thumbnail_quality")]
+    pub quality: u8,
+}
+
+impl Default for ThumbnailConfigDto {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: default_thumbnail_width(),
+            height: default_thumbnail_height(),
+            quality: default_thumbnail_quality(),
+        }
+    }
+}
+
+impl ThumbnailConfigDto {
+    pub fn is_empty(&self) -> bool { !self.enabled }
+}
+
 impl Default for LibraryPlaylistConfigDto {
     fn default() -> Self {
         Self { movie_category: default_movie_category(), series_category: default_series_category() }
@@ -144,6 +176,7 @@ impl Default for LibraryConfigDto {
             supported_extensions: default_supported_library_extensions(),
             metadata: LibraryMetadataConfigDto::default(),
             playlist: LibraryPlaylistConfigDto::default(),
+            thumbnails: ThumbnailConfigDto::default(),
         }
     }
 }

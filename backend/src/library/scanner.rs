@@ -312,6 +312,12 @@ mod tests {
                 movie_category: "Local Movies".intern(),
                 series_category: "Local Series".intern(),
             },
+            thumbnails: crate::model::ThumbnailConfig {
+                enabled: false,
+                width: 320,
+                height: 180,
+                quality: 75,
+            },
         }
     }
 
