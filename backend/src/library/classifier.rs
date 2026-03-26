@@ -51,21 +51,24 @@ impl MediaClassifier {
                 MediaClassification::Movie { metadata: ptt_metadata }
             }
             LibraryContentType::Series => {
+                // Lowercase title for counter and SeriesKey so case variations
+                // don't split the same series into separate groups.
+                let normalized_title = ptt_metadata.title.to_lowercase();
                 if let (Some(episode), Some(season)) = (ptt_metadata.episodes.first(), ptt_metadata.seasons.first()) {
                     // Record the parsed episode so later fallback files in the same
                     // series/season don't collide with it.
-                    let key = (ptt_metadata.title.clone(), *season);
+                    let key = (normalized_title.clone(), *season);
                     let counter = episode_counters.entry(key).or_insert(1);
                     if *episode >= *counter {
                         *counter = *episode + 1;
                     }
                     // Use normalized key (no year/tmdb) so patterned and fallback
                     // files in the same forced-Series directory group together.
-                    Self::make_series_normalized(*episode, *season, ptt_metadata)
+                    Self::make_series_normalized(*episode, *season, &normalized_title, ptt_metadata)
                 } else {
                     // No episode/season pattern found — auto-assign sequential episode
                     // scoped to this series title + season 1.
-                    let key = (ptt_metadata.title.clone(), 1);
+                    let key = (normalized_title.clone(), 1);
                     let counter = episode_counters.entry(key).or_insert(1);
                     let episode = *counter;
                     *counter += 1;
@@ -75,7 +78,7 @@ impl MediaClassifier {
                     );
                     // Normalize key: strip year/tmdb so files from the same show
                     // with different per-file years group into one series.
-                    Self::make_series_normalized(episode, 1, ptt_metadata)
+                    Self::make_series_normalized(episode, 1, &normalized_title, ptt_metadata)
                 }
             }
         }
@@ -102,12 +105,13 @@ impl MediaClassifier {
         }
     }
 
-    /// Like `make_series` but strips year/tmdb from the key so that files from the
-    /// same show with different per-file years (e.g. encoding year) are grouped together.
-    fn make_series_normalized(episode: u32, season: u32, ptt_metadata: PttMetadata) -> MediaClassification {
+    /// Like `make_series` but uses a pre-normalized (lowercased) title and strips
+    /// year/tmdb from the key so that files from the same show with different
+    /// per-file years or case variations are grouped together.
+    fn make_series_normalized(episode: u32, season: u32, normalized_title: &str, ptt_metadata: PttMetadata) -> MediaClassification {
         MediaClassification::Series {
             key: SeriesKey {
-                title: ptt_metadata.title.clone(),
+                title: normalized_title.to_string(),
                 year: None,
                 tmdb_id: None,
             },
@@ -208,8 +212,8 @@ mod tests {
             }
             _ => panic!("Expected Series classification"),
         }
-        // Counter should record next episode after the parsed one
-        assert_eq!(counters[&("Breaking Bad".to_string(), 2)], 6);
+        // Counter should record next episode after the parsed one (key is lowercased)
+        assert_eq!(counters[&("breaking bad".to_string(), 2)], 6);
     }
 
     #[test]
@@ -238,7 +242,7 @@ mod tests {
             }
             _ => panic!("Expected Series classification for both"),
         }
-        assert_eq!(counters[&("Breaking Bad".to_string(), 1)], 3);
+        assert_eq!(counters[&("breaking bad".to_string(), 1)], 3);
     }
 
     #[test]
@@ -283,8 +287,9 @@ mod tests {
                 MediaClassification::Series { key: k1, episode: ep1, season: s1, .. },
                 MediaClassification::Series { key: k2, episode: ep2, season: s2, .. },
             ) => {
-                // Both must share the same normalized key (no year/tmdb)
+                // Both must share the same normalized key (lowercased, no year/tmdb)
                 assert_eq!(k1, k2);
+                assert_eq!(k1.title, "myshow");
                 assert_eq!(k1.year, None);
                 assert_eq!(k1.tmdb_id, None);
                 // Patterned file keeps its parsed episode
@@ -293,6 +298,28 @@ mod tests {
                 // Fallback gets auto-assigned episode 4 (after recorded episode 3)
                 assert_eq!(*s2, 1);
                 assert_eq!(*ep2, 4);
+            }
+            _ => panic!("Expected Series for both"),
+        }
+    }
+
+    #[test]
+    fn test_force_series_case_variations_same_group() {
+        let mut counters = HashMap::new();
+        let f1 = create_test_file("MyShow.1080p.mkv", "/tv", LibraryContentType::Series);
+        let f2 = create_test_file("myshow.720p.mkv", "/tv", LibraryContentType::Series);
+
+        let c1 = MediaClassifier::classify(&f1, &mut counters);
+        let c2 = MediaClassifier::classify(&f2, &mut counters);
+
+        match (&c1, &c2) {
+            (
+                MediaClassification::Series { key: k1, episode: ep1, .. },
+                MediaClassification::Series { key: k2, episode: ep2, .. },
+            ) => {
+                assert_eq!(k1, k2, "Case variants must produce the same SeriesKey");
+                assert_eq!(*ep1, 1);
+                assert_eq!(*ep2, 2);
             }
             _ => panic!("Expected Series for both"),
         }

@@ -60,9 +60,13 @@ pub struct SeriesEpisodeFile {
 pub struct MediaGrouper;
 
 impl MediaGrouper {
-    pub fn group(files: Vec<ScannedMediaFile>) -> Vec<MediaGroup> {
+    pub fn group(mut files: Vec<ScannedMediaFile>) -> Vec<MediaGroup> {
         let mut series_map: HashMap<SeriesKey, Vec<SeriesEpisodeFile>> = HashMap::new();
         let mut movies = Vec::new();
+
+        // Sort by path before classification so fallback episode numbering
+        // matches the final display order deterministically.
+        files.sort_by(|a, b| a.file_path.cmp(&b.file_path));
 
         let mut episode_counters = HashMap::new();
         for file in files {
