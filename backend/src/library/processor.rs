@@ -277,6 +277,10 @@ impl LibraryProcessor {
             })
             .unwrap_or_else(|| show_key.to_string());
 
+        // Build a map of existing per-episode thumbnail state so it can be
+        // carried forward when the series metadata is rebuilt from scratch.
+        let mut existing_ep_thumbs: HashMap<(u32, u32), (Option<String>, i64)> = HashMap::new();
+
         // Check if file already exists in cache
         let (mut chache_entry, status) = if let Some(existing_entry) = existing_map.get(&series_file_path) {
             if !force_rescan {
@@ -288,6 +292,17 @@ impl LibraryProcessor {
             }
 
             debug!("File modified, updating metadata: {show_key}");
+            // Preserve existing per-episode thumbnail state before rebuilding
+            if let MediaMetadata::Series(ref existing_series) = existing_entry.metadata {
+                if let Some(ref eps) = existing_series.episodes {
+                    for ep in eps {
+                        existing_ep_thumbs.insert(
+                            (ep.season, ep.episode),
+                            (ep.thumbnail_id.clone(), ep.file_modified),
+                        );
+                    }
+                }
+            }
             // Reuse existing UUID
             let metadata = self.resolve_metadata(group).await?;
 
@@ -337,6 +352,26 @@ impl LibraryProcessor {
                     if episode.episode == series_episode.episode && episode.season == series_episode.season {
                         let previous_file_modified = series_episode.file_modified;
                         if series_episode.file_path.is_empty() {
+                            // Carry forward existing thumbnail state so we don't
+                            // re-extract thumbnails that are already cached.
+                            let prev_mtime = if let Some((ref existing_thumb_id, existing_mtime)) =
+                                existing_ep_thumbs.get(&(episode.season, episode.episode))
+                            {
+                                series_episode.thumbnail_id.clone_from(existing_thumb_id);
+                                Some(*existing_mtime)
+                            } else {
+                                None
+                            };
+                            series_episode.file_path.clone_from(&episode.file.file_path);
+                            series_episode.file_modified = episode.file.modified_timestamp;
+                            series_episode.file_size = episode.file.size_bytes;
+                            self.update_episode_thumbnail(
+                                series_episode,
+                                &episode.file.file_path,
+                                episode.file.modified_timestamp,
+                                prev_mtime,
+                            ).await;
+                        } else {
                             let mut new_episode = series_episode.clone();
                             new_episode.file_path.clone_from(&episode.file.file_path);
                             new_episode.file_modified = episode.file.modified_timestamp;
@@ -345,19 +380,9 @@ impl LibraryProcessor {
                                 &mut new_episode,
                                 &episode.file.file_path,
                                 episode.file.modified_timestamp,
-                                None,
-                            ).await;
-                            double_episodes.push(new_episode);
-                        } else {
-                            series_episode.file_path.clone_from(&episode.file.file_path);
-                            series_episode.file_modified = episode.file.modified_timestamp;
-                            series_episode.file_size = episode.file.size_bytes;
-                            self.update_episode_thumbnail(
-                                series_episode,
-                                &episode.file.file_path,
-                                episode.file.modified_timestamp,
                                 Some(previous_file_modified),
                             ).await;
+                            double_episodes.push(new_episode);
                         }
                     }
                 }
@@ -406,6 +431,9 @@ impl LibraryProcessor {
     ) {
         // Skip if already has a poster from TMDB/NFO
         if cache_entry.metadata.poster().is_some() {
+            // Clear stale generated-thumbnail references so they can be reclaimed
+            cache_entry.thumbnail_hash = None;
+            cache_entry.thumbnail_mtime = None;
             return;
         }
 

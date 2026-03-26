@@ -1,7 +1,10 @@
 use crate::model::ThumbnailConfig;
 use log::debug;
 use std::path::Path;
+use std::time::Duration;
 use tokio::process::Command;
+
+const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Computes a stable BLAKE3 hash for a file path (or URL).
 pub fn file_hash(path: &str) -> String {
@@ -48,27 +51,25 @@ impl ThumbnailExtractor {
         )
     }
 
-    /// Runs ffmpeg to extract a single frame at ~10s into the video.
-    /// Falls back to position 0 if the video is shorter than 10s.
+    /// Runs ffmpeg to extract a single frame at ~180s into the video.
+    /// Falls back to position 0 if the video is shorter than 180s.
     async fn run_ffmpeg(&self, input_path: &str) -> Result<Vec<u8>, String> {
         let temp_dir = tempfile::tempdir()
             .map_err(|e| format!("Failed to create temp dir: {e}"))?;
         let output_path = temp_dir.path().join("thumb.jpg");
         let scale_filter = self.build_scale_filter();
-        let quality = self.config.quality.to_string();
+        let clamped_quality = self.config.quality.clamp(50, 100);
+        let quality = clamped_quality.to_string();
 
-        let output = Command::new("ffmpeg")
-            .args([
-                "-ss", "10",
+        let output = self.run_ffmpeg_with_timeout(&[
+                "-ss", "180",
                 "-i", input_path,
                 "-frames:v", "1",
                 "-vf", &scale_filter,
                 "-q:v", &quality,
                 "-y",
                 &output_path.to_string_lossy(),
-            ])
-            .output()
-            .await
+            ]).await
             .map_err(|e| format!("Failed to run ffmpeg: {e}"))?;
 
         if !output.status.success() {
@@ -76,8 +77,7 @@ impl ThumbnailExtractor {
             // Retry at position 0 if seeking past end of short video
             if stderr.contains("Output file is empty") || stderr.contains("nothing was encoded") {
                 debug!("Video shorter than 10s, retrying at position 0: {input_path}");
-                let output = Command::new("ffmpeg")
-                    .args([
+                let output = self.run_ffmpeg_with_timeout(&[
                         "-ss", "0",
                         "-i", input_path,
                         "-frames:v", "1",
@@ -85,9 +85,7 @@ impl ThumbnailExtractor {
                         "-q:v", &quality,
                         "-y",
                         &output_path.to_string_lossy(),
-                    ])
-                    .output()
-                    .await
+                    ]).await
                     .map_err(|e| format!("Failed to run ffmpeg retry: {e}"))?;
 
                 if !output.status.success() {
@@ -102,6 +100,23 @@ impl ThumbnailExtractor {
         tokio::fs::read(&output_path)
             .await
             .map_err(|e| format!("Failed to read thumbnail: {e}"))
+    }
+
+    /// Spawns ffmpeg with the given args and enforces a bounded timeout.
+    /// On timeout the child process is killed via `kill_on_drop`.
+    async fn run_ffmpeg_with_timeout(&self, args: &[&str]) -> Result<std::process::Output, String> {
+        let child = Command::new("ffmpeg")
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("Failed to spawn ffmpeg: {e}"))?;
+
+        tokio::time::timeout(FFMPEG_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| "Timed out running ffmpeg".to_string())?
+            .map_err(|e| e.to_string())
     }
 }
 

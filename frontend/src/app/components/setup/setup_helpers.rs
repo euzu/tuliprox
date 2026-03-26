@@ -10,7 +10,7 @@ use shared::{
         ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, SourcesConfigDto, StreamConfigDto, TargetOutputDto,
         TargetUserDto, ThumbnailConfigDto, WebAuthConfigDto, WebUiConfigDto,
     },
-    utils::default_secret,
+    utils::{default_secret, is_default_supported_library_extensions},
 };
 use std::{
     collections::HashMap,
@@ -202,7 +202,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
 
 fn is_setup_library_toggle_only_update(cfg: &LibraryConfigDto) -> bool {
     cfg.scan_directories.is_empty()
-        && cfg.supported_extensions.is_empty()
+        && (cfg.supported_extensions.is_empty() || is_default_supported_library_extensions(&cfg.supported_extensions))
         && cfg.metadata == LibraryMetadataConfigDto::default()
         && cfg.playlist == LibraryPlaylistConfigDto::default()
         && cfg.thumbnails == ThumbnailConfigDto::default()

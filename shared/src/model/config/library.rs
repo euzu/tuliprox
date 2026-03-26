@@ -159,7 +159,12 @@ impl Default for ThumbnailConfigDto {
 }
 
 impl ThumbnailConfigDto {
-    pub fn is_empty(&self) -> bool { !self.enabled }
+    pub fn is_empty(&self) -> bool {
+        !self.enabled
+            && self.width == default_thumbnail_width()
+            && self.height == default_thumbnail_height()
+            && self.quality == default_thumbnail_quality()
+    }
 }
 
 impl Default for LibraryPlaylistConfigDto {

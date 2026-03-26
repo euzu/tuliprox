@@ -45,10 +45,10 @@ const LABEL_MOVIE: &str = "LABEL.MOVIE";
 const LABEL_SERIES: &str = "LABEL.SERIES";
 const LABEL_FORMATS: &str = "LABEL.FORMATS";
 const LABEL_ADD_FORMAT: &str = "LABEL.ADD_FORMAT";
-const LABEL_THUMBNAILS: &str = "Thumbnails";
-const LABEL_WIDTH: &str = "Width";
-const LABEL_HEIGHT: &str = "Height";
-const LABEL_QUALITY: &str = "Quality";
+const LABEL_THUMBNAILS: &str = "LABEL.THUMBNAILS";
+const LABEL_WIDTH: &str = "LABEL.WIDTH";
+const LABEL_HEIGHT: &str = "LABEL.HEIGHT";
+const LABEL_QUALITY: &str = "LABEL.QUALITY";
 
 const TYPE_AUTO: &str = "Auto";
 const TYPE_MOVIE: &str = "Movie";
@@ -430,11 +430,11 @@ pub fn LibraryConfigView() -> Html {
                 </Card>
 
                 <Card class="tp__config-view__card">
-                    <h1>{LABEL_THUMBNAILS}</h1>
+                    <h1>{translate.t(LABEL_THUMBNAILS)}</h1>
                     { config_field_bool!(thumbnails, translate.t(LABEL_ENABLED), enabled) }
-                    { config_field!(thumbnails, LABEL_WIDTH, width) }
-                    { config_field!(thumbnails, LABEL_HEIGHT, height) }
-                    { config_field!(thumbnails, LABEL_QUALITY, quality) }
+                    { config_field!(thumbnails, translate.t(LABEL_WIDTH), width) }
+                    { config_field!(thumbnails, translate.t(LABEL_HEIGHT), height) }
+                    { config_field!(thumbnails, translate.t(LABEL_QUALITY), quality) }
                 </Card>
             </div>
             </>
@@ -502,11 +502,11 @@ pub fn LibraryConfigView() -> Html {
                  </Card>
 
                  <Card class="tp__config-view__card">
-                    <h1>{LABEL_THUMBNAILS}</h1>
+                    <h1>{translate.t(LABEL_THUMBNAILS)}</h1>
                     { edit_field_bool!(thumbnail_state, translate.t(LABEL_ENABLED), enabled, ThumbnailConfigFormAction::Enabled) }
-                    { edit_field_number_u32!(thumbnail_state, LABEL_WIDTH, width, ThumbnailConfigFormAction::Width) }
-                    { edit_field_number_u32!(thumbnail_state, LABEL_HEIGHT, height, ThumbnailConfigFormAction::Height) }
-                    { edit_field_number_u8!(thumbnail_state, LABEL_QUALITY, quality, ThumbnailConfigFormAction::Quality) }
+                    { edit_field_number_u32!(thumbnail_state, translate.t(LABEL_WIDTH), width, ThumbnailConfigFormAction::Width) }
+                    { edit_field_number_u32!(thumbnail_state, translate.t(LABEL_HEIGHT), height, ThumbnailConfigFormAction::Height) }
+                    { edit_field_number_u8!(thumbnail_state, translate.t(LABEL_QUALITY), quality, ThumbnailConfigFormAction::Quality) }
                  </Card>
             </div>
             </>

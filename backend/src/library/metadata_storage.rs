@@ -7,6 +7,9 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use path_clean::PathClean;
 
+const THUMBNAILS_PATH: &str = "thumbnails";
+const LIBRARY_PATH: &str = "library";
+
 // Metadata storage for local VOD files
 // Stores metadata as JSON files with UUID-based filenames
 #[derive(Clone)]
@@ -26,8 +29,8 @@ impl MetadataStorage {
             info!("Creating metadata storage directory: {}", self.storage_dir.display());
         }
         fs::create_dir_all(&self.storage_dir).await?;
-        fs::create_dir_all(self.storage_dir.join("library")).await?;
-        fs::create_dir_all(self.storage_dir.join("thumbnails")).await?;
+        fs::create_dir_all(self.storage_dir.join(LIBRARY_PATH)).await?;
+        fs::create_dir_all(self.storage_dir.join(THUMBNAILS_PATH)).await?;
         Ok(())
     }
 
@@ -178,11 +181,11 @@ impl MetadataStorage {
 
     // Gets the metadata file path for a Local library
     fn get_library_metadata_file_path(&self, uuid: &str) -> PathBuf {
-        self.storage_dir.join("library").join(format!("{uuid}.json"))
+        self.storage_dir.join(LIBRARY_PATH).join(format!("{uuid}.json"))
     }
 
     pub fn get_thumbnail_path(&self, hash: &str) -> PathBuf {
-        self.storage_dir.join("thumbnails").join(format!("{hash}.jpg"))
+        self.storage_dir.join(THUMBNAILS_PATH).join(format!("{hash}.jpg"))
     }
 
     pub async fn store_thumbnail(&self, hash: &str, data: &[u8]) -> std::io::Result<()> {

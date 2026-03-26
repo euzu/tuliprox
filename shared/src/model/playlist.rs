@@ -677,7 +677,7 @@ impl XtreamMappingOptions {
             if resource_url.is_empty() {
                 return resource_url.to_string();
             }
-            if resource_url.starts_with('/') {
+            if resource_url.starts_with('/') && !resource_url.starts_with("//") {
                 return resource_url.to_string();
             }
             let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
@@ -706,7 +706,7 @@ impl XtreamMappingOptions {
             if resource_url.is_empty() {
                 return resource_url.to_string();
             }
-            if resource_url.starts_with('/') {
+            if resource_url.starts_with('/') && !resource_url.starts_with("//") {
                 return resource_url.to_string();
             }
             let rewrite_url = concat_path(&self.base_url, &obfuscate_text(&self.encrypt_secret, resource_url));
