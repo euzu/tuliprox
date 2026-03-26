@@ -295,7 +295,7 @@ mod tests {
             Some(MetadataStorage::new(PathBuf::from("/tmp"))),
         );
         let file = create_test_file("The.Matrix.1999.1080p.mkv");
-        let metadata = match MediaClassifier::classify(&file, &mut 1) {
+        let metadata = match MediaClassifier::classify(&file, &mut std::collections::HashMap::new()) {
             MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,
         };
         let group = MediaGroup::Movie { file, metadata: Box::new(metadata) };
@@ -356,7 +356,7 @@ mod tests {
             Some(MetadataStorage::new(PathBuf::from("/tmp"))),
         );
         let file = create_test_file("343jfkjh4789dkjfh934z3.Movie.mkv");
-        let metadata = match MediaClassifier::classify(&file, &mut 1) {
+        let metadata = match MediaClassifier::classify(&file, &mut std::collections::HashMap::new()) {
             MediaClassification::Movie { metadata, .. } | MediaClassification::Series { metadata, .. } => metadata,
         };
         let group = MediaGroup::Movie { file, metadata: Box::new(metadata) };

@@ -64,9 +64,9 @@ impl MediaGrouper {
         let mut series_map: HashMap<SeriesKey, Vec<SeriesEpisodeFile>> = HashMap::new();
         let mut movies = Vec::new();
 
-        let mut episode_counter: u32 = 1;
+        let mut episode_counters = HashMap::new();
         for file in files {
-            let classification = MediaClassifier::classify(&file, &mut episode_counter);
+            let classification = MediaClassifier::classify(&file, &mut episode_counters);
             match classification {
                 MediaClassification::Movie { metadata } => {
                     movies.push(MediaGroup::Movie { file, metadata: Box::new(metadata) });
