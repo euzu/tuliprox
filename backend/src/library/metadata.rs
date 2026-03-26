@@ -134,7 +134,7 @@ pub struct SeriesMetadata {
 }
 
 // Episode metadata for TV series
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EpisodeMetadata {
     #[serde(default)]
     pub id: u32,

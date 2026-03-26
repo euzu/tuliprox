@@ -1,5 +1,5 @@
 use crate::api::model::create_http_client;
-use crate::library::metadata::{MediaMetadata, MetadataCacheEntry};
+use crate::library::metadata::{EpisodeMetadata, MediaMetadata, MetadataCacheEntry};
 use crate::library::metadata_resolver::MetadataResolver;
 use crate::library::metadata_storage::MetadataStorage;
 use crate::library::scanner::LibraryScanner;
@@ -292,30 +292,49 @@ impl LibraryProcessor {
         };
 
         if let (MediaMetadata::Series(ref mut series_metadata), MediaGroup::Series { episodes, .. }) = (&mut chache_entry.metadata, group) {
-            if let Some(series_episodes) = series_metadata.episodes.as_mut() {
-                // maybe we have the same episode as 2 different files
-                let mut double_episodes = vec![];
-                for episode in episodes {
-                    for series_episode in &mut *series_episodes {
-                        if episode.episode == series_episode.episode && episode.season == series_episode.season {
-                            if series_episode.file_path.is_empty() {
-                                let mut new_episode = series_episode.clone();
-                                new_episode.file_path.clone_from(&episode.file.file_path);
-                                new_episode.file_modified = episode.file.modified_timestamp;
-                                new_episode.file_size = episode.file.size_bytes;
-                                double_episodes.push(new_episode);
-                            } else {
-                                series_episode.file_path.clone_from(&episode.file.file_path);
-                                series_episode.file_modified = episode.file.modified_timestamp;
-                                series_episode.file_size = episode.file.size_bytes;
-                            }
+            let series_episodes = series_metadata.episodes.get_or_insert_with(|| {
+                // No episode list from TMDB/NFO — synthesize stubs from scanned files
+                // so that file paths, sizes and timestamps get populated below.
+                episodes.iter().map(|ep| EpisodeMetadata {
+                    title: ep.metadata.title.clone(),
+                    season: ep.season,
+                    episode: ep.episode,
+                    file_path: String::new(),
+                    file_size: 0,
+                    file_modified: 0,
+                    ..EpisodeMetadata::default()
+                }).collect()
+            });
+
+            // maybe we have the same episode as 2 different files
+            let mut double_episodes = vec![];
+            for episode in episodes {
+                for series_episode in &mut *series_episodes {
+                    if episode.episode == series_episode.episode && episode.season == series_episode.season {
+                        if series_episode.file_path.is_empty() {
+                            let mut new_episode = series_episode.clone();
+                            new_episode.file_path.clone_from(&episode.file.file_path);
+                            new_episode.file_modified = episode.file.modified_timestamp;
+                            new_episode.file_size = episode.file.size_bytes;
+                            double_episodes.push(new_episode);
+                        } else {
+                            series_episode.file_path.clone_from(&episode.file.file_path);
+                            series_episode.file_modified = episode.file.modified_timestamp;
+                            series_episode.file_size = episode.file.size_bytes;
                         }
                     }
                 }
-                if !double_episodes.is_empty() {
-                    series_episodes.append(&mut double_episodes);
-                    series_episodes.sort_by_key(|episode| (episode.season, episode.episode));
-                }
+            }
+            if !double_episodes.is_empty() {
+                series_episodes.append(&mut double_episodes);
+                series_episodes.sort_by_key(|episode| (episode.season, episode.episode));
+            }
+
+            series_metadata.number_of_episodes = u32::try_from(series_episodes.len()).unwrap_or(0);
+            if series_metadata.number_of_seasons == 0 {
+                let mut seasons: Vec<u32> = series_episodes.iter().map(|e| e.season).collect();
+                seasons.dedup();
+                series_metadata.number_of_seasons = u32::try_from(seasons.len()).unwrap_or(0);
             }
         }
 
