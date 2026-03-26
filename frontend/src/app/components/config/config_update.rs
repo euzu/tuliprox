@@ -1,9 +1,11 @@
 use crate::app::components::config::config_page::ConfigForm;
-use shared::model::{
-    ConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto,
-    LibraryPlaylistConfigDto, ThumbnailConfigDto, WebAuthConfigDto, WebUiConfigDto,
+use shared::{
+    model::{
+        ConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto,
+        LibraryPlaylistConfigDto, ThumbnailConfigDto, WebAuthConfigDto, WebUiConfigDto,
+    },
+    utils::is_default_supported_library_extensions,
 };
-use shared::utils::is_default_supported_library_extensions;
 
 macro_rules! set_config_field {
     ($main_config:expr, $config:expr, $field:ident) => {
