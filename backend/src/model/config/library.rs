@@ -39,7 +39,6 @@ pub struct ThumbnailConfig {
     pub enabled: bool,
     pub width: u32,
     pub height: u32,
-    pub quality: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +122,6 @@ impl From<&LibraryConfigDto> for LibraryConfig {
                 enabled: dto.thumbnails.enabled,
                 width: dto.thumbnails.width,
                 height: dto.thumbnails.height,
-                quality: dto.thumbnails.quality,
             },
         }
     }

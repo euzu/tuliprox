@@ -1,11 +1,11 @@
 use crate::library::metadata::{MediaMetadata, MetadataCacheEntry};
 use log::{debug, error, info};
+use path_clean::PathClean;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use path_clean::PathClean;
 
 const THUMBNAILS_PATH: &str = "thumbnails";
 const LIBRARY_PATH: &str = "library";
@@ -121,21 +121,27 @@ impl MetadataStorage {
             fs::remove_file(&file_path).await?;
         }
 
+        let cached_entries = self.load_all().await;
+
         if let Some(entry) = entry {
             for thumbnail_id in referenced_thumbnail_ids_for_entry(&entry) {
-                self.delete_unreferenced_thumbnail(thumbnail_id.as_str()).await;
+                self.delete_unreferenced_thumbnail(thumbnail_id.as_str(), Some(&cached_entries)).await;
             }
         }
 
         Ok(())
     }
 
-    async fn delete_unreferenced_thumbnail(&self, hash: &str) {
-        let still_referenced = self
-            .load_all()
-            .await
-            .into_iter()
-            .any(|entry| entry_references_thumbnail(&entry, hash));
+    async fn delete_unreferenced_thumbnail(&self, hash: &str, cached_entries: Option<&[MetadataCacheEntry]>) {
+        let loaded_entries;
+        let entries = if let Some(entries) = cached_entries { entries } else {
+            loaded_entries = self.load_all().await;
+            &loaded_entries
+        };
+
+        let still_referenced = entries
+            .iter()
+            .any(|entry| entry_references_thumbnail(entry, hash));
         if still_referenced {
             return;
         }
@@ -264,7 +270,7 @@ impl MetadataStorage {
     async fn store_file(&self, content: &[u8], file_path: PathBuf) -> std::io::Result<PathBuf> {
         // Ensure parent directory exists - unconditionally
         if let Some(parent) = file_path.parent() {
-             fs::create_dir_all(parent).await?;
+            fs::create_dir_all(parent).await?;
         }
 
         let mut file = fs::File::create(&file_path).await?;
@@ -410,12 +416,12 @@ fn referenced_thumbnail_ids_for_entry(entry: &MetadataCacheEntry) -> Vec<String>
 fn entry_references_thumbnail(entry: &MetadataCacheEntry, hash: &str) -> bool {
     entry.thumbnail_hash.as_deref() == Some(hash)
         || match &entry.metadata {
-            MediaMetadata::Movie(_) => false,
-            MediaMetadata::Series(series) => series
-                .episodes
-                .as_ref()
-                .is_some_and(|episodes| episodes.iter().any(|episode| episode.thumbnail_id.as_deref() == Some(hash))),
-        }
+        MediaMetadata::Movie(_) => false,
+        MediaMetadata::Series(series) => series
+            .episodes
+            .as_ref()
+            .is_some_and(|episodes| episodes.iter().any(|episode| episode.thumbnail_id.as_deref() == Some(hash))),
+    }
 }
 
 #[cfg(test)]

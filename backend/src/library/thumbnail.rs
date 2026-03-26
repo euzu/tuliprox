@@ -58,15 +58,13 @@ impl ThumbnailExtractor {
             .map_err(|e| format!("Failed to create temp dir: {e}"))?;
         let output_path = temp_dir.path().join("thumb.jpg");
         let scale_filter = self.build_scale_filter();
-        let clamped_quality = self.config.quality.clamp(50, 100);
-        let quality = clamped_quality.to_string();
 
         let output = self.run_ffmpeg_with_timeout(&[
                 "-ss", "180",
                 "-i", input_path,
                 "-frames:v", "1",
                 "-vf", &scale_filter,
-                "-q:v", &quality,
+                "-q:v1",
                 "-y",
                 &output_path.to_string_lossy(),
             ]).await
@@ -82,7 +80,7 @@ impl ThumbnailExtractor {
                         "-i", input_path,
                         "-frames:v", "1",
                         "-vf", &scale_filter,
-                        "-q:v", &quality,
+                        "-q:v1",
                         "-y",
                         &output_path.to_string_lossy(),
                     ]).await

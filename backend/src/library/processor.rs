@@ -394,9 +394,7 @@ impl LibraryProcessor {
 
             series_metadata.number_of_episodes = u32::try_from(series_episodes.len()).unwrap_or(0);
             if series_metadata.number_of_seasons == 0 {
-                let mut seasons: Vec<u32> = series_episodes.iter().map(|e| e.season).collect();
-                seasons.dedup();
-                series_metadata.number_of_seasons = u32::try_from(seasons.len()).unwrap_or(0);
+                series_metadata.number_of_seasons = unique_season_count(series_episodes);
             }
         }
 
@@ -534,6 +532,13 @@ impl LibraryProcessor {
     }
 }
 
+fn unique_season_count(episodes: &[EpisodeMetadata]) -> u32 {
+    let mut seasons: Vec<u32> = episodes.iter().map(|episode| episode.season).collect();
+    seasons.sort_unstable();
+    seasons.dedup();
+    u32::try_from(seasons.len()).unwrap_or(0)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -552,5 +557,17 @@ mod tests {
 
         assert_eq!(result.files_scanned, 100);
         assert_eq!(result.files_added, 50);
+    }
+
+    #[test]
+    fn test_unique_season_count_handles_unsorted_duplicates() {
+        let episodes = vec![
+            EpisodeMetadata { season: 2, ..EpisodeMetadata::default() },
+            EpisodeMetadata { season: 1, ..EpisodeMetadata::default() },
+            EpisodeMetadata { season: 2, ..EpisodeMetadata::default() },
+            EpisodeMetadata { season: 3, ..EpisodeMetadata::default() },
+        ];
+
+        assert_eq!(unique_season_count(&episodes), 3);
     }
 }

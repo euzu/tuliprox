@@ -119,7 +119,7 @@ mod tests {
     use crate::app::components::config::config_page::ConfigForm;
     use shared::model::{
         ConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto, LibraryConfigDto,
-        LibraryScanDirectoryDto, MetadataUpdateConfigDto, ProxyConfigDto, ThumbnailConfigDto, WebAuthConfigDto,
+        LibraryScanDirectoryDto, MetadataUpdateConfigDto, ProxyConfigDto, WebAuthConfigDto,
         WebUiConfigDto,
     };
 

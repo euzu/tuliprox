@@ -3,8 +3,8 @@ use crate::{
     info_err_res,
     utils::{
         default_as_true, default_movie_category, default_series_category, default_storage_formats,
-        default_supported_library_extensions, default_thumbnail_height, default_thumbnail_quality,
-        default_thumbnail_width, is_default_supported_library_extensions, is_true,
+        default_supported_library_extensions, default_thumbnail_height, default_thumbnail_width,
+        is_default_supported_library_extensions, is_true,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -143,27 +143,17 @@ pub struct ThumbnailConfigDto {
     pub width: u32,
     #[serde(default = "default_thumbnail_height")]
     pub height: u32,
-    #[serde(default = "default_thumbnail_quality")]
-    pub quality: u8,
 }
 
 impl Default for ThumbnailConfigDto {
     fn default() -> Self {
-        Self {
-            enabled: false,
-            width: default_thumbnail_width(),
-            height: default_thumbnail_height(),
-            quality: default_thumbnail_quality(),
-        }
+        Self { enabled: false, width: default_thumbnail_width(), height: default_thumbnail_height() }
     }
 }
 
 impl ThumbnailConfigDto {
     pub fn is_empty(&self) -> bool {
-        !self.enabled
-            && self.width == default_thumbnail_width()
-            && self.height == default_thumbnail_height()
-            && self.quality == default_thumbnail_quality()
+        !self.enabled && self.width == default_thumbnail_width() && self.height == default_thumbnail_height()
     }
 }
 

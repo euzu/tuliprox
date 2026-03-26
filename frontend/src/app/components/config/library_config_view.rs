@@ -13,7 +13,7 @@ use crate::{
         context::ConfigContext,
     },
     config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_list, edit_field_number_u32,
-    edit_field_number_u8, edit_field_text, generate_form_reducer,
+    edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{
@@ -48,8 +48,6 @@ const LABEL_ADD_FORMAT: &str = "LABEL.ADD_FORMAT";
 const LABEL_THUMBNAILS: &str = "LABEL.THUMBNAILS";
 const LABEL_WIDTH: &str = "LABEL.WIDTH";
 const LABEL_HEIGHT: &str = "LABEL.HEIGHT";
-const LABEL_QUALITY: &str = "LABEL.QUALITY";
-
 const TYPE_AUTO: &str = "Auto";
 const TYPE_MOVIE: &str = "Movie";
 const TYPE_SERIES: &str = "Series";
@@ -99,7 +97,6 @@ generate_form_reducer!(
         Enabled => enabled: bool,
         Width => width: u32,
         Height => height: u32,
-        Quality => quality: u8,
     }
 );
 
@@ -434,7 +431,6 @@ pub fn LibraryConfigView() -> Html {
                     { config_field_bool!(thumbnails, translate.t(LABEL_ENABLED), enabled) }
                     { config_field!(thumbnails, translate.t(LABEL_WIDTH), width) }
                     { config_field!(thumbnails, translate.t(LABEL_HEIGHT), height) }
-                    { config_field!(thumbnails, translate.t(LABEL_QUALITY), quality) }
                 </Card>
             </div>
             </>
@@ -506,7 +502,6 @@ pub fn LibraryConfigView() -> Html {
                     { edit_field_bool!(thumbnail_state, translate.t(LABEL_ENABLED), enabled, ThumbnailConfigFormAction::Enabled) }
                     { edit_field_number_u32!(thumbnail_state, translate.t(LABEL_WIDTH), width, ThumbnailConfigFormAction::Width) }
                     { edit_field_number_u32!(thumbnail_state, translate.t(LABEL_HEIGHT), height, ThumbnailConfigFormAction::Height) }
-                    { edit_field_number_u8!(thumbnail_state, translate.t(LABEL_QUALITY), quality, ThumbnailConfigFormAction::Quality) }
                  </Card>
             </div>
             </>

@@ -250,7 +250,6 @@ mod tests {
                 enabled: false,
                 width: 320,
                 height: 180,
-                quality: 75,
             },
         }
     }
