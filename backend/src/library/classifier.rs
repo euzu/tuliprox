@@ -59,7 +59,9 @@ impl MediaClassifier {
                     if *episode >= *counter {
                         *counter = *episode + 1;
                     }
-                    Self::make_series(*episode, *season, ptt_metadata)
+                    // Use normalized key (no year/tmdb) so patterned and fallback
+                    // files in the same forced-Series directory group together.
+                    Self::make_series_normalized(*episode, *season, ptt_metadata)
                 } else {
                     // No episode/season pattern found — auto-assign sequential episode
                     // scoped to this series title + season 1.
@@ -262,6 +264,37 @@ mod tests {
         match ca2 {
             MediaClassification::Series { episode, .. } => assert_eq!(episode, 2),
             _ => panic!("Expected Series"),
+        }
+    }
+
+    #[test]
+    fn test_force_series_mixed_pattern_and_fallback_same_key() {
+        let mut counters = HashMap::new();
+        // Patterned file with year in filename
+        let f1 = create_test_file("MyShow.2020.S01E03.mkv", "/tv/MyShow", LibraryContentType::Series);
+        // Fallback file: same title parsed by PTT but no SxxExx pattern
+        let f2 = create_test_file("MyShow.2020.1080p.mkv", "/tv/MyShow", LibraryContentType::Series);
+
+        let c1 = MediaClassifier::classify(&f1, &mut counters);
+        let c2 = MediaClassifier::classify(&f2, &mut counters);
+
+        match (&c1, &c2) {
+            (
+                MediaClassification::Series { key: k1, episode: ep1, season: s1, .. },
+                MediaClassification::Series { key: k2, episode: ep2, season: s2, .. },
+            ) => {
+                // Both must share the same normalized key (no year/tmdb)
+                assert_eq!(k1, k2);
+                assert_eq!(k1.year, None);
+                assert_eq!(k1.tmdb_id, None);
+                // Patterned file keeps its parsed episode
+                assert_eq!(*s1, 1);
+                assert_eq!(*ep1, 3);
+                // Fallback gets auto-assigned episode 4 (after recorded episode 3)
+                assert_eq!(*s2, 1);
+                assert_eq!(*ep2, 4);
+            }
+            _ => panic!("Expected Series for both"),
         }
     }
 }
