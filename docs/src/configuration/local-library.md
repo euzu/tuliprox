@@ -123,6 +123,16 @@ your disk when requested by the IPTV player!
 
 ## Additional Information
 
+### Content Classification
+
+The MediaClassifier logic respects the `content_type` defined for configured directories.
+
+* **auto** (default): Uses auto-detection to determine if a file is a movie or a series based on filename patterns (e.g. `S01E01`).
+* **movie**: Forces all files to be classified as movies, overriding any auto-detection results.
+* **series**: Forces classification as a series. If episode/season patterns are detected in the filename (e.g. `S02E05`), those values are used.  
+  If no pattern is found, the file is still classified as a series with **season 1** and an **auto-incremented episode number**  
+  (starting at 1, in file scan order).
+
 ### Triggering Scans (CLI & API)
 
 By default, the library scan can be automated using standard Cron syntax under the `schedules:` block (
