@@ -1,6 +1,7 @@
 use crate::api::model::{MetadataRetryDbKey, MetadataRetryDbValue};
 use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery, VirtualIdRecord};
-use log::error;
+use env_logger::{Builder, Target};
+use log::{error, LevelFilter};
 use serde::{Deserialize, Serialize};
 use shared::model::{EpgChannel, M3uPlaylistItem, XtreamPlaylistItem};
 use std::io::Write;
@@ -75,6 +76,8 @@ pub fn db_viewer(args: &DbViewerArgs<'_>) {
         return;
     }
 
+    init_db_viewer_logger();
+
     let mut any_processed = false;
     for request in requests {
         if let Some(filename) = request.filename {
@@ -90,6 +93,12 @@ pub fn db_viewer(args: &DbViewerArgs<'_>) {
     }
 }
 
+fn init_db_viewer_logger() {
+    let mut log_builder = Builder::from_default_env();
+    log_builder.target(Target::Stderr);
+    log_builder.filter_level(LevelFilter::Info);
+    let _ = log_builder.try_init();
+}
 
 fn try_dump_typed_db<K, V>(path: &Path) -> bool
 where
