@@ -36,7 +36,6 @@ pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
 pub fn exec_scheduler(
     client: &reqwest::Client,
     app_state: &Arc<AppState>,
-    targets: &Arc<ProcessTargets>,
     cancel: &CancellationToken,
 ) {
     let cfg = &app_state.app_config;
@@ -64,7 +63,9 @@ pub fn exec_scheduler(
 
         let expression = schedule.schedule.clone();
         let task_type = schedule.task_type;
-        let exec_targets = get_process_targets(cfg, targets, schedule.targets.as_ref());
+        // Store the schedule's target names (not resolved IDs) so we can
+        // re-resolve against current sources at each execution.
+        let schedule_target_names: Option<Vec<String>> = schedule.targets.clone();
         let app_state_clone = Arc::clone(app_state);
         let http_client = client.clone();
         let cancel_token = cancel.clone();
@@ -87,9 +88,8 @@ pub fn exec_scheduler(
                 // lock when another update is active.  Cancels cleanly on shutdown.
                 let worker_client = http_client;
                 let worker_state = app_state_clone;
-                let worker_targets = exec_targets;
                 tokio::spawn(async move {
-                    run_playlist_update_worker(worker_client, worker_state, worker_targets, rx, cancel_token).await;
+                    run_playlist_update_worker(worker_client, worker_state, schedule_target_names, rx, cancel_token).await;
                 });
             }
             ScheduleTaskType::LibraryScan | ScheduleTaskType::GeoIpUpdate => {
@@ -99,7 +99,6 @@ pub fn exec_scheduler(
                         expression.as_str(),
                         task_type,
                         app_state_clone,
-                        exec_targets,
                         cancel_token,
                     )
                     .await;
@@ -143,7 +142,7 @@ async fn start_playlist_trigger(expression: &str, cancel: CancellationToken, tx:
 async fn run_playlist_update_worker(
     client: reqwest::Client,
     app_state: Arc<AppState>,
-    targets: Arc<ProcessTargets>,
+    schedule_target_names: Option<Vec<String>>,
     mut rx: mpsc::Receiver<()>,
     cancel: CancellationToken,
 ) {
@@ -155,17 +154,28 @@ async fn run_playlist_update_worker(
                 if msg.is_none() {
                     break; // Sender dropped (scheduler task exited)
                 }
-                run_playlist_update_inner(&client, &app_state, &targets).await;
+                run_playlist_update_inner(&client, &app_state, schedule_target_names.as_ref()).await;
             }
         }
     }
 }
 
-async fn run_playlist_update_inner(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
+async fn run_playlist_update_inner(
+    client: &reqwest::Client,
+    app_state: &Arc<AppState>,
+    schedule_target_names: Option<&Vec<String>>,
+) {
+    // Re-resolve targets from the CURRENT sources and forced_targets each time,
+    // so that input/target ID changes from hot-reloads are picked up.
+    let targets = get_process_targets(
+        &app_state.app_config,
+        &app_state.forced_targets.load(),
+        schedule_target_names,
+    );
     exec_processing(
         client,
         Arc::clone(&app_state.app_config),
-        Arc::clone(targets),
+        targets,
         Some(Arc::clone(&app_state.event_manager)),
         Some(Arc::clone(app_state)),
         Some(app_state.playlists.clone()),
@@ -184,7 +194,6 @@ async fn start_scheduler(
     expression: &str,
     task_type: ScheduleTaskType,
     app_state: Arc<AppState>,
-    _targets: Arc<ProcessTargets>,
     cancel: CancellationToken,
 ) {
     match Schedule::from_str(expression) {

@@ -500,7 +500,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         sync_panel_api_exp_dates_on_boot(&app_state).await;
     }
 
-    exec_scheduler(client.as_ref(), &app_state, &targets, &cancel_token_scheduler);
+    exec_scheduler(client.as_ref(), &app_state, &cancel_token_scheduler);
     exec_file_lock_prune(&app_state);
     exec_interner_prune(&app_state);
     exec_config_watch(&app_state, &cancel_token_file_watch);

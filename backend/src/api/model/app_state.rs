@@ -188,7 +188,6 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         exec_scheduler(
             &Arc::clone(&app_state.http_client.load()),
             app_state,
-            &app_state.forced_targets.load(),
             &app_state.cancel_tokens.load().scheduler,
         );
     }
