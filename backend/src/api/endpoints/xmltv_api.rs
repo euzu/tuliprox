@@ -460,6 +460,7 @@ pub async fn serve_short_epg(
 /// // A GET request to /xmltv.php with valid query parameters will invoke this handler.
 /// ```
 async fn xmltv_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
+    api_req.log_sanitized("xmltv_api");
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
         get_user_target(&api_req, app_state),

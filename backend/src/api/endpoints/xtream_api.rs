@@ -1145,6 +1145,7 @@ macro_rules! skip_flag_optional {
 
 #[allow(clippy::too_many_lines)]
 async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
+    api_req.log_sanitized("xtream_player_api");
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
         get_user_target(&api_req, app_state),
