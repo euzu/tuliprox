@@ -381,16 +381,16 @@ pub fn v1_api_playlist_register_with_permissions(
 #[cfg(test)]
 mod tests {
     use super::resolve_provider_url_for_request;
-    use crate::model::{AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, SourcesConfig};
+    use crate::model::{AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, ConfigTarget, SourcesConfig};
     use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::foundation::Filter;
     use shared::{
         model::{ConfigPaths, ConfigProviderDto, PlaylistRequest},
         utils::Internable,
     };
     use std::sync::Arc;
 
-    fn test_app_config(input: Arc<ConfigInput>) -> AppConfig {
-        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+    fn test_app_config(input: Arc<ConfigInput>, source: ConfigSource) -> AppConfig {
         let sources = SourcesConfig {
             batch_files: vec![],
             provider: vec![],
@@ -438,10 +438,51 @@ mod tests {
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
         });
-        let app_config = test_app_config(input);
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(input, source);
         let resolved = resolve_provider_url_for_request(
             &app_config,
             &PlaylistRequest::Input(7),
+            "provider://demo/live/user/pass/1359.ts",
+        );
+
+        assert_eq!(resolved, "http://provider.example/live/user/pass/1359.ts");
+    }
+
+    #[test]
+    fn resolve_provider_url_for_target_request_rewrites_provider_scheme() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".intern(),
+            urls: vec!["http://provider.example".intern()],
+            dns: None,
+        });
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..Default::default()
+        });
+        let target = Arc::new(ConfigTarget {
+            id: 11,
+            enabled: true,
+            name: "target".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: Default::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![target] };
+        let app_config = test_app_config(input, source);
+        let resolved = resolve_provider_url_for_request(
+            &app_config,
+            &PlaylistRequest::Target(11),
             "provider://demo/live/user/pass/1359.ts",
         );
 

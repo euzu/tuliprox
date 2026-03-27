@@ -12,10 +12,15 @@ fn resolve_close_result(actions: &DialogActions) -> Option<DialogResult> {
         .into_iter()
         .flatten()
         .chain(actions.right.iter())
-        .find(|action| matches!(action.result, DialogResult::Cancel))
+        .find(|action| !action.disabled && matches!(action.result, DialogResult::Cancel))
         .map(|action| action.result.clone())
-        .or_else(|| actions.right.first().map(|action| action.result.clone()))
-        .or_else(|| actions.left.as_ref().and_then(|actions| actions.first().map(|action| action.result.clone())))
+        .or_else(|| actions.right.iter().find(|action| !action.disabled).map(|action| action.result.clone()))
+        .or_else(|| {
+            actions
+                .left
+                .as_ref()
+                .and_then(|actions| actions.iter().find(|action| !action.disabled).map(|action| action.result.clone()))
+        })
 }
 
 #[derive(Properties, PartialEq)]
@@ -112,5 +117,17 @@ mod tests {
         };
 
         assert_eq!(resolve_close_result(&actions), Some(DialogResult::Cancel));
+    }
+
+    #[test]
+    fn resolve_close_result_ignores_disabled_actions() {
+        let actions = DialogActions {
+            left: Some(vec![
+                DialogAction::new("close", "LABEL.CLOSE", DialogResult::Cancel, None, None).with_disabled(true)
+            ]),
+            right: vec![DialogAction::new("ok", "LABEL.OK", DialogResult::Ok, None, None)],
+        };
+
+        assert_eq!(resolve_close_result(&actions), Some(DialogResult::Ok));
     }
 }

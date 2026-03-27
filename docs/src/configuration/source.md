@@ -705,7 +705,7 @@ Tuliprox supports the following filter expression types:
 * Regular expression comparison: `([fieldanme]) ~ "regexp"` <br>
   The `[fieldanme]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input` or `Type`.
 * Filters don't have operator precedence, so please use parentheses
-* You can apply Moore's Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`
+* You can apply Morgan’s Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`
 
 > **Note:**
 >

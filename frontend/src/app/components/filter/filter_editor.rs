@@ -40,16 +40,16 @@ pub(crate) fn parse_filter_preview(
 pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let translate = use_translation();
+    let cfg_templates = config_ctx.config.as_ref().and_then(|c| {
+        c.templates.as_ref().map(|definition| definition.templates.clone()).or_else(|| c.sources.templates.clone())
+    });
 
-    let templates_state = use_state(|| None);
-    let filter_state = use_state(|| None);
+    let templates_state = use_state(|| cfg_templates.clone());
+    let filter_state = use_state(|| props.filter.clone());
 
     {
         let templates = templates_state.clone();
         let on_templates_change = props.on_templates_change.clone();
-        let cfg_templates = config_ctx.config.as_ref().and_then(|c| {
-            c.templates.as_ref().map(|definition| definition.templates.clone()).or_else(|| c.sources.templates.clone())
-        });
         use_effect_with(cfg_templates, move |templ| {
             templates.set(templ.clone());
             on_templates_change.emit(templ.clone());
