@@ -218,10 +218,20 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
     }
 
     fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
-        Ok(Some(normalize_scalar_string(v).intern()))
+        let normalized = normalize_scalar_string(v);
+        if normalized.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(normalized.intern()))
+        }
     }
     fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
-        Ok(Some(normalize_scalar_string(v.as_str()).intern()))
+        let normalized = normalize_scalar_string(v.as_str());
+        if normalized.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(normalized.intern()))
+        }
     }
     fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
     fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
@@ -274,12 +284,12 @@ pub mod arc_str_serde {
         serializer.serialize_str(value)
     }
 
-    /// Deserialize a YAML scalar as an interned `Arc<str>`.
+    /// Deserialize a scalar as an interned `Arc<str>`.
     ///
-    /// Uses `deserialize_string` so saphyr hands us the **raw text** without
-    /// first running it through float/bool/int parsing.  This preserves values
-    /// like `infinity` as the literal string `"infinity"` instead of silently
-    /// converting them to `".inf"`.
+    /// This goes through `deserialize_option(ArcStrVisitor)`, and
+    /// `ArcStrVisitor::visit_some` uses `deserialize_any`. That allows numeric
+    /// JSON/YAML scalars to be accepted, but raw numeric notation may be lost
+    /// during normalization (for example `1e2` becomes `"100"`).
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
     where
         D: Deserializer<'de>,
@@ -327,7 +337,8 @@ pub mod arc_str_option_null_if_empty_serde {
 //
 // Reuses `ArcStrVisitor` / `OptionArcStrVisitor` via `deserialize_option`:
 //   - null / ~ / empty  -> visit_none / visit_unit -> "" / None
-//   - `ArcStrVisitor::visit_some` -> deserialize_string -> raw scalar text
+//   - `ArcStrVisitor::visit_some` -> deserialize_any -> numbers/bools map into
+//     typed `visit_*` methods, so raw numeric notation may be normalized
 //   - `OptionArcStrVisitor::visit_some` -> deserialize_any -> numbers/bools map
 //     into their typed `visit_*` methods before being interned as strings
 
@@ -391,5 +402,17 @@ mod tests {
     fn arc_str_option_serde_accepts_json_string() {
         let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":"8169"}"#).unwrap();
         assert_eq!(parsed.value.as_deref(), Some("8169"));
+    }
+
+    #[test]
+    fn arc_str_option_serde_maps_empty_string_to_none() {
+        let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":""}"#).unwrap();
+        assert_eq!(parsed.value, None);
+    }
+
+    #[test]
+    fn arc_str_serde_normalizes_json_scientific_notation_numbers() {
+        let parsed: ArcStrHolder = serde_json::from_str(r#"{"value":1e2}"#).unwrap();
+        assert_eq!(parsed.value.as_ref(), "100");
     }
 }

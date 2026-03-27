@@ -220,9 +220,17 @@ impl FfmpegExecutor {
 
         tokio::time::timeout(FFMPEG_TIMEOUT, child.wait_with_output())
             .await
-            .map_err(|_| "Timed out running ffmpeg".to_string())?
+            .map_err(|_| format_ffmpeg_timeout_error(args))?
             .map_err(|e| e.to_string())
     }
+}
+
+fn format_ffmpeg_timeout_error(args: &[String]) -> String {
+    let summary = args.join(" ");
+    format!(
+        "Timed out running ffmpeg after {}s: {summary}",
+        FFMPEG_TIMEOUT.as_secs()
+    )
 }
 
 fn build_ffprobe_proxy_url(proxy_cfg: &ProxyConfig) -> Option<String> {
@@ -305,7 +313,7 @@ fn build_thumbnail_args(input_path: &str, output_path: &Path, scale_filter: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ffprobe_proxy_url, build_thumbnail_args, build_thumbnail_scale_filter};
+    use super::{build_ffprobe_proxy_url, build_thumbnail_args, build_thumbnail_scale_filter, format_ffmpeg_timeout_error, FFMPEG_TIMEOUT};
     use crate::model::ProxyConfig;
     use std::path::Path;
 
@@ -360,5 +368,13 @@ mod tests {
             .map(str::to_string)
             .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn format_ffmpeg_timeout_error_includes_binary_timeout_and_args() {
+        let msg = format_ffmpeg_timeout_error(&["-ss".to_string(), "180".to_string(), "-i".to_string(), "/tmp/in.mkv".to_string()]);
+        assert!(msg.contains("ffmpeg"));
+        assert!(msg.contains(&FFMPEG_TIMEOUT.as_secs().to_string()));
+        assert!(msg.contains("-ss 180 -i /tmp/in.mkv"));
     }
 }

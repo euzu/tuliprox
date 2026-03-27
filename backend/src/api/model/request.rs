@@ -1,6 +1,9 @@
 use axum::extract::{FromRequest, Request};
-use axum::response::Response;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use log::log_enabled;
+
+const MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct UserApiRequest {
@@ -61,17 +64,30 @@ where
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        // Parse body (ignore errors, fallback to query-only)
-        let body_req = parse_body(body, content_type).await.ok();
+        let body_req = match parse_body(body, content_type).await {
+            Ok(body_req) => Some(body_req),
+            Err(err) => return Err((StatusCode::BAD_REQUEST, err).into_response()),
+        };
 
         Ok(UserApiRequestQueryOrBody(UserApiRequest::merge_query_over_form(&query_req, body_req.as_ref())))
     }
 }
 
 async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserApiRequest, String> {
-    let bytes = axum::body::to_bytes(body, usize::MAX)
+    let bytes = axum::body::to_bytes(body, MAX_BODY_SIZE_BYTES)
         .await
-        .map_err(|e| format!("Failed to read body: {e}"))?;
+        .map_err(|e| {
+            let err = e.to_string();
+            if err.contains("length limit exceeded") {
+                format!("Request body too large (max {MAX_BODY_SIZE_BYTES} bytes)")
+            } else {
+                format!("Failed to read request body: {err}")
+            }
+        })?;
+
+    if bytes.is_empty() {
+        return Ok(UserApiRequest::default());
+    }
 
     if content_type.starts_with("multipart/form-data") {
         parse_multipart_body(&bytes, content_type)
@@ -191,7 +207,10 @@ impl UserApiRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::UserApiRequest;
+    use super::{parse_body, UserApiRequest, MAX_BODY_SIZE_BYTES};
+    use axum::body::Body;
+    use axum::extract::FromRequest;
+    use axum::http::{Request as HttpRequest, StatusCode};
 
     #[test]
     fn merge_prefer_primary_uses_fallback_for_empty_fields() {
@@ -287,5 +306,32 @@ mod tests {
         assert_eq!(merged.username, "query-user");
         assert_eq!(merged.token, "query-token");
         assert_eq!(merged.action, "query-action");
+    }
+
+    #[tokio::test]
+    async fn parse_body_rejects_oversized_payloads() {
+        let oversized = "a".repeat(MAX_BODY_SIZE_BYTES + 1);
+        let err = parse_body(Body::from(oversized), "application/x-www-form-urlencoded")
+            .await
+            .expect_err("oversized bodies should be rejected");
+
+        assert!(err.contains("body too large"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn extractor_surfaces_oversized_body_as_bad_request() {
+        let oversized = "a".repeat(MAX_BODY_SIZE_BYTES + 1);
+        let request = HttpRequest::builder()
+            .header("content-type", "application/x-www-form-urlencoded")
+            .uri("/player_api.php")
+            .body(Body::from(oversized))
+            .expect("request should build");
+
+        let response = match super::UserApiRequestQueryOrBody::from_request(request, &()).await {
+            Ok(_) => panic!("oversized body should reject extractor"),
+            Err(response) => response,
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

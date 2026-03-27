@@ -20,6 +20,20 @@ use tokio::task::spawn_blocking;
 /// Supports up to ~42 900 categories with up to 100 000 streams each.
 const CAT_BUCKET: u32 = 100_000;
 
+fn next_group_map_key<T>(group_map: &IndexMap<u32, T>) -> u32 {
+    if let Some(max_key) = group_map.keys().copied().max() {
+        if let Some(next_key) = max_key.checked_add(1) {
+            return next_key;
+        }
+    }
+
+    let mut candidate = 0u32;
+    while group_map.contains_key(&candidate) {
+        candidate = candidate.saturating_add(1);
+    }
+    candidate
+}
+
 async fn map_to_xtream_category(categories: DynReader, input_name: &Arc<str>) -> Result<Vec<XtreamCategory>, TuliproxError> {
     let input_name_clone = Arc::clone(input_name);
     spawn_blocking(move || {
@@ -207,7 +221,8 @@ pub async fn parse_xtream(input: &ConfigInput,
                     }
 
                     if !unknown_grp.channels.is_empty() {
-                        group_map.insert(0, unknown_grp);
+                        let unknown_key = next_group_map_key(&group_map);
+                        group_map.insert(unknown_key, unknown_grp);
                     }
 
                     // Assign source_ordinal in category-list order (primary)
@@ -670,5 +685,40 @@ mod tests {
         assert_eq!(unknown_names, vec!["unknown-999", "unknown-888"]);
         assert_eq!(groups[1].channels[0].header.source_ordinal, 2);
         assert_eq!(groups[1].channels[1].header.source_ordinal, 3);
+    }
+
+    #[tokio::test]
+    async fn test_parse_xtream_keeps_real_category_zero_and_appends_unknown_group() {
+        let categories = r#"
+            [
+                {"category_id":"0","category_name":"Provider Zero"}
+            ]
+        "#;
+        let streams = r#"
+            [
+                {"name":"zero-1","stream_id":201,"category_id":"0","added":"0"},
+                {"name":"unknown-1","stream_id":301,"category_id":"999","added":"0"}
+            ]
+        "#;
+
+        let groups = parse_xtream(
+            &test_input(),
+            XtreamCluster::Live,
+            make_reader(categories),
+            make_reader(streams),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].id, 0);
+        assert_eq!(groups[0].title.as_ref(), "Provider Zero");
+        assert_eq!(groups[0].channels[0].header.name.as_ref(), "zero-1");
+        assert_eq!(groups[0].channels[0].header.source_ordinal, 1);
+
+        assert_eq!(groups[1].title.as_ref(), "Unknown");
+        assert_eq!(groups[1].channels[0].header.name.as_ref(), "unknown-1");
+        assert_eq!(groups[1].channels[0].header.source_ordinal, 2);
     }
 }
