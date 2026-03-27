@@ -32,7 +32,6 @@ mod ui_playlist_item;
 mod user_command;
 mod uuidtype;
 mod web_socket;
-mod webplayer_url_request;
 mod xtream;
 pub mod xtream_const;
 
@@ -42,5 +41,5 @@ pub use self::{
     playlist_categories::*, playlist_info_document::*, playlist_request::*, processing_order::*, regex_cache::*,
     search_request::*, short_epg::*, stats::*, status_check::*, stream_info::*, stream_meter::*, stream_properties::*,
     strm_export_style::*, system_info::*, target_type::*, ui_playlist_item::*, user_command::*, uuidtype::*,
-    web_socket::*, webplayer_url_request::*, xtream::*,
+    web_socket::*, xtream::*,
 };

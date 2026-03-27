@@ -26,6 +26,12 @@ pub enum PlaylistRequest {
     CustomM3u(PlaylistRequestM3u),
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub enum PlaylistUrlResolveRequest {
+    Webplayer { target_id: u16, virtual_id: u32, cluster: XtreamCluster },
+    Provider { playlist_request: PlaylistRequest, url: String },
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct CommonPlaylistItem {
     pub virtual_id: u32,

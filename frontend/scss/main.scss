@@ -33,6 +33,11 @@ body {
     margin: var(--margin-mini) 0;
   }
 
+  button[disabled] {
+    opacity: 0.5;
+    filter: grayscale(1);
+    cursor: not-allowed;
+  }
 }
 
 #root {
