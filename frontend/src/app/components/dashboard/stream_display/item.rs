@@ -53,7 +53,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                             <div class="tp__stream-display__subtitle">
                                 <span class="tp__stream-display__username"> {stream.username.clone()}</span>
                                 {" • "}
-                                <span class="tp__stream-display__channel">{render_cluster(&stream.channel)}</span>
+                                <span class="tp__stream-display__channel_type">{render_cluster(&stream.channel)}</span>
                                 {" • "}
                                 <span class="tp__stream-display__provider">{stream.provider.clone()}</span>
                                 if !country.is_empty() {

@@ -139,10 +139,12 @@
     font-weight: bold;
     color: var(--stream-tech-chip-video-codec-color);
   }
-  &__channel {
+
+  &__channel_type {
     font-weight: bold;
     color: var(--stream-tech-chip-audio-codec-color);
   }
+
   &__provider {
     font-weight: bold;
     color: var(--stream-tech-chip-container-color);

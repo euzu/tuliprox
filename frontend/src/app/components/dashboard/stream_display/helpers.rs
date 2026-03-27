@@ -4,7 +4,7 @@ use shared::{
     model::{PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo},
     utils::{current_time_secs, default_hls_session_ttl_secs},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{console, Element};
 use yew::UseStateHandle;
@@ -69,9 +69,20 @@ pub fn refresh_adaptive_last_seen(
     streams: &Option<Vec<std::rc::Rc<StreamInfo>>>,
 ) {
     let now = current_time_secs();
-    let mut next = (**adaptive_last_seen).clone();
+    adaptive_last_seen.set(compute_adaptive_last_seen((**adaptive_last_seen).clone(), streams, now));
+}
 
+fn compute_adaptive_last_seen(
+    mut next: HashMap<u32, u64>,
+    streams: &Option<Vec<std::rc::Rc<StreamInfo>>>,
+    now: u64,
+) -> HashMap<u32, u64> {
     if let Some(streams) = streams {
+        let adaptive_uids: HashSet<u32> =
+            streams.iter().filter(|stream| is_adaptive_session_stream(stream)).map(|stream| stream.uid).collect();
+
+        next.retain(|uid, _| adaptive_uids.contains(uid));
+
         for stream in streams {
             if is_adaptive_session_stream(stream) {
                 if !stream.preserved || !next.contains_key(&stream.uid) {
@@ -85,7 +96,7 @@ pub fn refresh_adaptive_last_seen(
         next.clear();
     }
 
-    adaptive_last_seen.set(next);
+    next
 }
 
 pub fn format_duration(seconds: u64) -> String {
@@ -204,5 +215,65 @@ pub fn update_timestamps() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_adaptive_last_seen;
+    use shared::{
+        model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+        utils::Internable,
+    };
+    use std::{
+        collections::HashMap,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        rc::Rc,
+    };
+
+    fn test_stream(uid: u32, item_type: PlaylistItemType, preserved: bool, has_session: bool) -> Rc<StreamInfo> {
+        Rc::new(StreamInfo {
+            uid,
+            meter_uid: 0,
+            username: "user".to_string(),
+            channel: StreamChannel {
+                target_id: 1,
+                virtual_id: uid,
+                provider_id: 1,
+                item_type,
+                cluster: XtreamCluster::try_from(item_type).unwrap_or(XtreamCluster::Live),
+                group: "Group".intern(),
+                title: "Title".intern(),
+                url: "http://example.com/stream.m3u8".intern(),
+                shared: false,
+                technical: None,
+            },
+            provider: "provider".to_string(),
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+            client_ip: "127.0.0.1:1234".to_string(),
+            user_agent: String::new(),
+            ts: 0,
+            country: None,
+            session_token: has_session.then(|| "session".to_string()),
+            preserved,
+        })
+    }
+
+    #[test]
+    fn compute_adaptive_last_seen_prunes_missing_uids() {
+        let existing = HashMap::from([(1, 100), (2, 200), (3, 300)]);
+        let streams = Some(vec![
+            test_stream(2, PlaylistItemType::LiveHls, true, true),
+            test_stream(4, PlaylistItemType::LiveDash, false, true),
+            test_stream(9, PlaylistItemType::Live, false, false),
+        ]);
+
+        let refreshed = compute_adaptive_last_seen(existing, &streams, 999);
+
+        assert_eq!(refreshed.get(&2), Some(&200));
+        assert_eq!(refreshed.get(&4), Some(&999));
+        assert!(!refreshed.contains_key(&1));
+        assert!(!refreshed.contains_key(&3));
+        assert!(!refreshed.contains_key(&9));
     }
 }

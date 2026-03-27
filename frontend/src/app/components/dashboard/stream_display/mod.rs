@@ -111,6 +111,30 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
         },
     );
 
+    {
+        let popup_is_open = popup_is_open.clone();
+        let popup_anchor_ref = popup_anchor_ref.clone();
+        let selected_dto = selected_dto.clone();
+        let visible_streams_dep = (*visible_streams).clone();
+        use_effect_with(
+            (visible_streams_dep, (*selected_dto).as_ref().map(|stream| stream.uid)),
+            move |(visible_streams, selected_uid)| {
+                let selected_uid = *selected_uid;
+                let is_selected_visible = selected_uid.is_none_or(|uid| {
+                    visible_streams.as_ref().is_some_and(|streams| streams.iter().any(|stream| stream.uid == uid))
+                });
+
+                if !is_selected_visible {
+                    popup_is_open.set(false);
+                    popup_anchor_ref.set(None);
+                    selected_dto.set(None);
+                }
+
+                || ()
+            },
+        );
+    }
+
     let handle_popup_close = {
         let set_is_open = popup_is_open.clone();
         Callback::from(move |()| set_is_open.set(false))
