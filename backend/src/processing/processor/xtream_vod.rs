@@ -17,7 +17,7 @@ use crate::ptt::ptt_parse_title;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use crate::utils::{debug_if_enabled, trace_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
@@ -841,7 +841,7 @@ pub async fn update_vod_metadata(
                     temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
                     active_handle,
                 );
-                match crate::utils::ffmpeg::probe_url_with_cancel(
+                match FfmpegExecutor::new().probe_url_with_cancel(
                     &stream_url,
                     user_agent.as_deref(),
                     analyze_duration,

@@ -1,6 +1,6 @@
 use crate::api::model::AppState;
 use crate::model::Config;
-use crate::model::{ApiProxyConfig, AppConfig, SourcesConfig};
+use crate::model::{ApiProxyConfig, AppConfig, MediaToolCapabilities, SourcesConfig};
 use crate::repository::{
     csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file, load_api_user,
 };
@@ -29,7 +29,6 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::OnceCell;
 use shared::concat_string;
 use crate::utils::request::{is_uri};
 use url::Url;
@@ -581,7 +580,7 @@ pub async fn read_initial_app_config(
         custom_stream_response: Arc::new(ArcSwapAny::default()),
         access_token_secret: generate_default_access_secret(),
         encrypt_secret: generate_default_encrypt_secret(),
-        ffprobe_available: Arc::new(OnceCell::new())
+        media_tools: Arc::new(MediaToolCapabilities::new()),
     };
     app_config.prepare(include_computed)?;
     //print_info(&app_config);

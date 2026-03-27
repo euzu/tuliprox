@@ -1104,7 +1104,7 @@ mod tests {
     use super::ActiveProviderManager;
     use crate::{
         api::model::{EventManager, ProviderAllocation},
-        model::{AppConfig, Config, ConfigInput, ConfigInputAlias, SourcesConfig},
+        model::{AppConfig, Config, ConfigInput, ConfigInputAlias, MediaToolCapabilities, SourcesConfig},
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -1156,7 +1156,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapOption::default()),
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
-            ffprobe_available: Arc::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         }
     }
 

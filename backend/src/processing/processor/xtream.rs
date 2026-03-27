@@ -5,7 +5,7 @@ use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
 use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
 use crate::utils::{debug_if_enabled};
-use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
@@ -133,7 +133,7 @@ pub async fn update_live_stream_metadata(
 
     let mut success = false;
     let mut not_found = false;
-    match crate::utils::ffmpeg::probe_url(
+    match FfmpegExecutor::new().probe_url(
         &stream_url,
         user_agent.as_deref(),
         analyze_duration,

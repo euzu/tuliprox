@@ -5,6 +5,7 @@ use crate::library::metadata_storage::MetadataStorage;
 use crate::library::scanner::LibraryScanner;
 use crate::library::{MediaGroup, MediaGrouper, thumbnail::{self, ThumbnailExtractor}};
 use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
+use crate::utils::ffmpeg::FfmpegExecutor;
 use log::{debug, error, info, warn};
 use path_clean::PathClean;
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
@@ -135,9 +136,23 @@ impl LibraryProcessor {
             false
         };
 
+        let ffmpeg_available = if self.thumbnail_extractor.is_some() {
+            if let Some(app_cfg) = &self.app_config {
+                app_cfg.is_ffmpeg_available().await
+            } else {
+                FfmpegExecutor::new().check_ffmpeg_availability().await
+            }
+        } else {
+            false
+        };
+
+        if self.thumbnail_extractor.is_some() && !ffmpeg_available {
+            warn!("Thumbnail extraction disabled because ffmpeg is unavailable");
+        }
+
         // Process each scanned file
         for group in &media_groups {
-            match self.process_group(group, &existing_map, force_rescan, ffprobe_enabled).await {
+            match self.process_group(group, &existing_map, force_rescan, ffprobe_enabled, ffmpeg_available).await {
                 Ok(action) => match action {
                     ProcessAction::Added => result.files_added += 1,
                     ProcessAction::Updated => result.files_updated += 1,
@@ -170,7 +185,7 @@ impl LibraryProcessor {
             }
         }
 
-        if self.thumbnail_extractor.is_some() {
+        if ffmpeg_available {
             self.storage.cleanup_orphaned_thumbnails().await;
         }
 
@@ -178,13 +193,20 @@ impl LibraryProcessor {
         Ok(result)
     }
 
-    async fn process_group(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool, can_probe: bool) -> Result<ProcessAction, String> {
+    async fn process_group(
+        &self,
+        group: &MediaGroup,
+        existing_map: &HashMap<String, MetadataCacheEntry>,
+        force_rescan: bool,
+        can_probe: bool,
+        can_extract_thumbnails: bool,
+    ) -> Result<ProcessAction, String> {
         match group {
             MediaGroup::Movie { file: _, .. } => {
-                self.process_movie(group, existing_map, force_rescan, can_probe).await
+                self.process_movie(group, existing_map, force_rescan, can_probe, can_extract_thumbnails).await
             }
             MediaGroup::Series { show_key: _, episodes: _ } => {
-                self.process_series_group(group, existing_map, force_rescan, can_probe).await
+                self.process_series_group(group, existing_map, force_rescan, can_probe, can_extract_thumbnails).await
             }
         }
     }
@@ -210,7 +232,14 @@ impl LibraryProcessor {
     //}
 
     // Processes a single video file
-    async fn process_movie(&self, group: &MediaGroup, existing_map: &HashMap<String, MetadataCacheEntry>, force_rescan: bool, _can_probe: bool) -> Result<ProcessAction, String> {
+    async fn process_movie(
+        &self,
+        group: &MediaGroup,
+        existing_map: &HashMap<String, MetadataCacheEntry>,
+        force_rescan: bool,
+        _can_probe: bool,
+        can_extract_thumbnails: bool,
+    ) -> Result<ProcessAction, String> {
         let MediaGroup::Movie { file, .. } = group else { return Err(format!("Expected movie to resolve but got {group}")) };
         // Check if file already exists in cache
         let (mut cache_entry, status) = if let Some(existing_entry) = existing_map.get(&file.file_path) {
@@ -251,7 +280,12 @@ impl LibraryProcessor {
             (entry, ProcessAction::Added)
         };
 
-        self.extract_thumbnail_if_needed(&mut cache_entry, &file.file_path, file.modified_timestamp).await;
+        self.extract_thumbnail_if_needed(
+            &mut cache_entry,
+            &file.file_path,
+            file.modified_timestamp,
+            can_extract_thumbnails,
+        ).await;
         self.storage.store(&cache_entry).await.map_err(|e| e.to_string())?;
         self.write_metadata_files(&cache_entry).await.map_err(|e| e.to_string())?;
         Ok(status)
@@ -263,7 +297,9 @@ impl LibraryProcessor {
         &self,
         group: &MediaGroup,
         existing_map: &HashMap<String, MetadataCacheEntry>,
-        force_rescan: bool, _can_probe: bool
+        force_rescan: bool,
+        _can_probe: bool,
+        can_extract_thumbnails: bool,
     ) -> Result<ProcessAction, String> {
         let MediaGroup::Series { show_key, episodes } = group else { return Err(format!("Expected series to resolve but got {group}")) };
         let series_file_path = episodes
@@ -370,6 +406,7 @@ impl LibraryProcessor {
                                 &episode.file.file_path,
                                 episode.file.modified_timestamp,
                                 prev_mtime,
+                                can_extract_thumbnails,
                             ).await;
                         } else {
                             let mut new_episode = series_episode.clone();
@@ -381,6 +418,7 @@ impl LibraryProcessor {
                                 &episode.file.file_path,
                                 episode.file.modified_timestamp,
                                 Some(previous_file_modified),
+                                can_extract_thumbnails,
                             ).await;
                             double_episodes.push(new_episode);
                         }
@@ -404,6 +442,7 @@ impl LibraryProcessor {
                     &mut chache_entry,
                     &first_ep.file.file_path,
                     first_ep.file.modified_timestamp,
+                    can_extract_thumbnails,
                 ).await;
             }
         }
@@ -426,7 +465,12 @@ impl LibraryProcessor {
         cache_entry: &mut MetadataCacheEntry,
         file_path: &str,
         file_mtime: i64,
+        can_extract_thumbnails: bool,
     ) {
+        if !can_extract_thumbnails {
+            return;
+        }
+
         // Skip if already has a poster from TMDB/NFO
         if cache_entry.metadata.poster().is_some() {
             // Clear stale generated-thumbnail references so they can be reclaimed
@@ -471,6 +515,7 @@ impl LibraryProcessor {
         file_path: &str,
         file_mtime: i64,
         previous_file_mtime: Option<i64>,
+        can_extract_thumbnails: bool,
     ) {
         if !episode.thumb.as_deref().unwrap_or_default().is_empty()
             && episode.thumbnail_id.as_deref().unwrap_or_default().is_empty()
@@ -478,7 +523,12 @@ impl LibraryProcessor {
             return;
         }
 
-        if let Some(thumbnail_id) = self.extract_thumbnail_id_for_file(file_path, file_mtime, previous_file_mtime).await {
+        if let Some(thumbnail_id) = self.extract_thumbnail_id_for_file(
+            file_path,
+            file_mtime,
+            previous_file_mtime,
+            can_extract_thumbnails,
+        ).await {
             episode.thumbnail_id = Some(thumbnail_id);
         }
     }
@@ -488,7 +538,12 @@ impl LibraryProcessor {
         file_path: &str,
         file_mtime: i64,
         previous_file_mtime: Option<i64>,
+        can_extract_thumbnails: bool,
     ) -> Option<String> {
+        if !can_extract_thumbnails {
+            return None;
+        }
+
         let extractor = self.thumbnail_extractor.as_ref()?;
         let hash = thumbnail::file_hash(file_path);
 
