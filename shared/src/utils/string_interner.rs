@@ -147,14 +147,24 @@ pub fn interner_gc() -> usize {
 fn f64_to_str(v: f64) -> String {
     if v.is_infinite() {
         if v.is_sign_positive() {
-            ".inf".to_owned()
+            "infinity".to_owned()
         } else {
-            "-.inf".to_owned()
+            "-infinity".to_owned()
         }
     } else if v.is_nan() {
-        ".nan".to_owned()
+        "nan".to_owned()
     } else {
         v.to_string()
+    }
+}
+
+#[inline]
+fn normalize_scalar_string(value: &str) -> &str {
+    match value {
+        ".inf" => "infinity",
+        "-.inf" => "-infinity",
+        ".nan" => "nan",
+        _ => value,
     }
 }
 
@@ -182,18 +192,19 @@ impl<'de> Visitor<'de> for ArcStrVisitor {
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("a string, number, boolean, or null") }
 
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> { Ok(v.intern()) }
-    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> { Ok(v.intern()) }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(normalize_scalar_string(v).intern())
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        Ok(normalize_scalar_string(v.as_str()).intern())
+    }
     fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
     fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
     fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
     fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(f64_to_str(v).intern()) }
     fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
     fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        // `deserialize_string` returns the raw text -> `infinity` stays `infinity`.
-        d.deserialize_string(self)
-    }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
 }
 
 /// Visitor that produces `Option<Arc<str>>`, mapping null / empty -> `None`.
@@ -206,8 +217,12 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
         f.write_str("a string, number, boolean, null, or empty")
     }
 
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> { Ok(Some(v.intern())) }
-    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> { Ok(Some(v.intern())) }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(Some(normalize_scalar_string(v).intern()))
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        Ok(Some(normalize_scalar_string(v.as_str()).intern()))
+    }
     fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
     fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
     fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
@@ -337,9 +352,33 @@ mod tests {
     use super::*;
 
     #[derive(Debug, serde::Deserialize)]
+    struct ArcStrHolder {
+        #[serde(default, with = "arc_str_serde")]
+        value: Arc<str>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
     struct OptArcStrHolder {
         #[serde(default, with = "arc_str_option_serde")]
         value: Option<Arc<str>>,
+    }
+
+    #[test]
+    fn arc_str_serde_preserves_yaml_infinity_literal_as_string() {
+        let parsed: ArcStrHolder = serde_saphyr::from_str("value: infinity\n").unwrap();
+        assert_eq!(parsed.value.as_ref(), "infinity");
+    }
+
+    #[test]
+    fn arc_str_serde_preserves_yaml_numeric_like_word_as_string() {
+        let parsed: ArcStrHolder = serde_saphyr::from_str("value: 01abc\n").unwrap();
+        assert_eq!(parsed.value.as_ref(), "01abc");
+    }
+
+    #[test]
+    fn arc_str_serde_accepts_json_integer() {
+        let parsed: ArcStrHolder = serde_json::from_str(r#"{"value":1285728}"#).unwrap();
+        assert_eq!(parsed.value.as_ref(), "1285728");
     }
 
     #[test]
