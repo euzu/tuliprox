@@ -53,12 +53,11 @@ where
     async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let (parts, body) = req.into_parts();
 
-        // Parse query parameters (ignore errors, default to empty)
-        let query_req: UserApiRequest = parts
-            .uri
-            .query()
-            .and_then(|q| serde_html_form::from_str(q).ok())
-            .unwrap_or_default();
+        let query_req = match parts.uri.query() {
+            Some(query) => serde_html_form::from_str(query)
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to parse query: {e}")).into_response())?,
+            None => UserApiRequest::default(),
+        };
 
         let content_type = parts
             .headers
@@ -115,8 +114,7 @@ fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiReque
                 let name_start = name_start + 6;
                 if let Some(name_end) = headers[name_start..].find('\"') {
                     let name = &headers[name_start..name_start + name_end];
-                    let value = body.strip_prefix("\r\n").unwrap_or(body);
-                    let value = value.strip_suffix("\r\n").unwrap_or(value);
+                    let value = body.strip_suffix("\r\n").unwrap_or(body);
                     match name {
                         "username" => request.username = value.to_string(),
                         "password" => request.password = value.to_string(),
@@ -131,7 +129,7 @@ fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiReque
                         "end" => request.end = value.to_string(),
                         "stream" => request.stream = value.to_string(),
                         "duration" => request.duration = value.to_string(),
-                        "type" => request.content_type = value.to_string(),
+                        "type" | "content_type" => request.content_type = value.to_string(),
                         _ => {}
                     }
                 }
@@ -391,4 +389,24 @@ mod tests {
         assert_eq!(parsed.username, "  alice  ");
         assert_eq!(parsed.password, "\t secret \t");
     }
+
+    #[tokio::test]
+    async fn parse_body_accepts_content_type_field_name_in_multipart() {
+        let body = concat!(
+            "--abc123\r\n",
+            "Content-Disposition: form-data; name=\"content_type\"\r\n\r\n",
+            "m3u_plus\r\n",
+            "--abc123--\r\n",
+        );
+
+        let parsed = parse_body(
+            Body::from(body),
+            "multipart/form-data; boundary=abc123",
+        )
+        .await
+        .expect("multipart body should parse");
+
+        assert_eq!(parsed.content_type, "m3u_plus");
+    }
+
 }

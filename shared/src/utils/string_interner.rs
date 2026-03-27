@@ -158,6 +158,10 @@ fn f64_to_str(v: f64) -> String {
 }
 
 #[inline]
+// This intentionally only normalizes the lowercase dot-prefixed spellings that
+// serde_saphyr emits for special float scalars. Other YAML 1.1 variants such as
+// `.Inf`, `.INF`, or `.NaN` are out of scope here because they are not produced
+// by the current parser path.
 fn normalize_scalar_string(value: &str) -> &str {
     match value {
         ".inf" => "infinity",
@@ -241,10 +245,12 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
     fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
+        log::debug!("ignored sequence while deserializing string interner, returning None");
         Ok(None)
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        log::debug!("ignored map while deserializing string interner, returning None");
         Ok(None)
     }
 }
@@ -413,5 +419,27 @@ mod tests {
     fn arc_str_serde_normalizes_json_scientific_notation_numbers() {
         let parsed: ArcStrHolder = serde_json::from_str(r#"{"value":1e2}"#).unwrap();
         assert_eq!(parsed.value.as_ref(), "100");
+    }
+
+    #[test]
+    fn arc_str_serde_normalizes_yaml_special_float_scalars() {
+        let parsed_inf: ArcStrHolder = serde_saphyr::from_str("value: .inf\n").unwrap();
+        let parsed_neg_inf: ArcStrHolder = serde_saphyr::from_str("value: -.inf\n").unwrap();
+        let parsed_nan: ArcStrHolder = serde_saphyr::from_str("value: .nan\n").unwrap();
+
+        assert_eq!(parsed_inf.value.as_ref(), "infinity");
+        assert_eq!(parsed_neg_inf.value.as_ref(), "-infinity");
+        assert_eq!(parsed_nan.value.as_ref(), "nan");
+    }
+
+    #[test]
+    fn arc_str_option_serde_normalizes_yaml_special_float_scalars() {
+        let parsed_inf: OptArcStrHolder = serde_saphyr::from_str("value: .inf\n").unwrap();
+        let parsed_neg_inf: OptArcStrHolder = serde_saphyr::from_str("value: -.inf\n").unwrap();
+        let parsed_nan: OptArcStrHolder = serde_saphyr::from_str("value: .nan\n").unwrap();
+
+        assert_eq!(parsed_inf.value.as_deref(), Some("infinity"));
+        assert_eq!(parsed_neg_inf.value.as_deref(), Some("-infinity"));
+        assert_eq!(parsed_nan.value.as_deref(), Some("nan"));
     }
 }

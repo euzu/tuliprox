@@ -290,7 +290,15 @@ fn is_attached_pic(stream: &Value) -> bool {
 
 fn is_not_found_probe_error(stderr: &str) -> bool {
     let normalized = stderr.to_ascii_lowercase();
-    normalized.contains("404") || normalized.contains("not found")
+    [
+        "http error 404",
+        "404 not found",
+        "http/1.1 404",
+        "http/2 404",
+        "server returned 404",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn build_thumbnail_scale_filter(width: u32, height: u32) -> String {
@@ -322,6 +330,7 @@ fn build_thumbnail_args(input_path: &str, output_path: &Path, scale_filter: &str
 mod tests {
     use super::{build_ffprobe_proxy_url, build_thumbnail_args, build_thumbnail_scale_filter, format_ffmpeg_timeout_error, FFMPEG_TIMEOUT};
     use crate::model::ProxyConfig;
+    use shared::utils::{default_thumbnail_height, default_thumbnail_width};
     use std::path::Path;
 
     #[test]
@@ -350,6 +359,13 @@ mod tests {
     fn build_thumbnail_scale_filter_formats_dimensions() {
         let filter = build_thumbnail_scale_filter(320, 180);
         assert_eq!(filter, "scale=320:180:force_original_aspect_ratio=increase,crop=320:180");
+    }
+
+    #[test]
+    fn build_thumbnail_scale_filter_uses_defaults_for_zero_dimensions() {
+        let filter = build_thumbnail_scale_filter(0, 0);
+        let expected = build_thumbnail_scale_filter(default_thumbnail_width(), default_thumbnail_height());
+        assert_eq!(filter, expected);
     }
 
     #[test]
@@ -383,5 +399,15 @@ mod tests {
         assert!(msg.contains("ffmpeg"));
         assert!(msg.contains(&FFMPEG_TIMEOUT.as_secs().to_string()));
         assert!(msg.contains("-ss 180 -i /tmp/in.mkv"));
+    }
+
+    #[test]
+    fn is_not_found_probe_error_only_matches_http_404_markers() {
+        assert!(super::is_not_found_probe_error("HTTP error 404 Not Found"));
+        assert!(super::is_not_found_probe_error("Server returned 404 Not Found"));
+        assert!(super::is_not_found_probe_error("HTTP/1.1 404 Not Found"));
+        assert!(!super::is_not_found_probe_error("host not found"));
+        assert!(!super::is_not_found_probe_error("file not found"));
+        assert!(!super::is_not_found_probe_error("protocol handler not found"));
     }
 }
