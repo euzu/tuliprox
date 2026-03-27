@@ -208,10 +208,13 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                             let playlist_request = PlaylistRequest::Target(dto.channel.target_id);
                             let copy_to_clipboard = copy_to_clipboard.clone();
                             let services = services.clone();
+                            let translate = translate.clone();
                             spawn_local(async move {
                                 let request = PlaylistUrlResolveRequest::Provider { playlist_request, url };
                                 if let Some(resolved) = services.playlist.resolve_url(request).await {
                                     copy_to_clipboard.emit(resolved);
+                                } else {
+                                    services.toastr.error(translate.t("MESSAGES.FAILED_TO_RETRIEVE_PROVIDER_URL"));
                                 }
                             });
                         }
@@ -311,16 +314,14 @@ impl FromStr for StreamDisplayAction {
     type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq(KICK) {
-            Ok(Self::Kick)
-        } else if s.eq(COPY_LINK_TULIPROX_VIRTUAL_ID) {
-            Ok(Self::CopyLinkTuliproxVirtualId)
-        } else if s.eq(COPY_LINK_TULIPROX_WEBPLAYER_URL) {
-            Ok(Self::CopyLinkTuliproxWebPlayerUrl)
-        } else if s.eq(COPY_LINK_PROVIDER_URL) {
-            Ok(Self::CopyLinkProviderUrl)
-        } else {
-            info_err_res!("Unknown Stream Action: {}", s)
+        match s {
+            KICK => Ok(Self::Kick),
+            COPY_LINK_TULIPROX_VIRTUAL_ID => Ok(Self::CopyLinkTuliproxVirtualId),
+            COPY_LINK_TULIPROX_WEBPLAYER_URL => Ok(Self::CopyLinkTuliproxWebPlayerUrl),
+            COPY_LINK_PROVIDER_URL => Ok(Self::CopyLinkProviderUrl),
+            _ => {
+                info_err_res!("Unknown Stream Action: {}", s)
+            }
         }
     }
 }

@@ -1262,6 +1262,7 @@
       }
     },
     "FAILED_TO_KICK_USER_STREAM": "Failed to kick user stream",
+    "FAILED_TO_RETRIEVE_PROVIDER_URL": "Failed to retrieve provider URL",
     "FAILED_TO_RETRIEVE_WEBPLAYER_URL": "Failed to retrieve webplayer URL",
     "INVALID_FILETYPE": "Invalid filetype",
     "INVALID_REGEXP": "Invalid regexp",
