@@ -178,8 +178,16 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
                 DisconnectReason::ProviderClosed => "provider_closed",
                 DisconnectReason::Preempted => "preempted",
                 DisconnectReason::SessionExpired => "session_expired",
+                DisconnectReason::UserConnectionsExhausted => "user_connections_exhausted",
+                DisconnectReason::ProviderConnectionsExhausted => "provider_connections_exhausted",
             }))
         }
+        "user_agent" => RecordFieldValue::String(record.user_agent.as_deref()),
+        "cluster" => RecordFieldValue::String(record.cluster.as_deref()),
+        "container" => RecordFieldValue::String(record.container.as_deref()),
+        "video_codec" => RecordFieldValue::String(record.video_codec.as_deref()),
+        "audio_codec" => RecordFieldValue::String(record.audio_codec.as_deref()),
+        "resolution" => RecordFieldValue::String(record.resolution.as_deref()),
         "session_id" => RecordFieldValue::U64(record.session_id),
         _ => RecordFieldValue::String(None), // Unknown field: no match
     }
@@ -598,11 +606,22 @@ mod tests {
             title: None,
             group: None,
             country: None,
+            user_agent: None,
+            shared: None,
+            provider_id: None,
+            cluster: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            resolution: None,
             connect_ts_utc: None,
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
+            first_byte_latency_ms: None,
+            provider_reconnect_count: None,
             disconnect_reason: None,
+            previous_session_id: None,
         }
     }
 }

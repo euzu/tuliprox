@@ -161,6 +161,8 @@ struct ActiveClientStreamState {
     /// Set once when the provider stream ends. Read once in Drop. Never queried during streaming.
     /// Separate from `send_custom_stream_flag` (`StreamMode`). Uses `PROVIDER_END_*` constants.
     provider_end_reason: AtomicU8,
+    /// Count of successful provider reconnections during this session (grace period / deferred open).
+    provider_reconnect_count: AtomicU8,
 }
 
 impl ActiveClientStreamState {
@@ -215,6 +217,7 @@ impl ActiveClientStreamState {
         self.connection_manager.send_cleanup(CleanupEvent::ReleaseStream {
             addr: self.fingerprint.addr,
             provider_end_reason: self.provider_end_reason.load(Ordering::Relaxed),
+            reconnect_count: self.provider_reconnect_count.load(Ordering::Relaxed),
         });
     }
 
@@ -533,6 +536,7 @@ impl Stream for ActiveClientStream {
                                         return Poll::Pending;
                                     }
                                     Poll::Ready(DeferredProviderOpenOutcome::Stream(stream)) => {
+                                        self.state.provider_reconnect_count.fetch_add(1, Ordering::Relaxed);
                                         self.state.inner = Some(self.state.wrap_provider_stream(stream));
                                         continue;
                                     }
@@ -668,6 +672,7 @@ impl Drop for ActiveClientStream {
                 addr,
                 handle: handle_for_cleanup,
                 provider_end_reason: self.state.provider_end_reason.load(Ordering::Relaxed),
+                reconnect_count: self.state.provider_reconnect_count.load(Ordering::Relaxed),
             });
         }
     }
@@ -849,6 +854,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         custom_video_timeout_mode: None,
         custom_video_timeout_sleep: None,
         provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
+        provider_reconnect_count: AtomicU8::new(0),
     };
 
     ActiveClientStream { state }.boxed()
@@ -1326,6 +1332,7 @@ mod tests {
             custom_video_timeout_mode: None,
             custom_video_timeout_sleep: None,
             provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
+            provider_reconnect_count: AtomicU8::new(0),
         };
 
         let stream = ActiveClientStream { state };
@@ -1574,6 +1581,7 @@ mod tests {
             custom_video_timeout_mode: None,
             custom_video_timeout_sleep: None,
             provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
+            provider_reconnect_count: AtomicU8::new(0),
         };
         let stream = ActiveClientStream { state };
         pin_mut!(stream);

@@ -238,11 +238,22 @@ mod tests {
             title: Some("Test".to_string()),
             group: None,
             country: None,
+            user_agent: None,
+            shared: None,
+            provider_id: None,
+            cluster: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            resolution: None,
             connect_ts_utc: None,
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
+            first_byte_latency_ms: None,
+            provider_reconnect_count: None,
             disconnect_reason: None,
+            previous_session_id: None,
         }
     }
 

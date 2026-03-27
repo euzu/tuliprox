@@ -47,6 +47,8 @@ pub enum DisconnectReason {
     ProviderClosed,
     Preempted,
     SessionExpired,
+    UserConnectionsExhausted,
+    ProviderConnectionsExhausted,
 }
 
 /// Serialized as `MessagePack` named (map encoding) for schema evolution safety.
@@ -121,12 +123,33 @@ pub struct StreamHistoryRecord {
     pub title: Option<String>,
     pub group: Option<String>,
     pub country: Option<String>,
+    // QoS metadata
+    pub user_agent: Option<String>,
+    pub shared: Option<bool>,
+    pub provider_id: Option<u32>,
+    pub cluster: Option<String>,
+    pub container: Option<String>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub resolution: Option<String>,
     // Session summary — populated on disconnect
     pub connect_ts_utc: Option<u64>,
     pub disconnect_ts_utc: Option<u64>,
     pub session_duration: Option<u64>,
     pub bytes_sent: Option<u64>,
+    pub first_byte_latency_ms: Option<u64>,
+    pub provider_reconnect_count: Option<u8>,
     pub disconnect_reason: Option<DisconnectReason>,
+    /// Set when this connect event continues a session that was split by day rollover.
+    pub previous_session_id: Option<u64>,
+}
+
+/// `QoS` metrics collected at disconnect time, passed as a bundle to avoid growing the signature.
+#[derive(Debug, Default)]
+pub struct DisconnectQos {
+    pub bytes_sent: Option<u64>,
+    pub first_byte_latency_ms: Option<u64>,
+    pub provider_reconnect_count: Option<u8>,
 }
 
 impl StreamHistoryRecord {
@@ -147,11 +170,22 @@ impl StreamHistoryRecord {
             title: Some(info.channel.title.to_string()),
             group: Some(info.channel.group.to_string()),
             country: info.country.clone(),
+            user_agent: if info.user_agent.is_empty() { None } else { Some(info.user_agent.clone()) },
+            shared: Some(info.channel.shared),
+            provider_id: Some(info.channel.provider_id),
+            cluster: Some(info.channel.cluster.to_string()),
+            container: info.channel.technical.as_ref().and_then(|t| if t.container.is_empty() { None } else { Some(t.container.clone()) }),
+            video_codec: info.channel.technical.as_ref().and_then(|t| if t.video_codec.is_empty() { None } else { Some(t.video_codec.clone()) }),
+            audio_codec: info.channel.technical.as_ref().and_then(|t| if t.audio_codec.is_empty() { None } else { Some(t.audio_codec.clone()) }),
+            resolution: info.channel.technical.as_ref().and_then(|t| if t.resolution.is_empty() { None } else { Some(t.resolution.clone()) }),
             connect_ts_utc: None,
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
+            first_byte_latency_ms: None,
+            provider_reconnect_count: None,
             disconnect_reason: None,
+            previous_session_id: None,
         }
     }
 
@@ -162,7 +196,8 @@ impl StreamHistoryRecord {
         record
     }
 
-    pub fn from_disconnect(info: &StreamInfo, reason: DisconnectReason) -> Self {
+    /// Extra `QoS` fields carried as a struct to keep the signature stable.
+    pub fn from_disconnect(info: &StreamInfo, reason: DisconnectReason, qos: DisconnectQos) -> Self {
         let now_secs = now_utc_secs();
         let connect_secs = info.ts;
         let mut record = Self::base(info);
@@ -170,6 +205,9 @@ impl StreamHistoryRecord {
         record.connect_ts_utc = Some(connect_secs);
         record.disconnect_ts_utc = Some(now_secs);
         record.session_duration = Some(now_secs.saturating_sub(connect_secs));
+        record.bytes_sent = qos.bytes_sent;
+        record.first_byte_latency_ms = qos.first_byte_latency_ms;
+        record.provider_reconnect_count = qos.provider_reconnect_count;
         record.disconnect_reason = Some(reason);
         record
     }
@@ -320,11 +358,22 @@ mod tests {
             title: Some("News Channel".to_string()),
             group: Some("News".to_string()),
             country: Some("DE".to_string()),
+            user_agent: Some("VLC/3.0".to_string()),
+            shared: Some(false),
+            provider_id: Some(1),
+            cluster: Some("live".to_string()),
+            container: Some("mpegts".to_string()),
+            video_codec: Some("H.264".to_string()),
+            audio_codec: Some("AAC".to_string()),
+            resolution: Some("1920x1080".to_string()),
             connect_ts_utc: Some(1_742_600_001_000),
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
+            first_byte_latency_ms: None,
+            provider_reconnect_count: None,
             disconnect_reason: None,
+            previous_session_id: None,
         }
     }
 
@@ -344,11 +393,22 @@ mod tests {
             title: Some("News Channel".to_string()),
             group: Some("News".to_string()),
             country: Some("DE".to_string()),
+            user_agent: Some("VLC/3.0".to_string()),
+            shared: Some(false),
+            provider_id: Some(1),
+            cluster: Some("live".to_string()),
+            container: Some("mpegts".to_string()),
+            video_codec: Some("H.264".to_string()),
+            audio_codec: Some("AAC".to_string()),
+            resolution: Some("1920x1080".to_string()),
             connect_ts_utc: Some(1_742_600_001),
             disconnect_ts_utc: Some(1_742_603_601),
             session_duration: Some(3600),
             bytes_sent: Some(1_234_567_890),
+            first_byte_latency_ms: Some(150),
+            provider_reconnect_count: Some(0),
             disconnect_reason: Some(DisconnectReason::ClientClosed),
+            previous_session_id: None,
         }
     }
 

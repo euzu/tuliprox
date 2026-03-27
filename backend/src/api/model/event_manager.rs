@@ -212,6 +212,19 @@ impl EventManager {
         }
     }
 
+    /// Read `QoS` metrics (`bytes_total`, `first_byte_latency`) for a meter without removing it.
+    /// Single lock acquisition for both values.
+    pub async fn read_meter_qos(&self, meter_uid: u32) -> (Option<u64>, Option<u64>) {
+        if meter_uid == 0 {
+            return (None, None);
+        }
+        let registry = self.meter_registry.read().await;
+        match registry.meters.get(&meter_uid) {
+            Some(m) => (Some(m.bytes_total()), m.first_byte_latency_ms()),
+            None => (None, None),
+        }
+    }
+
     pub async fn unregister_meter_client(&self, client_uid: u32) {
         if client_uid == 0 {
             return;
