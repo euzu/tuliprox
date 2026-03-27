@@ -13,7 +13,9 @@ use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_list;
 
 const LABEL_UPDATE_LOCAL_LIBRARY: &str = "LABEL.UPDATE_LOCAL_LIBRARY";
+const LABEL_FORCE: &str = "LABEL.FORCE";
 const ACTION_UPDATE_LIBRARY: &str = "update_library";
+const ACTION_UPDATE_LIBRARY_FORCE: &str = "update_library_force";
 
 #[component]
 pub fn PlaylistUpdateView() -> Html {
@@ -84,8 +86,13 @@ pub fn PlaylistUpdateView() -> Html {
             let services = services.clone();
             let translate = translate.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if name.as_str() == ACTION_UPDATE_LIBRARY {
-                    match services.config.update_library().await {
+                let mode = match name.as_str() {
+                    ACTION_UPDATE_LIBRARY => 1,
+                    ACTION_UPDATE_LIBRARY_FORCE => 2,
+                    _ => 0,
+                };
+                if mode > 0 {
+                    match services.config.update_library(mode == 2).await {
                         Ok(_) => services.toastr.success(translate.t("MESSAGES.LIBRARY_UPDATE.SUCCESS")),
                         Err(_err) => services.toastr.error(translate.t("MESSAGES.LIBRARY_UPDATE.FAIL")),
                     }
@@ -103,10 +110,15 @@ pub fn PlaylistUpdateView() -> Html {
           <h1>{ translate.t("LABEL.UPDATE")}</h1>
           <div class="tp__config-view__header-tools">
             {html_if!(can_write_library && library_enabled, {
+                <div class="tp__radio-button-group">
                 <TextButton class="tertiary" name={ACTION_UPDATE_LIBRARY}
                     icon="Refresh"
                     title={ translate.t(LABEL_UPDATE_LOCAL_LIBRARY)}
                     onclick={handle_update_content.clone()}></TextButton>
+                <TextButton class="tertiary" name={ACTION_UPDATE_LIBRARY_FORCE}
+                    title={ translate.t(LABEL_FORCE)}
+                    onclick={handle_update_content.clone()}></TextButton>
+                </div>
             })}
             </div>
         { html_if!(can_write_playlist, {

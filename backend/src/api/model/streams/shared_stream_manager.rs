@@ -749,7 +749,7 @@ mod tests {
     use super::{SharedStreamManager, SharedStreamState, CHANNEL_SIZE};
     use crate::{
         api::model::{ActiveProviderManager, EventManager},
-        model::{AppConfig, Config, ConfigInput, SourcesConfig},
+        model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, SourcesConfig},
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -803,7 +803,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapOption::default()),
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
-            ffprobe_available: Arc::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         }
     }
 

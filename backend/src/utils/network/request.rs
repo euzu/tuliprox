@@ -1561,7 +1561,7 @@ mod tests {
         strip_sensitive_headers_for_cross_origin_redirect,
     };
     use crate::{
-        model::{AppConfig, Config, ConfigProvider, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
+        model::{AppConfig, Config, ConfigProvider, MediaToolCapabilities, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
         utils::{FileLockManager, DEFAULT_USER_AGENT}
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -1607,7 +1607,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapOption::default()),
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
-            ffprobe_available: Arc::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         })
     }
 

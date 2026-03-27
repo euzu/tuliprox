@@ -30,6 +30,16 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         },
     );
 
+    let render_system_stats = |cache| {
+        html! {
+           <div class="tp__stats__body-group">
+               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()} /></Card>
+               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()} /></Card>
+               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
+            </div>
+        }
+    };
+
     let render_streams_embedded = || {
         let cache = status_ctx.status.as_ref().map_or_else(
             || "n/a".to_string(),
@@ -44,11 +54,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 </div>
                 })}>
                 <div class="tp__stats__body">
-                  <div class="tp__stats__body-group">
-                    <Card><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()} /></Card>
-                    <Card><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()} /></Card>
-                    <Card><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
-                  </div>
+                  { render_system_stats(cache) }
                   <div class="tp__stats__body-group">
                     <Card><PlaylistProgressStatusCard /></Card>
                   </div>
@@ -128,11 +134,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
              <h1>{ translate.t("LABEL.STATS")}</h1>
             </div>
             <div class="tp__stats__body">
-                <div class="tp__stats__body-group">
-                    <Card><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()} /></Card>
-                    <Card><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()} /></Card>
-                    <Card><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
-                </div>
+                { render_system_stats(cache) }
                 <div class="tp__stats__body-group">
                     <Card><PlaylistProgressStatusCard /></Card>
                 </div>

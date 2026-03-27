@@ -134,27 +134,40 @@ pub fn interner_gc() -> usize {
     0
 }
 
-/// Convert an `f64` that reached `visit_f64` into a round-trip-safe string
-/// using the canonical YAML 1.2 spelling (`.inf`, `-.inf`, `.nan`).
+/// Convert an `f64` that reached `visit_f64` into a round-trip-safe string.
 ///
-/// `serde_saphyr` recognises these spellings as ambiguous and **quotes** them
-/// when re-serializing, so the value survives a YAML round-trip as a string.
+/// Special values are emitted as `"infinity"`, `"-infinity"`, and `"nan"`.
+/// `serde_saphyr` re-serializes these ambiguous scalars quoted, so they
+/// survive a YAML round-trip as strings.
 ///
-/// This is a safety-net: the primary fix is using `deserialize_string` (which
-/// skips float parsing entirely), so `visit_f64` is normally not reached for
-/// plain string fields.
+/// This is a safety-net for paths that intentionally accept typed numeric
+/// scalars and normalize them into strings.
 #[inline]
 fn f64_to_str(v: f64) -> String {
     if v.is_infinite() {
         if v.is_sign_positive() {
-            ".inf".to_owned()
+            "infinity".to_owned()
         } else {
-            "-.inf".to_owned()
+            "-infinity".to_owned()
         }
     } else if v.is_nan() {
-        ".nan".to_owned()
+        "nan".to_owned()
     } else {
         v.to_string()
+    }
+}
+
+#[inline]
+// This intentionally only normalizes the lowercase dot-prefixed spellings that
+// serde_saphyr emits for special float scalars. Other YAML 1.1 variants such as
+// `.Inf`, `.INF`, or `.NaN` are out of scope here because they are not produced
+// by the current parser path.
+fn normalize_scalar_string(value: &str) -> &str {
+    match value {
+        ".inf" => "infinity",
+        "-.inf" => "-infinity",
+        ".nan" => "nan",
+        _ => value,
     }
 }
 
@@ -165,9 +178,9 @@ fn f64_to_str(v: f64) -> String {
 //   ArcStrVisitor        -> Arc<str>         (null/empty -> "")
 //   OptionArcStrVisitor  -> Option<Arc<str>> (null/empty -> None)
 //
-// `ArcStrVisitor::visit_some` uses `deserialize_string`, which tells saphyr to
-// return the **raw scalar text** without float-parsing. That is what makes
-// `name: infinity` survive as the literal string `"infinity"`.
+// `ArcStrVisitor::visit_some` uses `deserialize_any(self)`, so numeric/bool
+// scalars can flow into the typed `visit_*` methods. The tradeoff is that raw
+// numeric notation may be normalized (for example `1e2` becomes `"100"`).
 //
 // `OptionArcStrVisitor::visit_some` intentionally diverges and uses
 // `deserialize_any` so JSON/YAML numeric inputs can flow into `visit_i64`,
@@ -182,18 +195,19 @@ impl<'de> Visitor<'de> for ArcStrVisitor {
 
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("a string, number, boolean, or null") }
 
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> { Ok(v.intern()) }
-    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> { Ok(v.intern()) }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(normalize_scalar_string(v).intern())
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        Ok(normalize_scalar_string(v.as_str()).intern())
+    }
     fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
     fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
     fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(v.to_string().intern()) }
     fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> { Ok(f64_to_str(v).intern()) }
     fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
     fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> { Ok("".intern()) }
-    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        // `deserialize_string` returns the raw text -> `infinity` stays `infinity`.
-        d.deserialize_string(self)
-    }
+    fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
 }
 
 /// Visitor that produces `Option<Arc<str>>`, mapping null / empty -> `None`.
@@ -206,8 +220,22 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
         f.write_str("a string, number, boolean, null, or empty")
     }
 
-    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> { Ok(Some(v.intern())) }
-    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> { Ok(Some(v.intern())) }
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        let normalized = normalize_scalar_string(v);
+        if normalized.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(normalized.intern()))
+        }
+    }
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        let normalized = normalize_scalar_string(v.as_str());
+        if normalized.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(normalized.intern()))
+        }
+    }
     fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
     fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
     fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> { Ok(Some(v.to_string().intern())) }
@@ -217,10 +245,12 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
     fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> { d.deserialize_any(self) }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         while seq.next_element::<IgnoredAny>()?.is_some() {}
+        log::debug!("ignored sequence while deserializing string interner, returning None");
         Ok(None)
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        log::debug!("ignored map while deserializing string interner, returning None");
         Ok(None)
     }
 }
@@ -259,12 +289,12 @@ pub mod arc_str_serde {
         serializer.serialize_str(value)
     }
 
-    /// Deserialize a YAML scalar as an interned `Arc<str>`.
+    /// Deserialize a scalar as an interned `Arc<str>`.
     ///
-    /// Uses `deserialize_string` so saphyr hands us the **raw text** without
-    /// first running it through float/bool/int parsing.  This preserves values
-    /// like `infinity` as the literal string `"infinity"` instead of silently
-    /// converting them to `".inf"`.
+    /// This goes through `deserialize_option(ArcStrVisitor)`, and
+    /// `ArcStrVisitor::visit_some` uses `deserialize_any`. That allows numeric
+    /// JSON/YAML scalars to be accepted, but raw numeric notation may be lost
+    /// during normalization (for example `1e2` becomes `"100"`).
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
     where
         D: Deserializer<'de>,
@@ -312,7 +342,8 @@ pub mod arc_str_option_null_if_empty_serde {
 //
 // Reuses `ArcStrVisitor` / `OptionArcStrVisitor` via `deserialize_option`:
 //   - null / ~ / empty  -> visit_none / visit_unit -> "" / None
-//   - `ArcStrVisitor::visit_some` -> deserialize_string -> raw scalar text
+//   - `ArcStrVisitor::visit_some` -> deserialize_any -> numbers/bools map into
+//     typed `visit_*` methods, so raw numeric notation may be normalized
 //   - `OptionArcStrVisitor::visit_some` -> deserialize_any -> numbers/bools map
 //     into their typed `visit_*` methods before being interned as strings
 
@@ -337,9 +368,33 @@ mod tests {
     use super::*;
 
     #[derive(Debug, serde::Deserialize)]
+    struct ArcStrHolder {
+        #[serde(default, with = "arc_str_serde")]
+        value: Arc<str>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
     struct OptArcStrHolder {
         #[serde(default, with = "arc_str_option_serde")]
         value: Option<Arc<str>>,
+    }
+
+    #[test]
+    fn arc_str_serde_preserves_yaml_infinity_literal_as_string() {
+        let parsed: ArcStrHolder = serde_saphyr::from_str("value: infinity\n").unwrap();
+        assert_eq!(parsed.value.as_ref(), "infinity");
+    }
+
+    #[test]
+    fn arc_str_serde_preserves_yaml_numeric_like_word_as_string() {
+        let parsed: ArcStrHolder = serde_saphyr::from_str("value: 01abc\n").unwrap();
+        assert_eq!(parsed.value.as_ref(), "01abc");
+    }
+
+    #[test]
+    fn arc_str_serde_accepts_json_integer() {
+        let parsed: ArcStrHolder = serde_json::from_str(r#"{"value":1285728}"#).unwrap();
+        assert_eq!(parsed.value.as_ref(), "1285728");
     }
 
     #[test]
@@ -352,5 +407,39 @@ mod tests {
     fn arc_str_option_serde_accepts_json_string() {
         let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":"8169"}"#).unwrap();
         assert_eq!(parsed.value.as_deref(), Some("8169"));
+    }
+
+    #[test]
+    fn arc_str_option_serde_maps_empty_string_to_none() {
+        let parsed: OptArcStrHolder = serde_json::from_str(r#"{"value":""}"#).unwrap();
+        assert_eq!(parsed.value, None);
+    }
+
+    #[test]
+    fn arc_str_serde_normalizes_json_scientific_notation_numbers() {
+        let parsed: ArcStrHolder = serde_json::from_str(r#"{"value":1e2}"#).unwrap();
+        assert_eq!(parsed.value.as_ref(), "100");
+    }
+
+    #[test]
+    fn arc_str_serde_normalizes_yaml_special_float_scalars() {
+        let parsed_inf: ArcStrHolder = serde_saphyr::from_str("value: .inf\n").unwrap();
+        let parsed_neg_inf: ArcStrHolder = serde_saphyr::from_str("value: -.inf\n").unwrap();
+        let parsed_nan: ArcStrHolder = serde_saphyr::from_str("value: .nan\n").unwrap();
+
+        assert_eq!(parsed_inf.value.as_ref(), "infinity");
+        assert_eq!(parsed_neg_inf.value.as_ref(), "-infinity");
+        assert_eq!(parsed_nan.value.as_ref(), "nan");
+    }
+
+    #[test]
+    fn arc_str_option_serde_normalizes_yaml_special_float_scalars() {
+        let parsed_inf: OptArcStrHolder = serde_saphyr::from_str("value: .inf\n").unwrap();
+        let parsed_neg_inf: OptArcStrHolder = serde_saphyr::from_str("value: -.inf\n").unwrap();
+        let parsed_nan: OptArcStrHolder = serde_saphyr::from_str("value: .nan\n").unwrap();
+
+        assert_eq!(parsed_inf.value.as_deref(), Some("infinity"));
+        assert_eq!(parsed_neg_inf.value.as_deref(), Some("-infinity"));
+        assert_eq!(parsed_nan.value.as_deref(), Some("nan"));
     }
 }

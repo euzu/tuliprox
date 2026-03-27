@@ -26,12 +26,12 @@
       }
     }
 
-    .tp__text-button {
+    .tp__text-button:not(.active) {
       color: var(--modest-text-color);
     }
 
     .tp__icon-button,
-    .tp__text-button {
+    .tp__text-button:not(.active) {
       &:hover {
         color: var(--tab-hover-color);
         fill: currentColor;
@@ -40,8 +40,8 @@
     }
 
     &--active {
-      .tp__icon-button,
-      .tp__text-button {
+      .tp__icon-button:not(.active),
+      .tp__text-button:not(.active) {
         background-color: var(--tab-active-background-color);
         color: var(--tab-active-color);
         fill: currentColor;

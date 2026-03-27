@@ -1,5 +1,6 @@
 use crate::library::{MediaClassification, MediaClassifier};
 use crate::model::{LibraryConfig, LibraryScanDirectory};
+use shared::model::LibraryContentType;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -53,6 +54,7 @@ pub struct SeriesEpisodeFile {
     pub file: ScannedMediaFile,
     pub season: u32,
     pub episode: u32,
+    pub auto_assigned_episode: bool,
     pub metadata: Box<PttMetadata>,
 }
 
@@ -63,13 +65,15 @@ impl MediaGrouper {
         let mut series_map: HashMap<SeriesKey, Vec<SeriesEpisodeFile>> = HashMap::new();
         let mut movies = Vec::new();
 
+        let mut episode_counters = HashMap::new();
         for file in files {
-            let classification = MediaClassifier::classify(&file);
+            let classification = MediaClassifier::classify(&file, &mut episode_counters);
             match classification {
                 MediaClassification::Movie { metadata } => {
                     movies.push(MediaGroup::Movie { file, metadata: Box::new(metadata) });
                 }
                 MediaClassification::Series { key, metadata, season, episode,.. } => {
+                    let auto_assigned_episode = metadata.episodes.is_empty() || metadata.seasons.is_empty();
                     series_map
                         .entry(key)
                         .or_default()
@@ -77,6 +81,7 @@ impl MediaGrouper {
                             file,
                             season,
                             episode,
+                            auto_assigned_episode,
                             metadata: Box::new(metadata),
                         });
                 }
@@ -87,7 +92,11 @@ impl MediaGrouper {
         result.extend(
             series_map.into_iter()
                 .map(|(key, mut episodes)| {
-                    episodes.sort_by(|a, b| a.file.file_path.cmp(&b.file.file_path));
+                    assign_fallback_episode_numbers(&mut episodes);
+                    episodes.sort_by(|a, b| {
+                        (a.season, a.episode, a.file.modified_timestamp, &a.file.file_path)
+                            .cmp(&(b.season, b.episode, b.file.modified_timestamp, &b.file.file_path))
+                    });
                     MediaGroup::Series {
                         show_key: key,
                         episodes,
@@ -105,6 +114,34 @@ impl MediaGrouper {
     }
 }
 
+fn assign_fallback_episode_numbers(episodes: &mut [SeriesEpisodeFile]) {
+    let next_fallback_episode = episodes
+        .iter()
+        .filter(|episode| !episode.auto_assigned_episode && episode.season == 1)
+        .map(|episode| episode.episode)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    let mut fallback_indices: Vec<usize> = episodes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, episode)| episode.auto_assigned_episode.then_some(idx))
+        .collect();
+
+    fallback_indices.sort_by(|left, right| {
+        let left_episode = &episodes[*left];
+        let right_episode = &episodes[*right];
+        (left_episode.file.modified_timestamp, &left_episode.file.file_path)
+            .cmp(&(right_episode.file.modified_timestamp, &right_episode.file.file_path))
+    });
+
+    for (offset, idx) in fallback_indices.into_iter().enumerate() {
+        episodes[idx].season = 1;
+        episodes[idx].episode = next_fallback_episode.saturating_add(u32::try_from(offset).unwrap_or(0));
+    }
+}
+
 
 /// Represents a discovered video file with its metadata
 #[derive(Debug, Clone)]
@@ -115,11 +152,12 @@ pub struct ScannedMediaFile {
     pub extension: String,
     pub size_bytes: u64,
     pub modified_timestamp: i64,
+    pub content_type: LibraryContentType,
 }
 
 impl ScannedMediaFile {
     /// Creates a new `ScannedMediaFile` from a path and metadata
-    pub async fn from_path(path: &Path) -> io::Result<Self> {
+    pub async fn from_path(path: &Path, content_type: LibraryContentType) -> io::Result<Self> {
         let metadata = fs::metadata(path).await?;
         let file_name = path
             .file_name()
@@ -146,6 +184,7 @@ impl ScannedMediaFile {
             extension,
             size_bytes: metadata.len(),
             modified_timestamp,
+            content_type,
         })
     }
 }
@@ -206,7 +245,7 @@ impl LibraryScanner {
         }
 
         let mut files = Vec::new();
-        self.scan_directory_recursive(path, scan_directory.recursive, &mut files).await?;
+        self.scan_directory_recursive(path, scan_directory.recursive, scan_directory.content_type, &mut files).await?;
         Ok(files)
     }
 
@@ -214,6 +253,7 @@ impl LibraryScanner {
         &'a self,
         path: &'a Path,
         recursive: bool,
+        content_type: LibraryContentType,
         files: &'a mut Vec<ScannedMediaFile>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output=io::Result<()>> + Send + 'a>> {
         Box::pin(async move {
@@ -232,7 +272,7 @@ impl LibraryScanner {
                 if metadata.is_dir() {
                     if recursive {
                         // Recursively scan subdirectories
-                        if let Err(err) = self.scan_directory_recursive(&entry_path, recursive, files).await {
+                        if let Err(err) = self.scan_directory_recursive(&entry_path, recursive, content_type, files).await {
                             error!("Failed to scan subdirectory {}: {err}", entry_path.display());
                         }
                     }
@@ -241,7 +281,7 @@ impl LibraryScanner {
                     if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
                         let ext_lower = ext.to_lowercase();
                         if self.config.supported_extensions.contains(&ext_lower) {
-                            match ScannedMediaFile::from_path(&entry_path).await {
+                            match ScannedMediaFile::from_path(&entry_path, content_type).await {
                                 Ok(video_file) => {
                                     trace!("Found video file: {}", video_file.file_path);
                                     files.push(video_file);
@@ -303,6 +343,29 @@ mod tests {
                 movie_category: "Local Movies".intern(),
                 series_category: "Local Series".intern(),
             },
+            thumbnails: crate::model::ThumbnailConfig {
+                enabled: false,
+                width: 320,
+                height: 180,
+            },
+        }
+    }
+
+    fn create_group_test_file(
+        file_name: &str,
+        parent_path: &str,
+        modified_timestamp: i64,
+        content_type: LibraryContentType,
+    ) -> ScannedMediaFile {
+        let path = PathBuf::from(parent_path).join(file_name);
+        ScannedMediaFile {
+            file_path: path.display().to_string(),
+            path,
+            file_name: file_name.to_string(),
+            extension: "mkv".to_string(),
+            size_bytes: 1024,
+            modified_timestamp,
+            content_type,
         }
     }
 
@@ -321,5 +384,28 @@ mod tests {
         let result = scanner.scan_all().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_group_assigns_fallback_episode_numbers_by_modified_time() {
+        let files = vec![
+            create_group_test_file("MyShow.2020.1080p.mkv", "/tv/MyShow", 200, LibraryContentType::Series),
+            create_group_test_file("MyShow.2020.S01E03.mkv", "/tv/MyShow", 300, LibraryContentType::Series),
+            create_group_test_file("MyShow.2021.720p.mkv", "/tv/MyShow", 100, LibraryContentType::Series),
+        ];
+
+        let groups = MediaGrouper::group(files);
+        let MediaGroup::Series { episodes, .. } = &groups[0] else {
+            panic!("Expected series group");
+        };
+
+        let episode_numbers: HashMap<_, _> = episodes
+            .iter()
+            .map(|episode| (episode.file.file_name.as_str(), episode.episode))
+            .collect();
+
+        assert_eq!(episode_numbers["MyShow.2020.S01E03.mkv"], 3);
+        assert_eq!(episode_numbers["MyShow.2021.720p.mkv"], 4);
+        assert_eq!(episode_numbers["MyShow.2020.1080p.mkv"], 5);
     }
 }

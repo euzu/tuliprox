@@ -1,7 +1,10 @@
 use crate::app::components::config::config_page::ConfigForm;
-use shared::model::{
-    ConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto,
-    LibraryPlaylistConfigDto, WebAuthConfigDto, WebUiConfigDto,
+use shared::{
+    model::{
+        ConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto,
+        LibraryPlaylistConfigDto, ThumbnailConfigDto, WebAuthConfigDto, WebUiConfigDto,
+    },
+    utils::is_default_supported_library_extensions,
 };
 
 macro_rules! set_config_field {
@@ -17,9 +20,10 @@ macro_rules! set_config_field {
 
 fn is_library_toggle_only_update(cfg: &LibraryConfigDto) -> bool {
     cfg.scan_directories.is_empty()
-        && cfg.supported_extensions.is_empty()
+        && (cfg.supported_extensions.is_empty() || is_default_supported_library_extensions(&cfg.supported_extensions))
         && cfg.metadata == LibraryMetadataConfigDto::default()
         && cfg.playlist == LibraryPlaylistConfigDto::default()
+        && cfg.thumbnails == ThumbnailConfigDto::default()
 }
 
 fn update_hdhomerun_field(config: &mut ConfigDto, mut hdhr_cfg: HdHomeRunConfigDto) {
@@ -137,6 +141,7 @@ mod tests {
 
         let library = config.library.expect("library config should be preserved");
         assert!(!library.enabled);
+        assert!(!library.thumbnails.enabled);
         assert_eq!(library.scan_directories.len(), 1);
         assert_eq!(library.scan_directories[0].path, "/media");
     }

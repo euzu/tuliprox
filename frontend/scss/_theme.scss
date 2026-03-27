@@ -67,7 +67,7 @@
 }
 
 :root {
-  --primary-color: rgba(96, 165, 250, 0.72);
+  --primary-color: rgba(96, 165, 250, 0.4);
   /* Icy Blue */
   --secondary-color: rgba(251, 113, 133, 0.62);
   /* Soft Coral Red */
@@ -98,6 +98,16 @@
   --card-color: var(--modest-text-color);
   --sub-card-background-color: rgba(15, 23, 42, 0.62);
 
+  --tertiary-background-color: rgba(168, 85, 247, 0.1);
+  --tertiary-border-color: rgba(168, 85, 247, 0.4);
+  --tertiary-text-color: rgb(244, 244, 245);
+  --tertiary-title-text-color: rgb(216, 180, 254);
+
+  --quaternary-background-color: rgba(34, 197, 94, 0.2);
+  --quaternary-border-color: rgba(34, 197, 94, 0.4);
+  --quaternary-text-color: rgb(244, 244, 245);
+  --quaternary-title-text-color: rgb(110, 231, 183);
+  --quaternary-hover-background-color: rgb(34, 197, 94, 0.3);
 
   --text-button-background-color: rgba(30, 64, 175, 0.28);
   --text-button-color: #ffffff;
@@ -114,12 +124,17 @@
   --text-button-secondary-hover-background-color: rgba(220, 70, 70, 0.55);
   --text-button-secondary-hover-color: #ffffff;
   --text-button-secondary-border-color: rgba(220, 70, 70, 0.5);
+  --text-button-tertiary-background-color: var(--tertiary-background-color);
+  --text-button-tertiary-color: var(--tertiary-title-text-color);
+  --text-button-tertiary-hover-background-color: rgba(168, 85, 247, 0.2);
+  --text-button-tertiary-hover-color: rgb(233, 213, 255);
+  --text-button-tertiary-border-color: var(--tertiary-border-color);
 
-  --text-button-active-background-color: rgba(34, 197, 94, 0.58);
-  --text-button-active-color: #fdfdfd;
-  --text-button-active-hover-background-color: rgba(22, 163, 74, 0.72);
-  --text-button-active-hover-color: #ffffff;
-  --text-button-active-border-color: rgba(74, 222, 128, 0.82);
+  --text-button-active-background-color: var(--quaternary-hover-background-color);
+  --text-button-active-color: var(--quaternary-title-text-color);
+  --text-button-active-hover-background-color:  var(--quaternary-background-color);
+  --text-button-active-hover-color: var(--quaternary-text-color);
+  --text-button-active-border-color: var(--quaternary-border-color);
 
   --text-button-disabled-border-color: #717171;
   --text-button-disabled-background-color: #494949;

@@ -1,11 +1,10 @@
 use crate::api::model::TransportStreamBuffer;
 use crate::model::{
     ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse,
-    GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, ProxyUserCredentials,
+    GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, MediaToolCapabilities, ProxyUserCredentials,
     ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
 };
 use crate::utils;
-use crate::utils::ffmpeg::check_ffprobe_availability;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, warn};
 use rand::Rng;
@@ -22,7 +21,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::OnceCell;
 
 fn generate_secret() -> [u8; 32] {
     let mut rng = rand::rng();
@@ -42,7 +40,7 @@ pub struct AppConfig {
     pub custom_stream_response: Arc<ArcSwapOption<CustomStreamResponse>>,
     pub access_token_secret: [u8; 32],
     pub encrypt_secret: [u8; 16],
-    pub(crate) ffprobe_available: Arc<OnceCell<bool>>,
+    pub(crate) media_tools: Arc<MediaToolCapabilities>,
 }
 
 impl AppConfig {
@@ -481,8 +479,10 @@ impl AppConfig {
             return false;
         }
 
-        *self.ffprobe_available.get_or_init(|| async {
-            check_ffprobe_availability().await
-        }).await
+        self.media_tools.is_ffprobe_available().await
+    }
+
+    pub async fn is_ffmpeg_available(&self) -> bool {
+        self.media_tools.is_ffmpeg_available().await
     }
 }

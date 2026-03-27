@@ -35,12 +35,20 @@ pub struct LibraryPlaylistConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ThumbnailConfig {
+    pub enabled: bool,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct LibraryConfig {
     pub enabled: bool,
     pub scan_directories: Vec<LibraryScanDirectory>,
     pub supported_extensions: Vec<String>,
     pub metadata: LibraryMetadataConfig,
     pub playlist: LibraryPlaylistConfig,
+    pub thumbnails: ThumbnailConfig,
 }
 
 impl LibraryConfig {
@@ -109,6 +117,11 @@ impl From<&LibraryConfigDto> for LibraryConfig {
             playlist: LibraryPlaylistConfig {
                 movie_category: dto.playlist.movie_category.as_str().intern(),
                 series_category: dto.playlist.series_category.as_str().intern(),
+            },
+            thumbnails: ThumbnailConfig {
+                enabled: dto.thumbnails.enabled,
+                width: dto.thumbnails.width,
+                height: dto.thumbnails.height,
             },
         }
     }

@@ -476,7 +476,7 @@ mod tests {
             path: None,
             filter: None,
         };
-        let (start, end) = resolve_time_range(&query).unwrap();
+        let (_start, end) = resolve_time_range(&query).unwrap();
         let day22_end = parse_date_or_datetime("2026-03-22").unwrap() + SECS_PER_DAY - 1;
         assert_eq!(end, day22_end);
     }

@@ -12,7 +12,7 @@ use crate::{
             hls_api::handle_hls_stream_request,
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
-        model::{create_custom_video_stream_response, AppState, CustomVideoStreamType, UserApiRequest},
+        model::{create_custom_video_stream_response, AppState, CustomVideoStreamType, UserApiRequestQueryOrBody, UserApiRequest},
     },
     auth::Fingerprint,
     repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const},
@@ -29,6 +29,7 @@ use shared::{
 use std::sync::Arc;
 
 async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoResponse + Send {
+    api_req.log_sanitized("m3u_api");
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
         get_user_target(api_req, app_state),
@@ -68,12 +69,9 @@ async fn m3u_api_get(
 }
 
 async fn m3u_api_post(
-    axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
+    UserApiRequestQueryOrBody(api_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
-    let api_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
     m3u_api(&api_req, &app_state).await.into_response()
 }
 

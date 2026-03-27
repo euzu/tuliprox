@@ -433,9 +433,9 @@ impl ConfigService {
         request_get::<()>(&self.geoip_path, None, None).await
     }
 
-    pub async fn update_library(&self) -> Result<Option<()>, Error> {
+    pub async fn update_library(&self, force_rescan: bool) -> Result<Option<()>, Error> {
         let path = concat_path(&self.library_path, "scan");
-        let params = LibraryScanRequest { force_rescan: false };
+        let params = LibraryScanRequest { force_rescan };
         request_post::<LibraryScanRequest, ()>(&path, params, None, None).await
     }
 

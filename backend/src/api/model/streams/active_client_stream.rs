@@ -1067,7 +1067,7 @@ mod tests {
             StreamError, UpdateGuard,
         },
         auth::Fingerprint,
-        model::{AppConfig, Config, ConfigInput, GracePeriodOptions, ProcessTargets, ProxyUserCredentials, SourcesConfig},
+        model::{AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProcessTargets, ProxyUserCredentials, SourcesConfig},
         utils::{FileLockManager, GeoIp},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -1129,7 +1129,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapOption::default()),
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
-            ffprobe_available: Arc::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         }
     }
 

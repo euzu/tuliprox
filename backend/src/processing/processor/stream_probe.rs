@@ -3,8 +3,8 @@ use crate::model::ConfigInput;
 use crate::model::{AppConfig};
 use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};
 use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
-use crate::utils::{debug_if_enabled, ffmpeg};
-use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::debug_if_enabled;
+use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use log::{info, warn};
 use shared::error::TuliproxError;
 use shared::model::{EpisodeStreamProperties, InputType, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, LiveStreamProperties, M3uPlaylistItem, XtreamCluster, XtreamPlaylistItem};
@@ -124,7 +124,7 @@ pub async fn update_generic_stream_metadata(
         acquired_handle.as_ref().and_then(ProbeHandleGuard::handle),
         active_handle,
     );
-    let probe_data = ffmpeg::probe_url_with_cancel(
+    let probe_data = FfmpegExecutor::new().probe_url_with_cancel(
         &probe_url,
         user_agent.as_deref(),
         analyze_duration,

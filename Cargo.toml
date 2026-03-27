@@ -3,7 +3,7 @@ members = ["backend", "frontend", "shared"]
 resolver = "2"
 
 [workspace.package]
-version = "3.2.155"
+version = "3.2.158"
 edition = "2021"
 rust-version = "1.89.0"
 
@@ -20,7 +20,7 @@ fastrand      = "2.3.0"
 lz4_flex      = "0.13.0"
 indexmap      = "2.13.0"
 dashmap       = "6.1.0"
-arc-swap      = "1.8.2"
+arc-swap      = "1.9.0"
 paste         = "1.0.15"
 pest          = "2.8.6"
 pest_derive   = "2.8.6"
@@ -28,10 +28,10 @@ zeroize       = "1.8.2"
 deunicode     = "1.6.2"
 path-clean    = "1.0.1"
 url           = "2.5.8"
-cron          = "0.15.0"
+cron          = "0.16.0"
 enum-iterator = "2.3.0"
 futures       = "0.3.32"
-serde-saphyr  = "0.0.21"
+serde-saphyr  = "0.0.22"
 tokio         = { version = "1.50.0" }
 
 [profile.release]

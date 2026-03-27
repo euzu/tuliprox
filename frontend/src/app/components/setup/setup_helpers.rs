@@ -8,9 +8,9 @@ use shared::{
         ApiProxyConfigDto, AppConfigDto, ConfigInputDto, ConfigTargetDto, ContentSecurityPolicyConfigDto,
         HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto, LibraryPlaylistConfigDto, LogConfigDto,
         ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, SourcesConfigDto, StreamConfigDto, TargetOutputDto,
-        TargetUserDto, WebAuthConfigDto, WebUiConfigDto,
+        TargetUserDto, ThumbnailConfigDto, WebAuthConfigDto, WebUiConfigDto,
     },
-    utils::default_secret,
+    utils::{default_secret, is_default_supported_library_extensions},
 };
 use std::{
     collections::HashMap,
@@ -202,9 +202,10 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
 
 fn is_setup_library_toggle_only_update(cfg: &LibraryConfigDto) -> bool {
     cfg.scan_directories.is_empty()
-        && cfg.supported_extensions.is_empty()
+        && (cfg.supported_extensions.is_empty() || is_default_supported_library_extensions(&cfg.supported_extensions))
         && cfg.metadata == LibraryMetadataConfigDto::default()
         && cfg.playlist == LibraryPlaylistConfigDto::default()
+        && cfg.thumbnails == ThumbnailConfigDto::default()
 }
 
 fn apply_setup_hdhomerun_form(config: &mut shared::model::ConfigDto, hdhr_cfg: HdHomeRunConfigDto) {
@@ -587,6 +588,7 @@ mod tests {
         let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
         let library = app_cfg.config.library.expect("library config should be present");
         assert!(!library.enabled);
+        assert!(!library.thumbnails.enabled);
         assert_eq!(library.scan_directories.len(), 1);
         assert_eq!(library.scan_directories[0].path, "/media");
     }

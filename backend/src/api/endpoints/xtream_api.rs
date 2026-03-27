@@ -17,7 +17,7 @@ use crate::{
             xmltv_api::{get_empty_epg_response, get_epg_path_for_target, serve_short_epg},
         },
         model::{
-            create_custom_video_stream_response, AppState, CustomVideoStreamType, UserApiRequest,
+            create_custom_video_stream_response, AppState, CustomVideoStreamType, UserApiRequestQueryOrBody, UserApiRequest,
             XtreamAuthorizationResponse,
         },
     },
@@ -698,13 +698,10 @@ struct XtreamApiTimeShiftRequest {
 async fn xtream_player_api_timeshift_stream(
     fingerprint: Fingerprint,
     req_headers: HeaderMap,
-    axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
     axum::extract::Path(timeshift_request): axum::extract::Path<XtreamApiTimeShiftRequest>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
+    UserApiRequestQueryOrBody(query_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
-    let query_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
     let path_req = UserApiRequest {
         username: timeshift_request.username,
         password: timeshift_request.password,
@@ -752,12 +749,9 @@ async fn xtream_player_api_timeshift_stream(
 async fn xtream_player_api_timeshift_query_stream(
     fingerprint: Fingerprint,
     req_headers: HeaderMap,
-    axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
+    UserApiRequestQueryOrBody(api_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
-    let api_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
 
     if api_req.username.is_empty()
         || api_req.password.is_empty()
@@ -1145,6 +1139,7 @@ macro_rules! skip_flag_optional {
 
 #[allow(clippy::too_many_lines)]
 async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
+    api_req.log_sanitized("xtream_player_api");
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = try_option_forbidden!(
         get_user_target(&api_req, app_state),
@@ -1313,11 +1308,8 @@ async fn xtream_player_api_get(
 
 async fn xtream_player_api_post(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
-    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
+    UserApiRequestQueryOrBody(api_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
-    let api_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
     xtream_player_api(api_req, &app_state).await
 }
 

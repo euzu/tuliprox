@@ -22,9 +22,7 @@ use crate::{
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::exec_processing,
     repository::run_startup_migrations,
-    utils::{
-        config_file_reader, db_viewer, init_bootstrap_logger, init_logger, request::create_client, resolve_env_var,
-    },
+    utils::{config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
@@ -148,12 +146,6 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-
-    // Initialize a minimal stdout logger immediately so that any error that
-    // occurs before `init_logger` (e.g. during path resolution) is visible.
-    // `init_logger` below will attempt a second `try_init` which silently
-    // fails; the format and module filters set here remain in effect.
-    init_bootstrap_logger(args.log_level.as_deref());
 
     db_viewer(&args.db_viewer_args());
 
@@ -327,7 +319,8 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         match utils::read_config_file(&config_file, true, false) {
             Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
             Err(err) => {
-                exit!("Can't read config file {config_file} while resolving storage path: {err}")
+                eprintln!("Can't read config file {config_file} while resolving storage path: {err}");
+                std::process::exit(1);
             }
         }
     } else {

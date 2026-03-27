@@ -1,7 +1,7 @@
 use crate::{api::{
     library_scan::{spawn_library_scan, LibraryScanTaskOptions},
     model::{AppState, EventMessage},
-}, auth::permission_layer, library::{resolve_metadata_storage_path, LibraryProcessor}};
+}, auth::permission_layer, library::{resolve_metadata_storage_path, LibraryProcessor, MetadataStorage}};
 use axum::response::IntoResponse;
 use log::{debug, warn};
 use serde_json::json;
@@ -50,7 +50,6 @@ async fn scan_library(
             }
         }
     };
-
     let client = app_state.http_client.load_full().as_ref().clone();
     let event_manager = Arc::clone(&app_state.event_manager);
     spawn_library_scan(
@@ -75,7 +74,12 @@ async fn get_library_status(
             let client = app_state.http_client.load_full().as_ref().clone();
             // Get statistics from processor
             let processor =
-                LibraryProcessor::new(config.clone(), config_snapshot.metadata_update.as_ref(), client, &config_snapshot.storage_dir);
+                LibraryProcessor::new(
+                    config.clone(),
+                    config_snapshot.metadata_update.as_ref(),
+                    client,
+                    &config_snapshot.storage_dir,
+                );
             let entries = processor.get_all_entries().await;
 
             let movies = entries.iter().filter(|e| e.metadata.is_movie()).count();
@@ -101,6 +105,64 @@ async fn get_library_status(
     axum::Json(response).into_response()
 }
 
+async fn get_thumbnail(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let config_snapshot = app_state.app_config.config.load();
+    let Some(library_config) = config_snapshot.library.as_ref().filter(|l| l.enabled) else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+
+    if !library_config.thumbnails.enabled {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+
+    let storage_path = resolve_metadata_storage_path(
+        config_snapshot.metadata_update.as_ref(),
+        &config_snapshot.storage_dir,
+    );
+    let storage = MetadataStorage::new(storage_path);
+
+    if let Some(entry) = storage.load_by_uuid(&id).await {
+        if let Some(hash) = entry.thumbnail_hash.as_ref() {
+            let mtime = entry.thumbnail_mtime.unwrap_or(0);
+            let etag = format!("\"{hash}-{mtime}\"");
+            return serve_thumbnail_hash(&storage, hash, etag, &headers).await;
+        }
+    }
+
+    let etag = format!("\"{id}\"");
+    serve_thumbnail_hash(&storage, &id, etag, &headers).await
+}
+
+async fn serve_thumbnail_hash(
+    storage: &MetadataStorage,
+    hash: &str,
+    etag: String,
+    headers: &axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Some(if_none_match) = headers.get(axum::http::header::IF_NONE_MATCH) {
+        if if_none_match.as_bytes() == etag.as_bytes() {
+            return axum::http::StatusCode::NOT_MODIFIED.into_response();
+        }
+    }
+
+    let thumb_path = storage.get_thumbnail_path(hash);
+    match tokio::fs::read(&thumb_path).await {
+        Ok(data) => {
+            let headers = [
+                (axum::http::header::CONTENT_TYPE, "image/jpeg".to_string()),
+                (axum::http::header::CACHE_CONTROL, "max-age=86400, public".to_string()),
+                (axum::http::header::ETAG, etag),
+            ];
+            (headers, data).into_response()
+        }
+        Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Registers Library API routes.
 pub fn library_api_register(
     router: axum::Router<Arc<AppState>>,
@@ -115,9 +177,11 @@ pub fn library_api_register(
             .route(
                 "/library/scan",
                 axum::routing::post(scan_library).layer(permission_layer!(app_state, Permission::LibraryWrite)),
-            ),
+            )
+            .route("/library/thumbnail/{uuid}", axum::routing::get(get_thumbnail)),
         None => router
             .route("/library/scan", axum::routing::post(scan_library))
-            .route("/library/status", axum::routing::get(get_library_status)),
+            .route("/library/status", axum::routing::get(get_library_status))
+            .route("/library/thumbnail/{uuid}", axum::routing::get(get_thumbnail)),
     }
 }

@@ -12,7 +12,6 @@ macro_rules! include_modules {
         pub mod processing;
         pub mod ptt;
         pub mod repository;
-        pub mod tools;
         pub mod utils;
     };
 }

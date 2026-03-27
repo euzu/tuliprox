@@ -27,6 +27,8 @@ use shared::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
+pub const API_V1_PATH: &str = "api/v1";
+
 async fn create_ipinfo_check(app_state: &Arc<AppState>) -> Option<(Option<String>, Option<String>)> {
     let config = app_state.app_config.config.load();
     if let Some(ipcheck) = config.ipcheck.as_ref() {
@@ -156,7 +158,7 @@ pub fn v1_api_register(
         base_router = base_router.merge(user_api_register(app_state, web_ui_path));
     }
 
-    let api_prefix = concat_path_leading_slash(web_ui_path, "api/v1");
+    let api_prefix = concat_path_leading_slash(web_ui_path, API_V1_PATH);
     base_router
         .nest(&api_prefix, public_router)
         .nest(&api_prefix, router)

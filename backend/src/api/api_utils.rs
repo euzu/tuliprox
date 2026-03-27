@@ -11,7 +11,6 @@ use crate::{
     },
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
-    tools::lru_cache::LRUResourceCache,
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -206,6 +205,7 @@ pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
 pub use try_unwrap_body;
+use crate::utils::LRUResourceCache;
 
 pub fn get_server_time() -> String {
     chrono::offset::Local::now().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string()

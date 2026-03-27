@@ -254,6 +254,33 @@ pub struct XtreamSeriesInfo {
     pub episodes: Option<Vec<XtreamSeriesInfoEpisode>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::XtreamVideoInfo;
+    use serde_json::json;
+
+    #[test]
+    fn xtream_video_info_accepts_numeric_tmdb_id() {
+        let parsed: XtreamVideoInfo = serde_json::from_value(json!({
+            "info": {
+                "tmdb_id": 1285728,
+                "name": "A Normal Woman"
+            },
+            "movie_data": {
+                "stream_id": 982447,
+                "name": "A Normal Woman - 2025",
+                "added": "1771006438",
+                "category_id": "727",
+                "container_extension": "mkv",
+                "direct_source": ""
+            }
+        }))
+        .expect("numeric tmdb_id should deserialize");
+
+        assert_eq!(parsed.info.tmdb_id.as_ref(), "1285728");
+    }
+}
+
 // sometimes episodes are a map with season as key, sometimes an array
 fn deserialize_episodes<'de, D>(deserializer: D) -> Result<Option<Vec<XtreamSeriesInfoEpisode>>, D::Error>
 where

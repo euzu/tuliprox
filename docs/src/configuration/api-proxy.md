@@ -119,6 +119,7 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 | `proxy`                 | Enum     |    No    | `redirect` | Defines the proxy mode for this user (see [proxy modes](#proxy-modes-proxy) below).                                                                                                                                                                                                |
 | `server`                | String   |    No    | `default`  | Which server block (host/port) is rendered into the playlist for this user.                                                                                                                                                                                                        |
 | `epg_timeshift`         | String   |    No    | `None`     | Shifts EPG times for users in different time zones. Formats supported: `[-+]hh:mm` or `TimeZone`. Examples: `-2:30` (minus 2h30m), `1:45` (1h45m), `+0:15` (15m), `2` (2h), `:30` (30m), `:3` (3m), `Europe/Paris`, `America/New_York`. Only applies when `epg_url` is configured. |
+| `epg_request_timeshift` | String   |    No    | `None`     | Shifts EPG times for users in different time zones specifically to adjust catchup requests                                                                                                                                                                                         |
 | `max_connections`       | Int      |    No    | `0`        | Hard limit of concurrent streams for *this* user. `0` = Unlimited. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                        |
 | `status`                | Enum     |    No    | `Active`   | Possible values: `Active`, `Trial`, `Expired`, `Banned`, `Disabled`, `Pending`. **Requires** `user_access_control: true` in `config.yml` to block non-active streaming.                                                                                                            |
 | `exp_date`              | UnixTs   |    No    | `None`     | Locks the user out after this Unix timestamp. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                                             |
@@ -137,7 +138,7 @@ This is the most crucial field governing traffic flow for the user. When to use 
   * *Tradeoff:* **No** connection limits, buffering, bandwidth throttling, or custom fallback videos are applied!
 * **`reverse`**: Tuliprox downloads the video stream from the provider onto your server and pipes it to the client.
   * *When to use:* This is required for connection limits, fallback videos, caching, bandwidth throttling, and shared
-    streams to function.
+      streams to function.
 * **Partial Syntax**: You can mix and match! `reverse[live]` forces Live-TV through Tuliprox
   (allowing shared streams) but redirects VODs (saving bandwidth).
   `reverse[live,vod]` routes everything except Series episodes through Tuliprox.
@@ -170,6 +171,324 @@ Now you, the Admin (User C with Priority `-10`), want to watch.
 listeners are not interrupted.
 Internal FFprobe metadata probe tasks run by default at the absolute lowest priority (`127`) and are immediately
 preempted/killed if any real user needs the slot.)*
+
+---
+
+### EPG Timeshift Configuration Guide
+
+#### What is an EPG Timeshift?
+
+**EPG (Electronic Program Guide)** timeshift allows you to adjust TV program times to match your local time zone. This
+is especially useful when:
+
+* You live in a different time zone than your IPTV provider
+* You want to view programs as if they were aired at a different time
+* Your EPG data is in one time zone, but you need it displayed in another
+
+---
+
+#### The Two EPG Timeshift Fields
+
+When configuring users in Tuliprox, you'll find two separate fields for EPG timeshift:
+
+| Field                   | Purpose                                                         | When to Use                                                        |
+|-------------------------|-----------------------------------------------------------------|--------------------------------------------------------------------|
+| `epg_timeshift`         | Shifts EPG times for **XMLTV/EPG requests** (regular EPG files) | Use when you want ALL EPG times globally shifted for this user     |
+| `epg_request_timeshift` | Adjusts client-provided time ranges for **XTream Catchup API**  | Use when you need to shift catchup time requests (start/end times) |
+
+---
+
+#### When to Use Which Field?
+
+##### Use `epg_timeshift` for
+
+✅ **XMLTV EPG Requests**
+
+* When clients request EPG via `/xmltv.php` or `/epg` endpoints
+* When serving EPG files to applications
+* When you want ALL program times adjusted to your time zone
+
+**Example:** You're in Paris (UTC+2) and your provider is in UTC. All EPG times should be 2 hours earlier.
+
+---
+
+##### Use `epg_request_timeshift` for
+
+✅ **XTream Catchup API**
+
+* When clients request catchup via `/timeshift` or `/streaming/timeshift.php`
+* When clients provide their own time ranges (`start`, `end`, `duration`)
+* When you need to shift those client-provided times to match your needs
+
+**Example:** A client requests catchup from 14:00-16:00. You want these times shifted to match your local time zone.
+
+---
+
+##### Key Difference
+
+| Feature               | `epg_timeshift`             | `epg_request_timeshift`                     |
+|-----------------------|-----------------------------|---------------------------------------------|
+| Affects               | All EPG program times       | Client-provided catchup time ranges only    |
+| Used in               | XMLTV/EPG endpoints         | XTream Catchup API                          |
+| Global or Per-Request | Global (affects entire EPG) | Per-request (adjusts client-provided times) |
+
+---
+
+#### Supported Time Formats
+
+Both fields support the same time formats:
+
+| Format      | Example                            | Meaning                           |
+|-------------|------------------------------------|-----------------------------------|
+| `[-+]hh:mm` | `-2:30`, `+1:00`                   | Fixed offset in hours and minutes |
+| `hh:mm`     | `2:00`, `:30`                      | Positive offset (implies +)       |
+| `TimeZone`  | `Europe/Paris`, `America/New_York` | IANA timezone name                |
+
+##### Common Examples
+
+| Format        | Value              | Description             |
+|---------------|--------------------|-------------------------|
+| Fixed offset  | `-2:00`            | Minus 2 hours           |
+|               | `+1:30`            | Plus 1 hour 30 minutes  |
+|               | `2:00`             | Plus 2 hours (positive) |
+|               | `:30`              | Plus 30 minutes         |
+|               | `:3`               | Plus 3 minutes          |
+| Timezone name | `Europe/Paris`     | Paris time zone         |
+|               | `America/New_York` | New York time zone      |
+|               | `Asia/Tokyo`       | Tokyo time zone         |
+
+---
+
+#### Configuration Examples
+
+##### Example 1: User in Paris, No Additional Catchup Offset
+
+**Scenario:** You're in Paris (UTC+2) and your IPTV provider uses UTC. You want all EPG programs shown in Paris time.
+Catchup times should not be adjusted.
+
+```yaml
+# config.yml
+api_proxy:
+  users:
+    - username: paris_user
+      password: ***
+      epg_timeshift: Europe/Paris          # ✅ All EPG in Paris time zone
+      epg_request_timeshift: None        # ✅ No adjustment for catchup
+```
+
+---
+
+##### Example 2: User in New York, -1h30 for Everything
+
+**Scenario:** You're in New York (UTC-5 in winter, UTC-4 in summer). Your EPG is in UTC. You want to shift everything by
+-1h30.
+
+```yaml
+# config.yml
+api_proxy:
+  users:
+    - username: ny_user
+      password: ***
+      epg_timeshift: America/New_York    # ✅ EPG in New York time zone
+      epg_request_timeshift: -1:30     # ✅ Catchup also shifted by -1h30
+```
+
+---
+
+##### Example 3: User in Berlin, -2h Only for Catchup
+
+**Scenario:** You're in Berlin (UTC+1). Your EPG is already in Berlin time zone. However, when clients request catchup,
+you want to adjust their times by -2 hours.
+
+```yaml
+# config.yml
+api_proxy:
+  users:
+    - username: berlin_user
+      password: ***
+      epg_timeshift: Europe/Berlin        # ✅ EPG in Berlin time zone
+      epg_request_timeshift: -2:00      # ✅ Catchup shifted by -2h
+```
+
+---
+
+##### Example 4: User in London, +3h Global, No Catchup Shift
+
+**Scenario:** You're in London (UTC+0 or UTC+1 depending on DST). Your EPG is 3 hours behind. You want to catch up on
+all EPG times.
+
+```yaml
+# config.yml
+api_proxy:
+  users:
+    - username: london_user
+      password: ***
+      epg_timeshift: +3:00                # ✅ All EPG times +3 hours
+      epg_request_timeshift: None          # ✅ Catchup uses client times as-is
+```
+
+---
+
+##### Example 5: User in Sydney, Timezone for EPG, Catchup Unchanged
+
+**Scenario:** You're in Sydney (UTC+10/UTC+11). You want EPG in Sydney time zone. Catchup should use exact times as
+clients request.
+
+```yaml
+# config.yml
+api_proxy:
+  users:
+    - username: sydney_user
+      password: ***
+      epg_timeshift: Australia/Sydney    # ✅ EPG in Sydney time zone
+      epg_request_timeshift: None        # ✅ No catchup adjustment
+```
+
+---
+
+#### Real-World Scenarios
+
+##### Scenario 1: Watching EPG in Different Time Zone
+
+**Problem:** Your provider's EPG shows programs in UTC time, but you're in Tokyo (UTC+9).
+
+**Solution:** Use `epg_timeshift: Australia/Sydney` or `epg_timeshift: +9:00`.
+
+**Result:** All EPG programs appear in Tokyo local time, making it easy to find what's on TV right now.
+
+---
+
+##### Scenario 2: Requesting Catchup for Specific Times
+
+**Problem:** A client requests catchup from 14:00-16:00 (2pm-4pm), but you want to adjust this for your time zone.
+
+**Setup:** `epg_request_timeshift: -1:00`
+
+**When client requests:** `start=14:00&end=16:00`
+
+**Tuliprox adjusts to:** `start=13:00&end=15:00` (shifted by -1 hour)
+
+**Result:** Provider receives catchup request for 1pm-3pm (your local time).
+
+---
+
+##### Scenario 3: Same User Needs Different Shifts for Different Features
+
+**Problem:** You want EPG in your local time zone, but catchup requests should use a different offset (or no offset at
+all).
+
+**Solution:** Configure different values for each field.
+
+**Result:** XMLTV requests use one shift, XTream catchup uses another shift. Full flexibility!
+
+---
+
+#### Common Questions (FAQ)
+
+##### Q: Can I leave both fields empty?
+
+**A:** Yes! Both `epg_timeshift` and `epg_request_timeshift` are optional (`None`). When empty:
+
+* EPG/EPG times remain unchanged
+* Catchup times are exactly as requested by client
+* No time shifting is applied
+
+---
+
+##### Q: What's the difference between `+2:00` and `Europe/Paris`?
+
+**A:** Both are valid formats, but they work differently:
+
+* `+2:00`: A fixed +2 hour offset. This is always +2 hours, regardless of Daylight Saving Time (DST).
+* `Europe/Paris`: Uses the actual Paris time zone, which automatically handles DST (UTC+1 in winter, UTC+2 in summer).
+
+**Recommendation:** Use timezone names (`Europe/Paris`) for locations with DST. Use fixed offsets (`+2:00`) when you
+want a constant shift.
+
+---
+
+##### Q: Which field should I use if I don't know?
+
+**A:** Start with `epg_timeshift`. This is the most common field and affects XMLTV/EPG requests, which are used by most
+IPTV applications. Only configure `epg_request_timeshift` if you specifically need to adjust catchup time requests.
+
+---
+
+##### Q: Can I use both fields with different values?
+
+**A:** Absolutely! This is the intended design. For example:
+
+* `epg_timeshift: Europe/Berlin` (EPG in Berlin time)
+* `epg_request_timeshift: -2:00` (Catchup shifted by -2 hours)
+
+Each field affects only its specific use case, giving you complete control.
+
+---
+
+##### Q: How do negative timeshifts work?
+
+**A:** Negative values shift times **backwards** in time.
+
+**Example:** `epg_timeshift: -2:30`
+
+If EPG shows a program at 20:00, it will appear at 17:30 to your client.
+
+**Common use:** You're ahead of your provider's time zone and need to go back.
+
+---
+
+##### Q: What is the maximum/minimum timeshift I can set?
+
+**A:** There is no hard limit in Tuliprox, but practical limits apply:
+
+* **For fixed offsets:** Typically -12 to +14 hours (covering most global time differences)
+* **For timezone names:** Any IANA timezone name (e.g., `Pacific/Honolulu` to `Etc/GMT+14`)
+
+---
+
+##### Q: Will timeshift affect recording/catchup?
+
+**A:** Only `epg_request_timeshift` affects catchup requests. `epg_timeshift` only affects EPG/EPG program times and
+does not modify actual stream or recording times.
+
+---
+
+##### Q: Do I need to restart Tuliprox after changing these settings?
+
+**A:** No! Configuration changes are detected automatically and applied without restart. The new timeshift values will
+be used for the next request.
+
+---
+
+#### Quick Reference
+
+| I Want To...                         | Use This Field                | Format Example                                           |
+|--------------------------------------|-------------------------------|----------------------------------------------------------|
+| Shift all EPG times globally         | `epg_timeshift`               | `Europe/Paris` or `-2:00`                                |
+| Adjust catchup time requests         | `epg_request_timeshift`       | `America/New_York` or `+1:30`                            |
+| No time shifting                     | Leave both empty              | `None` or omit field                                     |
+| Handle DST automatically             | Use timezone name             | `Europe/london`                                          |
+| Constant offset regardless of DST    | Use fixed offset              | `+1:00`                                                  |
+| EPG in local time, catchup different | Set different values for both | `epg_timeshift: Berlin` / `epg_request_timeshift: -1:00` |
+
+---
+
+#### Getting Help
+
+If you're unsure which values to use:
+
+1. **Check your local time zone** and compare with your IPTV provider's EPG
+2. **Calculate the difference** in hours (e.g., "I'm 2 hours ahead of EPG")
+3. **Set `epg_timeshift` to that value** if you want EPG adjusted
+4. **Set `epg_request_timeshift`** only if you specifically need to adjust catchup requests
+5. **Test with your IPTV app** to verify times appear correctly
+
+For timezone names, see: [IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+
+---
+
+**Note:** These settings only affect EPG (Electronic Program Guide) times. They do not change when streams are actually
+aired - that's controlled by your IPTV provider.
 
 ---
 
