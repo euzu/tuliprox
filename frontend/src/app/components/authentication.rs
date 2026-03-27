@@ -66,7 +66,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
         use_effect_with((*loading, *authenticated), move |(loading, authenticated)| {
             if !*loading && !*authenticated {
                 if let Some(navigator) = navigator.clone() {
-                    navigator.replace(&AppRoute::Login);
+                    navigator.replace(&AppRoute::Home);
                 }
             }
             || ()

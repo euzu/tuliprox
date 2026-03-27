@@ -10,11 +10,11 @@ mod status_card;
 mod user_action_card;
 mod version_action_card;
 
-mod streams_table;
+mod stream_display;
 mod streams_view;
 
 pub use self::{
     action_card::*, dashboard_view::*, discord_action_card::*, documentation_action_card::*, github_action_card::*,
-    ipinfo_action_card::*, playlist_progress_status_card::*, stats_view::*, status_card::*, streams_table::*,
+    ipinfo_action_card::*, playlist_progress_status_card::*, stats_view::*, status_card::*, stream_display::*,
     streams_view::*, user_action_card::*, version_action_card::*,
 };
