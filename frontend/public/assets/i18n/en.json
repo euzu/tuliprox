@@ -273,7 +273,7 @@
     "CACHE_CONFIG": {
       "DIR": "Filesystem directory where playlist and metadata caches are stored.",
       "ENABLED": "Globally enables or disables disk caching for input resources.",
-      "SIZE": "Maximum size (in bytes) allowed for the cache directory."
+      "SIZE": "Maximum size (in bytes) allowed for the cache directory. Allowed units are: B, KB, MB, GB, TB"
     },
     "CONFIG_API": {
       "HOST": "Host where the tuliprox API listens. Default: 0.0.0.0",
@@ -1234,7 +1234,9 @@
     "XTREAM_CODES": "xtream codes",
     "X_HEADER": "Remove X-* headers",
     "YES": "Yes",
-    "FORCE": "Force"
+    "FORCE": "Force",
+    "ACTIVE_STREAMS": "Active Streams",
+    "PLAYER": "Player"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -1260,6 +1262,7 @@
       }
     },
     "FAILED_TO_KICK_USER_STREAM": "Failed to kick user stream",
+    "FAILED_TO_RETRIEVE_PROVIDER_URL": "Failed to retrieve provider URL",
     "FAILED_TO_RETRIEVE_WEBPLAYER_URL": "Failed to retrieve webplayer URL",
     "INVALID_FILETYPE": "Invalid filetype",
     "INVALID_REGEXP": "Invalid regexp",

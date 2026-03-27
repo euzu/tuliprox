@@ -1,6 +1,6 @@
 use crate::{
     app::{
-        components::{Card, StatusCard, StreamsTable},
+        components::{Card, StatusCard, StreamDisplay},
         StatusContext,
     },
     hooks::use_service_context,
@@ -74,7 +74,7 @@ pub fn StreamsView(props: &StreamsViewProps) -> Html {
                     />
                  </Card>
             </div>
-            <StreamsTable streams={ (*memo_streams).clone() } />
+            <StreamDisplay streams={ (*memo_streams).clone() } />
         </div>
       </div>
     }

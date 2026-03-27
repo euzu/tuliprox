@@ -58,6 +58,7 @@ pub fn create_stream_channel_with_type(
 ) -> StreamChannel {
     let mut stream_channel = pli.to_stream_channel(target_id);
     stream_channel.item_type = item_type;
+    stream_channel.cluster = XtreamCluster::try_from(item_type).unwrap_or(stream_channel.cluster);
     stream_channel
 }
 
@@ -305,5 +306,43 @@ impl StreamInfo {
             session_token: session_token.map(|token| token.to_string()),
             preserved: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_stream_channel_with_type;
+    use crate::{
+        model::{PlaylistItemType, XtreamCluster, XtreamPlaylistItem},
+        utils::Internable,
+    };
+
+    #[test]
+    fn create_stream_channel_with_type_keeps_cluster_consistent_with_item_type() {
+        let playlist_item = XtreamPlaylistItem {
+            virtual_id: 93_995,
+            provider_id: 1,
+            name: "Example".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Movies".intern(),
+            title: "Example".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://provider.example/movie/93995.mkv".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 0,
+            input_name: "demo".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+        };
+
+        let stream_channel = create_stream_channel_with_type(1, &playlist_item, PlaylistItemType::Video);
+
+        assert_eq!(stream_channel.item_type, PlaylistItemType::Video);
+        assert_eq!(stream_channel.cluster, XtreamCluster::Video);
     }
 }
