@@ -100,6 +100,21 @@ fn resolve_provider_url_for_request(app_config: &AppConfig, playlist_request: &P
     }
 }
 
+fn build_playlist_webplayer_url(
+    base_url: &str,
+    access_token: &str,
+    target_id: u16,
+    virtual_id: u32,
+    cluster: XtreamCluster,
+) -> String {
+    format!(
+        "{base_url}/token/{access_token}/{}/{}/{}",
+        target_id,
+        cluster.as_stream_type(),
+        virtual_id
+    )
+}
+
 async fn playlist_update(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(targets): axum::extract::Json<Vec<String>>,
@@ -268,13 +283,7 @@ fn playlist_webplayer(
         .map_or("default", |server_name| server_name.as_str());
     let server_info = app_state.app_config.get_server_info(server_name);
     let base_url = server_info.get_base_url();
-    format!(
-        "{base_url}/token/{access_token}/{}/{}/{}",
-        target_id,
-        cluster.as_stream_type(),
-        virtual_id
-    )
-    .into_response()
+    build_playlist_webplayer_url(&base_url, &access_token, target_id, virtual_id, cluster).into_response()
 }
 
 async fn playlist_epg(
@@ -398,7 +407,7 @@ mod tests {
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::foundation::Filter;
     use shared::{
-        model::{ConfigPaths, ConfigProviderDto, PlaylistRequest},
+        model::{ConfigPaths, ConfigProviderDto, PlaylistRequest, XtreamCluster},
         utils::Internable,
     };
     use std::sync::Arc;
@@ -641,6 +650,18 @@ mod tests {
         let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Target(11), original);
 
         assert_eq!(resolved, original);
+    }
+
+    #[test]
+    fn build_playlist_webplayer_url_uses_cluster_stream_type() {
+        let live = super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Live);
+        let movie = super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Video);
+        let series =
+            super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Series);
+
+        assert_eq!(live, "http://player.example/token/token123/1/live/42");
+        assert_eq!(movie, "http://player.example/token/token123/1/movie/42");
+        assert_eq!(series, "http://player.example/token/token123/1/series/42");
     }
 }
 
