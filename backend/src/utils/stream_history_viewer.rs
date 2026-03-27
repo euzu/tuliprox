@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::repository::{StreamHistoryRecord, EventType, DisconnectReason, StreamHistoryFileReader, FileHeaderBody, read_and_verify_file_magic, read_framed, extract_day_from_filename};
 
 #[derive(Deserialize)]
-struct StreamHistoryQuery {
+pub(crate) struct StreamHistoryQuery {
     pub from: Option<String>,
     pub to: Option<String>,
     pub path: Option<String>,
@@ -19,13 +19,13 @@ struct StreamHistoryQuery {
 }
 
 /// Parsed time range as (`start_ts_utc`, `end_ts_utc`) in seconds
-type TimeRange = (u64, u64);
+pub(crate) type TimeRange = (u64, u64);
 
 const SECS_PER_DAY: u64 = 86400;
 
 /// Parse a date or datetime string into a UTC unix timestamp.
 /// Accepts: "YYYY-MM-DD", "YYYY-MM-DD HH:MM", "YYYY-MM-DD HH:MM:SS"
-fn parse_date_or_datetime(input: &str) -> Result<u64, String> {
+pub(crate) fn parse_date_or_datetime(input: &str) -> Result<u64, String> {
     let trimmed = input.trim();
 
     // Try date only: YYYY-MM-DD
@@ -56,7 +56,7 @@ fn is_date_only(input: &str) -> bool {
 }
 
 /// Resolve the query's from/to into a concrete time range.
-fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange, String> {
+pub(crate) fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange, String> {
     match (&query.from, &query.to) {
         (Some(from), Some(to)) => {
             let start = parse_date_or_datetime(from)?;
@@ -99,12 +99,12 @@ enum FilterValue {
     NumericExact(u64),
 }
 
-struct CompiledFilter {
+pub(crate) struct CompiledFilter {
     fields: Vec<(String, FilterValue)>,
 }
 
 impl CompiledFilter {
-    fn compile(raw: &HashMap<String, String>) -> Result<Self, String> {
+    pub(crate) fn compile(raw: &HashMap<String, String>) -> Result<Self, String> {
         let mut fields = Vec::with_capacity(raw.len());
         for (key, value) in raw {
             let filter_value = if NUMERIC_FIELDS.contains(&key.as_str()) {
@@ -125,7 +125,7 @@ impl CompiledFilter {
         Ok(Self { fields })
     }
 
-    fn matches(&self, record: &StreamHistoryRecord) -> bool {
+    pub(crate) fn matches(&self, record: &StreamHistoryRecord) -> bool {
         self.fields.iter().all(|(key, value)| {
             match get_record_field(record, key) {
                 RecordFieldValue::String(Some(s)) => match value {
@@ -207,13 +207,13 @@ fn load_query(input: &str) -> Result<StreamHistoryQuery, String> {
 }
 
 
-struct HistoryFile {
-    path: PathBuf,
-    partition_day: String,
-    is_archive: bool,
+pub(crate) struct HistoryFile {
+    pub path: PathBuf,
+    pub partition_day: String,
+    pub is_archive: bool,
 }
 
-fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<HistoryFile>> {
+pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<HistoryFile>> {
     if !dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,

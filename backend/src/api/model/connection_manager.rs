@@ -139,7 +139,7 @@ impl ConnectionManager {
                             event_manager.unregister_meter_client(stream_info.uid).await;
                             let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
                             let rc = if reconnect_count > 0 { Some(reconnect_count) } else { None };
-                            emit_disconnect_record(&history_writer, &stream_info, reason, DisconnectQos { bytes_sent, first_byte_latency_ms, provider_reconnect_count: rc });
+                            emit_disconnect_record(&history_writer, &stream_info, reason, &DisconnectQos { bytes_sent, first_byte_latency_ms, provider_reconnect_count: rc });
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
@@ -169,7 +169,7 @@ impl ConnectionManager {
                             event_manager.unregister_meter_client(stream_info.uid).await;
                             let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
                             let rc = if reconnect_count > 0 { Some(reconnect_count) } else { None };
-                            emit_disconnect_record(&history_writer, &stream_info, reason, DisconnectQos { bytes_sent, first_byte_latency_ms, provider_reconnect_count: rc });
+                            emit_disconnect_record(&history_writer, &stream_info, reason, &DisconnectQos { bytes_sent, first_byte_latency_ms, provider_reconnect_count: rc });
                             event_manager.send_event(EventMessage::ActiveUser(
                                 ActiveUserConnectionChange::Disconnected(addr),
                             ));
@@ -202,7 +202,7 @@ impl ConnectionManager {
                     CleanupEvent::AdaptiveSessionExpired { stream_info } => {
                         let (bytes_sent, first_byte_latency_ms) = event_manager.read_meter_qos(stream_info.meter_uid).await;
                         event_manager.unregister_meter_client(stream_info.uid).await;
-                        emit_disconnect_record(&history_writer, &stream_info, DisconnectReason::SessionExpired, DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() });
+                        emit_disconnect_record(&history_writer, &stream_info, DisconnectReason::SessionExpired, &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() });
                         event_manager.send_event(EventMessage::ActiveUser(
                             ActiveUserConnectionChange::Disconnected(stream_info.addr),
                         ));
@@ -254,7 +254,7 @@ impl ConnectionManager {
         for stream_info in &removed.removed_streams {
             let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
             self.event_manager.unregister_meter_client(stream_info.uid).await;
-            emit_disconnect_record(&self.history_writer, stream_info, DisconnectReason::ClientClosed, DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() });
+            emit_disconnect_record(&self.history_writer, stream_info, DisconnectReason::ClientClosed, &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() });
         }
         self.provider_manager.release_connection(addr).await;
         self.shared_stream_manager.release_connection(addr, true).await;
@@ -274,7 +274,7 @@ impl ConnectionManager {
         if let Some(stream_info) = self.user_manager.release_stream(addr).await {
             let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
             self.event_manager.unregister_meter_client(stream_info.uid).await;
-            emit_disconnect_record(&self.history_writer, &stream_info, DisconnectReason::ClientClosed, DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() });
+            emit_disconnect_record(&self.history_writer, &stream_info, DisconnectReason::ClientClosed, &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() });
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
             notify_capacity(self.capacity_notify.as_ref());
         }
@@ -403,7 +403,7 @@ fn emit_connect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &Strea
     w.send_record(StreamHistoryRecord::from_connect(info));
 }
 
-fn emit_disconnect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &StreamInfo, reason: DisconnectReason, qos: DisconnectQos) {
+fn emit_disconnect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &StreamInfo, reason: DisconnectReason, qos: &DisconnectQos) {
     let guard = writer.load();
     let Some(w) = guard.as_ref() else { return };
     w.send_record(StreamHistoryRecord::from_disconnect(info, reason, qos));

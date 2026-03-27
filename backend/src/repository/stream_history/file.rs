@@ -197,7 +197,7 @@ impl StreamHistoryRecord {
     }
 
     /// Extra `QoS` fields carried as a struct to keep the signature stable.
-    pub fn from_disconnect(info: &StreamInfo, reason: DisconnectReason, qos: DisconnectQos) -> Self {
+    pub fn from_disconnect(info: &StreamInfo, reason: DisconnectReason, qos: &DisconnectQos) -> Self {
         let now_secs = now_utc_secs();
         let connect_secs = info.ts;
         let mut record = Self::base(info);

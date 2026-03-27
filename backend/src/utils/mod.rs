@@ -11,7 +11,7 @@ mod binary_utils;
 mod telegram;
 mod geoip;
 mod db_viewer;
-mod stream_history_viewer;
+pub(crate) mod stream_history_viewer;
 mod epg_parser;
 mod ordinal;
 pub mod ffmpeg;
