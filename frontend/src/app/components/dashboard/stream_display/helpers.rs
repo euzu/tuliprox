@@ -5,8 +5,8 @@ use shared::{
     utils::{current_time_secs, default_hls_session_ttl_secs},
 };
 use std::collections::HashMap;
-use wasm_bindgen::JsCast;
-use web_sys::Element;
+use wasm_bindgen::{JsCast, JsValue};
+use web_sys::{console, Element};
 use yew::UseStateHandle;
 
 const LIVE: &str = "Live";
@@ -182,14 +182,25 @@ pub fn render_cluster(channel: &StreamChannel) -> &'static str {
 
 pub fn update_timestamps() {
     let window = window();
-    let document = window.document().unwrap();
-    let spans = document.query_selector_all("span[data-ts]").unwrap();
+    let Some(document) = window.document() else {
+        return;
+    };
+    let spans = match document.query_selector_all("span[data-ts]") {
+        Ok(spans) => spans,
+        Err(err) => {
+            console::error_1(&err);
+            return;
+        }
+    };
     for i in 0..spans.length() {
         if let Some(node) = spans.item(i) {
-            let el: Element = node.dyn_into().unwrap();
+            let Ok(el) = node.dyn_into::<Element>() else {
+                console::error_1(&JsValue::from_str("failed to convert timestamp node to Element"));
+                continue;
+            };
             if let Some(ts_str) = el.get_attribute("data-ts") {
                 if let Ok(ts) = ts_str.parse::<u64>() {
-                    el.set_inner_html(&format_duration(current_time_secs() - ts));
+                    el.set_inner_html(&format_duration(current_time_secs().saturating_sub(ts)));
                 }
             }
         }

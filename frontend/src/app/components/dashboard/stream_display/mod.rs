@@ -26,6 +26,7 @@ use shared::{
     utils::default_kick_secs,
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use wasm_bindgen::JsCast;
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
 
@@ -120,7 +121,8 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
         let set_anchor_ref = popup_anchor_ref.clone();
         let set_is_open = popup_is_open.clone();
         Callback::from(move |(dto, event): (Rc<StreamInfo>, MouseEvent)| {
-            if let Some(streams) = event.target_dyn_into::<web_sys::Element>() {
+            if let Some(streams) = event.current_target().and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            {
                 set_selected_dto.set(Some(dto));
                 set_anchor_ref.set(Some(streams));
                 set_is_open.set(true);
@@ -185,8 +187,9 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                             spawn_local(async move {
                                 let request =
                                     PlaylistUrlResolveRequest::Provider { playlist_request, url: url.to_string() };
-                                let resolved = services.playlist.resolve_url(request).await.unwrap_or(url);
-                                copy_to_clipboard.emit(resolved);
+                                if let Some(resolved) = services.playlist.resolve_url(request).await {
+                                    copy_to_clipboard.emit(resolved);
+                                }
                             });
                         }
                     }
@@ -228,12 +231,16 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                         html! {
                             <>
                                 <div class="tp__stream-display__list">
-                                    { for streams.iter().cloned().map(|stream| html! {
-                                        <StreamDisplayItem
-                                            stream={stream}
-                                            metrics_enabled={metrics_enabled}
-                                            on_popup_click={handle_popup_onclick.clone()}
-                                        />
+                                    { for streams.iter().cloned().map(|stream| {
+                                        let uid = stream.uid;
+                                        html! {
+                                            <StreamDisplayItem
+                                                key={uid}
+                                                stream={stream}
+                                                metrics_enabled={metrics_enabled}
+                                                on_popup_click={handle_popup_onclick.clone()}
+                                            />
+                                        }
                                     })}
                                 </div>
                                 <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>

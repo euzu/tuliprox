@@ -78,7 +78,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                     <div class="tp__stream-display__stat">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.DURATION")}</span>
                         <span class="tp__stream-display__stat-value tp__stream-display__duration" data-ts={stream.ts.to_string()}>
-                            {format_duration(current_time_secs() - stream.ts)}
+                            {format_duration(current_time_secs().saturating_sub(stream.ts))}
                         </span>
                     </div>
                     if props.metrics_enabled {

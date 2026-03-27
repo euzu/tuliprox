@@ -6,7 +6,6 @@
   flex: 1 1 auto;
   box-sizing: border-box;
   width: 100%;
-  max-width: var(--max-view-width);
   overflow: hidden;
 
   &__header {
@@ -120,13 +119,14 @@
     flex-flow: column;
     gap: var(--gap-default);
     min-width: 0;
+    margin-right: var(--margin-default);
   }
 
   &__title {
     font-weight: 700;
     line-height: 1.2;
-    word-break: break-word;
-    min-width: 320px;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   &__subtitle {
