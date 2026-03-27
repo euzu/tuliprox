@@ -64,7 +64,10 @@ fn resolve_provider_url_with_input(input: &ConfigInput, url: &str) -> String {
     match input.resolve_url(url) {
         Ok(resolved) => resolved.into_owned(),
         Err(err) => {
-            error!("resolve_provider_url_with_input failed for url '{url}': {err}");
+            let sanitized_url = sanitize_sensitive_info(url);
+            let err_text = err.to_string();
+            let sanitized_err = sanitize_sensitive_info(&err_text);
+            error!("resolve_provider_url_with_input failed for url '{sanitized_url}': {sanitized_err}");
             url.to_string()
         }
     }
@@ -83,10 +86,14 @@ fn resolve_provider_url_for_request(app_config: &AppConfig, playlist_request: &P
             .get_target_by_id(*target_id)
             .and_then(|target| app_config.get_inputs_for_target(&target.name))
             .and_then(|inputs| {
-                inputs
+                let mut matches = inputs
                     .into_iter()
-                    .find(|input| input.get_resolve_provider(url).is_some())
-                    .map(|input| resolve_provider_url_with_input(input.as_ref(), url))
+                    .filter(|input| input.get_resolve_provider(url).is_some());
+                let first = matches.next()?;
+                if matches.next().is_some() {
+                    return None;
+                }
+                Some(resolve_provider_url_with_input(first.as_ref(), url))
             })
             .unwrap_or_else(|| url.to_string()),
         PlaylistRequest::CustomXtream(_) | PlaylistRequest::CustomM3u(_) => url.to_string(),
@@ -548,6 +555,89 @@ mod tests {
         let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![target] };
         let app_config = test_app_config(input, source);
         let original = "provider://unknown/live/user/pass/1359.ts";
+        let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Target(11), original);
+
+        assert_eq!(resolved, original);
+    }
+
+    #[test]
+    fn resolve_provider_url_passthrough_for_ambiguous_target_request() {
+        let provider_a = ConfigProvider::from(&ConfigProviderDto {
+            name: "shared".intern(),
+            urls: vec!["http://provider-a.example".intern()],
+            dns: None,
+        });
+        let provider_b = ConfigProvider::from(&ConfigProviderDto {
+            name: "shared".intern(),
+            urls: vec!["http://provider-b.example".intern()],
+            dns: None,
+        });
+        let input_a = Arc::new(ConfigInput {
+            id: 7,
+            name: "input-a".intern(),
+            provider_configs: Some(vec![Arc::new(provider_a)]),
+            ..Default::default()
+        });
+        let input_b = Arc::new(ConfigInput {
+            id: 8,
+            name: "input-b".intern(),
+            provider_configs: Some(vec![Arc::new(provider_b)]),
+            ..Default::default()
+        });
+        let target = Arc::new(ConfigTarget {
+            id: 11,
+            enabled: true,
+            name: "target".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: Default::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let source = ConfigSource {
+            inputs: vec![Arc::clone(&input_a.name), Arc::clone(&input_b.name)],
+            targets: vec![target],
+        };
+        let sources = SourcesConfig {
+            batch_files: vec![],
+            provider: vec![],
+            inputs: vec![input_a, input_b],
+            sources: vec![source],
+            templates: None,
+        };
+
+        let app_config = AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::empty()),
+            api_proxy: Arc::new(ArcSwapOption::empty()),
+            file_locks: Arc::new(crate::utils::FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::empty()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(crate::model::MediaToolCapabilities::default()),
+        };
+
+        let original = "provider://shared/live/user/pass/1359.ts";
         let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Target(11), original);
 
         assert_eq!(resolved, original);

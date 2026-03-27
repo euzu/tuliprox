@@ -1,8 +1,12 @@
-use crate::{app::components::login::Login, hooks::use_service_context};
+use crate::{
+    app::{components::login::Login, AppRoute},
+    hooks::use_service_context,
+};
 use shared::model::permission::Permission;
 use std::future;
 use yew::{prelude::*, suspense::use_future};
 use yew_hooks::{use_async_with_options, UseAsyncOptions};
+use yew_router::prelude::use_navigator;
 
 fn should_connect_websocket(success: bool, setup_mode: bool, can_read_system: bool) -> bool {
     success && !setup_mode && can_read_system
@@ -18,6 +22,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
     let services = use_service_context();
     let loading = use_state(|| true);
     let authenticated = use_state(|| false);
+    let navigator = use_navigator();
 
     {
         let services_ctx = services.clone();
@@ -54,6 +59,18 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
             },
             UseAsyncOptions::enable_auto(),
         );
+    }
+
+    {
+        let navigator = navigator.clone();
+        use_effect_with((*loading, *authenticated), move |(loading, authenticated)| {
+            if !*loading && !*authenticated {
+                if let Some(navigator) = navigator.clone() {
+                    navigator.replace(&AppRoute::Login);
+                }
+            }
+            || ()
+        });
     }
 
     if *loading {
