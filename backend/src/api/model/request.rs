@@ -44,6 +44,21 @@ pub struct UserApiRequest {
 /// them with query parameters taking priority over body fields.
 pub struct UserApiRequestQueryOrBody(pub UserApiRequest);
 
+#[derive(Debug)]
+enum ParseBodyError {
+    PayloadTooLarge(String),
+    BadRequest(String),
+}
+
+impl ParseBodyError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::PayloadTooLarge(err) => (StatusCode::PAYLOAD_TOO_LARGE, err).into_response(),
+            Self::BadRequest(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+        }
+    }
+}
+
 impl<S> FromRequest<S> for UserApiRequestQueryOrBody
 where
     S: Send + Sync,
@@ -53,11 +68,8 @@ where
     async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let (parts, body) = req.into_parts();
 
-        let query_req = match parts.uri.query() {
-            Some(query) => serde_html_form::from_str(query)
-                .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to parse query: {e}")).into_response())?,
-            None => UserApiRequest::default(),
-        };
+        let query_req = parse_query_request(parts.uri.query())
+            .map_err(ParseBodyError::into_response)?;
 
         let content_type = parts
             .headers
@@ -67,21 +79,21 @@ where
 
         let body_req = match parse_body(body, content_type).await {
             Ok(body_req) => Some(body_req),
-            Err(err) => return Err((StatusCode::BAD_REQUEST, err).into_response()),
+            Err(err) => return Err(err.into_response()),
         };
 
         Ok(UserApiRequestQueryOrBody(UserApiRequest::merge_query_over_form(&query_req, body_req.as_ref())))
     }
 }
 
-async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserApiRequest, String> {
+async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserApiRequest, ParseBodyError> {
     let bytes = axum::body::to_bytes(body, MAX_BODY_SIZE_BYTES)
         .await
         .map_err(|e| {
             if is_length_limit_error(&e) {
-                format!("Request body too large (max {MAX_BODY_SIZE_BYTES} bytes)")
+                ParseBodyError::PayloadTooLarge(format!("Request body too large (max {MAX_BODY_SIZE_BYTES} bytes)"))
             } else {
-                format!("Failed to read request body: {e}")
+                ParseBodyError::BadRequest(format!("Failed to read request body: {e}"))
             }
         })?;
 
@@ -93,50 +105,70 @@ async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserAp
         parse_multipart_body(&bytes, content_type)
     } else {
         // Treat as form-urlencoded (works for both explicit content-type and missing content-type)
-        serde_html_form::from_bytes(&bytes).map_err(|e| format!("Failed to parse form: {e}"))
+        serde_html_form::from_bytes(&bytes).map_err(|e| ParseBodyError::BadRequest(format!("Failed to parse form: {e}")))
     }
 }
 
-fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiRequest, String> {
+fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiRequest, ParseBodyError> {
     let boundary = extract_multipart_boundary(content_type)
-        .ok_or("Missing boundary in multipart content type")?;
+        .ok_or_else(|| ParseBodyError::BadRequest("Missing boundary in multipart content type".to_string()))?;
 
-    let data = std::str::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8: {e}"))?;
+    let data = std::str::from_utf8(bytes).map_err(|e| ParseBodyError::BadRequest(format!("Invalid UTF-8: {e}")))?;
 
     let mut request = UserApiRequest::default();
     let delimiter = format!("--{boundary}");
     for part in data.split(&delimiter) {
-        if let Some(header_end) = part.find("\r\n\r\n") {
-            let headers = &part[..header_end];
-            let body = &part[header_end + 4..];
-
-            if let Some(name_start) = headers.find("name=\"") {
-                let name_start = name_start + 6;
-                if let Some(name_end) = headers[name_start..].find('\"') {
-                    let name = &headers[name_start..name_start + name_end];
-                    let value = body.strip_suffix("\r\n").unwrap_or(body);
-                    match name {
-                        "username" => request.username = value.to_string(),
-                        "password" => request.password = value.to_string(),
-                        "token" => request.token = value.to_string(),
-                        "action" => request.action = value.to_string(),
-                        "series_id" => request.series_id = value.to_string(),
-                        "vod_id" => request.vod_id = value.to_string(),
-                        "stream_id" => request.stream_id = value.to_string(),
-                        "category_id" => request.category_id = value.to_string(),
-                        "limit" => request.limit = value.to_string(),
-                        "start" => request.start = value.to_string(),
-                        "end" => request.end = value.to_string(),
-                        "stream" => request.stream = value.to_string(),
-                        "duration" => request.duration = value.to_string(),
-                        "type" | "content_type" => request.content_type = value.to_string(),
-                        _ => {}
-                    }
-                }
-            }
+        if let Some((name, value)) = parse_multipart_field(part) {
+            request.set_field(name, value);
         }
     }
     Ok(request)
+}
+
+fn parse_query_request(query: Option<&str>) -> Result<UserApiRequest, ParseBodyError> {
+    match query {
+        Some(query) => serde_html_form::from_str(query)
+            .map_err(|e| ParseBodyError::BadRequest(format!("Failed to parse query: {e}"))),
+        None => Ok(UserApiRequest::default()),
+    }
+}
+
+fn parse_multipart_field(part: &str) -> Option<(&str, &str)> {
+    let header_end = part.find("\r\n\r\n")?;
+    let headers = &part[..header_end];
+    let body = &part[header_end + 4..];
+    let name = extract_multipart_field_name(headers)?;
+    let value = body.strip_suffix("\r\n").unwrap_or(body);
+    Some((name, value))
+}
+
+fn extract_multipart_field_name(headers: &str) -> Option<&str> {
+    let disposition = headers
+        .split("\r\n")
+        .find(|line| line.trim_start().to_ascii_lowercase().starts_with("content-disposition:"))?;
+
+    let (_, attrs) = disposition.split_once(':')?;
+    for attr in attrs.split(';').skip(1) {
+        let (name, value) = attr.trim().split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("name") {
+            continue;
+        }
+
+        let value = value.trim();
+        let unquoted_double = value.strip_prefix('"').and_then(|inner| inner.strip_suffix('"'));
+        if let Some(result) = unquoted_double {
+            return Some(result);
+        }
+
+        let unquoted_single = value.strip_prefix('\'').and_then(|inner| inner.strip_suffix('\''));
+        if let Some(result) = unquoted_single {
+            return Some(result);
+        }
+
+        return Some(value);
+    }
+
+    None
 }
 
 fn is_length_limit_error(err: &axum::Error) -> bool {
@@ -175,6 +207,26 @@ fn extract_multipart_boundary(content_type: &str) -> Option<&str> {
 }
 
 impl UserApiRequest {
+    fn set_field(&mut self, name: &str, value: &str) {
+        match name {
+            "username" => self.username = value.to_string(),
+            "password" => self.password = value.to_string(),
+            "token" => self.token = value.to_string(),
+            "action" => self.action = value.to_string(),
+            "series_id" => self.series_id = value.to_string(),
+            "vod_id" => self.vod_id = value.to_string(),
+            "stream_id" => self.stream_id = value.to_string(),
+            "category_id" => self.category_id = value.to_string(),
+            "limit" => self.limit = value.to_string(),
+            "start" => self.start = value.to_string(),
+            "end" => self.end = value.to_string(),
+            "stream" => self.stream = value.to_string(),
+            "duration" => self.duration = value.to_string(),
+            "type" | "content_type" => self.content_type = value.to_string(),
+            _ => {}
+        }
+    }
+
     pub fn merge_prefer_primary(primary: &Self, fallback: &Self) -> Self {
         fn pick(primary: &str, fallback: &str) -> String {
             if primary.trim().is_empty() {
@@ -347,7 +399,12 @@ mod tests {
             .await
             .expect_err("oversized bodies should be rejected");
 
-        assert!(err.contains("body too large"), "unexpected error: {err}");
+        match err {
+            super::ParseBodyError::PayloadTooLarge(msg) => {
+                assert!(msg.contains("body too large"), "unexpected error: {msg}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -364,7 +421,7 @@ mod tests {
             Err(response) => response,
         };
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -407,6 +464,25 @@ mod tests {
         .expect("multipart body should parse");
 
         assert_eq!(parsed.content_type, "m3u_plus");
+    }
+
+    #[tokio::test]
+    async fn parse_body_uses_content_disposition_name_not_filename() {
+        let body = concat!(
+            "--abc123\r\n",
+            "Content-Disposition: form-data; filename=\"name=\\\"wrong\\\".txt\"; name=\"username\"\r\n\r\n",
+            "alice\r\n",
+            "--abc123--\r\n",
+        );
+
+        let parsed = parse_body(
+            Body::from(body),
+            "multipart/form-data; boundary=abc123",
+        )
+        .await
+        .expect("multipart body should parse");
+
+        assert_eq!(parsed.username, "alice");
     }
 
 }
