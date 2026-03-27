@@ -4,8 +4,8 @@ use indexmap::IndexMap;
 use log::error;
 use shared::{
     model::{
-        EpgChannel, EpgTv, PlaylistEpgRequest, PlaylistRequest, SeriesStreamProperties, UiPlaylistCategories,
-        UiPlaylistGroup, UiPlaylistItem, WebplayerUrlRequest, XtreamCluster, XtreamSeriesInfoDoc,
+        EpgChannel, EpgTv, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, SeriesStreamProperties,
+        UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::concat_path_leading_slash,
 };
@@ -16,7 +16,7 @@ pub struct PlaylistService {
     playlist_api_live_path: String,
     playlist_api_vod_path: String,
     playlist_api_series_path: String,
-    playlist_api_webplayer_url_path: String,
+    playlist_api_resolve_url_path: String,
     playlist_api_epg_path: String,
     playlist_api_series_info_path: String,
     playlist_api_episode_info_path: String,
@@ -33,7 +33,7 @@ impl PlaylistService {
             playlist_api_live_path: concat_path_leading_slash(&base_href, "api/v1/playlist/live"),
             playlist_api_vod_path: concat_path_leading_slash(&base_href, "api/v1/playlist/vod"),
             playlist_api_series_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series"),
-            playlist_api_webplayer_url_path: concat_path_leading_slash(&base_href, "api/v1/playlist/webplayer"),
+            playlist_api_resolve_url_path: concat_path_leading_slash(&base_href, "api/v1/playlist/resolve_url"),
             playlist_api_epg_path: concat_path_leading_slash(&base_href, "api/v1/playlist/epg"),
             playlist_api_series_info_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series_info"),
             playlist_api_episode_info_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series/episode"),
@@ -98,15 +98,15 @@ impl PlaylistService {
         None
     }
 
-    pub async fn get_playlist_webplayer_url(
-        &self,
-        target_id: u16,
-        virtual_id: u32,
-        cluster: XtreamCluster,
-    ) -> Option<String> {
-        let request = WebplayerUrlRequest { target_id, virtual_id, cluster };
-        request_post::<&WebplayerUrlRequest, String>(
-            &self.playlist_api_webplayer_url_path,
+    pub async fn resolve_url(&self, request: PlaylistUrlResolveRequest) -> Option<String> {
+        if let PlaylistUrlResolveRequest::Provider { url, .. } = &request {
+            if !url.starts_with(shared::utils::PROVIDER_SCHEME_PREFIX) {
+                return Some(url.to_string());
+            }
+        }
+
+        request_post::<&PlaylistUrlResolveRequest, String>(
+            &self.playlist_api_resolve_url_path,
             &request,
             None,
             Some(Encoding::Text),

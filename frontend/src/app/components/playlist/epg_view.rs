@@ -15,8 +15,7 @@ use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, HtmlElement};
 use yew::{
-    classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_node_ref, use_state, Callback,
-    Html, UseStateHandle,
+    classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_node_ref, use_state, Callback, Html,
 };
 
 const TIME_BLOCK_WIDTH: f64 = 210.0;
@@ -67,12 +66,12 @@ pub fn EpgView() -> Html {
     {
         let container_ref = container_ref.clone();
         let now_line_ref = now_line_ref.clone();
-        use_effect_with(epg.clone(), move |epg_tv| {
+        use_effect_with((*epg).clone(), move |epg_tv| {
             // Updates the now-line position
             let epg_tv_clone = epg_tv.clone();
 
-            let calculate_position = Rc::new(move |epg_tv: &UseStateHandle<Option<EpgTv>>, recenter: bool| {
-                if let Some(tv) = &**epg_tv {
+            let calculate_position = Rc::new(move |epg_tv: &Option<EpgTv>, recenter: bool| {
+                if let Some(tv) = epg_tv {
                     if let (Some(div), Some(now_line)) =
                         (container_ref.cast::<HtmlElement>(), now_line_ref.cast::<HtmlElement>())
                     {

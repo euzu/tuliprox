@@ -18,8 +18,8 @@ use shared::{
     concat_string,
     error::{info_err_res, TuliproxError},
     model::{
-        PlaylistItemType, ProtocolMessage, SortOrder, StreamChannel, StreamInfo, StreamMeterEntry, StreamTechnicalInfo,
-        UserCommand,
+        PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, SortOrder, StreamChannel,
+        StreamInfo, StreamMeterEntry, StreamTechnicalInfo, UserCommand,
     },
     utils::{current_time_secs, default_hls_session_ttl_secs, default_kick_secs, strip_port},
 };
@@ -605,7 +605,16 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                     }
                     StreamsTableAction::CopyLinkProviderUrl => {
                         if let Some(dto) = &*selected_dto {
-                            copy_to_clipboard.emit(dto.channel.url.to_string());
+                            let url = dto.channel.url.to_string();
+                            let playlist_request = PlaylistRequest::Target(dto.channel.target_id);
+                            let copy_to_clipboard = copy_to_clipboard.clone();
+                            let services = services.clone();
+                            spawn_local(async move {
+                                let request =
+                                    PlaylistUrlResolveRequest::Provider { playlist_request, url: url.to_string() };
+                                let resolved = services.playlist.resolve_url(request).await.unwrap_or(url);
+                                copy_to_clipboard.emit(resolved);
+                            });
                         }
                     }
                     StreamsTableAction::CopyLinkTuliproxWebPlayerUrl => {
@@ -617,9 +626,8 @@ pub fn StreamsTable(props: &StreamsTableProps) -> Html {
                             let translate = translate.clone();
                             let copy_to_clipboard = copy_to_clipboard.clone();
                             spawn_local(async move {
-                                if let Some(url) =
-                                    services.playlist.get_playlist_webplayer_url(target_id, virtual_id, cluster).await
-                                {
+                                let request = PlaylistUrlResolveRequest::Webplayer { target_id, virtual_id, cluster };
+                                if let Some(url) = services.playlist.resolve_url(request).await {
                                     copy_to_clipboard.emit(url);
                                 } else {
                                     services.toastr.error(translate.t("MESSAGES.FAILED_TO_RETRIEVE_WEBPLAYER_URL"));

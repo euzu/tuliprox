@@ -7,14 +7,14 @@ use crate::{api::{
         xtream_api::xtream_get_stream_info_response,
     },
     model::AppState,
-}, auth::create_access_token, auth::permission_layer, model::{parse_xmltv_for_web_ui_from_url, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id};
+}, auth::create_access_token, auth::permission_layer, model::{parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
 use shared::{
     model::{
         permission::Permission,
-        InputType, PlaylistEpgRequest, PlaylistRequest, ProxyType, TargetType, UiPlaylistItem, WebplayerUrlRequest,
+        InputType, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem,
         XtreamCluster,
     },
     utils::{sanitize_sensitive_info, Internable},
@@ -57,6 +57,33 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             probe_live_interval_hours: 120,
         }),
         ..Default::default()
+    }
+}
+
+fn resolve_provider_url_with_input(input: &ConfigInput, url: &str) -> String {
+    input.resolve_url(url).map_or_else(|_| url.to_string(), std::borrow::Cow::into_owned)
+}
+
+fn resolve_provider_url_for_request(app_config: &AppConfig, playlist_request: &PlaylistRequest, url: &str) -> String {
+    if !url.starts_with(shared::utils::PROVIDER_SCHEME_PREFIX) {
+        return url.to_string();
+    }
+
+    match playlist_request {
+        PlaylistRequest::Input(input_id) => app_config
+            .get_input_by_id(*input_id)
+            .map_or_else(|| url.to_string(), |input| resolve_provider_url_with_input(input.as_ref(), url)),
+        PlaylistRequest::Target(target_id) => app_config
+            .get_target_by_id(*target_id)
+            .and_then(|target| app_config.get_inputs_for_target(&target.name))
+            .and_then(|inputs| {
+                inputs
+                    .into_iter()
+                    .find(|input| input.get_resolve_provider(url).is_some())
+                    .map(|input| resolve_provider_url_with_input(input.as_ref(), url))
+            })
+            .unwrap_or_else(|| url.to_string()),
+        PlaylistRequest::CustomXtream(_) | PlaylistRequest::CustomM3u(_) => url.to_string(),
     }
 }
 
@@ -213,9 +240,11 @@ async fn playlist_series_info(
     axum::http::StatusCode::NO_CONTENT.into_response()
 }
 
-async fn playlist_webplayer(
+fn playlist_webplayer(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(playlist_item): axum::extract::Json<WebplayerUrlRequest>,
+    target_id: u16,
+    virtual_id: u32,
+    cluster: XtreamCluster,
 ) -> impl axum::response::IntoResponse + Send {
     let access_token = create_access_token(&app_state.app_config.access_token_secret, 30);
     let config = app_state.app_config.config.load();
@@ -228,9 +257,9 @@ async fn playlist_webplayer(
     let base_url = server_info.get_base_url();
     format!(
         "{base_url}/token/{access_token}/{}/{}/{}",
-        playlist_item.target_id,
-        playlist_item.cluster.as_stream_type(),
-        playlist_item.virtual_id
+        target_id,
+        cluster.as_stream_type(),
+        virtual_id
     )
     .into_response()
 }
@@ -282,9 +311,29 @@ async fn playlist_resource(
     }
 }
 
+async fn playlist_resolve_url(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(request): axum::extract::Json<PlaylistUrlResolveRequest>,
+) -> impl IntoResponse + Send {
+    match request {
+        PlaylistUrlResolveRequest::Webplayer { target_id, virtual_id, cluster } => {
+            playlist_webplayer(
+                axum::extract::State(app_state),
+                target_id,
+                virtual_id,
+                cluster,
+            )
+            .into_response()
+        }
+        PlaylistUrlResolveRequest::Provider { playlist_request, url } => {
+            resolve_provider_url_for_request(&app_state.app_config, &playlist_request, &url).into_response()
+        }
+    }
+}
+
 pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
-        .route("/playlist/webplayer", axum::routing::post(playlist_webplayer))
+        .route("/playlist/resolve_url", axum::routing::post(playlist_resolve_url))
         .route("/playlist/update", axum::routing::post(playlist_update))
         .route("/playlist/epg", axum::routing::post(playlist_epg))
         .route("/playlist/live", axum::routing::post(playlist_content_live))
@@ -309,9 +358,9 @@ pub fn v1_api_playlist_register_with_permissions(
         .route("/live", axum::routing::post(playlist_content_live))
         .route("/vod", axum::routing::post(playlist_content_vod))
         .route("/series", axum::routing::post(playlist_content_series))
+        .route("/resolve_url", axum::routing::post(playlist_resolve_url))
         .route("/series_info/{virtual_id}/{provider_id}", axum::routing::post(playlist_series_info))
         .route("/series/episode/{virtual_id}", axum::routing::post(playlist_episode_item))
-        .route("/webplayer", axum::routing::post(playlist_webplayer))
         .layer(permission_layer!(app_state, Permission::PlaylistRead));
 
     let write_routes = Router::new()
@@ -327,6 +376,77 @@ pub fn v1_api_playlist_register_with_permissions(
                     .merge(write_routes)
                     .merge(epg_routes)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_provider_url_for_request;
+    use crate::model::{AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, SourcesConfig};
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::{
+        model::{ConfigPaths, ConfigProviderDto, PlaylistRequest},
+        utils::Internable,
+    };
+    use std::sync::Arc;
+
+    fn test_app_config(input: Arc<ConfigInput>) -> AppConfig {
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let sources = SourcesConfig {
+            batch_files: vec![],
+            provider: vec![],
+            inputs: vec![input],
+            sources: vec![source],
+            templates: None,
+        };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::empty()),
+            api_proxy: Arc::new(ArcSwapOption::empty()),
+            file_locks: Arc::new(crate::utils::FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::empty()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(crate::model::MediaToolCapabilities::default()),
+        }
+    }
+
+    #[test]
+    fn resolve_provider_url_for_input_request_rewrites_provider_scheme() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".intern(),
+            urls: vec!["http://provider.example".intern()],
+            dns: None,
+        });
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..Default::default()
+        });
+        let app_config = test_app_config(input);
+        let resolved = resolve_provider_url_for_request(
+            &app_config,
+            &PlaylistRequest::Input(7),
+            "provider://demo/live/user/pass/1359.ts",
+        );
+
+        assert_eq!(resolved, "http://provider.example/live/user/pass/1359.ts");
+    }
 }
 
 async fn playlist_episode_item(

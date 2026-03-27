@@ -5,6 +5,19 @@ use crate::{
 };
 use yew::prelude::*;
 
+fn resolve_close_result(actions: &DialogActions) -> Option<DialogResult> {
+    actions
+        .left
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .chain(actions.right.iter())
+        .find(|action| matches!(action.result, DialogResult::Cancel))
+        .map(|action| action.result.clone())
+        .or_else(|| actions.right.first().map(|action| action.result.clone()))
+        .or_else(|| actions.left.as_ref().and_then(|actions| actions.first().map(|action| action.result.clone())))
+}
+
 #[derive(Properties, PartialEq)]
 pub struct ContentDialogProps {
     pub content: Html,
@@ -40,6 +53,7 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
                             html! {
                                 <TextButton
                                     autofocus={action.focus}
+                                    disabled={action.disabled}
                                     class={action.style.as_ref().map_or_else(String::new, ToString::to_string)}
                                     name={action.name.clone()}
                                     icon={action.icon.as_ref().map_or_else(String::new, |i| i.clone())}
@@ -57,21 +71,11 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
     // Find a cancel action to use for backdrop clicks
     let on_close = {
         let on_result = on_result.clone();
-        let cancel_action = props
-            .actions
-            .right
-            .iter()
-            .find(|action| matches!(action.result, DialogResult::Cancel))
-            .or_else(|| props.actions.right.first());
-
-        if let Some(action) = cancel_action {
-            let result = action.result.clone();
-            Some(Callback::from(move |_| {
+        resolve_close_result(&props.actions).map(|result| {
+            Callback::from(move |_| {
                 on_result(result.clone());
-            }))
-        } else {
-            None
-        }
+            })
+        })
     };
 
     html! {
@@ -92,5 +96,21 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
                 </div>
             </div>
         </CustomDialog>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_close_result;
+    use crate::model::{DialogAction, DialogActions, DialogResult};
+
+    #[test]
+    fn resolve_close_result_prefers_cancel_from_left_actions() {
+        let actions = DialogActions {
+            left: Some(vec![DialogAction::new("close", "LABEL.CLOSE", DialogResult::Cancel, None, None)]),
+            right: vec![DialogAction::new("ok", "LABEL.OK", DialogResult::Ok, None, None)],
+        };
+
+        assert_eq!(resolve_close_result(&actions), Some(DialogResult::Cancel));
     }
 }
