@@ -2,7 +2,7 @@ use crate::model::ProxyConfig;
 use log::{debug, warn};
 use serde_json::Value;
 use shared::model::MediaQuality;
-use shared::utils::sanitize_sensitive_info;
+use shared::utils::{default_thumbnail_height, default_thumbnail_width, sanitize_sensitive_info};
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
@@ -203,9 +203,14 @@ impl FfmpegExecutor {
     }
 
     async fn check_binary_availability(&self, binary: &str) -> bool {
-        match Command::new(binary).arg("-version").output().await {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+        let mut command = Command::new(binary);
+        command
+            .arg("-version")
+            .kill_on_drop(true);
+
+        match tokio::time::timeout(FFMPEG_TIMEOUT, command.output()).await {
+            Ok(Ok(output)) => output.status.success(),
+            Ok(Err(_)) | Err(_) => false,
         }
     }
 
@@ -289,8 +294,10 @@ fn is_not_found_probe_error(stderr: &str) -> bool {
 }
 
 fn build_thumbnail_scale_filter(width: u32, height: u32) -> String {
+    let w = if width < 1 { default_thumbnail_width() } else { width };
+    let h = if height < 1 { default_thumbnail_height() } else { height };
     format!(
-        "scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+        "scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
     )
 }
 

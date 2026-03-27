@@ -222,6 +222,7 @@ pub async fn parse_xtream(input: &ConfigInput,
 
                     if !unknown_grp.channels.is_empty() {
                         let unknown_key = next_group_map_key(&group_map);
+                        unknown_grp.category_id = unknown_key;
                         group_map.insert(unknown_key, unknown_grp);
                     }
 
@@ -718,6 +719,7 @@ mod tests {
         assert_eq!(groups[0].channels[0].header.source_ordinal, 1);
 
         assert_eq!(groups[1].title.as_ref(), "Unknown");
+        assert_ne!(groups[1].id, 0);
         assert_eq!(groups[1].channels[0].header.name.as_ref(), "unknown-1");
         assert_eq!(groups[1].channels[0].header.source_ordinal, 2);
     }

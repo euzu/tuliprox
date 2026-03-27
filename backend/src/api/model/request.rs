@@ -1,7 +1,9 @@
 use axum::extract::{FromRequest, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use http_body_util::LengthLimitError;
 use log::log_enabled;
+use std::error::Error as StdError;
 
 const MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -77,11 +79,10 @@ async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserAp
     let bytes = axum::body::to_bytes(body, MAX_BODY_SIZE_BYTES)
         .await
         .map_err(|e| {
-            let err = e.to_string();
-            if err.contains("length limit exceeded") {
+            if is_length_limit_error(&e) {
                 format!("Request body too large (max {MAX_BODY_SIZE_BYTES} bytes)")
             } else {
-                format!("Failed to read request body: {err}")
+                format!("Failed to read request body: {e}")
             }
         })?;
 
@@ -89,7 +90,7 @@ async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserAp
         return Ok(UserApiRequest::default());
     }
 
-    if content_type.starts_with("multipart/form-data") {
+    if is_multipart_content_type(content_type) {
         parse_multipart_body(&bytes, content_type)
     } else {
         // Treat as form-urlencoded (works for both explicit content-type and missing content-type)
@@ -98,11 +99,8 @@ async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserAp
 }
 
 fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiRequest, String> {
-    let boundary = content_type
-        .split("boundary=")
-        .nth(1)
-        .ok_or("Missing boundary in multipart content type")?
-        .trim();
+    let boundary = extract_multipart_boundary(content_type)
+        .ok_or("Missing boundary in multipart content type")?;
 
     let data = std::str::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8: {e}"))?;
 
@@ -117,7 +115,8 @@ fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiReque
                 let name_start = name_start + 6;
                 if let Some(name_end) = headers[name_start..].find('\"') {
                     let name = &headers[name_start..name_start + name_end];
-                    let value = body.trim().trim_end_matches("\r\n").trim();
+                    let value = body.strip_prefix("\r\n").unwrap_or(body);
+                    let value = value.strip_suffix("\r\n").unwrap_or(value);
                     match name {
                         "username" => request.username = value.to_string(),
                         "password" => request.password = value.to_string(),
@@ -140,6 +139,41 @@ fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiReque
         }
     }
     Ok(request)
+}
+
+fn is_length_limit_error(err: &axum::Error) -> bool {
+    let mut current: Option<&(dyn StdError + 'static)> = Some(err);
+    while let Some(source) = current {
+        if source.is::<LengthLimitError>() {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+fn is_multipart_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("multipart/form-data"))
+}
+
+fn extract_multipart_boundary(content_type: &str) -> Option<&str> {
+    for param in content_type.split(';').skip(1) {
+        let (name, value) = param.split_once('=')?;
+        if name.trim().eq_ignore_ascii_case("boundary") {
+            let trimmed = value.trim();
+            let unquoted = trimmed
+                .strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+                .unwrap_or(trimmed);
+            if !unquoted.is_empty() {
+                return Some(unquoted);
+            }
+        }
+    }
+    None
 }
 
 impl UserApiRequest {
@@ -333,5 +367,28 @@ mod tests {
         };
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn parse_body_detects_multipart_case_insensitively_and_preserves_field_whitespace() {
+        let body = concat!(
+            "--abc123\r\n",
+            "Content-Disposition: form-data; name=\"username\"\r\n\r\n",
+            "  alice  \r\n",
+            "--abc123\r\n",
+            "Content-Disposition: form-data; name=\"password\"\r\n\r\n",
+            "\t secret \t\r\n",
+            "--abc123--\r\n",
+        );
+
+        let parsed = parse_body(
+            Body::from(body),
+            "Multipart/Form-Data; charset=utf-8; boundary=\"abc123\"",
+        )
+        .await
+        .expect("multipart body should parse");
+
+        assert_eq!(parsed.username, "  alice  ");
+        assert_eq!(parsed.password, "\t secret \t");
     }
 }

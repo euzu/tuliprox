@@ -134,15 +134,14 @@ pub fn interner_gc() -> usize {
     0
 }
 
-/// Convert an `f64` that reached `visit_f64` into a round-trip-safe string
-/// using the canonical YAML 1.2 spelling (`.inf`, `-.inf`, `.nan`).
+/// Convert an `f64` that reached `visit_f64` into a round-trip-safe string.
 ///
-/// `serde_saphyr` recognises these spellings as ambiguous and **quotes** them
-/// when re-serializing, so the value survives a YAML round-trip as a string.
+/// Special values are emitted as `"infinity"`, `"-infinity"`, and `"nan"`.
+/// `serde_saphyr` re-serializes these ambiguous scalars quoted, so they
+/// survive a YAML round-trip as strings.
 ///
-/// This is a safety-net: the primary fix is using `deserialize_string` (which
-/// skips float parsing entirely), so `visit_f64` is normally not reached for
-/// plain string fields.
+/// This is a safety-net for paths that intentionally accept typed numeric
+/// scalars and normalize them into strings.
 #[inline]
 fn f64_to_str(v: f64) -> String {
     if v.is_infinite() {
@@ -175,9 +174,9 @@ fn normalize_scalar_string(value: &str) -> &str {
 //   ArcStrVisitor        -> Arc<str>         (null/empty -> "")
 //   OptionArcStrVisitor  -> Option<Arc<str>> (null/empty -> None)
 //
-// `ArcStrVisitor::visit_some` uses `deserialize_string`, which tells saphyr to
-// return the **raw scalar text** without float-parsing. That is what makes
-// `name: infinity` survive as the literal string `"infinity"`.
+// `ArcStrVisitor::visit_some` uses `deserialize_any(self)`, so numeric/bool
+// scalars can flow into the typed `visit_*` methods. The tradeoff is that raw
+// numeric notation may be normalized (for example `1e2` becomes `"100"`).
 //
 // `OptionArcStrVisitor::visit_some` intentionally diverges and uses
 // `deserialize_any` so JSON/YAML numeric inputs can flow into `visit_i64`,
