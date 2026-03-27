@@ -14,7 +14,6 @@ use crate::{
         ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig,
     },
     repository::{get_geoip_path, load_target_into_memory_cache},
-    tools::lru_cache::LRUResourceCache,
     utils::{
         request::{create_client, create_client_with_redirect},
         GeoIp,
@@ -37,6 +36,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+use crate::utils::LRUResourceCache;
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {

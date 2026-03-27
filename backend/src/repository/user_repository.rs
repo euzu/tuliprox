@@ -368,6 +368,7 @@ pub async fn user_get_bouquet_filter(config: &Config, username: &str, category_i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::MediaToolCapabilities;
     use crate::utils::FileLockManager;
     use arc_swap::{ArcSwap, ArcSwapAny};
     use shared::model::{ConfigPaths, ProxyType, ProxyUserStatus};
@@ -473,7 +474,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapAny::default()),
             access_token_secret: Default::default(),
             encrypt_secret: Default::default(),
-            ffprobe_available: Arc::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         };
         let target_user = vec![user];
         let _ = store_api_user(&cfg, &target_user).await;

@@ -19,7 +19,7 @@ use crate::repository::{
     get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource, PlaylistSource,
 };
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::ffmpeg::{ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use crate::utils::{debug_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
@@ -924,7 +924,7 @@ pub async fn update_series_metadata(
                                 temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
                                 active_handle,
                             );
-                            match crate::utils::ffmpeg::probe_url_with_cancel(
+                            match FfmpegExecutor::new().probe_url_with_cancel(
                                 &episode_url,
                                 user_agent.as_deref(),
                                 probe_settings.analyze_duration_micros,

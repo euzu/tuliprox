@@ -287,7 +287,7 @@ mod tests {
     use super::{create_channel_unavailable_stream, CustomVideoStreamType};
     use crate::{
         api::model::TransportStreamBuffer,
-        model::{AppConfig, Config, ConfigInput, CustomStreamResponse, SourcesConfig},
+        model::{AppConfig, Config, ConfigInput, CustomStreamResponse, MediaToolCapabilities, SourcesConfig},
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -338,7 +338,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapOption::default()),
             access_token_secret: [0; 32],
             encrypt_secret: [0; 16],
-            ffprobe_available: Arc::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         };
 
         let mut ts_packet = vec![0_u8; 188];

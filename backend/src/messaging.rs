@@ -296,7 +296,7 @@ async fn resolve_template<'a>(app_config: &'a Arc<AppConfig>, http_client: &'a r
 #[cfg(test)]
 mod tests {
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use crate::model::ProcessingStats;
+    use crate::model::{MediaToolCapabilities, ProcessingStats};
     use super::*;
     use shared::model::{ConfigPaths};
     use crate::utils::FileLockManager;
@@ -324,7 +324,7 @@ mod tests {
             custom_stream_response: Arc::new(ArcSwapOption::default()),
             access_token_secret: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],
             encrypt_secret: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
-            ffprobe_available: Arc::default(),
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         })
     }
 

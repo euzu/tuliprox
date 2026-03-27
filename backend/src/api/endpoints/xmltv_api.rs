@@ -4,7 +4,7 @@ use crate::{
             empty_json_response_as_array, get_user_target, get_user_target_by_credentials, internal_server_error,
             resource_response, stream_json_or_bin_response_stream, try_option_forbidden, try_unwrap_body,
         },
-        model::{AppState, UserApiRequest},
+        model::{AppState, UserApiRequestQueryOrBody, UserApiRequest},
     },
     model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
@@ -492,14 +492,8 @@ async fn xmltv_api_get(
 
 async fn xmltv_api_post(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Query(api_query_req): axum::extract::Query<UserApiRequest>,
-    api_form_req: Result<axum::extract::Form<UserApiRequest>, axum::extract::rejection::FormRejection>,
+    UserApiRequestQueryOrBody(api_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    if let Err(ref rejection) = api_form_req {
-        debug!("xmltv_api_post: form parsing failed: {rejection:?}");
-    }
-    let form_req = api_form_req.as_ref().ok().map(|form| &form.0);
-    let api_req = UserApiRequest::merge_query_over_form(&api_query_req, form_req);
     xmltv_api(api_req, &app_state).await
 }
 
