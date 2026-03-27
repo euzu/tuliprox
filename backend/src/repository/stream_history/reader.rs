@@ -174,9 +174,17 @@ impl<R: Read> StreamHistoryFileReader<R> {
                         Err(_) => continue,
                     };
 
-                    // Read and validate payload from the chained reader
+                    // Read payload and validate CRC (same check as read_next_block)
                     self.payload_buf.resize(block_header.payload_len as usize, 0);
                     chained.read_exact(&mut self.payload_buf)?;
+
+                    let actual_crc = crc32fast::hash(&self.payload_buf);
+                    if actual_crc != block_header.payload_crc {
+                        eprintln!("Warning: {}: recovery candidate CRC mismatch (expected {:08x}, got {:08x}), skipping",
+                                  self.file_path, block_header.payload_crc, actual_crc);
+                        continue;
+                    }
+
                     self.current_block_remaining = block_header.record_count;
                     self.payload_offset = 0;
                     return Ok(Some(()));
@@ -501,15 +509,20 @@ mod tests {
         use crate::repository::stream_history::archive::archive_pending_file;
         use tempfile::TempDir;
 
-        let _tmp = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
         let records = vec![
             make_test_record(1000, "alice"),
             make_test_record(2000, "bob"),
         ];
 
-        // Create a pending file with known records
-        let pending_path = write_test_pending_file(&records);
-        let archive_path = archive_pending_file(pending_path.path()).unwrap();
+        // Create a pending file inside the isolated TempDir so the archive
+        // lands there too and does not clash with other test runs.
+        let pending = tmp.path().join("stream-history-2026-03-22.pending");
+        {
+            let source = write_test_pending_file(&records);
+            std::fs::copy(source.path(), &pending).unwrap();
+        }
+        let archive_path = archive_pending_file(&pending).unwrap();
 
         // Open with StreamHistoryFileReader::from_archive
         let (reader, _header) = StreamHistoryFileReader::from_archive(&archive_path, None).unwrap();

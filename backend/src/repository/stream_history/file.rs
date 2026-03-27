@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use shared::error::to_io_error;
 use std::io::{self, Read, Write};
 use shared::model::StreamInfo;
-use crate::repository::{current_utc_day, now_utc_secs};
+use crate::repository::{now_utc_secs, utc_day_from_secs};
 
 pub const FILE_MAGIC: [u8; 8] = *b"STRHIST\x01";
 pub const BLOCK_MAGIC: [u8; 4] = *b"BLK\x01";
@@ -154,12 +154,14 @@ pub struct DisconnectQos {
 
 impl StreamHistoryRecord {
     /// Build a common base from a `StreamInfo`, leaving event-specific fields to the caller.
-    fn base(info: &StreamInfo) -> Self {
+    /// `event_ts` is the authoritative timestamp — `partition_day_utc` is derived from it
+    /// so both fields are always consistent.
+    fn base(info: &StreamInfo, event_ts: u64) -> Self {
         Self {
             schema_version: RECORD_SCHEMA_VERSION,
             event_type: EventType::Connect, // overridden by callers
-            event_ts_utc: now_utc_secs(),
-            partition_day_utc: current_utc_day(),
+            event_ts_utc: event_ts,
+            partition_day_utc: utc_day_from_secs(event_ts),
             session_id: u64::from(info.uid),
             source_addr: Some(info.client_ip.clone()),
             api_username: Some(info.username.clone()),
@@ -190,7 +192,7 @@ impl StreamHistoryRecord {
     }
 
     pub fn from_connect(info: &StreamInfo) -> Self {
-        let mut record = Self::base(info);
+        let mut record = Self::base(info, info.ts);
         record.event_type = EventType::Connect;
         record.connect_ts_utc = Some(info.ts);
         record
@@ -200,7 +202,7 @@ impl StreamHistoryRecord {
     pub fn from_disconnect(info: &StreamInfo, reason: DisconnectReason, qos: &DisconnectQos) -> Self {
         let now_secs = now_utc_secs();
         let connect_secs = info.ts;
-        let mut record = Self::base(info);
+        let mut record = Self::base(info, now_secs);
         record.event_type = EventType::Disconnect;
         record.connect_ts_utc = Some(connect_secs);
         record.disconnect_ts_utc = Some(now_secs);

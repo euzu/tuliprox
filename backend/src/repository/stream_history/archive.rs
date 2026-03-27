@@ -7,7 +7,7 @@ use crate::repository::stream_history::writer::{apply_retention, current_utc_day
 use lz4_flex::frame::FrameEncoder;
 use log::{info, warn};
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, BufReader, Read, Seek},
     path::{Path, PathBuf},
 };
@@ -102,7 +102,7 @@ pub fn archive_pending_file(path: &Path) -> io::Result<PathBuf> {
     // Use the partition day from the file header (authoritative) — not the filename,
     // which is user-manipulable and must not be trusted.
     let archive_path = archive_path_for(path, &summary.header.partition_day_ts_utc);
-    let archive_file = File::create(&archive_path)?;
+    let archive_file = OpenOptions::new().write(true).create_new(true).open(&archive_path)?;
     let mut lz4 = FrameEncoder::new(archive_file);
 
     // Write the finalized file header

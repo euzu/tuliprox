@@ -111,14 +111,15 @@ impl ConnectionManager {
         mgr
     }
 
-    /// Reload the history writer on config change. Shuts down the old writer (flushing pending
-    /// records) and atomically replaces it with a new one — or `None` if disabled.
+    /// Reload the history writer on config change. Shuts down the old writer first so
+    /// `recover_pending_files` in `build_history_writer` does not collide with an active writer.
     pub async fn reload_history_writer(&self, config: Option<&StreamHistoryConfig>) {
-        let new_writer = build_history_writer(config);
-        let old_writer = self.history_writer.swap(new_writer);
+        let old_writer = self.history_writer.swap(None);
         if let Some(w) = old_writer {
             w.shutdown().await;
         }
+        let new_writer = build_history_writer(config);
+        self.history_writer.store(new_writer);
     }
 
     fn spawn_cleanup_worker(

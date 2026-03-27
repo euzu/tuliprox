@@ -10,7 +10,7 @@ use std::{
     io::{self, BufWriter, Write},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -28,7 +28,7 @@ pub(crate) fn now_utc_secs() -> u64 {
         .as_secs()
 }
 
-fn utc_day_from_secs(ts_secs: u64) -> String {
+pub(crate) fn utc_day_from_secs(ts_secs: u64) -> String {
     chrono::DateTime::from_timestamp_secs(i64::try_from(ts_secs).unwrap_or(0)).map_or_else(|| "1970-01-01".to_string(), |dt| dt.format("%Y-%m-%d").to_string())
 }
 
@@ -60,12 +60,14 @@ pub struct StreamHistoryWriter {
     tx: Option<mpsc::Sender<WriterCommand>>,
     /// Count of records dropped due to queue backpressure.
     pub dropped_events: Arc<AtomicU64>,
+    /// Set by `shutdown()` to reject new records immediately.
+    closing: AtomicBool,
 }
 
 impl StreamHistoryWriter {
     /// Creates a no-op writer when stream history is disabled.
     pub fn new_disabled() -> Self {
-        Self { tx: None, dropped_events: Arc::new(AtomicU64::new(0)) }
+        Self { tx: None, dropped_events: Arc::new(AtomicU64::new(0)), closing: AtomicBool::new(false) }
     }
 
     /// Creates an active writer and spawns its background worker task.
@@ -83,11 +85,15 @@ impl StreamHistoryWriter {
             worker.run(rx, dropped_clone).await;
         });
 
-        Self { tx: Some(tx), dropped_events }
+        Self { tx: Some(tx), dropped_events, closing: AtomicBool::new(false) }
     }
 
-    /// Submit a record for persistence. Non-blocking; drops the record if the queue is full.
+    /// Submit a record for persistence. Non-blocking; drops the record if the queue is full
+    /// or the writer is shutting down.
     pub fn send_record(&self, record: StreamHistoryRecord) {
+        if self.closing.load(Ordering::Acquire) {
+            return;
+        }
         let Some(tx) = &self.tx else { return };
         if tx.try_send(WriterCommand::Record(Box::new(record))).is_err() {
             let dropped = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
@@ -107,7 +113,10 @@ impl StreamHistoryWriter {
     }
 
     /// Flush and shut down the writer, waiting for the worker to finish.
+    /// Sets the closing flag first so `send_record` stops accepting new records
+    /// before the Shutdown command is enqueued.
     pub async fn shutdown(&self) {
+        self.closing.store(true, Ordering::Release);
         let Some(tx) = &self.tx else { return };
         let (resp_tx, resp_rx) = oneshot::channel();
         let _ = tx.send(WriterCommand::Shutdown(resp_tx)).await;
@@ -135,8 +144,8 @@ impl WriterWorker {
             Ok(s) => s,
             Err(e) => {
                 error!("Stream history writer failed to initialize: {e}");
-                // Drain the channel without panicking
-                while rx.recv().await.is_some() {}
+                // Drop rx immediately so senders observe a closed channel
+                // and dropped_events is incremented by send_record.
                 return;
             }
         };
@@ -146,9 +155,9 @@ impl WriterWorker {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 WriterCommand::Record(record) => {
-                    // Day rollover check
+                    // Day rollover check — use the record's partition day as the target
                     if record.partition_day_utc != state.current_day {
-                        if let Err(e) = state.flush_and_rollover(&self.config, self.writer_instance_id) {
+                        if let Err(e) = state.flush_and_rollover_to(&record.partition_day_utc, &self.config, self.writer_instance_id) {
                             error!("Stream history day rollover failed: {e}");
                             let dropped = dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
                             warn!("Stream history record dropped due to rollover failure (total dropped: {dropped})");
@@ -295,15 +304,14 @@ impl WriterState {
         Ok(())
     }
 
-    fn flush_and_rollover(&mut self, config: &StreamHistoryConfig, writer_instance_id: u64) -> io::Result<()> {
+    fn flush_and_rollover_to(&mut self, target_day: &str, config: &StreamHistoryConfig, writer_instance_id: u64) -> io::Result<()> {
         self.flush_batch()?;
         self.finalize()?;
 
-        let new_day = current_utc_day();
-        let new_path = pending_file_path(&self.directory, &new_day);
-        let new_file = open_or_create_pending_file(&new_path, &new_day, writer_instance_id)?;
+        let new_path = pending_file_path(&self.directory, target_day);
+        let new_file = open_or_create_pending_file(&new_path, target_day, writer_instance_id)?;
 
-        self.current_day = new_day;
+        self.current_day = target_day.to_string();
         self.file = Some(BufWriter::new(new_file));
         self.file_path = new_path;
         self.total_block_count = 0;

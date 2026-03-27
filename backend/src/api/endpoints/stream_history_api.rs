@@ -104,19 +104,15 @@ fn collect_records(
     for file in &files {
         let iter: Box<dyn Iterator<Item = io::Result<crate::repository::StreamHistoryRecord>>> =
             if file.is_archive {
-                match StreamHistoryFileReader::from_archive(&file.path, Some(*time_range)) {
-                    Ok((reader, _)) => Box::new(reader),
-                    Err(_) => continue,
-                }
+                let (reader, _) = StreamHistoryFileReader::from_archive(&file.path, Some(*time_range))?;
+                Box::new(reader)
             } else {
-                match StreamHistoryFileReader::from_pending(&file.path, Some(*time_range)) {
-                    Ok((reader, _)) => Box::new(reader),
-                    Err(_) => continue,
-                }
+                let (reader, _) = StreamHistoryFileReader::from_pending(&file.path, Some(*time_range))?;
+                Box::new(reader)
             };
 
         for result in iter {
-            let Ok(record) = result else { continue };
+            let record = result?;
             if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
                 continue;
             }
