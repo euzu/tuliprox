@@ -42,7 +42,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
     html! {
         <article class="tp__stream-display__item">
             <button class="tp__stream-display__menu" onclick={handle_popup_click}>
-                <AppIcon name="Popup" />
+                <AppIcon name="Handle" />
             </button>
         <div class="tp__stream-display__item-content">
             <div class="tp__stream-display__item-head">

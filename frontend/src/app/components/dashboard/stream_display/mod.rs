@@ -26,7 +26,6 @@ use shared::{
     utils::default_kick_secs,
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
-use wasm_bindgen::JsCast;
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
 
@@ -145,8 +144,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
         let set_anchor_ref = popup_anchor_ref.clone();
         let set_is_open = popup_is_open.clone();
         Callback::from(move |(dto, event): (Rc<StreamInfo>, MouseEvent)| {
-            if let Some(streams) = event.current_target().and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-            {
+            if let Some(streams) = event.target_dyn_into::<web_sys::Element>() {
                 set_selected_dto.set(Some(dto));
                 set_anchor_ref.set(Some(streams));
                 set_is_open.set(true);
