@@ -22,6 +22,7 @@ chrono.workspace = true
 iana-time-zone = "0.1.65"
 cron.workspace = true
 axum = { version = "0.8.8" , features = ["macros", "default", "ws"]}
+serde_html_form = "0.2"
 tower = "0.5.3"
 tower-http = { version = "0.6.8", features = ["cors", "auth", "fs", "compression-full", "trace"] }
 tower_governor = { version = "0.8.0", features = ["axum"] }

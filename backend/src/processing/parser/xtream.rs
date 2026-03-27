@@ -287,9 +287,9 @@ where
         let mut cat_counters: HashMap<u32, u32> = HashMap::new();
         let mut cat_source_ordinal = |cat_id: u32| -> u32 {
             let cat_pos = cat_order.get(&cat_id).copied().unwrap_or(unknown_cat_pos);
-            let counter = cat_counters.entry(cat_id).or_insert(0);
+            let counter = cat_counters.entry(cat_pos).or_insert(0);
             *counter += 1;
-            cat_pos * CAT_BUCKET + *counter
+            cat_pos.saturating_mul(CAT_BUCKET).saturating_add(*counter)
         };
 
         match xtream_cluster {

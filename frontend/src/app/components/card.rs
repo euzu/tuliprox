@@ -4,7 +4,7 @@ use yew::prelude::*;
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct CardProps {
     #[prop_or_default]
-    pub class: String,
+    pub class: Classes,
     pub children: Children,
 }
 
@@ -14,7 +14,7 @@ pub fn Card(props: &CardProps) -> Html {
     let context = CardContext { custom_class: custom_class.clone() };
     html! {
         <ContextProvider<CardContext> context={context}>
-            <div class={classes!("tp__card", &props.class, &*custom_class)}>
+            <div class={classes!("tp__card", props.class.clone(), &*custom_class)}>
                 { for props.children.iter() }
             </div>
         </ContextProvider<CardContext>>

@@ -1,3 +1,5 @@
+use axum::extract::{FromRequest, Request};
+use axum::response::Response;
 use log::log_enabled;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -30,6 +32,98 @@ pub struct UserApiRequest {
     pub duration: String,
     #[serde(default, alias = "type")]
     pub content_type: String,
+}
+
+/// Custom extractor that parses `UserApiRequest` from query parameters and request body
+/// (either `application/x-www-form-urlencoded` or `multipart/form-data`), then merges
+/// them with query parameters taking priority over body fields.
+pub struct UserApiRequestQueryOrBody(pub UserApiRequest);
+
+impl<S> FromRequest<S> for UserApiRequestQueryOrBody
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
+        let (parts, body) = req.into_parts();
+
+        // Parse query parameters (ignore errors, default to empty)
+        let query_req: UserApiRequest = parts
+            .uri
+            .query()
+            .and_then(|q| serde_html_form::from_str(q).ok())
+            .unwrap_or_default();
+
+        let content_type = parts
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        // Parse body (ignore errors, fallback to query-only)
+        let body_req = parse_body(body, content_type).await.ok();
+
+        Ok(UserApiRequestQueryOrBody(UserApiRequest::merge_query_over_form(&query_req, body_req.as_ref())))
+    }
+}
+
+async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserApiRequest, String> {
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|e| format!("Failed to read body: {e}"))?;
+
+    if content_type.starts_with("multipart/form-data") {
+        parse_multipart_body(&bytes, content_type)
+    } else {
+        // Treat as form-urlencoded (works for both explicit content-type and missing content-type)
+        serde_html_form::from_bytes(&bytes).map_err(|e| format!("Failed to parse form: {e}"))
+    }
+}
+
+fn parse_multipart_body(bytes: &[u8], content_type: &str) -> Result<UserApiRequest, String> {
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)
+        .ok_or("Missing boundary in multipart content type")?
+        .trim();
+
+    let data = std::str::from_utf8(bytes).map_err(|e| format!("Invalid UTF-8: {e}"))?;
+
+    let mut request = UserApiRequest::default();
+    let delimiter = format!("--{boundary}");
+    for part in data.split(&delimiter) {
+        if let Some(header_end) = part.find("\r\n\r\n") {
+            let headers = &part[..header_end];
+            let body = &part[header_end + 4..];
+
+            if let Some(name_start) = headers.find("name=\"") {
+                let name_start = name_start + 6;
+                if let Some(name_end) = headers[name_start..].find('\"') {
+                    let name = &headers[name_start..name_start + name_end];
+                    let value = body.trim().trim_end_matches("\r\n").trim();
+                    match name {
+                        "username" => request.username = value.to_string(),
+                        "password" => request.password = value.to_string(),
+                        "token" => request.token = value.to_string(),
+                        "action" => request.action = value.to_string(),
+                        "series_id" => request.series_id = value.to_string(),
+                        "vod_id" => request.vod_id = value.to_string(),
+                        "stream_id" => request.stream_id = value.to_string(),
+                        "category_id" => request.category_id = value.to_string(),
+                        "limit" => request.limit = value.to_string(),
+                        "start" => request.start = value.to_string(),
+                        "end" => request.end = value.to_string(),
+                        "stream" => request.stream = value.to_string(),
+                        "duration" => request.duration = value.to_string(),
+                        "type" => request.content_type = value.to_string(),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(request)
 }
 
 impl UserApiRequest {
