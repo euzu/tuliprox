@@ -209,8 +209,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                             let copy_to_clipboard = copy_to_clipboard.clone();
                             let services = services.clone();
                             spawn_local(async move {
-                                let request =
-                                    PlaylistUrlResolveRequest::Provider { playlist_request, url: url.to_string() };
+                                let request = PlaylistUrlResolveRequest::Provider { playlist_request, url };
                                 if let Some(resolved) = services.playlist.resolve_url(request).await {
                                     copy_to_clipboard.emit(resolved);
                                 }
