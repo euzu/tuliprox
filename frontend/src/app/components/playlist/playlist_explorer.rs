@@ -12,8 +12,8 @@ use crate::{
 use shared::{
     error::{info_err_res, TuliproxError},
     model::{
-        PlaylistRequest, SearchRequest, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, UiPlaylistGroup,
-        UiPlaylistItem, VirtualId, XtreamCluster,
+        PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
+        SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::format_float_localized,
 };
@@ -245,11 +245,9 @@ pub fn PlaylistExplorer() -> Html {
                                         let target_id = *target_id;
                                         let services_clone = services.clone();
                                         spawn_local(async move {
-                                            if let Some(url) = services
-                                                .playlist
-                                                .get_playlist_webplayer_url(target_id, virtual_id, cluster)
-                                                .await
-                                            {
+                                            let request =
+                                                PlaylistUrlResolveRequest::Webplayer { target_id, virtual_id, cluster };
+                                            if let Some(url) = services.playlist.resolve_url(request).await {
                                                 copy_to_clipboard.emit(url);
                                                 services_clone.toastr.success(
                                                     translate_clone
@@ -273,7 +271,25 @@ pub fn PlaylistExplorer() -> Html {
                         if let Some(dto) = &*selected_channel {
                             let url = dto.url.clone();
                             if !url.is_empty() {
-                                copy_to_clipboard.emit(url);
+                                if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
+                                    let copy_to_clipboard = copy_to_clipboard.clone();
+                                    let services = services.clone();
+                                    let playlist_request = playlist_request.clone();
+                                    spawn_local(async move {
+                                        let request = PlaylistUrlResolveRequest::Provider {
+                                            playlist_request,
+                                            url: url.to_string(),
+                                        };
+                                        let resolved = services
+                                            .playlist
+                                            .resolve_url(request)
+                                            .await
+                                            .unwrap_or_else(|| url.to_string());
+                                        copy_to_clipboard.emit(resolved);
+                                    });
+                                } else {
+                                    copy_to_clipboard.emit(url);
+                                }
                             } else {
                                 // Try to fetch episode
                                 if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
@@ -285,7 +301,13 @@ pub fn PlaylistExplorer() -> Html {
                                         if let Some(pli) =
                                             services.playlist.get_episode(virtual_id, &playlist_request).await
                                         {
-                                            copy_to_clipboard.emit(pli.url.to_string());
+                                            let url = pli.url.to_string();
+                                            let request = PlaylistUrlResolveRequest::Provider {
+                                                playlist_request,
+                                                url: url.to_string(),
+                                            };
+                                            let resolved = services.playlist.resolve_url(request).await.unwrap_or(url);
+                                            copy_to_clipboard.emit(resolved);
                                         }
                                     });
                                 }

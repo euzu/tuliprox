@@ -15,8 +15,7 @@ use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, HtmlElement};
 use yew::{
-    classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_node_ref, use_state, Callback,
-    Html, UseStateHandle,
+    classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_node_ref, use_state, Callback, Html,
 };
 
 const TIME_BLOCK_WIDTH: f64 = 210.0;
@@ -67,18 +66,19 @@ pub fn EpgView() -> Html {
     {
         let container_ref = container_ref.clone();
         let now_line_ref = now_line_ref.clone();
-        use_effect_with(epg.clone(), move |epg_tv| {
+        let epg_window = (*epg).as_ref().map(|tv| (tv.start, tv.stop));
+        use_effect_with(epg_window, move |epg_window| {
             // Updates the now-line position
-            let epg_tv_clone = epg_tv.clone();
+            let epg_window_clone = *epg_window;
 
-            let calculate_position = Rc::new(move |epg_tv: &UseStateHandle<Option<EpgTv>>, recenter: bool| {
-                if let Some(tv) = &**epg_tv {
+            let calculate_position = Rc::new(move |epg_window: &Option<(i64, i64)>, recenter: bool| {
+                if let Some((start, stop)) = epg_window {
                     if let (Some(div), Some(now_line)) =
                         (container_ref.cast::<HtmlElement>(), now_line_ref.cast::<HtmlElement>())
                     {
                         let now = Utc::now().timestamp();
-                        if now >= tv.start && now <= tv.stop {
-                            let start_window_secs = (tv.start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
+                        if now >= *start && now <= *stop {
+                            let start_window_secs = (*start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
                             let start_window = (start_window_secs / 60).max(0);
                             let now_line_pos = get_pos(now, start_window);
                             now_line.style().set_property("width", &format!("{now_line_pos}px")).unwrap();
@@ -97,9 +97,9 @@ pub fn EpgView() -> Html {
 
             let calculate_pos = calculate_position.clone();
             let interval = Interval::new(60_000, move || {
-                calculate_pos(&epg_tv_clone, false);
+                calculate_pos(&epg_window_clone, false);
             });
-            calculate_position(epg_tv, true);
+            calculate_position(epg_window, true);
             || drop(interval)
         });
     }

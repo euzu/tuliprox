@@ -5,7 +5,10 @@ use crate::{
     },
     i18n::use_translation,
 };
-use shared::{foundation::get_filter, model::PatternTemplate};
+use shared::{
+    foundation::{get_filter, Filter},
+    model::PatternTemplate,
+};
 use web_sys::InputEvent;
 use yew::{classes, component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast};
 
@@ -15,25 +18,38 @@ pub struct FilterEditorProps {
     pub filter: Option<String>,
     #[prop_or_default]
     pub on_filter_change: Callback<Option<String>>,
+    #[prop_or_default]
+    pub on_valid_change: Callback<bool>,
     pub on_templates_change: Callback<Option<Vec<PatternTemplate>>>,
+}
+
+pub(crate) fn parse_filter_preview(
+    filter: Option<&str>,
+    templates: Option<&[PatternTemplate]>,
+) -> (Option<Filter>, bool) {
+    match filter {
+        Some(filter) => match get_filter(filter, templates) {
+            Ok(parsed) => (Some(parsed), true),
+            Err(_) => (None, false),
+        },
+        None => (None, true),
+    }
 }
 
 #[component]
 pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let translate = use_translation();
+    let cfg_templates = config_ctx.config.as_ref().and_then(|c| {
+        c.templates.as_ref().map(|definition| definition.templates.clone()).or_else(|| c.sources.templates.clone())
+    });
 
-    let templates_state = use_state(|| None);
-    let filter_state = use_state(|| None);
-    let parsed_filter_state = use_state(|| None);
-    let valid_filter_state = use_state(|| true);
+    let templates_state = use_state(|| cfg_templates.clone());
+    let filter_state = use_state(|| props.filter.clone());
 
     {
         let templates = templates_state.clone();
         let on_templates_change = props.on_templates_change.clone();
-        let cfg_templates = config_ctx.config.as_ref().and_then(|c| {
-            c.templates.as_ref().map(|definition| definition.templates.clone()).or_else(|| c.sources.templates.clone())
-        });
         use_effect_with(cfg_templates, move |templ| {
             templates.set(templ.clone());
             on_templates_change.emit(templ.clone());
@@ -47,28 +63,13 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
         });
     }
 
+    let (parsed_filter, valid_filter) = parse_filter_preview((*filter_state).as_deref(), (*templates_state).as_deref());
+
     {
-        let filter = filter_state.clone();
-        let parsed_filter = parsed_filter_state.clone();
-        let templates = templates_state.clone();
-        let valid_filter = valid_filter_state.clone();
-        use_effect_with(filter.clone(), move |flt| {
-            let parsed = if let Some(new_fltr) = flt.as_ref() {
-                match get_filter(new_fltr, (*templates).as_deref()) {
-                    Ok(fltr) => {
-                        valid_filter.set(true);
-                        Some(fltr)
-                    }
-                    Err(_) => {
-                        valid_filter.set(false);
-                        None
-                    }
-                }
-            } else {
-                valid_filter.set(true);
-                None
-            };
-            parsed_filter.set(parsed);
+        let on_valid_change = props.on_valid_change.clone();
+        use_effect_with(valid_filter, move |valid| {
+            on_valid_change.emit(*valid);
+            || ()
         });
     }
 
@@ -90,7 +91,7 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__filter-editor", if *valid_filter_state {"tp__filter-editor-valid"} else {"tp__filter-editor-invalid"})}>
+        <div class={classes!("tp__filter-editor", if valid_filter {"tp__filter-editor-valid"} else {"tp__filter-editor-invalid"})}>
           <CollapsePanel class="tp__filter-editor__templates-container" expanded={false} title={translate.t("LABEL.TEMPLATES")}>
             <div class="tp__filter-editor__templates">
                 <div class="tp__filter-editor__templates-content">
@@ -118,8 +119,34 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
                 <textarea class="tp__filter-editor__editor-input" value={(*filter_state).clone()} oninput={handle_filter_input}/>
             </div>
             <div class="tp__filter-editor__preview">
-                <FilterView inline={false} pretty={true} filter={(*parsed_filter_state).clone()} />
+                <FilterView inline={false} pretty={true} filter={parsed_filter} />
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_filter_preview;
+
+    #[test]
+    fn parse_filter_preview_accepts_empty_filter() {
+        let (parsed, valid) = parse_filter_preview(None, None);
+        assert!(parsed.is_none());
+        assert!(valid);
+    }
+
+    #[test]
+    fn parse_filter_preview_accepts_valid_filter() {
+        let (parsed, valid) = parse_filter_preview(Some("Group ~ \".*\""), None);
+        assert!(parsed.is_some());
+        assert!(valid);
+    }
+
+    #[test]
+    fn parse_filter_preview_rejects_invalid_filter() {
+        let (parsed, valid) = parse_filter_preview(Some("("), None);
+        assert!(parsed.is_none());
+        assert!(!valid);
     }
 }
