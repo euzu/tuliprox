@@ -61,7 +61,13 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
 }
 
 fn resolve_provider_url_with_input(input: &ConfigInput, url: &str) -> String {
-    input.resolve_url(url).map_or_else(|_| url.to_string(), std::borrow::Cow::into_owned)
+    match input.resolve_url(url) {
+        Ok(resolved) => resolved.into_owned(),
+        Err(err) => {
+            error!("resolve_provider_url_with_input failed for url '{url}': {err}");
+            url.to_string()
+        }
+    }
 }
 
 fn resolve_provider_url_for_request(app_config: &AppConfig, playlist_request: &PlaylistRequest, url: &str) -> String {
@@ -487,6 +493,64 @@ mod tests {
         );
 
         assert_eq!(resolved, "http://provider.example/live/user/pass/1359.ts");
+    }
+
+    #[test]
+    fn resolve_provider_url_passthrough_for_unresolved_provider_input_request() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".intern(),
+            urls: vec!["http://provider.example".intern()],
+            dns: None,
+        });
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..Default::default()
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(input, source);
+        let original = "provider://unknown/live/user/pass/1359.ts";
+        let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Input(7), original);
+
+        assert_eq!(resolved, original);
+    }
+
+    #[test]
+    fn resolve_provider_url_passthrough_for_unresolved_provider_target_request() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".intern(),
+            urls: vec!["http://provider.example".intern()],
+            dns: None,
+        });
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..Default::default()
+        });
+        let target = Arc::new(ConfigTarget {
+            id: 11,
+            enabled: true,
+            name: "target".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::default(),
+            favourites: None,
+            processing_order: Default::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![target] };
+        let app_config = test_app_config(input, source);
+        let original = "provider://unknown/live/user/pass/1359.ts";
+        let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Target(11), original);
+
+        assert_eq!(resolved, original);
     }
 }
 
