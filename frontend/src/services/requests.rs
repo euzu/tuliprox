@@ -308,6 +308,68 @@ where
     request(RequestMethod::Get, url, (), content_type, response_type, None, None).await.map(|response| response.body)
 }
 
+pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
+    let mut request = Request::get(url);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+
+    let response = request.send().await.map_err(|err| {
+        error!("{err}");
+        Error::RequestError
+    })?;
+
+    match response.status() {
+        200 | 205 | 206 => response.binary().await.map_err(|err| {
+            error!("Failed to read binary response body: {err}");
+            Error::RequestError
+        }),
+        400 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::BadRequest("400".to_string()))
+            } else {
+                Err(Error::BadRequest(message))
+            }
+        }
+        401 => Err(Error::Unauthorized),
+        403 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::Forbidden("Forbidden".to_string()))
+            } else {
+                Err(Error::Forbidden(message))
+            }
+        }
+        404 => Err(Error::NotFound),
+        409 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::Conflict("Configuration conflict (409)".to_string()))
+            } else {
+                Err(Error::Conflict(message))
+            }
+        }
+        428 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
+            } else {
+                Err(Error::PreconditionRequired(message))
+            }
+        }
+        500 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::InternalServerError("Internal Server Error".to_string()))
+            } else {
+                Err(Error::InternalServerError(message))
+            }
+        }
+        _ => Err(Error::RequestError),
+    }
+}
+
 pub async fn request_get_meta<T>(
     url: &str,
     content_type: Option<Encoding>,

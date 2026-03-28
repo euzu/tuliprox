@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{
     app::components::{AppIcon, Chip, RevealContent, ToggleSwitch},
+    hooks::use_service_context,
     i18n::use_translation,
     utils::t_safe,
 };
@@ -13,7 +14,7 @@ use shared::{
 };
 use std::rc::Rc;
 use web_sys::MouseEvent;
-use yew::prelude::*;
+use yew::{prelude::*, virtual_dom::AttrValue};
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct StreamDisplayItemProps {
@@ -25,12 +26,14 @@ pub struct StreamDisplayItemProps {
 #[component]
 pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
     let translate = use_translation();
+    let services = use_service_context();
     let stream = props.stream.clone();
     let chips = build_technical_chips(stream.channel.item_type, stream.channel.technical.as_ref());
-    let country = stream
-        .country
-        .as_ref()
-        .map_or_else(String::new, |c| t_safe(&translate, &format!("COUNTRY.{c}")).unwrap_or_else(|| c.to_string()));
+    let country_code = stream.country_code.as_ref().map(|code| code.to_ascii_uppercase());
+    let country = country_code.as_ref().map_or_else(String::new, |code| {
+        t_safe(&translate, &format!("COUNTRY.{code}")).unwrap_or_else(|| code.clone())
+    });
+    let flag_svg = country_code.as_ref().and_then(|code| services.flags.get_flag(code));
     let client_ip = strip_port(&stream.client_ip).to_string();
 
     let handle_popup_click = {
@@ -56,10 +59,21 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                 <span class="tp__stream-display__channel_type">{render_cluster(&stream.channel)}</span>
                                 {" • "}
                                 <span class="tp__stream-display__provider">{stream.provider.clone()}</span>
-                                if !country.is_empty() {
+                                if !country.is_empty() || country_code.is_some() {
                                     <>
                                         {" • "}
-                                        {country}
+                                        <span class="tp__stream-display__country">
+                                            if let Some(svg) = flag_svg.as_ref() {
+                                                <span class="tp__stream-display__flag" aria-hidden="true">
+                                                    // SAFETY: flags.dat is built offline by flags_builder from a trusted flag directory.
+                                                    // If this source ever becomes user-controlled, replace this with sanitized SVG rendering.
+                                                    {Html::from_html_unchecked(AttrValue::from(svg.clone()))}
+                                                </span>
+                                            }
+                                            if !country.is_empty() {
+                                                <span class="tp__stream-display__country-name">{country.clone()}</span>
+                                            }
+                                        </span>
                                     </>
                                 }
                             </div>

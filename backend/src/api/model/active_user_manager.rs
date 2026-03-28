@@ -620,7 +620,7 @@ impl ActiveUserManager {
                     stream_info.meter_uid = meter_uid;
                     stream_info.addr = fingerprint.addr;
                     stream_info.client_ip.clone_from(&client_ip);
-                    stream_info.country = self.lookup_country(&client_ip);
+                    stream_info.country_code = self.lookup_country(&client_ip);
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
@@ -641,7 +641,7 @@ impl ActiveUserManager {
             if let Some(stream_info) = existing_stream_info {
                 stream_info
             } else {
-                let country = self.lookup_country(&fingerprint.client_ip);
+                let country_code = self.lookup_country(&fingerprint.client_ip);
 
                 let stream_info = StreamInfo::new(
                     uid,
@@ -652,7 +652,7 @@ impl ActiveUserManager {
                     provider,
                     stream_channel.clone(),
                     user_agent_string,
-                    country,
+                    country_code,
                     session_token,
                 );
 

@@ -186,9 +186,17 @@ fn assign_provider_series_info_episode_key(provider_series: &mut HashMap<Arc<str
 #[allow(clippy::implicit_hasher)]
 fn rewrite_local_series_info_episode_virtual_id(pli: &mut PlaylistItem, local_library_series: &HashMap<Arc<str>, Vec<LocalEpisodeKey>>) {
     let header = &mut pli.header;
-    // the local_library_series key is the id of the SeriesInfo. The episodes have their parent SeriesInfo id as parent_code.
-    // When we populate  local_library_series, we use the episodes.parent_code. Here we need to use the SeriesInfo.id to get the assigned episodes.
-    if let Some(episode_keys) = local_library_series.get(&*header.id) {
+    // local_library_series key is the Series UUID.
+    // For LocalSeriesInfo items (series description), header.id is the Series UUID.
+    // For LocalSeries items (episodes), header.parent_code is the Series UUID.
+    // We need to use the correct key based on item type.
+    let lookup_key = if header.item_type == PlaylistItemType::LocalSeries {
+        header.parent_code.clone()
+    } else {
+        header.id.clone()
+    };
+
+    if let Some(episode_keys) = local_library_series.get(&*lookup_key) {
         if let Some(StreamProperties::Series(series)) = header.additional_properties.as_mut() {
             if let Some(episodes) =
                 series.details.as_mut().and_then(|d| d.episodes.as_mut())
@@ -459,4 +467,174 @@ pub fn get_input_local_library_playlist_file_path(storage_path: &Path, input_nam
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     storage_path.join(format!("lib_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        assign_local_series_info_episode_key, rewrite_local_series_info_episode_virtual_id,
+        rewrite_series_info_episode_virtual_id, LocalEpisodeKey, ProviderEpisodeKey,
+    };
+    use shared::model::{
+        PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
+        SeriesStreamDetailProperties, SeriesStreamProperties, StreamProperties, XtreamCluster,
+    };
+    use shared::utils::Internable;
+    use std::{collections::HashMap, sync::Arc};
+
+    fn make_local_series_info(series_uuid: &str, episodes: Vec<(u32, &str, &str)>) -> PlaylistItem {
+        let episode_props = episodes
+            .into_iter()
+            .map(|(id, title, direct_source)| SeriesStreamDetailEpisodeProperties {
+                id,
+                episode_num: 0,
+                season: 0,
+                title: title.intern(),
+                container_extension: "".intern(),
+                custom_sid: None,
+                added: "".intern(),
+                direct_source: direct_source.intern(),
+                tmdb: None,
+                release_date: "".intern(),
+                series_release_date: None,
+                plot: None,
+                crew: None,
+                duration_secs: 0,
+                duration: "".intern(),
+                movie_image: "".intern(),
+                bitrate: 0,
+                rating: None,
+                video: None,
+                audio: None,
+            })
+            .collect();
+
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                id: series_uuid.intern(),
+                item_type: PlaylistItemType::LocalSeriesInfo,
+                xtream_cluster: XtreamCluster::Series,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    name: "Series".intern(),
+                    details: Some(SeriesStreamDetailProperties {
+                        year: None,
+                        seasons: None,
+                        episodes: Some(episode_props),
+                    }),
+                    ..SeriesStreamProperties::default()
+                }))),
+                ..PlaylistItemHeader::default()
+            },
+        }
+    }
+
+    fn make_local_series_episode(series_uuid: &str, direct_source: &str, virtual_id: u32) -> PlaylistItemHeader {
+        PlaylistItemHeader {
+            parent_code: series_uuid.intern(),
+            url: direct_source.intern(),
+            item_type: PlaylistItemType::LocalSeries,
+            xtream_cluster: XtreamCluster::Series,
+            virtual_id,
+            ..PlaylistItemHeader::default()
+        }
+    }
+
+    #[test]
+    fn rewrite_local_series_info_uses_series_uuid_lookup_and_updates_episode_virtual_ids() {
+        let series_uuid = "series-uuid";
+        let mut series_info = make_local_series_info(
+            series_uuid,
+            vec![(101, "Episode 1", "/library/episode1.mkv"), (202, "Episode 2", "/library/episode2.mkv")],
+        );
+        let mut local_library_series = HashMap::<Arc<str>, Vec<LocalEpisodeKey>>::new();
+        local_library_series.insert(
+            series_uuid.intern(),
+            vec![
+                LocalEpisodeKey { path: "/library/episode1.mkv".intern(), virtual_id: 7001 },
+                LocalEpisodeKey { path: "/library/episode2.mkv".intern(), virtual_id: 7002 },
+            ],
+        );
+
+        rewrite_local_series_info_episode_virtual_id(&mut series_info, &local_library_series);
+
+        let Some(StreamProperties::Series(series)) = series_info.header.additional_properties.as_ref() else {
+            panic!("missing series properties");
+        };
+        let episodes = series.details.as_ref().and_then(|details| details.episodes.as_ref()).expect("missing episodes");
+        assert_eq!(episodes[0].id, 7001);
+        assert_eq!(episodes[1].id, 7002);
+    }
+
+    #[test]
+    fn rewrite_series_info_updates_local_episode_ids_before_parent_code_is_cleared() {
+        let series_uuid = "series-uuid";
+        let mut episode_one = make_local_series_episode(series_uuid, "/library/episode1.mkv", 7001);
+        let mut episode_two = make_local_series_episode(series_uuid, "/library/episode2.mkv", 7002);
+
+        let mut local_library_series = HashMap::<Arc<str>, Vec<LocalEpisodeKey>>::new();
+        assign_local_series_info_episode_key(&mut local_library_series, &mut episode_one, PlaylistItemType::LocalSeries);
+        assign_local_series_info_episode_key(&mut local_library_series, &mut episode_two, PlaylistItemType::LocalSeries);
+
+        let series_info = make_local_series_info(
+            series_uuid,
+            vec![(101, "Episode 1", "/library/episode1.mkv"), (202, "Episode 2", "/library/episode2.mkv")],
+        );
+        let local_episode_one = PlaylistItem { header: episode_one };
+        let local_episode_two = PlaylistItem { header: episode_two };
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![series_info, local_episode_one, local_episode_two],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        rewrite_series_info_episode_virtual_id(&mut playlist, &local_library_series, &HashMap::<Arc<str>, Vec<ProviderEpisodeKey>>::new());
+
+        let Some(StreamProperties::Series(series)) = playlist[0].channels[0].header.additional_properties.as_ref() else {
+            panic!("missing series properties");
+        };
+        let episodes = series.details.as_ref().and_then(|details| details.episodes.as_ref()).expect("missing episodes");
+        assert_eq!(episodes[0].id, 7001);
+        assert_eq!(episodes[1].id, 7002);
+        assert!(playlist[0].channels[1].header.parent_code.is_empty());
+        assert!(playlist[0].channels[2].header.parent_code.is_empty());
+    }
+
+    #[test]
+    fn rewrite_series_info_updates_local_episode_ids_when_episodes_come_first() {
+        // Test with episodes BEFORE series_info to verify iteration-order doesn't matter
+        let series_uuid = "series-uuid";
+        let mut episode_one = make_local_series_episode(series_uuid, "/library/episode1.mkv", 7001);
+        let mut episode_two = make_local_series_episode(series_uuid, "/library/episode2.mkv", 7002);
+
+        let mut local_library_series = HashMap::<Arc<str>, Vec<LocalEpisodeKey>>::new();
+        assign_local_series_info_episode_key(&mut local_library_series, &mut episode_one, PlaylistItemType::LocalSeries);
+        assign_local_series_info_episode_key(&mut local_library_series, &mut episode_two, PlaylistItemType::LocalSeries);
+
+        let series_info = make_local_series_info(
+            series_uuid,
+            vec![(101, "Episode 1", "/library/episode1.mkv"), (202, "Episode 2", "/library/episode2.mkv")],
+        );
+        let local_episode_one = PlaylistItem { header: episode_one };
+        let local_episode_two = PlaylistItem { header: episode_two };
+
+        // Episodes FIRST, then series_info (reversed order)
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![local_episode_one, local_episode_two, series_info],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        rewrite_series_info_episode_virtual_id(&mut playlist, &local_library_series, &HashMap::<Arc<str>, Vec<ProviderEpisodeKey>>::new());
+
+        let Some(StreamProperties::Series(series)) = playlist[0].channels[2].header.additional_properties.as_ref() else {
+            panic!("missing series properties");
+        };
+        let episodes = series.details.as_ref().and_then(|details| details.episodes.as_ref()).expect("missing episodes");
+        assert_eq!(episodes[0].id, 7001);
+        assert_eq!(episodes[1].id, 7002);
+        assert!(playlist[0].channels[0].header.parent_code.is_empty());
+        assert!(playlist[0].channels[1].header.parent_code.is_empty());
+    }
 }

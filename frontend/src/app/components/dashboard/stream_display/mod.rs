@@ -17,16 +17,17 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
     model::EventMessage,
-    services::DialogService,
+    services::{DialogService, FlagsLoadState},
 };
-use gloo_timers::callback::Interval;
+use gloo_timers::{callback::Interval, future::TimeoutFuture};
+use log::error;
 use shared::{
     error::{info_err_res, TuliproxError},
     model::{PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, UserCommand},
     utils::default_kick_secs,
 };
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
-use yew::{platform::spawn_local, prelude::*};
+use std::{cell::Cell, collections::HashMap, fmt::Display, future, rc::Rc, str::FromStr};
+use yew::{platform::spawn_local, prelude::*, suspense::use_future};
 use yew_hooks::use_clipboard;
 
 const KICK: &str = "kick";
@@ -53,6 +54,8 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let cleanup_now_secs = use_state(shared::utils::current_time_secs);
     let adaptive_session_ttl_secs = get_adaptive_session_ttl_secs(&config_ctx);
     let metrics_enabled = is_stream_metrics_enabled(&config_ctx);
+    let geoip_enabled = config_ctx.config.as_ref().is_some_and(|cfg| cfg.config.is_geoip_enabled());
+    let flags_ready = use_state(|| service_ctx.flags.is_loaded());
 
     use_effect_with((), move |_| {
         let interval = Interval::new(1000, update_timestamps);
@@ -100,6 +103,45 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                     websocket.send_message(ProtocolMessage::StreamMeterUnsubscribe);
                 }
             }
+        });
+    }
+
+    {
+        let flags_service = service_ctx.flags.clone();
+        let flags_ready = flags_ready.clone();
+        let _ = use_future(|| async move {
+            flags_service
+                .loaded_subscribe(&mut |loaded| {
+                    flags_ready.set(loaded);
+                    future::ready(())
+                })
+                .await
+        });
+    }
+
+    {
+        let flags_service = service_ctx.flags.clone();
+        use_effect_with(geoip_enabled, move |geoip_enabled| {
+            let cancelled = Rc::new(Cell::new(false));
+            if *geoip_enabled {
+                let flags_service = flags_service.clone();
+                let cancelled = cancelled.clone();
+                spawn_local(async move {
+                    while !cancelled.get() && !flags_service.is_loaded() {
+                        match flags_service.ensure_loaded_from_assets().await {
+                            Ok(FlagsLoadState::Loaded) => break,
+                            Ok(FlagsLoadState::InProgress) => {
+                                TimeoutFuture::new(250).await;
+                            }
+                            Err(err) => {
+                                error!("Failed to load flags {err}");
+                                TimeoutFuture::new(5000).await;
+                            }
+                        }
+                    }
+                });
+            }
+            move || cancelled.set(true)
         });
     }
 
@@ -240,6 +282,9 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             popup_is_open_state.set(false);
         })
     };
+
+    // Force a re-render after the flags service finishes loading so StreamDisplayItem can read flag SVGs.
+    let _flags_ready_marker = *flags_ready;
 
     html! {
         <div class="tp__stream-display">

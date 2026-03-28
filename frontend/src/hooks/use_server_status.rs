@@ -166,7 +166,7 @@ mod tests {
             client_ip: "127.0.0.1".to_string(),
             user_agent: "ua".to_string(),
             ts: 1,
-            country: None,
+            country_code: None,
             session_token: session_token.map(ToOwned::to_owned),
             preserved: false,
         }

@@ -74,6 +74,14 @@ pub fn StreamsView(props: &StreamsViewProps) -> Html {
                     />
                  </Card>
             </div>
+            <div class="tp__stats__body-group-mobile">
+                <Card>
+                   <StatusCard title={translate.t("LABEL.ACTIVE_USERS")} data={status_ctx.status.as_ref().map_or_else(|| "n/a".to_string(), |status| status.active_users.to_string())} />
+                   <StatusCard title={translate.t("LABEL.ACTIVE_USER_CONNECTIONS")} data={status_ctx.status.as_ref().map_or_else(|| "n/a".to_string(), |status| status.active_user_connections.to_string())} />
+                   <StatusCard title={translate.t("LABEL.ACTIVE_PROVIDER_CONNECTIONS")} data={(*provider_connections).to_string()} />
+                 </Card>
+            </div>
+
             <StreamDisplay streams={ (*memo_streams).clone() } />
         </div>
       </div>

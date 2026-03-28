@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-shared = { version = "3.2.161", path = "../shared" }
+shared = { version = "3.2.164", path = "../shared" }
 chrono.workspace = true
 yew = "0.22.1"
 yew-router = "0.19.0"
@@ -32,6 +32,7 @@ bytes.workspace = true
 regex.workspace = true
 base64.workspace = true
 cron.workspace = true
+brotli.workspace = true
 fastrand.workspace = true
 indexmap.workspace = true
 
