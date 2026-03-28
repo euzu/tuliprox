@@ -1,11 +1,18 @@
 use crate::{error::Error, services::request_get_binary};
 use futures_signals::signal::{Mutable, SignalExt};
+use log::error;
 use shared::utils::FlagsLoader;
 use std::{
     cell::{Cell, RefCell},
     future::Future,
     rc::Rc,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlagsLoadState {
+    Loaded,
+    InProgress,
+}
 
 #[derive(Clone)]
 pub struct FlagsService {
@@ -44,9 +51,12 @@ impl FlagsService {
         fut.await
     }
 
-    pub async fn ensure_loaded_from_assets(&self) -> Result<(), Error> {
-        if self.is_loaded() || self.loading_started.replace(true) {
-            return Ok(());
+    pub async fn ensure_loaded_from_assets(&self) -> Result<FlagsLoadState, Error> {
+        if self.is_loaded() {
+            return Ok(FlagsLoadState::Loaded);
+        }
+        if self.loading_started.replace(true) {
+            return Ok(FlagsLoadState::InProgress);
         }
 
         let bytes = match request_get_binary("assets/flags.dat").await {
@@ -59,15 +69,16 @@ impl FlagsService {
         };
         let loader = match FlagsLoader::from_bytes(bytes) {
             Ok(loader) => loader,
-            Err(_) => {
+            Err(err) => {
                 self.loading_started.set(false);
                 self.loaded_channel.set(false);
+                error!("Failed to parse flags.dat: {err}");
                 return Err(Error::DeserializeError);
             }
         };
         self.loader.replace(Some(Rc::new(loader)));
         self.loaded_channel.set(true);
-        Ok(())
+        Ok(FlagsLoadState::Loaded)
     }
 
     pub fn get_flag(&self, country_code: &str) -> Option<String> {

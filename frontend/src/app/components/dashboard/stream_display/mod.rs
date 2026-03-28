@@ -17,7 +17,7 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
     model::EventMessage,
-    services::DialogService,
+    services::{DialogService, FlagsLoadState},
 };
 use gloo_timers::{callback::Interval, future::TimeoutFuture};
 use log::error;
@@ -129,7 +129,10 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                 spawn_local(async move {
                     while !cancelled.get() && !flags_service.is_loaded() {
                         match flags_service.ensure_loaded_from_assets().await {
-                            Ok(()) => break,
+                            Ok(FlagsLoadState::Loaded) => break,
+                            Ok(FlagsLoadState::InProgress) => {
+                                TimeoutFuture::new(250).await;
+                            }
                             Err(err) => {
                                 error!("Failed to load flags {err}");
                                 TimeoutFuture::new(5000).await;
