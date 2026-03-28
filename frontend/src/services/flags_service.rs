@@ -1,21 +1,47 @@
 use crate::{error::Error, services::request_get_binary};
+use futures_signals::signal::{Mutable, SignalExt};
 use shared::utils::FlagsLoader;
 use std::{
     cell::{Cell, RefCell},
+    future::Future,
     rc::Rc,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct FlagsService {
     loader: Rc<RefCell<Option<Rc<FlagsLoader>>>>,
     loading_started: Rc<Cell<bool>>,
+    loaded_channel: Rc<Mutable<bool>>,
+}
+
+impl Default for FlagsService {
+    fn default() -> Self {
+        Self {
+            loader: Rc::new(RefCell::new(None)),
+            loading_started: Rc::new(Cell::new(false)),
+            loaded_channel: Rc::new(Mutable::new(false)),
+        }
+    }
 }
 
 impl FlagsService {
     pub fn new() -> Self { Self::default() }
 
     pub fn from_loader(loader: FlagsLoader) -> Self {
-        Self { loader: Rc::new(RefCell::new(Some(Rc::new(loader)))), loading_started: Rc::new(Cell::new(true)) }
+        Self {
+            loader: Rc::new(RefCell::new(Some(Rc::new(loader)))),
+            loading_started: Rc::new(Cell::new(true)),
+            loaded_channel: Rc::new(Mutable::new(true)),
+        }
+    }
+
+    pub async fn loaded_subscribe<F, U>(&self, callback: &mut F)
+    where
+        U: Future<Output = ()>,
+        F: FnMut(bool) -> U,
+    {
+        let fut = self.loaded_channel.signal_cloned().for_each(callback);
+        fut.await
     }
 
     pub async fn ensure_loaded_from_assets(&self) -> Result<(), Error> {
@@ -27,6 +53,7 @@ impl FlagsService {
             Ok(bytes) => bytes,
             Err(err) => {
                 self.loading_started.set(false);
+                self.loaded_channel.set(false);
                 return Err(err);
             }
         };
@@ -34,10 +61,12 @@ impl FlagsService {
             Ok(loader) => loader,
             Err(_) => {
                 self.loading_started.set(false);
+                self.loaded_channel.set(false);
                 return Err(Error::DeserializeError);
             }
         };
         self.loader.replace(Some(Rc::new(loader)));
+        self.loaded_channel.set(true);
         Ok(())
     }
 

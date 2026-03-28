@@ -19,15 +19,15 @@ use crate::{
     model::EventMessage,
     services::DialogService,
 };
-use gloo_timers::callback::Interval;
+use gloo_timers::{callback::Interval, future::TimeoutFuture};
 use log::error;
 use shared::{
     error::{info_err_res, TuliproxError},
     model::{PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, UserCommand},
     utils::default_kick_secs,
 };
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
-use yew::{platform::spawn_local, prelude::*};
+use std::{cell::Cell, collections::HashMap, fmt::Display, future, rc::Rc, str::FromStr};
+use yew::{platform::spawn_local, prelude::*, suspense::use_future};
 use yew_hooks::use_clipboard;
 
 const KICK: &str = "kick";
@@ -109,20 +109,36 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     {
         let flags_service = service_ctx.flags.clone();
         let flags_ready = flags_ready.clone();
+        let _ = use_future(|| async move {
+            flags_service
+                .loaded_subscribe(&mut |loaded| {
+                    flags_ready.set(loaded);
+                    future::ready(())
+                })
+                .await
+        });
+    }
+
+    {
+        let flags_service = service_ctx.flags.clone();
         use_effect_with(geoip_enabled, move |geoip_enabled| {
-            if *geoip_enabled && !flags_service.is_loaded() {
+            let cancelled = Rc::new(Cell::new(false));
+            if *geoip_enabled {
                 let flags_service = flags_service.clone();
-                let flags_ready = flags_ready.clone();
+                let cancelled = cancelled.clone();
                 spawn_local(async move {
-                    match flags_service.ensure_loaded_from_assets().await {
-                        Ok(()) => flags_ready.set(flags_service.is_loaded()),
-                        Err(err) => error!("Failed to load flags {err}"),
+                    while !cancelled.get() && !flags_service.is_loaded() {
+                        match flags_service.ensure_loaded_from_assets().await {
+                            Ok(()) => break,
+                            Err(err) => {
+                                error!("Failed to load flags {err}");
+                                TimeoutFuture::new(5000).await;
+                            }
+                        }
                     }
                 });
-            } else {
-                flags_ready.set(flags_service.is_loaded());
             }
-            || ()
+            move || cancelled.set(true)
         });
     }
 
