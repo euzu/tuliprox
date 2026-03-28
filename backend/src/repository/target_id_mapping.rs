@@ -239,6 +239,12 @@ impl TargetIdMapping {
         self.mem_by_uuid.get(uuid).copied()
     }
 
+    pub fn get_parent_virtual_id_by_uuid(&self, uuid: &UUIDType) -> Option<u32> {
+        self.get_virtual_id_by_uuid(uuid)
+            .and_then(|virtual_id| self.mem_by_virtual_id.get(&virtual_id))
+            .map(|record| record.parent_virtual_id)
+    }
+
     pub fn prune_expired_records(&mut self, retention_days: i64) -> usize {
         let expiration_threshold = Local::now().timestamp() - (retention_days * 86400);
         let mut expired_keys = Vec::new();

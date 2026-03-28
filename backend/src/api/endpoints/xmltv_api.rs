@@ -24,12 +24,14 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
     model::{EpgChannel, EpgProgramme, ShortEpgDto, ShortEpgResultDto},
+    utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::{io::AsyncWriteExt, sync::mpsc, task};
+use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
 
 pub fn get_empty_epg_response() -> axum::response::Response {
@@ -97,6 +99,10 @@ pub async fn serve_epg_web_ui(
     target: &Arc<ConfigTarget>,
 ) -> axum::response::Response {
     if file_exists_async(epg_path).await {
+        let config = app_state.app_config.config.load();
+        let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
+        let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+        let encrypt_secret = app_state.get_encrypt_secret();
         let iter_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
         let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
         let epg_path = epg_path.to_path_buf();
@@ -127,10 +133,22 @@ pub async fn serve_epg_web_ui(
             }
         });
 
-        let stream = LockedReceiverStream::new(rx, iter_lock);
+        let stream = LockedReceiverStream::new(rx, iter_lock)
+            .map(move |channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel));
         return stream_json_or_bin_response_stream(accept, stream);
     }
     try_unwrap_body!(empty_json_response_as_array())
+}
+
+pub fn rewrite_epg_channel_resource_url(encrypt_secret: &[u8; 16], resource_url: &str, mut channel: EpgChannel) -> EpgChannel {
+    let Some(icon) = channel.icon.as_ref() else {
+        return channel;
+    };
+    if icon.is_empty() || icon.starts_with('/') {
+        return channel;
+    }
+    channel.icon = Some(concat_path(resource_url, &obfuscate_text(encrypt_secret, icon)).intern());
+    channel
 }
 
 macro_rules! continue_on_err {
@@ -541,4 +559,47 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
             &format!("/{}/{{username}}/{{password}}/{{resource}}", storage_const::EPG_RESOURCE_PATH),
             axum::routing::get(epg_api_resource),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_epg_channel_resource_url;
+    use shared::{
+        model::EpgChannel,
+        utils::{concat_path, obfuscate_text, Internable},
+    };
+
+    fn sample_channel(icon: Option<&str>) -> EpgChannel {
+        EpgChannel {
+            id: "channel-1".intern(),
+            title: Some("Channel".intern()),
+            icon: icon.map(Internable::intern),
+            programmes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rewrite_epg_channel_resource_url_wraps_external_icon() {
+        let secret = [9u8; 16];
+        let resource_url = "/api/v1/playlist/resource";
+        let channel = sample_channel(Some("https://cdn.example.com/logo.png"));
+
+        let rewritten = rewrite_epg_channel_resource_url(&secret, resource_url, channel);
+
+        assert_eq!(
+            rewritten.icon.as_deref(),
+            Some(concat_path(resource_url, &obfuscate_text(&secret, "https://cdn.example.com/logo.png")).as_str())
+        );
+    }
+
+    #[test]
+    fn rewrite_epg_channel_resource_url_keeps_internal_path() {
+        let secret = [9u8; 16];
+        let resource_url = "/api/v1/playlist/resource";
+        let channel = sample_channel(Some("/api/v1/library/thumbnail/test"));
+
+        let rewritten = rewrite_epg_channel_resource_url(&secret, resource_url, channel);
+
+        assert_eq!(rewritten.icon.as_deref(), Some("/api/v1/library/thumbnail/test"));
+    }
 }
