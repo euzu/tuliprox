@@ -25,6 +25,7 @@ bytes.workspace = true
 ciborium = "0.2.2"
 hex = "0.4.3"
 lz4_flex.workspace = true
+brotli.workspace = true
 deunicode.workspace = true
 serde-saphyr.workspace = true
 dashmap.workspace = true

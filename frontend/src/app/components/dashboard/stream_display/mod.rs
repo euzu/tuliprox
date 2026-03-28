@@ -20,6 +20,7 @@ use crate::{
     services::DialogService,
 };
 use gloo_timers::callback::Interval;
+use log::error;
 use shared::{
     error::{info_err_res, TuliproxError},
     model::{PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, UserCommand},
@@ -53,6 +54,8 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let cleanup_now_secs = use_state(shared::utils::current_time_secs);
     let adaptive_session_ttl_secs = get_adaptive_session_ttl_secs(&config_ctx);
     let metrics_enabled = is_stream_metrics_enabled(&config_ctx);
+    let geoip_enabled = config_ctx.config.as_ref().is_some_and(|cfg| cfg.config.is_geoip_enabled());
+    let flags_ready = use_state(|| service_ctx.flags.is_loaded());
 
     use_effect_with((), move |_| {
         let interval = Interval::new(1000, update_timestamps);
@@ -100,6 +103,26 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                     websocket.send_message(ProtocolMessage::StreamMeterUnsubscribe);
                 }
             }
+        });
+    }
+
+    {
+        let flags_service = service_ctx.flags.clone();
+        let flags_ready = flags_ready.clone();
+        use_effect_with(geoip_enabled, move |geoip_enabled| {
+            if *geoip_enabled && !flags_service.is_loaded() {
+                let flags_service = flags_service.clone();
+                let flags_ready = flags_ready.clone();
+                spawn_local(async move {
+                    match flags_service.ensure_loaded_from_assets().await {
+                        Ok(()) => flags_ready.set(flags_service.is_loaded()),
+                        Err(err) => error!("Failed to load flags {err}"),
+                    }
+                });
+            } else {
+                flags_ready.set(flags_service.is_loaded());
+            }
+            || ()
         });
     }
 
@@ -240,6 +263,8 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             popup_is_open_state.set(false);
         })
     };
+
+    let _flags_ready = *flags_ready;
 
     html! {
         <div class="tp__stream-display">

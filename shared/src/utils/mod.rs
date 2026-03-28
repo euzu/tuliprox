@@ -3,6 +3,7 @@ mod constants;
 mod crypto;
 mod default_utils;
 mod directed_graph;
+mod flags;
 mod hash_utils;
 mod hdhomerun_utils;
 mod json_utils;
@@ -16,9 +17,9 @@ mod string_utils;
 mod time_utils;
 
 pub use self::{
-    constants::*, crypto::*, default_utils::*, directed_graph::*, hash_utils::*, hdhomerun_utils::*, json_utils::*,
-    net_utils::*, number_utils::*, request::*, serde_utils::*, size_utils::*, string_interner::*, string_utils::*,
-    time_utils::*,
+    constants::*, crypto::*, default_utils::*, directed_graph::*, flags::*, hash_utils::*, hdhomerun_utils::*,
+    json_utils::*, net_utils::*, number_utils::*, request::*, serde_utils::*, size_utils::*, string_interner::*,
+    string_utils::*, time_utils::*,
 };
 use std::fmt::Display;
 

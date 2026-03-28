@@ -308,6 +308,33 @@ where
     request(RequestMethod::Get, url, (), content_type, response_type, None, None).await.map(|response| response.body)
 }
 
+pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
+    let mut request = Request::get(url);
+    if let Some(token) = get_token() {
+        request = request.header("Authorization", format!("Bearer {token}").as_str());
+    }
+
+    let response = request.send().await.map_err(|err| {
+        error!("{err}");
+        Error::RequestError
+    })?;
+
+    match response.status() {
+        200 | 205 | 206 => response.binary().await.map_err(|err| {
+            error!("Failed to read binary response body: {err}");
+            Error::RequestError
+        }),
+        400 => Err(Error::BadRequest(extract_error_message(response).await)),
+        401 => Err(Error::Unauthorized),
+        403 => Err(Error::Forbidden(extract_error_message(response).await)),
+        404 => Err(Error::NotFound),
+        409 => Err(Error::Conflict(extract_error_message(response).await)),
+        428 => Err(Error::PreconditionRequired(extract_error_message(response).await)),
+        500 => Err(Error::InternalServerError(extract_error_message(response).await)),
+        _ => Err(Error::RequestError),
+    }
+}
+
 pub async fn request_get_meta<T>(
     url: &str,
     content_type: Option<Encoding>,

@@ -1,3 +1,5 @@
+@use '../size';
+
 .tp__app {
   display: flex;
   flex-flow: row;
@@ -24,6 +26,10 @@
       align-items: center;
       overflow: hidden;
       height: 100vh;
+      @media (max-width: size.$mobile-breakpoint) {
+        padding: 0 var(--padding-micro);
+      }
     }
+
   }
 }

@@ -271,7 +271,7 @@ pub struct StreamInfo {
     #[serde(default)]
     pub ts: u64,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
-    pub country: Option<String>,
+    pub country_code: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub session_token: Option<String>,
     #[serde(default)]
@@ -289,7 +289,7 @@ impl StreamInfo {
         provider: &str,
         stream_channel: StreamChannel,
         user_agent: String,
-        country: Option<String>,
+        country_code: Option<String>,
         session_token: Option<&str>,
     ) -> Self {
         Self {
@@ -302,7 +302,7 @@ impl StreamInfo {
             client_ip: client_ip.to_string(),
             user_agent,
             ts: current_time_secs(),
-            country,
+            country_code,
             session_token: session_token.map(|token| token.to_string()),
             preserved: false,
         }
