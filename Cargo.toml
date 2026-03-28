@@ -3,7 +3,7 @@ members = ["backend", "frontend", "shared"]
 resolver = "2"
 
 [workspace.package]
-version = "3.2.162"
+version = "3.2.163"
 edition = "2021"
 rust-version = "1.89.0"
 
