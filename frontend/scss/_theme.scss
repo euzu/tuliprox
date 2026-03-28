@@ -1,6 +1,22 @@
 @use './size';
+@use './themes/theme-dark';
+@use './themes/theme-bright';
+@use './themes/theme-aurora';
+@use './themes/theme-monokai';
+@use './themes/theme-paper';
+@use './themes/theme-nature-pure';
+@use './themes/theme-dopamine';
+@use './themes/theme-mermaidcore';
+@use './themes/theme-vibrant-elegance';
+@use './themes/theme-cool-elegance';
+@use './themes/theme-banana-yellow';
+@use './themes/theme-clubroom-contrast';
+@use './themes/theme-sun-washed-soft';
+@use './themes/theme-vintage-neutral';
 
-:root {
+
+:root,
+body {
   --mobile-size: size.$mobile-breakpoint;
   --dashboard-mobile-size: size.$dashboard-mobile-breakpoint;
   --sidebar-width-expaned: 270px;
@@ -35,10 +51,13 @@
   --epg-row-height: 4rem;
   --epg-header-height: 2rem;
   --epg-channels-width: 300px;
-
-  --epg-past-background: rgba(0, 0, 0, 0.1);
-  --epg-now-line-color: red;
-
+  --border-radius: 8px;
+  --border-radius-small: 6px;
+  --tag-padding: 0.3rem 0.5rem;
+  --tag-border-radius: 0.5rem;
+  --icon-button-border-radius: 4px;
+  --theme-palette-contrast-base: #000000;
+  --theme-palette-contrast-inverse: #ffffff;
 }
 
 @media (max-width: size.$mobile-breakpoint) {
@@ -66,627 +85,604 @@
   }
 }
 
-:root {
-  --primary-color: rgba(96, 165, 250, 0.4);
-  /* Icy Blue */
-  --secondary-color: rgba(251, 113, 133, 0.62);
-  /* Soft Coral Red */
+:root,
+body {
+  --theme-palette-surface: var(--theme-palette-neutral-surface-940);
+  --theme-palette-surface-soft: var(--theme-palette-neutral-surface-920);
+  --theme-palette-surface-muted: var(--theme-palette-neutral-surface-900);
+  --theme-palette-surface-strong: var(--theme-palette-neutral-surface-880);
+  --theme-palette-surface-header: var(--theme-palette-neutral-surface-980);
+  --theme-palette-surface-tooltip: var(--theme-palette-neutral-surface-960);
+  --theme-palette-surface-menu: var(--theme-palette-neutral-surface-840);
+  --theme-palette-surface-tabset: var(--theme-palette-neutral-surface-820);
+  --theme-palette-surface-tab: var(--theme-palette-neutral-surface-620);
+  --theme-palette-surface-breadcrumbs: var(--theme-palette-neutral-surface-600);
+  --theme-palette-surface-breadcrumb: var(--theme-palette-neutral-surface-580);
+  --theme-palette-surface-showcase: var(--theme-palette-neutral-surface-560);
+  --theme-palette-surface-toolbar: var(--theme-palette-neutral-surface-540);
+  --theme-palette-surface-toolbar-alt: var(--theme-palette-neutral-surface-520);
+  --theme-palette-surface-card-gradient: var(--theme-palette-neutral-surface-700);
+  --theme-palette-surface-input: var(--theme-palette-neutral-surface-700);
+  --theme-palette-surface-option-active: var(--theme-palette-state-surface-option-active);
+  --theme-palette-surface-dialog-backdrop: var(--theme-palette-neutral-surface-640);
+  --theme-palette-surface-modal-backdrop: var(--theme-palette-neutral-surface-660);
+  --theme-palette-surface-setup-hover: var(--theme-palette-neutral-surface-780);
+  --theme-palette-surface-setup-active: var(--theme-palette-neutral-surface-800);
+  --theme-palette-surface-code: var(--theme-palette-neutral-surface-code);
+  --theme-palette-surface-code-solid: var(--theme-palette-neutral-surface-code-solid);
+  --theme-palette-surface-code-compare: var(--theme-palette-neutral-surface-code-compare);
+  --theme-palette-surface-glass: var(--theme-palette-neutral-surface-760);
+  --theme-palette-surface-glass-gradient-1: var(--theme-palette-neutral-surface-700);
+  --theme-palette-surface-glass-gradient-2: var(--theme-palette-neutral-surface-740);
+  --theme-palette-surface-glass-input: var(--theme-palette-neutral-surface-680);
 
-  --action-item-background-color: rgba(37, 99, 235, 0.18);
-  --action-item-color: #ffffff;
+  --theme-palette-border: var(--theme-palette-accent-border-500);
+  --theme-palette-border-strong: var(--theme-palette-accent-border-500);
+  --theme-palette-border-hover: var(--theme-palette-accent-border-460);
+  --theme-palette-border-focus: var(--theme-palette-accent-border-380);
+  --theme-palette-border-popup: var(--theme-palette-accent-border-340);
+  --theme-palette-border-soft: var(--theme-palette-neutral-border-460);
+  --theme-palette-border-tabset: var(--theme-palette-neutral-border-560);
+  --theme-palette-border-table: var(--theme-palette-neutral-border-520);
+  --theme-palette-border-muted: var(--theme-palette-neutral-border-500);
+  --theme-palette-border-input: var(--theme-palette-neutral-border-420);
+  --theme-palette-border-selection: var(--theme-palette-neutral-border-380);
 
-  --text-color: #e6edf7;
-  --modest-text-color: #9aa9bf;
-  --background-color: #0b1220;
-  --particle-flow-background-color: #070f1d;
-  --particle-flow-background-accent-color-1: #6ea8ff;
-  --particle-flow-background-accent-color-2: #273240;
-  --particle-flow-background-alpha-boost: 1.0;
-  --border-color: rgba(96, 165, 250, 0.24);
-  --input-background-color: rgba(15, 23, 42, 0.0);
-  --input-border-color: var(--border-color);
-  --input-focus-border-color: rgba(96, 165, 250, 0.88);
-  --button-background-color: var(--primary-color);
-  --menu-text-color: #d8e1ef;
-  --menu-icon-color: #8ea2bf;
-  --menu-item-hover-background-color: rgba(59, 130, 246, 0.16);
-  --menu-item-hover-color: #ffffff;
-  --menu-text-active-color: var(--primary-color);
-  --menu-item-active-background-color: rgba(59, 130, 246, 0.24);
-  --icon-button-hover-color: #e6edf7;
-  --card-background-color: rgba(15, 23, 42, 0.78);
-  --card-color: var(--modest-text-color);
-  --sub-card-background-color: rgba(15, 23, 42, 0.62);
+  --theme-palette-text: var(--theme-palette-neutral-text-900);
+  --theme-palette-text-muted: var(--theme-palette-neutral-text-620);
+  --theme-palette-text-soft: var(--theme-palette-neutral-text-580);
+  --theme-palette-text-menu: var(--theme-palette-neutral-text-760);
+  --theme-palette-text-inverse: var(--theme-palette-contrast-inverse);
+  --theme-palette-text-title: var(--theme-palette-neutral-text-580);
+  --theme-palette-text-card: var(--theme-palette-neutral-text-700);
+  --theme-palette-text-rating: var(--theme-palette-contrast-inverse);
+  --theme-palette-text-breadcrumb: var(--theme-palette-neutral-text-560);
+  --theme-palette-text-disabled: var(--theme-palette-neutral-text-500);
+  --theme-palette-text-disabled-border: var(--theme-palette-neutral-text-460);
+  --theme-palette-text-disabled-surface: var(--theme-palette-neutral-text-420);
 
-  --tertiary-background-color: rgba(168, 85, 247, 0.1);
-  --tertiary-border-color: rgba(168, 85, 247, 0.4);
-  --tertiary-text-color: rgb(244, 244, 245);
-  --tertiary-title-text-color: rgb(216, 180, 254);
+  --theme-brand-primary: var(--theme-palette-primary);
+  --theme-brand-primary-soft: var(--theme-palette-primary-soft);
+  --theme-brand-primary-hover-soft: var(--theme-palette-primary-hover-soft);
+  --theme-brand-primary-active-soft: var(--theme-palette-primary-active-soft);
+  --theme-brand-primary-hover: var(--theme-palette-primary-hover);
+  --theme-brand-primary-hover-strong: var(--theme-palette-primary-hover-strong);
+  --theme-brand-primary-border: var(--theme-palette-primary-border);
+  --theme-brand-primary-menu-hover: var(--theme-palette-primary-menu-hover);
+  --theme-brand-primary-tool-hover: var(--theme-palette-primary-tool-hover);
+  --theme-brand-primary-tree-hover: var(--theme-palette-primary-tree-hover);
+  --theme-brand-primary-tab-hover: var(--theme-palette-primary-tab-hover);
+  --theme-brand-primary-tab-active: var(--theme-palette-primary-tab-active);
+  --theme-brand-primary-tab-border: var(--theme-palette-primary-tab-border);
+  --theme-brand-primary-spinner: var(--theme-palette-primary-spinner);
 
-  --quaternary-background-color: rgba(34, 197, 94, 0.2);
-  --quaternary-border-color: rgba(34, 197, 94, 0.4);
-  --quaternary-text-color: rgb(244, 244, 245);
-  --quaternary-title-text-color: rgb(110, 231, 183);
-  --quaternary-hover-background-color: rgb(14, 169, 71, 0.3);
+  --theme-brand-secondary: var(--theme-palette-secondary);
+  --theme-brand-secondary-soft: var(--theme-palette-secondary-soft);
+  --theme-brand-secondary-hover: var(--theme-palette-secondary-hover);
+  --theme-brand-secondary-border: var(--theme-palette-secondary-border);
 
-  --text-button-background-color: rgba(30, 64, 175, 0.28);
-  --text-button-color: #ffffff;
-  --text-button-border-color: rgba(96, 165, 250, 0.28);
-  --text-button-hover-color: #ffffff;
-  --text-button-hover-background-color: rgba(37, 99, 235, 0.42);
-  --text-button-primary-background-color: var(--primary-color);
-  --text-button-primary-color: #ffffff;
-  --text-button-primary-hover-background-color: rgba(59, 130, 246, 0.9);
-  --text-button-primary-hover-color: #ffffff;
-  --text-button-primary-border-color: rgba(80, 150, 255, 0.8);
-  --text-button-secondary-background-color: rgba(220, 70, 70, 0.25);
-  --text-button-secondary-color: #ffffff;
-  --text-button-secondary-hover-background-color: rgba(220, 70, 70, 0.55);
-  --text-button-secondary-hover-color: #ffffff;
-  --text-button-secondary-border-color: rgba(220, 70, 70, 0.5);
-  --text-button-tertiary-background-color: var(--tertiary-background-color);
-  --text-button-tertiary-color: var(--tertiary-title-text-color);
-  --text-button-tertiary-hover-background-color: rgba(168, 85, 247, 0.2);
-  --text-button-tertiary-hover-color: rgb(233, 213, 255);
-  --text-button-tertiary-border-color: var(--tertiary-border-color);
+  --theme-brand-text: var(--theme-palette-text);
+  --theme-brand-text-muted: var(--theme-palette-text-muted);
+  --theme-brand-text-soft: var(--theme-palette-text-soft);
+  --theme-brand-text-menu: var(--theme-palette-text-menu);
+  --theme-brand-text-inverse: var(--theme-palette-text-inverse);
+  --theme-brand-text-header: var(--theme-palette-text-header);
+  --theme-brand-text-label: var(--theme-palette-text-label);
+  --theme-brand-text-title: var(--theme-palette-text-title);
+  --theme-brand-text-card: var(--theme-palette-text-card);
+  --theme-brand-text-rating: var(--theme-palette-text-rating);
+  --theme-brand-text-option-active: var(--theme-palette-text-option-active);
+  --theme-brand-text-breadcrumb: var(--theme-palette-text-breadcrumb);
+  --theme-brand-text-menu-warn: var(--theme-palette-text-menu-warn);
+  --theme-brand-text-menu-warn-strong: var(--theme-palette-text-menu-warn-strong);
+  --theme-brand-text-disabled: var(--theme-palette-text-disabled);
+  --theme-brand-text-disabled-border: var(--theme-palette-text-disabled-border);
+  --theme-brand-text-disabled-surface: var(--theme-palette-text-disabled-surface);
 
-  --text-button-active-background-color: var(--quaternary-hover-background-color);
-  --text-button-active-color: var(--quaternary-title-text-color);
-  --text-button-active-hover-background-color:  var(--quaternary-background-color);
-  --text-button-active-hover-color: var(--quaternary-text-color);
-  --text-button-active-border-color: var(--quaternary-border-color);
+  --theme-brand-page: var(--theme-palette-page);
+  --theme-brand-page-alt: var(--theme-palette-page-alt);
+  --theme-brand-surface: var(--theme-palette-surface);
+  --theme-brand-surface-soft: var(--theme-palette-surface-soft);
+  --theme-brand-surface-muted: var(--theme-palette-surface-muted);
+  --theme-brand-surface-strong: var(--theme-palette-surface-strong);
+  --theme-brand-surface-header: var(--theme-palette-surface-header);
+  --theme-brand-surface-tooltip: var(--theme-palette-surface-tooltip);
+  --theme-brand-surface-menu: var(--theme-palette-surface-menu);
+  --theme-brand-surface-tabset: var(--theme-palette-surface-tabset);
+  --theme-brand-surface-tab: var(--theme-palette-surface-tab);
+  --theme-brand-surface-breadcrumbs: var(--theme-palette-surface-breadcrumbs);
+  --theme-brand-surface-breadcrumb: var(--theme-palette-surface-breadcrumb);
+  --theme-brand-surface-showcase: var(--theme-palette-surface-showcase);
+  --theme-brand-surface-toolbar: var(--theme-palette-surface-toolbar);
+  --theme-brand-surface-toolbar-alt: var(--theme-palette-surface-toolbar-alt);
+  --theme-brand-surface-card-gradient: var(--theme-palette-surface-card-gradient);
+  --theme-brand-surface-input: var(--theme-palette-surface-input);
+  --theme-brand-surface-option-active: var(--theme-palette-surface-option-active);
+  --theme-brand-surface-dialog-backdrop: var(--theme-palette-surface-dialog-backdrop);
+  --theme-brand-surface-modal-backdrop: var(--theme-palette-surface-modal-backdrop);
+  --theme-brand-surface-setup-hover: var(--theme-palette-surface-setup-hover);
+  --theme-brand-surface-setup-active: var(--theme-palette-surface-setup-active);
+  --theme-brand-surface-code: var(--theme-palette-surface-code);
+  --theme-brand-surface-code-solid: var(--theme-palette-surface-code-solid);
+  --theme-brand-surface-code-compare: var(--theme-palette-surface-code-compare);
+  --theme-brand-surface-glass: var(--theme-palette-surface-glass);
+  --theme-brand-surface-glass-gradient-1: var(--theme-palette-surface-glass-gradient-1);
+  --theme-brand-surface-glass-gradient-2: var(--theme-palette-surface-glass-gradient-2);
+  --theme-brand-surface-glass-input: var(--theme-palette-surface-glass-input);
 
-  --text-button-disabled-border-color: #717171;
-  --text-button-disabled-background-color: #494949;
-  --text-button-disabled-color: #9b9b9b;
+  --theme-brand-border: var(--theme-palette-border);
+  --theme-brand-border-strong: var(--theme-palette-border-strong);
+  --theme-brand-border-hover: var(--theme-palette-border-hover);
+  --theme-brand-border-focus: var(--theme-palette-border-focus);
+  --theme-brand-border-popup: var(--theme-palette-border-popup);
+  --theme-brand-border-soft: var(--theme-palette-border-soft);
+  --theme-brand-border-tabset: var(--theme-palette-border-tabset);
+  --theme-brand-border-table: var(--theme-palette-border-table);
+  --theme-brand-border-muted: var(--theme-palette-border-muted);
+  --theme-brand-border-input: var(--theme-palette-border-input);
+  --theme-brand-border-selection: var(--theme-palette-border-selection);
 
-  --toggle-switch-on-background-color: rgba(34, 197, 94, 0.72);
-  --toggle-switch-off-background-color: rgba(51, 65, 85, 0.9);
-  --toggle-switch-toggle-color: #ffffff;
+  --theme-brand-tertiary-surface: var(--theme-palette-accent-tone-soft-surface);
+  --theme-brand-tertiary-border: var(--theme-palette-accent-tone-soft-border);
+  --theme-brand-tertiary-text: var(--theme-palette-accent-tone-text);
+  --theme-brand-tertiary-title: var(--theme-palette-accent-tone-text);
+  --theme-brand-tertiary-hover: var(--theme-palette-accent-tone-soft-hover);
+  --theme-brand-tertiary-hover-text: var(--theme-palette-accent-tone-text-soft);
 
-  --table-header-background-color: #1E293B;
-  --table-card-background-color: rgba(15, 23, 42, 0.56);
-  --table-alternate-background-color: rgba(30, 41, 59, 0.42);
-  --stream-tech-chip-container-color: #74c0fc;
-  --stream-tech-chip-container-background-color: #263645;
+  --theme-brand-positive: var(--theme-palette-success-tone-520);
+  --theme-brand-positive-soft: var(--theme-palette-success-tone-soft-200);
+  --theme-brand-positive-border: var(--theme-palette-success-tone-border);
+  --theme-brand-positive-strong: var(--theme-palette-success-tone-strong);
+  --theme-brand-positive-hover: var(--theme-palette-success-tone-hover);
+  --theme-brand-positive-text: var(--theme-palette-success-tone-text);
+  --theme-brand-positive-title: var(--theme-palette-success-tone-500);
+
+  --theme-brand-warning: var(--theme-palette-warning-tone-420);
+  --theme-brand-warning-strong: var(--theme-palette-warning-tone-520);
+  --theme-brand-warning-base: var(--theme-palette-warning-tone-500);
+  --theme-brand-danger: var(--theme-palette-danger-tone-520);
+  --theme-brand-danger-strong: var(--theme-palette-danger-tone-500);
+  --theme-brand-danger-deep: var(--theme-palette-danger-tone-480);
+  --theme-brand-active: var(--theme-palette-success-tone-540);
+  --theme-brand-info: var(--theme-palette-info-tone-500);
+  --theme-brand-info-strong: var(--theme-palette-info-tone-520);
+  --theme-brand-info-surface: var(--theme-palette-info-tone-surface);
+  --theme-brand-info-border: var(--theme-palette-info-tone-border);
+  --theme-brand-success-alt: var(--theme-palette-success-tone-500);
+  --theme-brand-success-soft-alt: var(--theme-palette-success-tone-380);
+  --theme-brand-quaternary: var(--theme-palette-quaternary-tone-500);
+  --theme-brand-emphasis: var(--theme-palette-emphasis-tone-500);
+  --theme-brand-accent: var(--theme-palette-accent-tone-500);
+
+  --theme-brand-tag-surface: var(--theme-palette-status-tag-surface);
+  --theme-brand-tag-active-text: var(--theme-palette-status-tag-active-text);
+  --theme-brand-tag-active-surface: var(--theme-palette-status-tag-active-surface);
+  --theme-brand-tag-active-border: var(--theme-palette-status-tag-active-border);
+  --theme-brand-tag-alt-text: var(--theme-palette-status-tag-alt-text);
+  --theme-brand-tag-alt-surface: var(--theme-palette-status-tag-alt-surface);
+  --theme-brand-tag-alt-border: var(--theme-palette-status-tag-alt-border);
+  --theme-brand-tag-expired-text: var(--theme-palette-status-tag-expired-text);
+  --theme-brand-tag-expired-surface: var(--theme-palette-status-tag-expired-surface);
+  --theme-brand-tag-expired-border: var(--theme-palette-status-tag-expired-border);
+  --theme-brand-tag-banned-text: var(--theme-palette-status-tag-banned-text);
+  --theme-brand-tag-banned-surface: var(--theme-palette-status-tag-banned-surface);
+  --theme-brand-tag-banned-border: var(--theme-palette-status-tag-banned-border);
+  --theme-brand-live-surface: var(--theme-palette-status-live-surface);
+  --theme-brand-video-surface: var(--theme-palette-status-video-surface);
+  --theme-brand-series-surface: var(--theme-palette-status-series-surface);
+
+  --theme-brand-popup-shadow: var(--theme-palette-shadow-popup);
+  --theme-brand-card-shadow: var(--theme-palette-shadow-card);
+  --theme-brand-scrollbar-track-shadow: var(--theme-palette-shadow-scrollbar-track);
+  --theme-brand-tab-header-shadow: var(--theme-palette-shadow-tab-header);
+  --theme-brand-field-code-shadow: var(--theme-palette-shadow-field-code);
+  --theme-brand-toggle-shadow: var(--theme-palette-shadow-toggle);
+  --theme-brand-toast-shadow: var(--theme-palette-shadow-toast);
+  --theme-brand-source-block-shadow: var(--theme-palette-shadow-source-block);
+  --theme-brand-glass-shadow: var(--theme-palette-shadow-glass);
+
+  --theme-brand-menu-icon-update: var(--theme-palette-menu-icon-update);
+  --theme-brand-menu-icon-user: var(--theme-palette-menu-icon-user);
+  --theme-brand-menu-icon-api-server: var(--theme-palette-menu-icon-api-server);
+  --theme-brand-menu-icon-main-config: var(--theme-palette-menu-icon-main-config);
+  --theme-brand-menu-icon-status: var(--theme-palette-menu-icon-status);
+
+  --theme-brand-code-identifier: var(--theme-palette-code-identifier);
+  --theme-brand-code-var-access: var(--theme-palette-code-var-access);
+  --theme-brand-code-field: var(--theme-palette-code-field);
+  --theme-brand-code-property: var(--theme-palette-code-property);
+  --theme-brand-code-literal: var(--theme-palette-code-literal);
+  --theme-brand-code-num: var(--theme-palette-code-num);
+  --theme-brand-code-builtin: var(--theme-palette-code-builtin);
+  --theme-brand-code-reserved: var(--theme-palette-code-reserved);
+  --theme-brand-code-regex: var(--theme-palette-code-regex);
+  --theme-brand-code-enum: var(--theme-palette-code-enum);
+  --theme-brand-code-range: var(--theme-palette-code-range);
+  --theme-brand-code-op: var(--theme-palette-code-op);
+  --theme-brand-code-compare-text: var(--theme-palette-code-compare-text);
+  --theme-brand-code-bracket-1: var(--theme-palette-code-bracket-1);
+  --theme-brand-code-bracket-2: var(--theme-palette-code-bracket-2);
+  --theme-brand-code-bracket-3: var(--theme-palette-code-bracket-3);
+  --theme-brand-code-any-match: var(--theme-palette-code-any-match);
+
+  --theme-brand-epg-program-surface: var(--theme-palette-epg-program-surface);
+  --theme-brand-epg-program-active-surface: var(--theme-palette-epg-program-active-surface);
+  --theme-brand-epg-program-text: var(--theme-palette-epg-program-text);
+  --theme-brand-epg-program-time: var(--theme-palette-epg-program-time);
+  --theme-brand-epg-program-time-active: var(--theme-palette-epg-program-time-active);
+  --theme-brand-epg-past-surface: var(--theme-palette-epg-past-surface);
+  --theme-brand-epg-now-line: var(--theme-palette-epg-now-line);
+
+  --theme-brand-particle-1: var(--theme-palette-particle-1);
+  --theme-brand-particle-2: var(--theme-palette-particle-2);
+  --theme-brand-particle-alpha-boost: var(--theme-palette-particle-alpha-boost);
+
+  --theme-brand-chip-container-text: var(--theme-palette-chip-container-text);
+  --theme-brand-chip-container-surface: var(--theme-palette-chip-container-surface);
+  --theme-brand-chip-video-text: var(--theme-palette-chip-video-text);
+  --theme-brand-chip-video-surface: var(--theme-palette-chip-video-surface);
+  --theme-brand-chip-resolution-text: var(--theme-palette-chip-resolution-text);
+  --theme-brand-chip-resolution-surface: var(--theme-palette-chip-resolution-surface);
+  --theme-brand-chip-fps-text: var(--theme-palette-chip-fps-text);
+  --theme-brand-chip-fps-surface: var(--theme-palette-chip-fps-surface);
+  --theme-brand-chip-audio-text: var(--theme-palette-chip-audio-text);
+  --theme-brand-chip-audio-surface: var(--theme-palette-chip-audio-surface);
+  --theme-brand-chip-audio-channels-text: var(--theme-palette-chip-audio-channels-text);
+
+  --theme-brand-brick-input-xtream: var(--theme-palette-graph-input-xtream);
+  --theme-brand-brick-input-m3u: var(--theme-palette-graph-input-m3u);
+  --theme-brand-brick-input-library: var(--theme-palette-graph-input-library);
+  --theme-brand-brick-target: var(--theme-palette-graph-target);
+  --theme-brand-brick-output: var(--theme-palette-graph-output);
+  --theme-brand-brick-output-xtream: var(--theme-palette-graph-output-xtream);
+  --theme-brand-brick-output-m3u: var(--theme-palette-graph-output-m3u);
+  --theme-brand-brick-output-hdhomerun: var(--theme-palette-graph-output-hdhomerun);
+  --theme-brand-brick-output-strm: var(--theme-palette-graph-output-strm);
+  --theme-brand-brick-port: var(--theme-palette-graph-port);
+  --theme-brand-brick-port-border: var(--theme-palette-graph-port-border);
+  --theme-brand-brick-port-hover: var(--theme-palette-graph-port-hover);
+  --theme-brand-graph-grid-1: var(--theme-palette-graph-grid-1);
+  --theme-brand-graph-grid-2: var(--theme-palette-graph-grid-2);
+
+  --theme-brand-login-logo: var(--theme-palette-login-logo);
+  --theme-brand-series-title: var(--theme-palette-series-title);
+  --theme-brand-series-backdrop-overlay: var(--theme-palette-series-backdrop-overlay);
+
+  --primary-color: var(--theme-brand-primary);
+  --secondary-color: var(--theme-brand-secondary);
+  --theme-color: var(--theme-brand-primary);
+
+  --background-color: var(--theme-brand-page);
+  --particle-flow-background-color: var(--theme-brand-page-alt);
+  --particle-flow-background-accent-color-1: var(--theme-brand-particle-1);
+  --particle-flow-background-accent-color-2: var(--theme-brand-particle-2);
+  --particle-flow-background-alpha-boost: var(--theme-brand-particle-alpha-boost);
+
+  --text-color: var(--theme-brand-text);
+  --modest-text-color: var(--theme-brand-text-muted);
+  --menu-text-color: var(--theme-brand-text-menu);
+  --menu-icon-color: var(--theme-brand-text-muted);
+  --menu-text-active-color: var(--theme-brand-primary);
+  --card-color: var(--theme-brand-text-card);
+  --action-item-color: var(--theme-brand-text-inverse);
+  --menu-item-hover-color: var(--theme-brand-text);
+  --icon-button-hover-color: var(--theme-brand-text);
+  --toggle-switch-toggle-color: var(--theme-brand-text-inverse);
+  --tool-button-color: var(--theme-brand-text-inverse);
+  --tool-button-hover-color: var(--theme-brand-text-inverse);
+  --toolbar-button-hover-color: var(--theme-brand-text-inverse);
+  --tree-hover-color: var(--theme-brand-text-inverse);
+  --tree-expander-hover-color: var(--theme-brand-text-inverse);
+  --tooltip-color: var(--theme-brand-text);
+  --popup-color: var(--theme-brand-text);
+  --playlist-color: var(--theme-brand-text-card);
+  --playlist-rating-color: var(--theme-brand-text-rating);
+  --sidebar-toggle-color: var(--theme-brand-text);
+  --sidebar-toggle-hover-color: var(--theme-brand-text-muted);
+  --hint-color: var(--theme-brand-text-soft);
+  --tree-count-color: var(--theme-brand-text-soft);
+  --label-color: var(--theme-brand-text-label);
+  --title-label-color: var(--theme-brand-text-title);
+  --menu-button-color: var(--theme-brand-text-menu);
+  --menu-button-hover-color: var(--theme-brand-text-header);
+  --menu-button-warn-color: var(--theme-brand-text-menu-warn);
+  --menu-button-warn-hover-color: var(--theme-brand-text-menu-warn-strong);
+  --app-header-color: var(--theme-brand-text-header);
+  --table-header-background-color: var(--theme-brand-surface-toolbar);
+  --table-card-background-color: var(--theme-brand-surface-muted);
+  --table-alternate-background-color: var(--theme-brand-surface-toolbar);
+  --table-border-color: var(--theme-brand-border-table);
+  --playlist-rating-background-color: var(--theme-brand-surface-toolbar-alt);
+  --scrollbar-track-color: var(--theme-brand-surface-toolbar-alt);
+  --scrollbar-handle-color: var(--theme-brand-text-muted);
+  --scrollbar-track-shadow: var(--theme-brand-scrollbar-track-shadow);
+
+  --border-color: var(--theme-brand-border);
+  --hover-border-color: var(--theme-brand-border-hover);
+  --input-border-color: var(--theme-brand-border);
+  --input-focus-border-color: var(--theme-brand-border-focus);
+  --popup-border-color: var(--theme-brand-border-popup);
+  --card-border-color: var(--theme-brand-border-strong);
+  --tag-border-color: var(--theme-brand-border-soft);
+  --tabset-border-color: var(--theme-brand-border-tabset);
+  --icon-button-hover-border-color: var(--theme-brand-text-header);
+  --text-button-border-color: var(--theme-brand-primary-soft);
+  --text-button-primary-border-color: var(--theme-brand-primary-border);
+  --text-button-secondary-border-color: var(--theme-brand-secondary-border);
+  --text-button-disabled-border-color: var(--theme-brand-text-disabled-border);
+  --checkbox-border-radius: 4px;
+
+  --action-item-background-color: var(--theme-brand-primary-soft);
+  --input-background-color: var(--theme-brand-surface-input);
+  --button-background-color: var(--theme-brand-primary);
+  --menu-item-hover-background-color: var(--theme-brand-primary-hover-soft);
+  --menu-item-active-background-color: var(--theme-brand-primary-active-soft);
+  --card-background-color: var(--theme-brand-surface);
+  --sub-card-background-color: var(--theme-brand-surface-soft);
+  --card-background-color-darker: var(--theme-brand-surface-strong);
+  --popup-background-color: var(--theme-brand-surface);
+  --tooltip-background-color: var(--theme-brand-surface-tooltip);
+  --app-header-background-color: var(--theme-brand-surface-header);
+  --menu-button-background-color: var(--theme-brand-surface-menu);
+  --menu-button-hover-background-color: var(--theme-brand-primary-menu-hover);
+  --menu-button-warn-hover-background-color: var(--theme-brand-tag-banned-surface);
+  --icon-button-background-color: var(--button-background-color);
+  --icon-button-color: var(--theme-brand-text);
+  --icon-button-hover-background-color: var(--theme-brand-primary-tool-hover);
+  --tool-button-background-color: var(--theme-brand-surface-toolbar);
+  --tool-button-hover-background-color: var(--theme-brand-primary-tool-hover);
+  --toolbar-background-color: var(--theme-brand-surface-toolbar);
+  --toolbar-bg-color: var(--theme-brand-surface-toolbar-alt);
+  --toolbar-button-hover-background-color: var(--theme-brand-primary-tool-hover);
+  --tabset-background-color: var(--theme-brand-surface-tabset);
+  --tab-background-color: var(--theme-brand-surface-tab);
+  --tab-hover-background-color: var(--theme-brand-primary-tab-hover);
+  --tab-active-background-color: var(--theme-brand-primary-tab-active);
+  --tab-active-border-color: var(--theme-brand-primary-tab-border);
+  --tab-hover-color: var(--theme-brand-text-inverse);
+  --tab-active-color: var(--theme-brand-text-inverse);
+  --checkbox-background-color: var(--theme-brand-surface-tab);
+  --checkbox-hover-background-color: var(--theme-brand-primary-tool-hover);
+  --checkbox-checked-background-color: var(--theme-brand-primary-tool-hover);
+  --option-active-background-color: var(--theme-brand-surface-option-active);
+  --option-active-color: var(--theme-brand-text-option-active);
+  --shocase-card-background: var(--theme-brand-surface-showcase);
+  --breadcrumbs-background-color: var(--theme-brand-surface-breadcrumbs);
+  --breadcrumb-background-color: var(--theme-brand-surface-breadcrumb);
+  --breadcrumb-active-background-color: var(--theme-brand-positive-soft);
+  --breadcrumb-color: var(--theme-brand-text-breadcrumb);
+  --breadcrumb-active-color: var(--theme-brand-text-option-active);
+  --tree-hover-background-color: var(--theme-brand-primary-tree-hover);
+
+  --tertiary-background-color: var(--theme-brand-tertiary-surface);
+  --tertiary-border-color: var(--theme-brand-tertiary-border);
+  --tertiary-text-color: var(--theme-brand-tertiary-text);
+  --tertiary-title-text-color: var(--theme-brand-tertiary-title);
+  --quaternary-background-color: var(--theme-brand-positive-soft);
+  --quaternary-border-color: var(--theme-brand-positive-border);
+  --quaternary-text-color: var(--theme-brand-positive-text);
+  --quaternary-title-text-color: var(--theme-brand-positive-title);
+  --quaternary-hover-background-color: var(--theme-brand-positive-hover);
+
+  --text-button-background-color: var(--theme-brand-surface-menu);
+  --text-button-color: var(--theme-brand-text-menu);
+  --text-button-hover-color: var(--theme-brand-text);
+  --text-button-hover-background-color: var(--theme-brand-primary-hover);
+  --text-button-primary-background-color: var(--theme-brand-primary);
+  --text-button-primary-color: var(--theme-brand-text-inverse);
+  --text-button-primary-hover-background-color: var(--theme-brand-primary-hover-strong);
+  --text-button-primary-hover-color: var(--theme-brand-text-inverse);
+  --text-button-secondary-background-color: var(--theme-brand-secondary-soft);
+  --text-button-secondary-color: color-mix(
+    in srgb,
+    var(--theme-brand-danger) 72%,
+    var(--theme-brand-text-inverse)
+  );
+  --text-button-secondary-hover-background-color: var(--theme-brand-secondary-hover);
+  --text-button-secondary-hover-color: color-mix(
+    in srgb,
+    var(--theme-brand-danger-strong) 74%,
+    var(--theme-brand-text-inverse)
+  );
+  --text-button-tertiary-background-color: var(--theme-brand-tertiary-surface);
+  --text-button-tertiary-color: var(--theme-brand-tertiary-title);
+  --text-button-tertiary-hover-background-color: var(--theme-brand-tertiary-hover);
+  --text-button-tertiary-hover-color: var(--theme-brand-tertiary-hover-text);
+  --text-button-tertiary-border-color: var(--theme-brand-tertiary-border);
+  --text-button-active-background-color: var(--theme-brand-positive-hover);
+  --text-button-active-color: var(--theme-brand-positive-text);
+  --text-button-active-hover-background-color: var(--theme-brand-positive-soft);
+  --text-button-active-hover-color: var(--theme-brand-positive-title);
+  --text-button-active-border-color: var(--theme-brand-positive-border);
+  --text-button-disabled-background-color: var(--theme-brand-text-disabled-surface);
+  --text-button-disabled-color: var(--theme-brand-text-disabled);
+
+  --toggle-switch-on-background-color: var(--theme-brand-positive-strong);
+  --toggle-switch-off-background-color: var(--theme-brand-border-soft);
+  --toggle-switch-toggle-shadow: var(--theme-brand-toggle-shadow);
+
+  --stream-tech-chip-container-color: var(--theme-brand-chip-container-text);
+  --stream-tech-chip-container-background-color: var(--theme-brand-chip-container-surface);
   --stream-tech-chip-container-border-color: transparent;
-  --stream-tech-chip-video-codec-color: #83da91;
-  --stream-tech-chip-video-codec-background-color: #2b3e30;
+  --stream-tech-chip-video-codec-color: var(--theme-brand-chip-video-text);
+  --stream-tech-chip-video-codec-background-color: var(--theme-brand-chip-video-surface);
   --stream-tech-chip-video-codec-border-color: transparent;
-  --stream-tech-chip-resolution-color: #e09393;
-  --stream-tech-chip-resolution-background-color: #462d2f;
+  --stream-tech-chip-resolution-color: var(--theme-brand-chip-resolution-text);
+  --stream-tech-chip-resolution-background-color: var(--theme-brand-chip-resolution-surface);
   --stream-tech-chip-resolution-border-color: transparent;
-  --stream-tech-chip-fps-color: #ffc078;
-  --stream-tech-chip-fps-background-color: #473426;
+  --stream-tech-chip-fps-color: var(--theme-brand-chip-fps-text);
+  --stream-tech-chip-fps-background-color: var(--theme-brand-chip-fps-surface);
   --stream-tech-chip-fps-border-color: transparent;
-  --stream-tech-chip-audio-codec-color: #faa2c1;
-  --stream-tech-chip-audio-codec-background-color: #432c36;
+  --stream-tech-chip-audio-codec-color: var(--theme-brand-chip-audio-text);
+  --stream-tech-chip-audio-codec-background-color: var(--theme-brand-chip-audio-surface);
   --stream-tech-chip-audio-codec-border-color: transparent;
-  --stream-tech-chip-audio-channels-color: #ea97b5;
-  --stream-tech-chip-audio-channels-background-color: #432c36;
+  --stream-tech-chip-audio-channels-color: var(--theme-brand-chip-audio-channels-text);
+  --stream-tech-chip-audio-channels-background-color: var(--theme-brand-chip-audio-surface);
   --stream-tech-chip-audio-channels-border-color: transparent;
 
   --discord-color: #5865f2;
-  --documentation-color: #2bbf5a;
-  --github-color: #ffffff;
-
-  --app-header-background-color: rgba(7, 12, 24, 0.82);
-  --app-header-color: #93c5fd;
-
-  --pulse-color-1: #64748b;
-  --pulse-color-2: #334155;
-
-  --tag-padding: 0.3rem 0.5rem;
-  --tag-border-radius: 0.5rem;
-  --tag-border-color: #3a3a3a;
-  --tag-color: #e0e0e0;
-  --tag-background-color: #2b2e3688;
-
-  --tag-active-color: #49dc7f;
-  --tag-active-background-color: #1e2d2588;
-  --tag-active-border-color: #2b6140;
-
-  --tag-inactive-color: #6f6f6f;
-  --tag-inactive-background-color: #3a3a3a88;
-  --tag-inactive-border-color: #555;
-
-  --tag-alt-active-color: #d070e7;
-  --tag-alt-active-background-color: #311a3888;
-  --tag-alt-active-border-color: #5d2f69;
-
-  --tag-status-expired-color: #efda8f;
-  --tag-status-expired-background-color: #39332088;
-  --tag-status-expired-border-color: #b69e5c;
-
-  --tag-status-banned-color: #dd7573;
-  --tag-status-banned-background-color: #4c343488;
-  --tag-status-banned-border-color: #755252;
-
-  --tag-status-trial-color: #49dcdc;
-  --tag-status-trial-background-color: #1e252d88;
-  --tag-status-trial-border-color: #2b4c61;
-
-  --tag-status-pending-color: #49dcdc;
-  --tag-status-pending-background-color: #1e252d88;
-  --tag-status-pending-border-color: #2b4c61;
-
-  --popup-background-color: rgba(15, 23, 42, 0.78);
-  --popup-shadow: 0 8px 24px rgba(0, 0, 0, 0.4),
-    inset 0 0 10px rgba(255, 255, 255, 0.08);
-
-  --popup-border-color: rgba(96, 165, 250, 0.26);
-  --popup-color: #e6edf7;
-
-  --tooltip-background-color: rgba(15, 23, 42, 0.94);
-  --tooltip-color: #e6edf7;
-
-  --attention-color: #f57170;
-  --warn-color: #e1b842;
-  --active-color: #3ae093;
-
-  --output-xtream-color: #06b6d4;
-  --output-m3u-color: #10b981;
-  --output-hdhomerun-color: #6366f1;
-  --output-strm-color: #f43f5e;
-
-  --tag-live-background-color: #075b4188;
-  --tag-live-border-color: #10b981;
-  --tag-video-background-color: #035b6e88;
-  --tag-video-border-color: #06b6d4;
-  --tag-series-background-color: #3c3f9f88;
-  --tag-series-border-color: #6366f1;
-
-  --toastr-success-color: #ffffff;
-  --toastr-success-background-color: #22c55e66;
-  --toastr-error-color: #ffffff;
-  --toastr-error-background-color: #ef444466;
-  --toastr-info-color: #ffffff;
-  --toastr-info-background-color: #3b82f666;
-  --toastr-warning-color: #ffffff;
-  --toastr-warning-background-color: #f59e0b66;
-
-  --hint-color: #7f8ea5;
-  --label-color: #8ec5ff;
-
-  --playlist-color: #aeb0b2;
-  --playlist-rating-color: #ffffff;
-  --playlist-rating-background-color: #121621;
-
-  --sidebar-toggle-color: #ffffff;
-  --sidebar-toggle-hover-color: #8ea2bf;
-  --hover-border-color: rgba(96, 165, 250, 0.46);
-  --spinner-color: rgba(255, 255, 255, 0.4);
-  --spinner-highlight-color: #60a5fa;
-
-  --tree-count-color: #7f8ea5;
-  --tree-hover-background-color: #2563eb66;
-  --tree-hover-color: white;
-  --tree-expander-hover-color: white;
-  --tool-button-background-color: #33415588;
-  --tool-button-color: #fff;
-  --tool-button-hover-color: #ffffff;
-  --tool-button-hover-background-color: #2563eb88;
-
-  --toolbar-background-color: #1e293b88;
-  --toolbar-button-hover-color: #ffffff;
-  --toolbar-button-hover-background-color: #2563eb88;
-
-  --ok-color: #22c55e;
-
-  --card-background-color-darker: rgba(22, 26, 36, 0.55);
-  --card-border-color: rgba(80, 130, 255, 0.2);
-
-  --title-label-color: #6495b1;
-
-  --border-radius: 8px;
-
-  --icon-button-border-radius: 4px;
-  --icon-button-background-color: var(--button-background-color);
-  --icon-button-color: #ffffff;
-  --icon-button-hover-background-color: #2563eb88;
-
-  --icon-button-hover-border-color: #93c5fd;
-
-  --menu-button-color: #d8e1ef;
-  --menu-button-background-color: rgba(30, 41, 59, 0.45);
-
-  --menu-button-hover-color: #93c5fd;
-  --menu-button-hover-background-color: rgba(37, 99, 235, 0.3);
-
-  --menu-button-warn-color: #b96665;
-  --menu-button-warn-hover-color: #dd7573;
-  --menu-button-warn-hover-background-color: #4c3434;
-
-  --scrollbar-track-color: #334155;
-  --scrollbar-handle-color: #64748b;
-
-  --tabset-background-color: rgba(68, 71, 90, 0.3);
-  --tabset-border-color: #535353;
-  --tab-background-color: #44475A88;
-  --tab-hover-background-color: #2f6db788;
-  --tab-hover-color: #fdfdfd;
-  --tab-active-background-color: #1f4f8f88;
-  --tab-active-color: #fdfdfd;
-  --tab-active-border-color: #4f8ffb;
-
-  --table-border-color: #44475a;
-
-  --checkbox-background-color: #44475A88;
-  --checkbox-hover-background-color: #006fee88;
-  --checkbox-checked-background-color: #006fee88;
-  --checkbox-border-radius: 4px;
-
-  --option-active-background-color: #50FA7B88;
-  --option-active-color: #000;
-
-  --shocase-card-background: #4b4b4b;
-
-  --breadcrumbs-background-color: #20273388;
-  --breadcrumb-background-color: #4e545d88;
-  --breadcrumb-color: #c4c4c4;
-  --breadcrumb-active-background-color: #4ad96e88;
-  --breadcrumb-active-color: #000;
-
-  --menu-icon-color-update: #A3D8FF;
-  --menu-icon-color-user: #0ABAB5;
-  --menu-icon-color-api_server: #FF9D23;
-  --menu-icon-color-main_config: #FF2DF1;
-  --menu-icon-color-status: #F9E400;
-
-  --code-identifier-color: #569cd6;
-  --code-var-access-color: #9cdcfe;
-  --code-field-color: #bb8953;
-  --code-property-color: #9a652f;
-  --code-literal-color: #65a181;
-  --code-num-literal-color: #6796ba;
-  --code-built-in-function-color: #fac46c;
-  --code-reserved-color: #e98863;
-  --code-regex-color: #bb8953;
-  --code-enum-color: #65a181;
-  --code-range-color: #6796ba;
-  --code-op-color: #569cd6;
-  --code-comparison-background-color: #20242988;
-  --code-comparison-color: #ffffff;
-  --code-bracket-1-color: #569CD6;
-  --code-bracket-2-color: #C586C0;
-  --code-bracket-3-color: #B5CEA8;
-  --code-editor-background-color: #1e1e1e88;
-  --code-editor-color: #d4d4d4;
-  --code-any-match-color: #fa5f2d;
-  --code-null-literal-color: #fa5f2d;
-
-  --toolbar-bg-color: #161b25;
-
-  --epg-program-background-color: #1a222b;
-  --epg-program-color: #ffffff;
-  --epg-program-active-background-color: #263140;
-  --epg-program-active-color: #ffffff;
-  --epg-program-time-color: #707f99;
-  --epg-program-active-time-color: #778295;
-
-  --glass-border-color: rgba(255, 255, 255, 0.15);
-  --glass-background-color: rgba(255, 255, 255, 0.1);
-  --glass-shadow-color: rgba(0, 0, 0, 0.1);
-  --glass-background-gradient-color-1: rgba(255, 255, 255, 0);
-  --glass-background-gradient-color-2: rgba(255, 255, 255, 0.1);
-  --glass-input-border-color: rgba(255, 255, 255, 0.15);
-  --glass-input-background-color: rgba(0, 0, 0, 0.15);
-
-  --graph-paper-line-color-1: #e0e0e030;
-  --graph-paper-line-color-2: #c0c0c030;
-
-
-  /* INPUT BLOCKS — cool blues (distinct per type) */
-
-  --brick-input-xtream-border-color: #1565c0cc;
-  --brick-input-xtream-background-color: #1565c088;
-  --brick-input-xtream-shadow-color: #1565c080;
-
-  --brick-input-m3u-border-color: #409affcc;
-  --brick-input-m3u-background-color: #409aff88;
-  --brick-input-m3u-shadow-color: #409aff80;
-
-  --brick-input-library-border-color: #64b5f6cc;
-  --brick-input-library-background-color: #64b5f688;
-  --brick-input-library-shadow-color: #64b5f680;
-
-  /* TARGET BLOCKS — balanced green/teal */
-  --brick-target-border-color: #2aa198cc;
-  /* Solarized teal */
-  --brick-target-background-color: #2aa19888;
-  --brick-target-shadow-color: #2aa19880;
-
-  /* GENERIC OUTPUT — warm amber */
-  --brick-output-border-color: #f39c12cc;
-  --brick-output-background-color: #f39c1288;
-  --brick-output-shadow-color: #f39c1280;
-
-  /* INDIVIDUAL OUTPUT TYPES — distinct but cohesive */
-  --brick-output-xtream-border-color: #0099ffcc;
-  /* vivid sky blue */
-  --brick-output-xtream-background-color: #0099ff88;
-  --brick-output-xtream-shadow-color: #0099ff80;
-
-  --brick-output-m3u-border-color: #8bc34acc;
-  /* light green */
-  --brick-output-m3u-background-color: #8bc34a88;
-  --brick-output-m3u-shadow-color: #8bc34a80;
-
-  --brick-output-hdhomerun-border-color: #9b59b6cc;
-  /* purple */
-  --brick-output-hdhomerun-background-color: #9b59b688;
-  --brick-output-hdhomerun-shadow-color: #9b59b680;
-
-  --brick-output-strm-border-color: #e74c3ccc;
-  /* strong red */
-  --brick-output-strm-background-color: #e74c3c88;
-  --brick-output-strm-shadow-color: #e74c3c80;
-
-  --brick-port-background-color: #587293;
-  --brick-port-border-color: #ffffff;
-  --brick-port-valid-background-color: #22c55e;
-  --brick-port-invalid-background-color: #e74c3c;
-  --source-editor-delete-color: #ef4444;
-
-  --source-editor-line-color: #ffffff;
-  --source-editor-active-line-color: #22c55e;
-
-  --source-editor-pending-line-color: #f59e0b;
-  --brick-port-hover-color: #f59e0b;
-
-  --selection-area-border-color: rgba(0, 120, 215, 0.9);
-  --selection-area-background-color: rgba(0, 120, 215, 0.12);
-}
-
-body[data-theme="bright"] {
-
-  --primary-color: #2f6fa8;
-  --secondary-color: #d46a6a;
-  --background-color: #e9eff4;
-  --particle-flow-background-color: #477fad;
-  --particle-flow-background-accent-color-1: #154679;
-  --particle-flow-background-accent-color-2: #9bb8cf;
-  --particle-flow-background-alpha-boost: 1.45;
-
-  --text-color: #1f2f3f;
-  --modest-text-color: #5a7084;
-  --border-color: #cfdbe6;
-
-
-  --card-color: #475569;
-  --card-background-color: #f7fbff;
-  --sub-card-background-color: #f1f6fb;
-  --card-background-color-darker: #eaf1f8;
-  --card-border-color: #cfdae6;
-
-  /* Shadows & Depth */
-  --popup-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
-  --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
-
-  /* Menu & Navigation */
-  --menu-text-color: #30465b;
-  --menu-icon-color: #597286;
-  --menu-item-hover-background-color: rgba(47, 111, 168, 0.1);
-  --menu-item-hover-color: #2b5f8a;
-  --menu-item-active-background-color: rgba(47, 111, 168, 0.16);
-  --menu-text-active-color: #2f6fa8;
-
-  --sidebar-toggle-color: #475569;
-  --sidebar-toggle-hover-color: #3b82f6;
-
-  /* UI Components */
-  --action-item-background-color: rgba(37, 99, 235, 0.06);
-  --action-item-color: #0f172a;
-
-  --input-background-color: transparent;
-  --input-border-color: #cbd5e1;
-  --input-focus-border-color: #3b82f6;
-
-  --button-background-color: #2f6fa8;
-  --icon-button-background-color: #2f6fa8;
-  --icon-button-hover-background-color: #25597e;
-  --icon-button-hover-border-color: #8fb0cb;
-  --icon-button-color: #121525;
-  --icon-button-hover-color: #0046ff;
-
-  --text-button-background-color: #e6eef6;
-  --text-button-border-color: #c7d7e5;
-  --text-button-hover-background-color: #d8e5f1;
-  --text-button-color: #3c5368;
-  --text-button-hover-color: #2c4256;
-  --text-button-primary-background-color: #2f6fa8;
-  --text-button-primary-hover-background-color: #275f90;
-  --text-button-primary-color: #ffffff;
-  --text-button-primary-hover-color: #ffffff;
-  --text-button-primary-border-color: #3b82f6;
-
-  --text-button-secondary-background-color: #fee2e2;
-  --text-button-secondary-color: #ef4444;
-  --text-button-secondary-hover-background-color: #fecaca;
-  --text-button-secondary-hover-color: #dc2626;
-  --text-button-secondary-border-color: #fca5a5;
-
-  --text-button-active-background-color: #dcfce7;
-  --text-button-active-color: #166534;
-  --text-button-active-hover-background-color: #bbf7d0;
-  --text-button-active-hover-color: #15803d;
-  --text-button-active-border-color: #86efac;
-
-  --text-button-disabled-border-color: #434343;
-  --text-button-disabled-background-color: #717171;
-  --text-button-disabled-color: #9b9b9b;
-
-  /* Form Elements */
-  --toggle-switch-on-background-color: #22c55e;
-  --toggle-switch-off-background-color: #e2e8f0;
-  --toggle-switch-toggle-color: #ffffff;
-
-  --checkbox-background-color: #f8fafc;
-  --checkbox-hover-background-color: #eff6ff;
-  --checkbox-checked-background-color: #3b82f6;
-
-  /* Tables */
-  --table-header-background-color: #e4ecf4;
-  --table-card-background-color: #f7fbff;
-  --table-alternate-background-color: #f0f6fc;
-  --table-border-color: #cfdae6;
-
-  /* Tags & Statuses */
-  --tag-background-color: #f1f5f9;
-  --tag-color: #475569;
-  --tag-border-color: #e2e8f0;
-
-  --tag-active-background-color: #f0fdf4;
-  --tag-active-color: #166534;
-  --tag-active-border-color: #bbf7d0;
-
-  --tag-inactive-background-color: #f8fafc;
-  --tag-inactive-color: #94a3b8;
-  --tag-inactive-border-color: #e2e8f0;
-
-  --tag-alt-active-background-color: #faf5ff;
-  --tag-alt-active-color: #6b21a8;
-  --tag-alt-active-border-color: #e9d5ff;
-
-  --tag-status-expired-background-color: #fffbeb;
-  --tag-status-expired-color: #92400e;
-  --tag-status-expired-border-color: #fde68a;
-
-  --tag-status-banned-background-color: #fef2f2;
-  --tag-status-banned-color: #991b1b;
-  --tag-status-banned-border-color: #fecaca;
-
-  --tag-status-trial-background-color: #ecfeff;
-  --tag-status-trial-color: #155e75;
-  --tag-status-trial-border-color: #a5f3fc;
-
-  --tag-status-pending-background-color: #eff6ff;
-  --tag-status-pending-color: #1e40af;
-  --tag-status-pending-border-color: #bfdbfe;
-
-  --tag-live-background-color: #f0fdf4;
-  --tag-live-border-color: #22c55e;
-  --tag-video-background-color: #ecfeff;
-  --tag-video-border-color: #06b6d4;
-  --tag-series-background-color: #eef2ff;
-  --tag-series-border-color: #6366f1;
-
-  /* Toastr Notifications */
-  --toastr-success-background-color: #d7eadf;
-  --toastr-error-background-color: #f1dcdc;
-  --toastr-info-background-color: #dbe8f3;
-  --toastr-warning-background-color: #f3ead4;
-
-  --toastr-success-color: #166534;
-  --toastr-error-color: #991b1b;
-  --toastr-info-color: #1e40af;
-  --toastr-warning-color: #92400e;
-
-  /* Popups & Tooltips */
-  --popup-background-color: #f6fafeef;
-  --popup-color: #1e293b;
-  --popup-border-color: #cfdae6;
-  --tooltip-background-color: #2a3f54;
-  --tooltip-color: #eff5fb;
-
-  /* Header */
-  --app-header-background-color: #ffffffdd;
-  --app-header-color: #2563eb;
-
-  /* Utilities */
-  --pulse-color-1: #e2e8f0;
-  --pulse-color-2: #edf2f7;
-  --hint-color: #94a3b8;
-  --label-color: #3b82f6;
-  --title-label-color: #64748b;
-  --ok-color: #16a34a;
-  --warn-color: #eab308;
-  --attention-color: #ef4444;
-  --active-color: #22c55e;
-
-  /* EPG */
-  --epg-program-background-color: #ffffff;
-  --epg-program-color: #334155;
-  --epg-program-active-background-color: #f1f5f9;
-  --epg-program-active-color: #1e293b;
-  --epg-program-time-color: #94a3b8;
-  --epg-program-active-time-color: #475569;
-
-  /* Tabs */
-  --tabset-background-color: #e6edf4;
-  --tab-background-color: #f3f8fd;
-  --tab-hover-background-color: #dce8f3;
-  --tab-hover-color: #2f6fa8;
-  --tab-active-background-color: #d1e1ef;
-  --tab-active-color: #25557e;
-  --tab-active-border-color: #4f81ad;
-
-  --tabset-border-color: #e2e8f0;
-
-  /* Code Editor (Fancy Light) */
-  --code-editor-background-color: #fdfdfd;
-  --code-editor-color: #334155;
-  --code-identifier-color: #0366d6;
-  --code-var-access-color: #005cc5;
-  --code-field-color: #e36209;
-  --code-property-color: #24292e;
-  --code-literal-color: #28a745;
-  --code-num-literal-color: #005cc5;
-  --code-built-in-function-color: #6f42c1;
-  --code-reserved-color: #d73a49;
-  --code-regex-color: #032f62;
-  --code-enum-color: #e36209;
-  --code-range-color: #005cc5;
-  --code-op-color: #d73a49;
-  --code-comparison-background-color: rgba(200, 200, 200, 0.6);
-  --code-comparison-color: #1e293b;
-  --code-bracket-1-color: #005cc5;
-  --code-bracket-2-color: #6f42c1;
-  --code-bracket-3-color: #e36209;
-
-  /* Glassmorphism Refined */
-  --glass-border-color: rgba(0, 0, 0, 0.08);
-  --glass-background-color: rgba(255, 255, 255, 0.4);
-  --glass-shadow-color: rgba(0, 0, 0, 0.05);
-  --glass-background-gradient-color-1: rgba(255, 255, 255, 0.5);
-  --glass-background-gradient-color-2: rgba(255, 255, 255, 0.2);
-  --glass-input-border-color: rgba(0, 0, 0, 0.1);
-  --glass-input-background-color: rgba(255, 255, 255, 0.3);
-
-  /* Brick Blocks (Node Graph Aesthetic) */
-  --brick-input-xtream-background-color: #dbeafe;
-  --brick-input-xtream-border-color: #3b82f6;
-  --brick-input-m3u-background-color: #f0f9ff;
-  --brick-input-m3u-border-color: #0ea5e9;
-  --brick-input-library-background-color: #f5f3ff;
-  --brick-input-library-border-color: #8b5cf6;
-
-  --brick-target-background-color: #f0fdf4;
-  --brick-target-border-color: #22c55e;
-
-  --brick-output-background-color: #fffbeb;
-  --brick-output-border-color: #f59e0b;
-
-  --brick-output-xtream-background-color: #ecfeff;
-  --brick-output-xtream-border-color: #06b6d4;
-  --brick-output-m3u-background-color: #f0fdfa;
-  --brick-output-m3u-border-color: #14b8a6;
-  --brick-output-hdhomerun-background-color: #f5f3ff;
-  --brick-output-hdhomerun-border-color: #8b5cf6;
-  --brick-output-strm-background-color: #fff1f2;
-  --brick-output-strm-border-color: #f43f5e;
-
-  /* Scrollbar */
-  --scrollbar-track-color: #f1f5f9;
-  --scrollbar-handle-color: #cbd5e1;
-
-  /* Misc */
-  --source-editor-line-color: #334155;
-  --source-editor-active-line-color: #16a34a;
-  --source-editor-pending-line-color: #eab308;
-  --breadcrumb-background-color: #f1f5f9;
-  --breadcrumb-color: #64748b;
-  --breadcrumb-active-background-color: #dcfce7;
-  --breadcrumb-active-color: #166534;
-
+  --documentation-color: var(--theme-brand-success-alt);
+  --github-color: var(--theme-brand-text-inverse);
+
+  --pulse-color-1: var(--theme-brand-text-muted);
+  --pulse-color-2: var(--theme-brand-surface-toolbar-alt);
+  --tag-color: var(--theme-brand-text-card);
+  --tag-background-color: var(--theme-brand-tag-surface);
+  --tag-active-color: var(--theme-brand-tag-active-text);
+  --tag-active-background-color: var(--theme-brand-tag-active-surface);
+  --tag-active-border-color: var(--theme-brand-tag-active-border);
+  --tag-inactive-color: var(--theme-brand-text-soft);
+  --tag-inactive-background-color: var(--theme-brand-surface-breadcrumb);
+  --tag-inactive-border-color: var(--theme-brand-border-muted);
+  --tag-alt-active-color: var(--theme-brand-tag-alt-text);
+  --tag-alt-active-background-color: var(--theme-brand-tag-alt-surface);
+  --tag-alt-active-border-color: var(--theme-brand-tag-alt-border);
+  --tag-status-expired-color: var(--theme-brand-tag-expired-text);
+  --tag-status-expired-background-color: var(--theme-brand-tag-expired-surface);
+  --tag-status-expired-border-color: var(--theme-brand-tag-expired-border);
+  --tag-status-banned-color: var(--theme-brand-tag-banned-text);
+  --tag-status-banned-background-color: var(--theme-brand-tag-banned-surface);
+  --tag-status-banned-border-color: var(--theme-brand-tag-banned-border);
+  --tag-status-trial-color: var(--theme-brand-info-strong);
+  --tag-status-trial-background-color: var(--theme-brand-info-surface);
+  --tag-status-trial-border-color: var(--theme-brand-info-border);
+  --tag-status-pending-color: var(--theme-brand-info-strong);
+  --tag-status-pending-background-color: var(--theme-brand-info-surface);
+  --tag-status-pending-border-color: var(--theme-brand-info-border);
+
+  --attention-color: var(--theme-brand-danger);
+  --warn-color: var(--theme-brand-warning);
+  --active-color: var(--theme-brand-active);
+  --ok-color: var(--theme-brand-positive);
+  --output-xtream-color: var(--theme-brand-info);
+  --output-m3u-color: var(--theme-brand-success-alt);
+  --output-hdhomerun-color: var(--theme-brand-quaternary);
+  --output-strm-color: var(--theme-brand-emphasis);
+  --tag-live-background-color: var(--theme-brand-live-surface);
+  --tag-live-border-color: var(--theme-brand-success-alt);
+  --tag-video-background-color: var(--theme-brand-video-surface);
+  --tag-video-border-color: var(--theme-brand-info);
+  --tag-series-background-color: var(--theme-brand-series-surface);
+  --tag-series-border-color: var(--theme-brand-quaternary);
+
+  --toastr-success-color: var(--theme-brand-text-inverse);
+  --toastr-success-background-color: color-mix(in srgb, var(--theme-brand-positive) 40%, transparent);
+  --toastr-error-color: var(--theme-brand-text-inverse);
+  --toastr-error-background-color: color-mix(in srgb, var(--theme-brand-danger-strong) 40%, transparent);
+  --toastr-info-color: var(--theme-brand-text-inverse);
+  --toastr-info-background-color: color-mix(in srgb, var(--theme-brand-primary-border) 40%, transparent);
+  --toastr-warning-color: var(--theme-brand-text-inverse);
+  --toastr-warning-background-color: color-mix(in srgb, var(--theme-brand-warning-strong) 40%, transparent);
+  --toastr-shadow: var(--theme-brand-toast-shadow);
+
+  --spinner-color: color-mix(in srgb, var(--theme-brand-text-inverse) 40%, transparent);
+  --spinner-highlight-color: var(--theme-brand-primary-spinner);
+  --popup-shadow: var(--theme-brand-popup-shadow);
+  --card-shadow: var(--theme-brand-card-shadow);
+
+  --menu-icon-color-update: var(--theme-brand-menu-icon-update);
+  --menu-icon-color-user: var(--theme-brand-menu-icon-user);
+  --menu-icon-color-api_server: var(--theme-brand-menu-icon-api-server);
+  --menu-icon-color-main_config: var(--theme-brand-menu-icon-main-config);
+  --menu-icon-color-status: var(--theme-brand-menu-icon-status);
+
+  --code-identifier-color: var(--theme-brand-code-identifier);
+  --code-var-access-color: var(--theme-brand-code-var-access);
+  --code-field-color: var(--theme-brand-code-field);
+  --code-property-color: var(--theme-brand-code-property);
+  --code-literal-color: var(--theme-brand-code-literal);
+  --code-num-literal-color: var(--theme-brand-code-num);
+  --code-built-in-function-color: var(--theme-brand-code-builtin);
+  --code-reserved-color: var(--theme-brand-code-reserved);
+  --code-regex-color: var(--theme-brand-code-regex);
+  --code-enum-color: var(--theme-brand-code-enum);
+  --code-range-color: var(--theme-brand-code-range);
+  --code-op-color: var(--theme-brand-code-op);
+  --code-comparison-background-color: var(--theme-brand-surface-code-compare);
+  --code-comparison-color: var(--theme-brand-code-compare-text);
+  --code-bracket-1-color: var(--theme-brand-code-bracket-1);
+  --code-bracket-2-color: var(--theme-brand-code-bracket-2);
+  --code-bracket-3-color: var(--theme-brand-code-bracket-3);
+  --code-editor-background-color: var(--theme-brand-surface-code);
+  --code-editor-color: var(--theme-brand-text);
+  --code-any-match-color: var(--theme-brand-code-any-match);
+  --code-null-literal-color: var(--theme-brand-code-any-match);
+
+  --epg-program-background-color: var(--theme-brand-epg-program-surface);
+  --epg-program-color: var(--theme-brand-epg-program-text);
+  --epg-program-active-background-color: var(--theme-brand-epg-program-active-surface);
+  --epg-program-active-color: var(--theme-brand-epg-program-text);
+  --epg-program-time-color: var(--theme-brand-epg-program-time);
+  --epg-program-active-time-color: var(--theme-brand-epg-program-time-active);
+  --epg-past-background: var(--theme-brand-epg-past-surface);
+  --epg-now-line-color: var(--theme-brand-epg-now-line);
+
+  --glass-border-color: var(--theme-brand-border-input);
+  --glass-background-color: var(--theme-brand-surface-glass);
+  --glass-shadow-color: var(--theme-brand-glass-shadow);
+  --glass-background-gradient-color-1: var(--theme-brand-surface-glass-gradient-1);
+  --glass-background-gradient-color-2: var(--theme-brand-surface-glass-gradient-2);
+  --glass-input-border-color: var(--theme-brand-border-input);
+  --glass-input-background-color: var(--theme-brand-surface-glass-input);
+
+  --graph-paper-line-color-1: var(--theme-brand-graph-grid-1);
+  --graph-paper-line-color-2: var(--theme-brand-graph-grid-2);
+
+  --brick-input-xtream-border-color: color-mix(in srgb, var(--theme-brand-brick-input-xtream) 80%, transparent);
+  --brick-input-xtream-background-color: color-mix(in srgb, var(--theme-brand-brick-input-xtream) 53%, transparent);
+  --brick-input-xtream-shadow-color: color-mix(in srgb, var(--theme-brand-brick-input-xtream) 50%, transparent);
+  --brick-input-m3u-border-color: color-mix(in srgb, var(--theme-brand-brick-input-m3u) 80%, transparent);
+  --brick-input-m3u-background-color: color-mix(in srgb, var(--theme-brand-brick-input-m3u) 53%, transparent);
+  --brick-input-m3u-shadow-color: color-mix(in srgb, var(--theme-brand-brick-input-m3u) 50%, transparent);
+  --brick-input-library-border-color: color-mix(in srgb, var(--theme-brand-brick-input-library) 80%, transparent);
+  --brick-input-library-background-color: color-mix(in srgb, var(--theme-brand-brick-input-library) 53%, transparent);
+  --brick-input-library-shadow-color: color-mix(in srgb, var(--theme-brand-brick-input-library) 50%, transparent);
+  --brick-target-border-color: color-mix(in srgb, var(--theme-brand-brick-target) 80%, transparent);
+  --brick-target-background-color: color-mix(in srgb, var(--theme-brand-brick-target) 53%, transparent);
+  --brick-target-shadow-color: color-mix(in srgb, var(--theme-brand-brick-target) 50%, transparent);
+  --brick-output-border-color: color-mix(in srgb, var(--theme-brand-brick-output) 80%, transparent);
+  --brick-output-background-color: color-mix(in srgb, var(--theme-brand-brick-output) 53%, transparent);
+  --brick-output-shadow-color: color-mix(in srgb, var(--theme-brand-brick-output) 50%, transparent);
+  --brick-output-xtream-border-color: color-mix(in srgb, var(--theme-brand-brick-output-xtream) 80%, transparent);
+  --brick-output-xtream-background-color: color-mix(in srgb, var(--theme-brand-brick-output-xtream) 53%, transparent);
+  --brick-output-xtream-shadow-color: color-mix(in srgb, var(--theme-brand-brick-output-xtream) 50%, transparent);
+  --brick-output-m3u-border-color: color-mix(in srgb, var(--theme-brand-brick-output-m3u) 80%, transparent);
+  --brick-output-m3u-background-color: color-mix(in srgb, var(--theme-brand-brick-output-m3u) 53%, transparent);
+  --brick-output-m3u-shadow-color: color-mix(in srgb, var(--theme-brand-brick-output-m3u) 50%, transparent);
+  --brick-output-hdhomerun-border-color: color-mix(in srgb, var(--theme-brand-brick-output-hdhomerun) 80%, transparent);
+  --brick-output-hdhomerun-background-color: color-mix(in srgb, var(--theme-brand-brick-output-hdhomerun) 53%, transparent);
+  --brick-output-hdhomerun-shadow-color: color-mix(in srgb, var(--theme-brand-brick-output-hdhomerun) 50%, transparent);
+  --brick-output-strm-border-color: color-mix(in srgb, var(--theme-brand-brick-output-strm) 80%, transparent);
+  --brick-output-strm-background-color: color-mix(in srgb, var(--theme-brand-brick-output-strm) 53%, transparent);
+  --brick-output-strm-shadow-color: color-mix(in srgb, var(--theme-brand-brick-output-strm) 50%, transparent);
+  --brick-port-background-color: var(--theme-brand-brick-port);
+  --brick-port-border-color: var(--theme-brand-brick-port-border);
+  --brick-port-valid-background-color: var(--theme-brand-positive);
+  --brick-port-invalid-background-color: var(--theme-brand-danger-deep);
+  --brick-port-hover-color: var(--theme-brand-brick-port-hover);
+
+  --source-editor-delete-color: var(--theme-brand-danger-strong);
+  --source-editor-line-color: var(--theme-brand-text-inverse);
+  --source-editor-active-line-color: var(--theme-brand-positive);
+  --source-editor-pending-line-color: var(--theme-brand-warning-strong);
+  --source-editor-block-shadow: var(--theme-brand-source-block-shadow);
+
+  --selection-area-border-color: var(--theme-brand-border-selection);
+  --selection-area-background-color: color-mix(in srgb, var(--theme-brand-border-selection) 12%, transparent);
+
+  --custom-dialog-backdrop-color: var(--theme-brand-surface-modal-backdrop);
+  --dialog-backdrop-color: var(--theme-brand-surface-dialog-backdrop);
+  --input-autofill-background-color: transparent;
+  --tab-header-shadow: var(--theme-brand-tab-header-shadow);
+  --setup-sidebar-item-hover-background-color: var(--theme-brand-surface-setup-hover);
+  --setup-sidebar-item-active-background-color: var(--theme-brand-surface-setup-active);
+  --field-explanation-code-background-color: var(--theme-brand-surface-code-solid);
+  --field-explanation-code-color: var(--theme-brand-text);
+  --field-explanation-code-border-color: var(--theme-brand-border-soft);
+  --field-explanation-code-shadow: var(--theme-brand-field-code-shadow);
+  --mapper-script-background-color: var(--theme-brand-surface-code-solid);
+  --login-logo-color: var(--theme-brand-login-logo);
+  --series-info-title-color: var(--theme-brand-series-title);
+  --series-backdrop-overlay-gradient: var(--theme-brand-series-backdrop-overlay);
+  --titled-card-title-background: linear-gradient(to bottom, var(--theme-brand-surface-card-gradient) 50%, var(--card-background-color) 50%);
 }

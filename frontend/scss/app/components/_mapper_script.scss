@@ -5,7 +5,7 @@
 
   .tp__mapper-script__code {
     font-family: monospace;
-    background: #1e1e1e;
+    background: var(--mapper-script-background-color);
     color: var(--modest-text-color);
     padding: var(--padding-default);
     border-radius: var(--border-radius);
@@ -65,9 +65,9 @@
       font-size: 1.1rem;
   }
 
-  .bracket-1 { color: #569CD6; }
-  .bracket-2 { color: #C586C0; }
-  .bracket-3 { color: #B5CEA8; }
+  .bracket-1 { color: var(--code-bracket-1-color); }
+  .bracket-2 { color: var(--code-bracket-2-color); }
+  .bracket-3 { color: var(--code-bracket-3-color); }
 }
 .tp__mapper-script__inline {
   .tp__mapper-script__code {

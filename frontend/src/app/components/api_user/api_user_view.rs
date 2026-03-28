@@ -16,7 +16,7 @@ pub fn ApiUserView() -> Html {
     let handle_theme_switch = {
         let set_theme = theme.clone();
         Callback::from(move |_| {
-            let new_theme = if *set_theme == Theme::Dark { Theme::Bright } else { Theme::Dark };
+            let new_theme = (*set_theme).next();
             new_theme.switch_theme();
             set_theme.set(new_theme);
         })
@@ -46,7 +46,7 @@ pub fn ApiUserView() -> Html {
                         </div>
                         <div class={"tp__app-header-toolbar"}>
                             <WebsocketStatus/>
-                            <IconButton name="Theme" icon={if *theme == Theme::Bright {"Moon"} else {"Sun"}} onclick={handle_theme_switch} />
+                            <IconButton name="Theme" icon={if (*theme).is_light() {"Moon"} else {"Sun"}} onclick={handle_theme_switch} />
                             <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
                         </div>
                     </div>

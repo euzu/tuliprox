@@ -1,0 +1,268 @@
+body[data-theme="aurora"] {
+  --theme-palette-page: #06151b;
+  --theme-palette-page-alt: #0b2230;
+  --theme-palette-neutral-surface-980: rgba(4, 20, 28, 0.9);
+  --theme-palette-neutral-surface-960: rgba(9, 33, 44, 0.96);
+  --theme-palette-neutral-surface-940: rgba(12, 44, 54, 0.78);
+  --theme-palette-neutral-surface-920: rgba(12, 44, 54, 0.68);
+  --theme-palette-neutral-surface-900: rgba(15, 52, 62, 0.62);
+  --theme-palette-neutral-surface-880: rgba(20, 66, 76, 0.56);
+  --theme-palette-neutral-surface-840: rgba(25, 80, 90, 0.44);
+  --theme-palette-neutral-surface-820: rgba(38, 103, 114, 0.28);
+  --theme-palette-neutral-surface-800: rgba(115, 203, 188, 0.22);
+  --theme-palette-neutral-surface-780: rgba(115, 203, 188, 0.12);
+  --theme-palette-neutral-surface-760: rgba(182, 244, 216, 0.14);
+  --theme-palette-neutral-surface-740: rgba(182, 244, 216, 0.08);
+  --theme-palette-neutral-surface-720: rgba(221, 255, 244, 0.16);
+  --theme-palette-neutral-surface-700: rgba(255, 255, 255, 0);
+  --theme-palette-neutral-surface-680: rgba(0, 0, 0, 0.2);
+  --theme-palette-neutral-surface-660: rgba(0, 0, 0, 0.56);
+  --theme-palette-neutral-surface-640: rgba(0, 0, 0, 0.34);
+  --theme-palette-neutral-surface-620: #21505b88;
+  --theme-palette-neutral-surface-600: #17394388;
+  --theme-palette-neutral-surface-580: #3e707788;
+  --theme-palette-neutral-surface-560: #20454b;
+  --theme-palette-neutral-surface-540: #10323c88;
+  --theme-palette-neutral-surface-520: #0d252d;
+  --theme-palette-neutral-surface-code: #071d23cc;
+  --theme-palette-neutral-surface-code-solid: #071d23;
+  --theme-palette-neutral-surface-code-compare: #14343b99;
+  --theme-palette-state-surface-option-active: #8ef6c688;
+
+  --theme-palette-accent-border-500: rgba(94, 234, 212, 0.26);
+  --theme-palette-accent-border-460: rgba(94, 234, 212, 0.44);
+  --theme-palette-accent-border-420: rgba(45, 212, 191, 0.82);
+  --theme-palette-accent-border-380: rgba(94, 234, 212, 0.9);
+  --theme-palette-accent-border-340: rgba(94, 234, 212, 0.3);
+  --theme-palette-neutral-border-560: #3b6168;
+  --theme-palette-neutral-border-520: #2f565d;
+  --theme-palette-neutral-border-500: #477178;
+  --theme-palette-neutral-border-460: #21474e;
+  --theme-palette-neutral-border-420: rgba(226, 255, 247, 0.18);
+  --theme-palette-neutral-border-380: rgba(56, 189, 248, 0.9);
+
+  --theme-palette-neutral-text-900: #ecfff8;
+  --theme-palette-neutral-text-760: #d3f7ef;
+  --theme-palette-neutral-text-700: #afdbd3;
+  --theme-palette-neutral-text-620: #8bb8b2;
+  --theme-palette-neutral-text-580: #6e9995;
+  --theme-palette-neutral-text-560: #9dc5bf;
+  --theme-palette-neutral-text-500: #7ea19b;
+  --theme-palette-neutral-text-460: #5d7f7a;
+  --theme-palette-neutral-text-420: #36504d;
+
+  --theme-palette-text-header: #7ef9e2;
+  --theme-palette-text-label: #7dd3fc;
+  --theme-palette-text-option-active: #042f2e;
+  --theme-palette-text-menu-warn: #f7a072;
+  --theme-palette-text-menu-warn-strong: #ff8f6b;
+
+  --theme-palette-primary: rgba(45, 212, 191, 0.42);
+  --theme-palette-primary-soft: rgba(45, 212, 191, 0.2);
+  --theme-palette-primary-hover-soft: rgba(34, 211, 238, 0.18);
+  --theme-palette-primary-active-soft: rgba(34, 211, 238, 0.28);
+  --theme-palette-primary-hover: rgba(13, 148, 136, 0.44);
+  --theme-palette-primary-hover-strong: rgba(45, 212, 191, 0.92);
+  --theme-palette-primary-border: rgba(45, 212, 191, 0.84);
+  --theme-palette-primary-menu-hover: rgba(13, 148, 136, 0.34);
+  --theme-palette-primary-tool-hover: #0f766e99;
+  --theme-palette-primary-tree-hover: #0d948888;
+  --theme-palette-primary-tab-hover: #155e7588;
+  --theme-palette-primary-tab-active: #164e6388;
+  --theme-palette-primary-tab-border: #22d3ee;
+  --theme-palette-primary-spinner: #5eead4;
+
+  --theme-palette-secondary: rgba(255, 143, 107, 0.68);
+  --theme-palette-secondary-soft: rgba(255, 143, 107, 0.24);
+  --theme-palette-secondary-hover: rgba(255, 143, 107, 0.46);
+  --theme-palette-secondary-border: rgba(255, 143, 107, 0.56);
+
+  --theme-palette-neutral-dark-950: #06151b;
+  --theme-palette-neutral-dark-900: #0b2230;
+  --theme-palette-neutral-dark-850: #0d252d;
+  --theme-palette-neutral-dark-800: #071d23;
+  --theme-palette-neutral-dark-780: #14343b99;
+  --theme-palette-neutral-dark-760: #10323c88;
+  --theme-palette-neutral-dark-740: #17394388;
+  --theme-palette-neutral-dark-720: #1a4950;
+  --theme-palette-neutral-dark-700: #204f57;
+  --theme-palette-neutral-dark-680: #2d6970;
+  --theme-palette-neutral-dark-660: #21505b88;
+  --theme-palette-neutral-dark-640: #2f565d;
+  --theme-palette-neutral-dark-620: #20454b;
+  --theme-palette-neutral-dark-600: #3e707788;
+  --theme-palette-neutral-dark-580: #3b6168;
+  --theme-palette-neutral-dark-560: #477178;
+  --theme-palette-neutral-dark-540: #36504d;
+  --theme-palette-neutral-dark-520: #21474e;
+
+  --theme-palette-primary-tone-500: #5eead4;
+  --theme-palette-primary-tone-450: #7ef9e2;
+  --theme-palette-primary-tone-420: #7dd3fc;
+  --theme-palette-primary-tone-380: #67e8f9;
+  --theme-palette-primary-tone-340: #54b7c3;
+  --theme-palette-primary-tone-300: #4fd1c5;
+  --theme-palette-primary-tone-260: #22d3ee;
+  --theme-palette-primary-tone-220: #22c55e;
+  --theme-palette-primary-tone-200: #0f766e;
+  --theme-palette-primary-tone-180: #155e75;
+  --theme-palette-primary-tone-160: #164e63;
+  --theme-palette-primary-tone-140: #0e7490;
+
+  --theme-palette-danger-tone-520: #ff8f6b;
+  --theme-palette-danger-tone-500: #ff6b6b;
+  --theme-palette-danger-tone-480: #f97360;
+  --theme-palette-danger-tone-420: #f59e8b;
+  --theme-palette-danger-tone-360: #c97b71;
+  --theme-palette-danger-tone-surface-250: rgba(249, 115, 96, 0.22);
+  --theme-palette-danger-tone-surface-550: rgba(249, 115, 96, 0.44);
+  --theme-palette-danger-tone-border: rgba(249, 115, 96, 0.5);
+
+  --theme-palette-success-tone-540: #6ee7b7;
+  --theme-palette-success-tone-520: #34d399;
+  --theme-palette-success-tone-500: #10b981;
+  --theme-palette-success-tone-460: #8ef6c6;
+  --theme-palette-success-tone-420: #4ade80;
+  --theme-palette-success-tone-380: #14b8a6;
+  --theme-palette-success-tone-340: #0f766e;
+  --theme-palette-success-tone-soft-200: rgba(52, 211, 153, 0.2);
+  --theme-palette-success-tone-border: rgba(52, 211, 153, 0.38);
+  --theme-palette-success-tone-strong: rgba(52, 211, 153, 0.74);
+  --theme-palette-success-tone-hover: rgba(16, 185, 129, 0.28);
+  --theme-palette-success-tone-text: #a7f3d0;
+  --theme-palette-success-tone-surface: #0b3b3488;
+
+  --theme-palette-warning-tone-520: #fbbf24;
+  --theme-palette-warning-tone-500: #f59e0b;
+  --theme-palette-warning-tone-460: #ffd166;
+  --theme-palette-warning-tone-420: #f4b942;
+  --theme-palette-warning-tone-surface: #4b371d88;
+  --theme-palette-warning-tone-border: #c28f38;
+
+  --theme-palette-info-tone-520: #67e8f9;
+  --theme-palette-info-tone-500: #22d3ee;
+  --theme-palette-info-tone-460: #38bdf8;
+  --theme-palette-info-tone-surface: #12374588;
+  --theme-palette-info-tone-border: #2e788c;
+
+  --theme-palette-accent-tone-540: #f472b6;
+  --theme-palette-accent-tone-520: #e879f9;
+  --theme-palette-accent-tone-500: #c084fc;
+  --theme-palette-accent-tone-460: #d8b4fe;
+  --theme-palette-accent-tone-surface: #3d214888;
+  --theme-palette-accent-tone-border: #7c3aed;
+  --theme-palette-accent-tone-soft-surface: rgba(192, 132, 252, 0.1);
+  --theme-palette-accent-tone-soft-hover: rgba(192, 132, 252, 0.2);
+  --theme-palette-accent-tone-soft-border: rgba(192, 132, 252, 0.36);
+  --theme-palette-accent-tone-text: #f0abfc;
+  --theme-palette-accent-tone-text-soft: #f5d0fe;
+
+  --theme-palette-quaternary-tone-500: #818cf8;
+  --theme-palette-quaternary-tone-surface: #312e8188;
+  --theme-palette-emphasis-tone-500: #fb7185;
+  --theme-palette-highlight-tone-500: #fde047;
+
+  --theme-palette-status-tag-surface: #1b394088;
+  --theme-palette-status-tag-active-text: #4ade80;
+  --theme-palette-status-tag-active-surface: #0b3b3488;
+  --theme-palette-status-tag-active-border: #0f766e;
+  --theme-palette-status-tag-alt-text: #e879f9;
+  --theme-palette-status-tag-alt-surface: #3d214888;
+  --theme-palette-status-tag-alt-border: #7c3aed;
+  --theme-palette-status-tag-expired-text: #ffd166;
+  --theme-palette-status-tag-expired-surface: #4b371d88;
+  --theme-palette-status-tag-expired-border: #c28f38;
+  --theme-palette-status-tag-banned-text: #ff8f6b;
+  --theme-palette-status-tag-banned-surface: #4a262188;
+  --theme-palette-status-tag-banned-border: #a95f55;
+
+  --theme-palette-status-live-surface: #0b3b3488;
+  --theme-palette-status-video-surface: #12374588;
+  --theme-palette-status-series-surface: #312e8188;
+
+  --theme-palette-shadow-popup: 0 10px 28px rgba(0, 0, 0, 0.42), inset 0 0 12px rgba(147, 197, 253, 0.08);
+  --theme-palette-shadow-card: 0 8px 20px rgba(0, 0, 0, 0.24);
+  --theme-palette-shadow-scrollbar-track: inset 0 0 6px rgba(0, 0, 0, 0.26);
+  --theme-palette-shadow-tab-header: 0 2px 4px rgba(0, 0, 0, 0.08);
+  --theme-palette-shadow-field-code: 0 4px 6px rgba(0, 0, 0, 0.14);
+  --theme-palette-shadow-toggle: 0 2px 6px rgba(0, 0, 0, 0.72);
+  --theme-palette-shadow-toast: 0 2px 5px rgba(0, 0, 0, 0.28);
+  --theme-palette-shadow-source-block: 0 1px 2px rgba(0, 0, 0, 0.18);
+  --theme-palette-shadow-glass: rgba(0, 0, 0, 0.12);
+
+  --theme-palette-menu-icon-update: #7ef9e2;
+  --theme-palette-menu-icon-user: #38bdf8;
+  --theme-palette-menu-icon-api-server: #fbbf24;
+  --theme-palette-menu-icon-main-config: #f472b6;
+  --theme-palette-menu-icon-status: #fde047;
+
+  --theme-palette-code-identifier: #67e8f9;
+  --theme-palette-code-var-access: #a5f3fc;
+  --theme-palette-code-field: #f7b267;
+  --theme-palette-code-property: #ff9f6e;
+  --theme-palette-code-literal: #6ee7b7;
+  --theme-palette-code-num: #7dd3fc;
+  --theme-palette-code-builtin: #f9e27d;
+  --theme-palette-code-reserved: #ff8f6b;
+  --theme-palette-code-regex: #f7b267;
+  --theme-palette-code-enum: #34d399;
+  --theme-palette-code-range: #7dd3fc;
+  --theme-palette-code-op: #67e8f9;
+  --theme-palette-code-compare-text: #ffffff;
+  --theme-palette-code-bracket-1: #67e8f9;
+  --theme-palette-code-bracket-2: #c084fc;
+  --theme-palette-code-bracket-3: #fde68a;
+  --theme-palette-code-any-match: #fb7185;
+
+  --theme-palette-epg-program-surface: #0c2732;
+  --theme-palette-epg-program-active-surface: #113847;
+  --theme-palette-epg-program-text: #ffffff;
+  --theme-palette-epg-program-time: #84a9b0;
+  --theme-palette-epg-program-time-active: #b8f6ec;
+  --theme-palette-epg-past-surface: rgba(0, 0, 0, 0.14);
+  --theme-palette-epg-now-line: #ff8f6b;
+
+  --theme-palette-graph-grid-1: #a7f3d030;
+  --theme-palette-graph-grid-2: #67e8f930;
+
+  --theme-palette-particle-1: #7ef9e2;
+  --theme-palette-particle-2: #1b3940;
+  --theme-palette-particle-alpha-boost: 1.2;
+
+  --theme-palette-chip-container-text: #7dd3fc;
+  --theme-palette-chip-container-surface: #133742;
+  --theme-palette-chip-video-text: #8ef6c6;
+  --theme-palette-chip-video-surface: #14342d;
+  --theme-palette-chip-resolution-text: #ffb4a2;
+  --theme-palette-chip-resolution-surface: #4a2621;
+  --theme-palette-chip-fps-text: #ffd166;
+  --theme-palette-chip-fps-surface: #46371d;
+  --theme-palette-chip-audio-text: #f0abfc;
+  --theme-palette-chip-audio-surface: #3d2148;
+  --theme-palette-chip-audio-channels-text: #f5d0fe;
+
+  --theme-palette-graph-input-xtream: #22d3ee;
+  --theme-palette-graph-input-m3u: #38bdf8;
+  --theme-palette-graph-input-library: #c084fc;
+  --theme-palette-graph-target: #14b8a6;
+  --theme-palette-graph-output: #f59e0b;
+  --theme-palette-graph-output-xtream: #5eead4;
+  --theme-palette-graph-output-m3u: #34d399;
+  --theme-palette-graph-output-hdhomerun: #818cf8;
+  --theme-palette-graph-output-strm: #fb7185;
+  --theme-palette-graph-port: #5f8b93;
+  --theme-palette-graph-port-border: #ffffff;
+  --theme-palette-graph-port-hover: #fbbf24;
+
+  --theme-palette-login-logo: color-mix(in srgb, #06151b 78%, #5eead4 10%);
+  --theme-palette-series-title: #ffffff;
+  --theme-palette-series-backdrop-overlay: linear-gradient(
+    to right,
+    rgba(6, 21, 27, 1) 28%,
+    rgba(6, 21, 27, 0.9) 48%,
+    rgba(6, 21, 27, 0.76) 60%,
+    rgba(6, 21, 27, 0.4) 72%,
+    rgba(6, 21, 27, 0) 86%
+  );
+}
+

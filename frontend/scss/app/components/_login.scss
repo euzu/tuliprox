@@ -78,7 +78,7 @@
     svg {
       height: 100%;
       width: 100%;
-      color: color-mix(in srgb, var(--background-color) 80%, black 10%);
+      color: var(--login-logo-color);
     }
   }
 
