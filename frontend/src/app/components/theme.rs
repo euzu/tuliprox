@@ -30,21 +30,21 @@ const THEME_GRAPEROOT_DARK: &str = "graperoot-dark";
 pub enum Theme {
     Dark,
     RefinedDark,
-    Bright,
+    GraperootDark,
+    Nord,
+    Dracula,
     Aurora,
     Monokai,
-    Paper,
-    NaturePure,
     Dopamine,
     Mermaidcore,
+    ClubroomContrast,
+    Bright,
+    Paper,
+    NaturePure,
     CoolElegance,
     BananaYellow,
-    ClubroomContrast,
     SunWashedSoft,
     VintageNeutral,
-    Dracula,
-    Nord,
-    GraperootDark,
 }
 
 impl Display for Theme {
@@ -55,21 +55,21 @@ impl Display for Theme {
             match self {
                 Theme::Dark => THEME_DARK,
                 Theme::RefinedDark => THEME_REFINED_DARK,
-                Theme::Bright => THEME_BRIGHT,
+                Theme::GraperootDark => THEME_GRAPEROOT_DARK,
+                Theme::Nord => THEME_NORD,
+                Theme::Dracula => THEME_DRACULA,
                 Theme::Aurora => THEME_AURORA,
                 Theme::Monokai => THEME_MONOKAI,
-                Theme::Paper => THEME_PAPER,
-                Theme::NaturePure => THEME_NATURE_PURE,
                 Theme::Dopamine => THEME_DOPAMINE,
                 Theme::Mermaidcore => THEME_MERMAIDCORE,
+                Theme::ClubroomContrast => THEME_CLUBROOM_CONTRAST,
+                Theme::Bright => THEME_BRIGHT,
+                Theme::Paper => THEME_PAPER,
+                Theme::NaturePure => THEME_NATURE_PURE,
                 Theme::CoolElegance => THEME_COOL_ELEGANCE,
                 Theme::BananaYellow => THEME_BANANA_YELLOW,
-                Theme::ClubroomContrast => THEME_CLUBROOM_CONTRAST,
                 Theme::SunWashedSoft => THEME_SUN_WASHED_SOFT,
                 Theme::VintageNeutral => THEME_VINTAGE_NEUTRAL,
-                Theme::Dracula => THEME_DRACULA,
-                Theme::Nord => THEME_NORD,
-                Theme::GraperootDark => THEME_GRAPEROOT_DARK,
             }
         )
     }
@@ -82,21 +82,21 @@ impl FromStr for Theme {
         match s.to_lowercase().as_str() {
             THEME_DARK => Ok(Theme::Dark),
             THEME_REFINED_DARK => Ok(Theme::RefinedDark),
-            THEME_BRIGHT => Ok(Theme::Bright),
+            THEME_GRAPEROOT_DARK => Ok(Theme::GraperootDark),
+            THEME_NORD => Ok(Theme::Nord),
+            THEME_DRACULA => Ok(Theme::Dracula),
             THEME_AURORA => Ok(Theme::Aurora),
             THEME_MONOKAI => Ok(Theme::Monokai),
-            THEME_PAPER => Ok(Theme::Paper),
-            THEME_NATURE_PURE => Ok(Theme::NaturePure),
             THEME_DOPAMINE => Ok(Theme::Dopamine),
             THEME_MERMAIDCORE => Ok(Theme::Mermaidcore),
+            THEME_CLUBROOM_CONTRAST => Ok(Theme::ClubroomContrast),
+            THEME_BRIGHT => Ok(Theme::Bright),
+            THEME_PAPER => Ok(Theme::Paper),
+            THEME_NATURE_PURE => Ok(Theme::NaturePure),
             THEME_COOL_ELEGANCE => Ok(Theme::CoolElegance),
             THEME_BANANA_YELLOW => Ok(Theme::BananaYellow),
-            THEME_CLUBROOM_CONTRAST => Ok(Theme::ClubroomContrast),
             THEME_SUN_WASHED_SOFT => Ok(Theme::SunWashedSoft),
             THEME_VINTAGE_NEUTRAL => Ok(Theme::VintageNeutral),
-            THEME_DRACULA => Ok(Theme::Dracula),
-            THEME_NORD => Ok(Theme::Nord),
-            THEME_GRAPEROOT_DARK => Ok(Theme::GraperootDark),
             _ => info_err_res!("Unknown theme: {s}"),
         }
     }
@@ -107,20 +107,20 @@ impl Theme {
         Theme::Dark,
         Theme::RefinedDark,
         Theme::GraperootDark,
-        Theme::Bright,
+        Theme::Nord,
+        Theme::Dracula,
         Theme::Aurora,
         Theme::Monokai,
-        Theme::Paper,
-        Theme::NaturePure,
         Theme::Dopamine,
         Theme::Mermaidcore,
+        Theme::ClubroomContrast,
+        Theme::Bright,
+        Theme::Paper,
+        Theme::NaturePure,
         Theme::CoolElegance,
         Theme::BananaYellow,
-        Theme::ClubroomContrast,
         Theme::SunWashedSoft,
         Theme::VintageNeutral,
-        Theme::Dracula,
-        Theme::Nord,
     ];
 
     pub const fn all() -> &'static [Self] { &Self::ALL }
@@ -177,7 +177,8 @@ impl Theme {
             Theme::Dark => remove_local_storage_item(TP_THEME_KEY),
             Theme::RefinedDark
             | Theme::GraperootDark
-            | Theme::Bright
+            | Theme::Nord
+            | Theme::Dracula
             | Theme::Aurora
             | Theme::Monokai
             | Theme::Paper
@@ -189,8 +190,7 @@ impl Theme {
             | Theme::ClubroomContrast
             | Theme::SunWashedSoft
             | Theme::VintageNeutral
-            | Theme::Dracula
-            | Theme::Nord => set_local_storage_item(TP_THEME_KEY, &self.to_string()),
+            | Theme::Bright => set_local_storage_item(TP_THEME_KEY, &self.to_string()),
         }
     }
 
