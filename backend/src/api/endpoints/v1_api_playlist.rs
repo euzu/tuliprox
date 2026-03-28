@@ -3,7 +3,7 @@ use crate::{api::{
     endpoints::{
         api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
         extract_accept_header::ExtractAcceptHeader,
-        xmltv_api::serve_epg_web_ui,
+        xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui},
         xtream_api::xtream_get_stream_info_response,
     },
     model::AppState,
@@ -17,7 +17,7 @@ use shared::{
         InputType, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem,
         XtreamCluster,
     },
-    utils::{sanitize_sensitive_info, Internable},
+    utils::{concat_path_leading_slash, sanitize_sensitive_info, Internable},
 };
 use std::sync::Arc;
 use url::Url;
@@ -313,6 +313,14 @@ async fn playlist_epg(
         }
         PlaylistEpgRequest::Custom(url) => {
             if let Ok(epg) = parse_xmltv_for_web_ui_from_url(&app_state, &url).await {
+                let config = app_state.app_config.config.load();
+                let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
+                let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+                let encrypt_secret = app_state.get_encrypt_secret();
+                let epg = epg
+                    .into_iter()
+                    .map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel))
+                    .collect::<Vec<_>>();
                 return json_or_bin_response(accept.as_deref(), &epg).into_response();
             }
         }

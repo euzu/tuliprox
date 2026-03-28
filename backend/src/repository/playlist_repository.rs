@@ -75,7 +75,15 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
             let uuid = header.get_uuid();
             let item_type = header.item_type;
             header.virtual_id = target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, 0);
+        }
+    }
 
+    rewrite_series_episode_parent_virtual_ids(playlist, &mut target_id_mapping);
+
+    for group in playlist.iter_mut() {
+        for channel in &mut group.channels {
+            let header = &mut channel.header;
+            let item_type = header.item_type;
             if item_type == PlaylistItemType::LocalSeries {
                 assign_local_series_info_episode_key(&mut local_library_series, header, item_type);
             } else if item_type == PlaylistItemType::Series {
@@ -252,6 +260,43 @@ fn rewrite_series_info_episode_virtual_id(playlist: &mut [PlaylistGroup],
                 rewrite_local_series_info_episode_virtual_id(channel, local_library_series);
             } else if item_type == PlaylistItemType::LocalSeries {
                 channel.header.parent_code = "".intern();
+            }
+        }
+    }
+}
+
+fn rewrite_series_episode_parent_virtual_ids(playlist: &mut [PlaylistGroup], target_id_mapping: &mut TargetIdMapping) {
+    let mut series_parent_virtual_ids = HashMap::<Arc<str>, u32>::new();
+
+    for group in playlist.iter() {
+        for channel in &group.channels {
+            let parent_key = match channel.header.item_type {
+                PlaylistItemType::SeriesInfo => Some(channel.header.uuid.intern()),
+                PlaylistItemType::LocalSeriesInfo => Some(channel.header.id.clone()),
+                _ => None,
+            };
+
+            if let Some(parent_key) = parent_key {
+                series_parent_virtual_ids.insert(parent_key, channel.header.virtual_id);
+            }
+        }
+    }
+
+    if series_parent_virtual_ids.is_empty() {
+        return;
+    }
+
+    for group in playlist.iter_mut() {
+        for channel in &mut group.channels {
+            let header = &mut channel.header;
+            if matches!(header.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
+                if let Some(parent_virtual_id) = series_parent_virtual_ids.get(&header.parent_code) {
+                    let provider_id = header.get_provider_id().unwrap_or_default();
+                    let item_type = header.item_type;
+                    let uuid = header.get_uuid();
+                    header.virtual_id =
+                        target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, *parent_virtual_id);
+                }
             }
         }
     }
@@ -473,14 +518,17 @@ pub fn get_input_local_library_playlist_file_path(storage_path: &Path, input_nam
 mod tests {
     use super::{
         assign_local_series_info_episode_key, rewrite_local_series_info_episode_virtual_id,
-        rewrite_series_info_episode_virtual_id, LocalEpisodeKey, ProviderEpisodeKey,
+        rewrite_series_episode_parent_virtual_ids, rewrite_series_info_episode_virtual_id, LocalEpisodeKey,
+        ProviderEpisodeKey,
     };
+    use crate::repository::{BPlusTreeQuery, TargetIdMapping, VirtualIdRecord};
     use shared::model::{
         PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
-        SeriesStreamDetailProperties, SeriesStreamProperties, StreamProperties, XtreamCluster,
+        SeriesStreamDetailProperties, SeriesStreamProperties, StreamProperties, UUIDType, XtreamCluster,
     };
     use shared::utils::Internable;
     use std::{collections::HashMap, sync::Arc};
+    use tempfile::tempdir;
 
     fn make_local_series_info(series_uuid: &str, episodes: Vec<(u32, &str, &str)>) -> PlaylistItem {
         let episode_props = episodes
@@ -537,6 +585,67 @@ mod tests {
             virtual_id,
             ..PlaylistItemHeader::default()
         }
+    }
+
+    #[test]
+    fn rewrite_series_episode_parent_virtual_ids_updates_local_episode_mapping() {
+        let series_uuid = "123e4567-e89b-12d3-a456-426614174000";
+        let series_uuid_type = UUIDType::from_valid_uuid(series_uuid);
+        let episode_uuid = UUIDType::from_valid_uuid("123e4567-e89b-12d3-a456-426614174001");
+        let dir = tempdir().expect("tempdir");
+        let mapping_path = dir.path().join("id_mapping.db");
+        let mut target_id_mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping");
+
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![
+                PlaylistItem {
+                    header: PlaylistItemHeader {
+                        uuid: episode_uuid,
+                        id: "101".intern(),
+                        parent_code: series_uuid.intern(),
+                        url: "/library/episode1.mkv".intern(),
+                        item_type: PlaylistItemType::LocalSeries,
+                        xtream_cluster: XtreamCluster::Series,
+                        ..PlaylistItemHeader::default()
+                    },
+                },
+                PlaylistItem {
+                    header: PlaylistItemHeader {
+                        uuid: series_uuid_type,
+                        id: series_uuid.intern(),
+                        item_type: PlaylistItemType::LocalSeriesInfo,
+                        xtream_cluster: XtreamCluster::Series,
+                        ..PlaylistItemHeader::default()
+                    },
+                },
+            ],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        for (idx, channel) in playlist[0].channels.iter_mut().enumerate() {
+            let uuid = channel.header.uuid.clone();
+            let provider_id = channel.header.get_provider_id().unwrap_or_default();
+            let item_type = channel.header.item_type;
+            channel.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, 0);
+            channel.header.source_ordinal = u32::try_from(idx + 1).expect("ordinal");
+        }
+
+        let series_virtual_id = playlist[0].channels[1].header.virtual_id;
+        let episode_virtual_id = playlist[0].channels[0].header.virtual_id;
+
+        rewrite_series_episode_parent_virtual_ids(&mut playlist, &mut target_id_mapping);
+        target_id_mapping.persist().expect("persist");
+
+        let mut query = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&mapping_path).expect("query");
+        let record = query
+            .query_zero_copy(&episode_virtual_id)
+            .expect("query ok")
+            .expect("record missing");
+
+        assert_eq!(record.parent_virtual_id, series_virtual_id);
+        assert_eq!(playlist[0].channels[0].header.virtual_id, episode_virtual_id);
     }
 
     #[test]
