@@ -9,6 +9,7 @@ use web_sys::window;
 pub const TP_THEME_KEY: &str = "tp-theme";
 
 const THEME_DARK: &str = "dark";
+const THEME_REFINED_DARK: &str = "refined-dark";
 const THEME_BRIGHT: &str = "bright";
 const THEME_AURORA: &str = "aurora";
 const THEME_MONOKAI: &str = "monokai";
@@ -23,10 +24,12 @@ const THEME_SUN_WASHED_SOFT: &str = "sun-washed-soft";
 const THEME_VINTAGE_NEUTRAL: &str = "vintage-neutral";
 const THEME_DRACULA: &str = "dracula";
 const THEME_NORD: &str = "nord";
+const THEME_GRAPEROOT_DARK: &str = "graperoot-dark";
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Theme {
     Dark,
+    RefinedDark,
     Bright,
     Aurora,
     Monokai,
@@ -41,6 +44,7 @@ pub enum Theme {
     VintageNeutral,
     Dracula,
     Nord,
+    GraperootDark,
 }
 
 impl Display for Theme {
@@ -50,6 +54,7 @@ impl Display for Theme {
             "{}",
             match self {
                 Theme::Dark => THEME_DARK,
+                Theme::RefinedDark => THEME_REFINED_DARK,
                 Theme::Bright => THEME_BRIGHT,
                 Theme::Aurora => THEME_AURORA,
                 Theme::Monokai => THEME_MONOKAI,
@@ -64,6 +69,7 @@ impl Display for Theme {
                 Theme::VintageNeutral => THEME_VINTAGE_NEUTRAL,
                 Theme::Dracula => THEME_DRACULA,
                 Theme::Nord => THEME_NORD,
+                Theme::GraperootDark => THEME_GRAPEROOT_DARK,
             }
         )
     }
@@ -75,6 +81,7 @@ impl FromStr for Theme {
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
         match s.to_lowercase().as_str() {
             THEME_DARK => Ok(Theme::Dark),
+            THEME_REFINED_DARK => Ok(Theme::RefinedDark),
             THEME_BRIGHT => Ok(Theme::Bright),
             THEME_AURORA => Ok(Theme::Aurora),
             THEME_MONOKAI => Ok(Theme::Monokai),
@@ -89,29 +96,54 @@ impl FromStr for Theme {
             THEME_VINTAGE_NEUTRAL => Ok(Theme::VintageNeutral),
             THEME_DRACULA => Ok(Theme::Dracula),
             THEME_NORD => Ok(Theme::Nord),
+            THEME_GRAPEROOT_DARK => Ok(Theme::GraperootDark),
             _ => info_err_res!("Unknown theme: {s}"),
         }
     }
 }
 
 impl Theme {
+    pub const ALL: [Self; 17] = [
+        Theme::Dark,
+        Theme::RefinedDark,
+        Theme::GraperootDark,
+        Theme::Bright,
+        Theme::Aurora,
+        Theme::Monokai,
+        Theme::Paper,
+        Theme::NaturePure,
+        Theme::Dopamine,
+        Theme::Mermaidcore,
+        Theme::CoolElegance,
+        Theme::BananaYellow,
+        Theme::ClubroomContrast,
+        Theme::SunWashedSoft,
+        Theme::VintageNeutral,
+        Theme::Dracula,
+        Theme::Nord,
+    ];
+
+    pub const fn all() -> &'static [Self] { &Self::ALL }
+
     pub const fn label(self) -> &'static str {
         match self {
             Theme::Dark => "Dark",
-            Theme::Bright => "Bright",
-            Theme::Aurora => "Aurora",
-            Theme::Monokai => "Monokai",
-            Theme::Paper => "Paper",
-            Theme::NaturePure => "Nature Pure",
-            Theme::Dopamine => "Dopamine",
-            Theme::Mermaidcore => "Mermaidcore",
-            Theme::CoolElegance => "Cool Elegance",
-            Theme::BananaYellow => "Banana Yellow",
-            Theme::ClubroomContrast => "Clubroom Contrast",
-            Theme::SunWashedSoft => "Sun-Washed Soft",
-            Theme::VintageNeutral => "Vintage Neutral",
+            Theme::RefinedDark => "Refined Dark",
+            Theme::GraperootDark => "GrapeRoot Dark",
             Theme::Dracula => "Dracula",
             Theme::Nord => "Nord",
+            Theme::Monokai => "Monokai",
+            Theme::Dopamine => "Dopamine",
+            Theme::Mermaidcore => "Mermaidcore",
+            Theme::ClubroomContrast => "Clubroom Contrast",
+            Theme::Bright => "Bright",
+            Theme::Aurora => "Aurora",
+            Theme::Paper => "Paper",
+            Theme::NaturePure => "Nature Pure",
+            Theme::CoolElegance => "Cool Elegance",
+            Theme::BananaYellow => "Banana Yellow",
+            Theme::SunWashedSoft => "Sun-Washed Soft",
+            Theme::VintageNeutral => "Vintage Neutral",
         }
     }
 
@@ -126,26 +158,6 @@ impl Theme {
                 | Theme::SunWashedSoft
                 | Theme::VintageNeutral
         )
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Theme::Dark => Theme::Bright,
-            Theme::Bright => Theme::Aurora,
-            Theme::Aurora => Theme::Monokai,
-            Theme::Monokai => Theme::Paper,
-            Theme::Paper => Theme::NaturePure,
-            Theme::NaturePure => Theme::Dopamine,
-            Theme::Dopamine => Theme::Mermaidcore,
-            Theme::Mermaidcore => Theme::CoolElegance,
-            Theme::CoolElegance => Theme::BananaYellow,
-            Theme::BananaYellow => Theme::ClubroomContrast,
-            Theme::ClubroomContrast => Theme::SunWashedSoft,
-            Theme::SunWashedSoft => Theme::VintageNeutral,
-            Theme::VintageNeutral => Theme::Dracula,
-            Theme::Dracula => Theme::Nord,
-            Theme::Nord => Theme::Dark,
-        }
     }
 
     pub fn get_current_theme() -> Theme {
@@ -163,7 +175,9 @@ impl Theme {
     fn save_to_local_storage(&self) {
         match self {
             Theme::Dark => remove_local_storage_item(TP_THEME_KEY),
-            Theme::Bright
+            Theme::RefinedDark
+            | Theme::GraperootDark
+            | Theme::Bright
             | Theme::Aurora
             | Theme::Monokai
             | Theme::Paper

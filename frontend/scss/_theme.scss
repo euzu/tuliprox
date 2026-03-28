@@ -1,5 +1,7 @@
 @use './size';
 @use './themes/theme-dark';
+@use './themes/theme-refined-dark';
+@use './themes/theme-graperoot-dark';
 @use './themes/theme-bright';
 @use './themes/theme-aurora';
 @use './themes/theme-monokai';
@@ -62,7 +64,8 @@ body {
 }
 
 @media (max-width: size.$mobile-breakpoint) {
-  :root {
+  :root,
+  body {
     --gap-small: 0.2rem;
     --gap-default: 0.3rem;
     --gap-large: 0.5rem;

@@ -1,7 +1,7 @@
 use crate::{
     app::components::{
         api_user::playlist::ApiUserPlaylist, loading_indicator::BusyIndicator, theme::Theme, AppIcon, IconButton,
-        ToastrView, WebsocketStatus,
+        ThemePicker, ToastrView, WebsocketStatus,
     },
     hooks::use_service_context,
     provider::DialogProvider,
@@ -13,10 +13,9 @@ pub fn ApiUserView() -> Html {
     let services = use_service_context();
     let theme = use_state(Theme::get_current_theme);
 
-    let handle_theme_switch = {
+    let handle_theme_select = {
         let set_theme = theme.clone();
-        Callback::from(move |_| {
-            let new_theme = (*set_theme).next();
+        Callback::from(move |new_theme: Theme| {
             new_theme.switch_theme();
             set_theme.set(new_theme);
         })
@@ -46,7 +45,7 @@ pub fn ApiUserView() -> Html {
                         </div>
                         <div class={"tp__app-header-toolbar"}>
                             <WebsocketStatus/>
-                            <IconButton name="Theme" icon={if (*theme).is_light() {"Moon"} else {"Sun"}} hint={(*theme).label()} onclick={handle_theme_switch} />
+                            <ThemePicker theme={*theme} on_select={handle_theme_select} />
                             <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
                         </div>
                     </div>

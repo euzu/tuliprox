@@ -6,10 +6,14 @@
 
     > :nth-child(even) {
       border-left: 2px solid  var(--output-xtream-color);
+      border-top-left-radius: var(--border-radius);
+      border-bottom-left-radius: var(--border-radius);
     }
 
     > :nth-child(odd) {
       border-left: 2px solid var(--output-hdhomerun-color);
+      border-top-left-radius: var(--border-radius);
+      border-bottom-left-radius: var(--border-radius);
     }
   }
 
