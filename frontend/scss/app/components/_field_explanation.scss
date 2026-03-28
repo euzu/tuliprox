@@ -5,16 +5,16 @@
     }
 
     pre {
-        background: var(--bg-secondary, #1e1e1e);
-        color: var(--text-secondary, #d4d4d4);
+        background: var(--field-explanation-code-background-color);
+        color: var(--field-explanation-code-color);
         padding: 1rem;
         border-radius: 8px;
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
         font-size: 0.9rem;
         overflow-x: auto;
         margin: 1rem 0;
-        border: 1px solid var(--border-color, #333);
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        border: 1px solid var(--field-explanation-code-border-color);
+        box-shadow: var(--field-explanation-code-shadow);
 
         code {
             display: block;

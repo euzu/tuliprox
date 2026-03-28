@@ -4,15 +4,27 @@
   position: fixed;
   top: var(--popup-top);
   left: var(--popup-left);
+  max-width: min(24rem, calc(100vw - 1rem));
+  max-height: min(70vh, calc(100vh - 1rem));
   padding: var(--padding-mini);
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
   background-color: var(--popup-background-color);
   color: var(--popup-color);
   box-shadow: var(--popup-shadow);
+  overflow: hidden;
   z-index: 9999;
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
+
+  ul {
+    margin: 0;
+    padding: 0;
+    max-height: inherit;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    list-style: none;
+  }
 
   hr {
     border: none;

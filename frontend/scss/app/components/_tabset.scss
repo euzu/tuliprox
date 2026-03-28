@@ -85,7 +85,7 @@
   background-color: var(--card-background-color);
   border-radius: 8px 8px 0 0;
   overflow: hidden;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--tab-header-shadow);
 }
 
 .tp__tab-button {

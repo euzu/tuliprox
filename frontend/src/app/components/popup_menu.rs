@@ -47,15 +47,22 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
             let rect = anchor.get_bounding_client_rect();
             let inner_width = window.inner_width().ok().and_then(|w| w.as_f64()).unwrap_or_default();
             let inner_height = window.inner_height().ok().and_then(|h| h.as_f64()).unwrap_or_default();
+            let popup_width = f64::from(popup.offset_width());
+            let popup_height = f64::from(popup.offset_height());
+            let gutter = 8.0;
 
-            let mut top = rect.bottom();
+            let mut top = rect.bottom() + gutter;
             let mut left = rect.left();
-            if left + 200.0 > inner_width {
-                left = inner_width - 200.0;
+
+            if left + popup_width > inner_width - gutter {
+                left = inner_width - popup_width - gutter;
             }
-            if top + 150.0 > inner_height {
-                top = rect.top() - 150.0;
+            if top + popup_height > inner_height - gutter {
+                let top_above = rect.top() - popup_height - gutter;
+                top = if top_above >= gutter { top_above } else { inner_height - popup_height - gutter };
             }
+            left = left.max(gutter);
+            top = top.max(gutter);
 
             let _ = popup.style().set_property("--popup-top", &format!("{top}px"));
             let _ = popup.style().set_property("--popup-left", &format!("{left}px"));

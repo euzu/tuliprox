@@ -303,7 +303,9 @@ impl ProviderConfig {
 
     pub async fn release(&self) {
         let mut guard = self.connection.write().await;
-        if guard.current_connections == 1 || guard.current_connections > self.max_connections {
+        // Don't reset grace tracking when current_connections == 1 - this happens during
+        // last connection release and should preserve grace state until after decrement
+        if guard.current_connections > self.max_connections {
             guard.granted_grace = false;
             guard.grace_ts = 0;
         }

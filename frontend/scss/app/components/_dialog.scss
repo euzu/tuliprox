@@ -9,7 +9,7 @@ dialog {
   border-radius: var(--border-radius);
   box-shadow: var(--popup-shadow);
   &::backdrop {
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--dialog-backdrop-color);
   }
   max-width: 80vw;
   max-height: 80vh;

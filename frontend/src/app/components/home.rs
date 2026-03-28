@@ -3,8 +3,8 @@ use crate::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
             IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
-            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ToastrView,
-            UserlistView, WebsocketStatus,
+            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ThemePicker,
+            ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -35,10 +35,9 @@ pub fn Home() -> Html {
     let view_visible = use_state(|| if setup_mode { ViewType::Config } else { ViewType::Dashboard });
     let theme = use_state(Theme::get_current_theme);
 
-    let handle_theme_switch = {
+    let handle_theme_select = {
         let set_theme = theme.clone();
-        Callback::from(move |_| {
-            let new_theme = if *set_theme == Theme::Dark { Theme::Bright } else { Theme::Dark };
+        Callback::from(move |new_theme: Theme| {
             new_theme.switch_theme();
             set_theme.set(new_theme);
         })
@@ -197,7 +196,7 @@ pub fn Home() -> Html {
                         }
                         </div>
                         <div class={"tp__app-header-toolbar"}>
-                            <IconButton name="Theme" icon={if *theme == Theme::Bright {"Moon"} else {"Sun"}} onclick={handle_theme_switch.clone()} />
+                            <ThemePicker theme={*theme} on_select={handle_theme_select.clone()} />
                             <IconButton name="Logout" icon="Logout" onclick={handle_logout.clone()} />
                         </div>
                     </div>
@@ -251,7 +250,7 @@ pub fn Home() -> Html {
                                 html! {
                                     <div class={"tp__app-header-toolbar"}>
                                         <WebsocketStatus/>
-                                        <IconButton name="Theme" icon={if *theme == Theme::Bright {"Moon"} else {"Sun"}} onclick={handle_theme_switch} />
+                                        <ThemePicker theme={*theme} on_select={handle_theme_select} />
                                         <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
                                     </div>
                                 }

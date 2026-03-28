@@ -55,12 +55,12 @@
     transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 
     &:hover:enabled {
-      background: rgba(127, 127, 127, 0.12);
+      background: var(--setup-sidebar-item-hover-background-color);
     }
 
     &.active {
       border-color: var(--theme-color);
-      background: rgba(127, 127, 127, 0.2);
+      background: var(--setup-sidebar-item-active-background-color);
     }
 
     &.locked {

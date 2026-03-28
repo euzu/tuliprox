@@ -16,7 +16,7 @@
   padding: var(--padding-default) var(--padding-large);
   border-radius: var(--border-radius);
   font-size: 1.1rem;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--toastr-shadow);
   animation: fadeIn 0.3s ease-out;
 
   &__message {

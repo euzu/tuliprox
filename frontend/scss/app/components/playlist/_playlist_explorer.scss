@@ -283,7 +283,16 @@ $series-backdrop-mobile-height: 150px;
           height: 100%;
           overflow: hidden;
           pointer-events: none;
-          background-image: linear-gradient(to right, rgba(0, 0, 0, 1.0) 30%, rgba(0, 0, 0, 0.85) 50%, rgba(0, 0, 0, 0.75) 60%, rgba(0, 0, 0, 0.35) 70%, rgba(0, 0, 0, 0.0) 85%);
+          background-image: var(
+            --series-backdrop-overlay-gradient,
+            linear-gradient(
+              to right,
+              rgb(0 0 0 / 88%) 24%,
+              rgb(0 0 0 / 72%) 48%,
+              rgb(0 0 0 / 48%) 66%,
+              rgb(0 0 0 / 0%) 86%
+            )
+          );
         }
 
         &-content {
@@ -295,7 +304,7 @@ $series-backdrop-mobile-height: 150px;
           background-size: cover;
           background-position: center;
           font-size: 1.2rem;
-          color: var(--series-info-title-color, white);
+          color: var(--series-info-title-color);
           z-index: 1;
         }
       }
@@ -308,7 +317,8 @@ $series-backdrop-mobile-height: 150px;
       @media (max-width: size.$mobile-breakpoint) {
         font-size: 1.1rem;
       }
-      color: var(--series-info-title-color, white);
+
+      color: var(--series-info-title-color);
     }
 
     &__infos {
@@ -318,7 +328,7 @@ $series-backdrop-mobile-height: 150px;
     }
 
     &__season {
-      color: var(--series-info-title-color, white);
+      color: var(--series-info-title-color);
       display: flex;
       flex-flow: column;
       gap: var(--gap-default);
