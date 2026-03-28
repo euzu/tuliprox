@@ -264,7 +264,8 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
         })
     };
 
-    let _flags_ready = *flags_ready;
+    // Force a re-render after the flags service finishes loading so StreamDisplayItem can read flag SVGs.
+    let _flags_ready_marker = *flags_ready;
 
     html! {
         <div class="tp__stream-display">

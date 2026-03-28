@@ -35,7 +35,10 @@
 //
 ///////////
 use brotli::CompressorWriter;
-use shared::utils::{country_code_to_index, FlagBlockEntry, FlagDataEntry, FlagFileHeader, FlagVersion};
+use shared::utils::{
+    country_code_to_index,
+    flags::{FlagBlockEntry, FlagDataEntry, FlagFileHeader, FlagVersion},
+};
 use std::{collections::HashMap, io::Write};
 
 const SVG_FLAGS_DIR: &str = "/projects/flags/flag-icons/flags/4x3";
@@ -64,6 +67,13 @@ impl FlagsBuilder {
         let upper_code = country_code.to_ascii_uppercase();
         if country_code_to_index(&upper_code).is_none() {
             return Err(format!("Invalid country code '{country_code}'"));
+        }
+        if svg_data.len() > u16::MAX as usize {
+            return Err(format!(
+                "Invalid svg for '{country_code}', size {} exceeds u16 storage limit {}",
+                svg_data.len(),
+                u16::MAX
+            ));
         }
         self.flags.insert(upper_code, svg_data.to_vec());
         Ok(())
@@ -183,7 +193,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::utils::{country_code_to_index, index_to_country_code, FlagFileHeader, FlagsLoader};
+    use shared::utils::{country_code_to_index, flags::FlagFileHeader, index_to_country_code, FlagsLoader};
 
     #[test]
     fn test_country_code_encoding() {
@@ -228,6 +238,16 @@ mod tests {
         builder.build(&mut buffer).unwrap();
 
         assert!(buffer.len() > FlagFileHeader::SIZE + ENTRY_TABLE_SIZE + BLOCK_TABLE_SIZE);
+    }
+
+    #[test]
+    fn test_add_flag_rejects_svg_over_u16_limit() {
+        let mut builder = FlagsBuilder::new();
+        let svg = vec![b'x'; u16::MAX as usize + 1];
+
+        let error = builder.add_flag("DE", &svg).unwrap_err();
+
+        assert!(error.contains("exceeds u16 storage limit"));
     }
 
     #[test]

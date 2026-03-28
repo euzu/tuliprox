@@ -65,6 +65,8 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                         <span class="tp__stream-display__country">
                                             if let Some(svg) = flag_svg.as_ref() {
                                                 <span class="tp__stream-display__flag" aria-hidden="true">
+                                                    // SAFETY: flags.dat is built offline by flags_builder from a trusted flag directory.
+                                                    // If this source ever becomes user-controlled, replace this with sanitized SVG rendering.
                                                     {Html::from_html_unchecked(AttrValue::from(svg.clone()))}
                                                 </span>
                                             }

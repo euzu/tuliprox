@@ -324,13 +324,48 @@ pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
             error!("Failed to read binary response body: {err}");
             Error::RequestError
         }),
-        400 => Err(Error::BadRequest(extract_error_message(response).await)),
+        400 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::BadRequest("400".to_string()))
+            } else {
+                Err(Error::BadRequest(message))
+            }
+        }
         401 => Err(Error::Unauthorized),
-        403 => Err(Error::Forbidden(extract_error_message(response).await)),
+        403 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::Forbidden("Forbidden".to_string()))
+            } else {
+                Err(Error::Forbidden(message))
+            }
+        }
         404 => Err(Error::NotFound),
-        409 => Err(Error::Conflict(extract_error_message(response).await)),
-        428 => Err(Error::PreconditionRequired(extract_error_message(response).await)),
-        500 => Err(Error::InternalServerError(extract_error_message(response).await)),
+        409 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::Conflict("Configuration conflict (409)".to_string()))
+            } else {
+                Err(Error::Conflict(message))
+            }
+        }
+        428 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::PreconditionRequired("Missing precondition header (428)".to_string()))
+            } else {
+                Err(Error::PreconditionRequired(message))
+            }
+        }
+        500 => {
+            let message = extract_error_message(response).await;
+            if message.trim().is_empty() {
+                Err(Error::InternalServerError("Internal Server Error".to_string()))
+            } else {
+                Err(Error::InternalServerError(message))
+            }
+        }
         _ => Err(Error::RequestError),
     }
 }
