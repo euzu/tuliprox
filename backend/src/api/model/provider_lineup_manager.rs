@@ -949,6 +949,12 @@ impl ProviderLineupManager {
         }
     }
 
+    pub fn reservation_blocks_other_sessions(&self, provider_name: &Arc<str>) -> bool {
+        let snapshot = self.snapshot.load();
+        Self::get_provider_config_by_name(provider_name, &snapshot.providers)
+            .is_none_or(|(_, config)| config.max_connections() > 0)
+    }
+
     pub fn is_provider_for_input(&self, provider_name: &str, input_name: &str) -> bool {
         let snapshot = self.snapshot.load();
         if let Some((lineup, _)) = Self::get_provider_config_by_name(&provider_name.into(), &snapshot.providers) {

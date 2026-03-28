@@ -208,6 +208,9 @@ impl ActiveProviderManager {
     }
 
     async fn is_reserved_for_other(&self, provider_name: &Arc<str>, session_owner: Option<&str>) -> bool {
+        if !self.providers.reservation_blocks_other_sessions(provider_name) {
+            return false;
+        }
         let mut reservations = self.reservations.write().await;
         Self::prune_expired_reservations(&mut reservations);
         reservations.get(provider_name).is_some_and(|reservation| {
@@ -1179,6 +1182,8 @@ mod tests {
 
     fn create_test_app_config_single_provider_pool() -> AppConfig { build_test_app_config(None, 1) }
 
+    fn create_test_app_config_single_unlimited_provider_pool() -> AppConfig { build_test_app_config(None, 0) }
+
     #[tokio::test]
     async fn test_force_exact_acquire_does_not_overallocate_busy_provider() {
         let app_cfg = create_test_app_config_with_dual_provider_pool();
@@ -1340,6 +1345,36 @@ mod tests {
             .await
             .expect("reservation should expire after TTL");
         assert_eq!(second.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+        manager.release_connection(&addr_2).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_unlimited_provider_reservation_does_not_block_other_sessions() {
+        let app_cfg = create_test_app_config_single_unlimited_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let owner_1 = "session-owner-1";
+        let owner_2 = "session-owner-2";
+        let addr_1: SocketAddr = "127.0.0.1:43121".parse().unwrap();
+        let addr_2: SocketAddr = "127.0.0.1:43122".parse().unwrap();
+
+        manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
+
+        let first = manager
+            .acquire_connection_with_grace_for_session(&input_name, &addr_1, false, default_user_priority(), Some(owner_1))
+            .await
+            .expect("reserved owner should reacquire its unlimited provider");
+        assert_eq!(first.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        let second = manager
+            .acquire_connection_with_grace_for_session(&input_name, &addr_2, false, default_user_priority(), Some(owner_2))
+            .await
+            .expect("other sessions should not be blocked by reservations on unlimited providers");
+        assert_eq!(second.allocation.get_provider_name().as_deref(), Some(input_name.as_ref()));
+
+        manager.release_connection(&addr_1).await;
         manager.release_connection(&addr_2).await;
     }
 
