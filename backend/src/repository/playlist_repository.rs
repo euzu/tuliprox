@@ -599,4 +599,42 @@ mod tests {
         assert!(playlist[0].channels[1].header.parent_code.is_empty());
         assert!(playlist[0].channels[2].header.parent_code.is_empty());
     }
+
+    #[test]
+    fn rewrite_series_info_updates_local_episode_ids_when_episodes_come_first() {
+        // Test with episodes BEFORE series_info to verify iteration-order doesn't matter
+        let series_uuid = "series-uuid";
+        let mut episode_one = make_local_series_episode(series_uuid, "/library/episode1.mkv", 7001);
+        let mut episode_two = make_local_series_episode(series_uuid, "/library/episode2.mkv", 7002);
+
+        let mut local_library_series = HashMap::<Arc<str>, Vec<LocalEpisodeKey>>::new();
+        assign_local_series_info_episode_key(&mut local_library_series, &mut episode_one, PlaylistItemType::LocalSeries);
+        assign_local_series_info_episode_key(&mut local_library_series, &mut episode_two, PlaylistItemType::LocalSeries);
+
+        let series_info = make_local_series_info(
+            series_uuid,
+            vec![(101, "Episode 1", "/library/episode1.mkv"), (202, "Episode 2", "/library/episode2.mkv")],
+        );
+        let local_episode_one = PlaylistItem { header: episode_one };
+        let local_episode_two = PlaylistItem { header: episode_two };
+
+        // Episodes FIRST, then series_info (reversed order)
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![local_episode_one, local_episode_two, series_info],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        rewrite_series_info_episode_virtual_id(&mut playlist, &local_library_series, &HashMap::<Arc<str>, Vec<ProviderEpisodeKey>>::new());
+
+        let Some(StreamProperties::Series(series)) = playlist[0].channels[2].header.additional_properties.as_ref() else {
+            panic!("missing series properties");
+        };
+        let episodes = series.details.as_ref().and_then(|details| details.episodes.as_ref()).expect("missing episodes");
+        assert_eq!(episodes[0].id, 7001);
+        assert_eq!(episodes[1].id, 7002);
+        assert!(playlist[0].channels[0].header.parent_code.is_empty());
+        assert!(playlist[0].channels[1].header.parent_code.is_empty());
+    }
 }
