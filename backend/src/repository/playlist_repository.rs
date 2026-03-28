@@ -268,10 +268,10 @@ fn rewrite_series_info_episode_virtual_id(playlist: &mut [PlaylistGroup],
 fn rewrite_series_episode_parent_virtual_ids(playlist: &mut [PlaylistGroup], target_id_mapping: &mut TargetIdMapping) {
     let mut series_parent_virtual_ids = HashMap::<Arc<str>, u32>::new();
 
-    for group in playlist.iter() {
+        for group in playlist.iter() {
         for channel in &group.channels {
             let parent_key = match channel.header.item_type {
-                PlaylistItemType::SeriesInfo => Some(channel.header.uuid.intern()),
+                PlaylistItemType::SeriesInfo => Some(channel.get_uuid().intern()),
                 PlaylistItemType::LocalSeriesInfo => Some(channel.header.id.clone()),
                 _ => None,
             };
@@ -523,8 +523,8 @@ mod tests {
     };
     use crate::repository::{BPlusTreeQuery, TargetIdMapping, VirtualIdRecord};
     use shared::model::{
-        PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
-        SeriesStreamDetailProperties, SeriesStreamProperties, StreamProperties, UUIDType, XtreamCluster,
+        PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
+        SeriesStreamDetailProperties, SeriesStreamProperties, StreamProperties, UUIDType, XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
     use std::{collections::HashMap, sync::Arc};
@@ -626,6 +626,89 @@ mod tests {
 
         for (idx, channel) in playlist[0].channels.iter_mut().enumerate() {
             let uuid = channel.header.uuid.clone();
+            let provider_id = channel.header.get_provider_id().unwrap_or_default();
+            let item_type = channel.header.item_type;
+            channel.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, 0);
+            channel.header.source_ordinal = u32::try_from(idx + 1).expect("ordinal");
+        }
+
+        let series_virtual_id = playlist[0].channels[1].header.virtual_id;
+        let episode_virtual_id = playlist[0].channels[0].header.virtual_id;
+
+        rewrite_series_episode_parent_virtual_ids(&mut playlist, &mut target_id_mapping);
+        target_id_mapping.persist().expect("persist");
+
+        let mut query = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&mapping_path).expect("query");
+        let record = query
+            .query_zero_copy(&episode_virtual_id)
+            .expect("query ok")
+            .expect("record missing");
+
+        assert_eq!(record.parent_virtual_id, series_virtual_id);
+        assert_eq!(playlist[0].channels[0].header.virtual_id, episode_virtual_id);
+    }
+
+    #[test]
+    fn rewrite_series_episode_parent_virtual_ids_updates_provider_episode_mapping_using_series_info_uuid() {
+        let dir = tempdir().expect("tempdir");
+        let mapping_path = dir.path().join("id_mapping.db");
+        let mut target_id_mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping");
+
+        let input_name = "provider-input".intern();
+        let xtream_series_info = XtreamPlaylistItem {
+            virtual_id: 0,
+            provider_id: 9001,
+            name: "Provider Series".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Provider Series".intern(),
+            title: "Provider Series".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://provider.example.com/series/user/pass/9001".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Series,
+            additional_properties: None,
+            item_type: PlaylistItemType::SeriesInfo,
+            category_id: 0,
+            input_name: Arc::clone(&input_name),
+            channel_no: 0,
+            source_ordinal: 0,
+        };
+        let provider_parent_code = xtream_series_info.get_uuid().intern();
+        let xtream_provider_episode = XtreamPlaylistItem {
+            virtual_id: 0,
+            provider_id: 201,
+            name: "Episode 1".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Provider Series".intern(),
+            title: "Episode 1".intern(),
+            parent_code: provider_parent_code,
+            rec: "".intern(),
+            url: "http://provider.example.com/series/user/pass/201.mkv".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Series,
+            additional_properties: None,
+            item_type: PlaylistItemType::Series,
+            category_id: 0,
+            input_name,
+            channel_no: 0,
+            source_ordinal: 0,
+        };
+        let provider_episode = PlaylistItem::from(&xtream_provider_episode);
+        let mut series_info = PlaylistItem::from(&xtream_series_info);
+        series_info.header.uuid = UUIDType::from_valid_uuid("123e4567-e89b-12d3-a456-426614174099");
+
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Provider Series".intern(),
+            channels: vec![provider_episode, series_info],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        for (idx, channel) in playlist[0].channels.iter_mut().enumerate() {
+            let uuid = channel.get_uuid();
             let provider_id = channel.header.get_provider_id().unwrap_or_default();
             let item_type = channel.header.item_type;
             channel.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, 0);
