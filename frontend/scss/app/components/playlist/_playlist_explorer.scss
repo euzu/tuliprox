@@ -283,7 +283,16 @@ $series-backdrop-mobile-height: 150px;
           height: 100%;
           overflow: hidden;
           pointer-events: none;
-          background-image: var(--series-backdrop-overlay-gradient);
+          background-image: var(
+            --series-backdrop-overlay-gradient,
+            linear-gradient(
+              to right,
+              rgb(0 0 0 / 88%) 24%,
+              rgb(0 0 0 / 72%) 48%,
+              rgb(0 0 0 / 48%) 66%,
+              rgb(0 0 0 / 0%) 86%
+            )
+          );
         }
 
         &-content {
@@ -308,6 +317,7 @@ $series-backdrop-mobile-height: 150px;
       @media (max-width: size.$mobile-breakpoint) {
         font-size: 1.1rem;
       }
+
       color: var(--series-info-title-color);
     }
 

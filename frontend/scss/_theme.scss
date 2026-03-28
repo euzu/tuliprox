@@ -7,12 +7,13 @@
 @use './themes/theme-nature-pure';
 @use './themes/theme-dopamine';
 @use './themes/theme-mermaidcore';
-@use './themes/theme-vibrant-elegance';
 @use './themes/theme-cool-elegance';
 @use './themes/theme-banana-yellow';
 @use './themes/theme-clubroom-contrast';
 @use './themes/theme-sun-washed-soft';
 @use './themes/theme-vintage-neutral';
+@use './themes/theme-dracula';
+@use './themes/theme-nord';
 
 
 :root,
@@ -446,7 +447,7 @@ body {
   --checkbox-checked-background-color: var(--theme-brand-primary-tool-hover);
   --option-active-background-color: var(--theme-brand-surface-option-active);
   --option-active-color: var(--theme-brand-text-option-active);
-  --shocase-card-background: var(--theme-brand-surface-showcase);
+  --showcase-card-background: var(--theme-brand-surface-showcase);
   --breadcrumbs-background-color: var(--theme-brand-surface-breadcrumbs);
   --breadcrumb-background-color: var(--theme-brand-surface-breadcrumb);
   --breadcrumb-active-background-color: var(--theme-brand-positive-soft);

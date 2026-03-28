@@ -46,7 +46,7 @@ pub fn ApiUserView() -> Html {
                         </div>
                         <div class={"tp__app-header-toolbar"}>
                             <WebsocketStatus/>
-                            <IconButton name="Theme" icon={if (*theme).is_light() {"Moon"} else {"Sun"}} onclick={handle_theme_switch} />
+                            <IconButton name="Theme" icon={if (*theme).is_light() {"Moon"} else {"Sun"}} hint={(*theme).label()} onclick={handle_theme_switch} />
                             <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
                         </div>
                     </div>

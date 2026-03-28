@@ -16,12 +16,13 @@ const THEME_PAPER: &str = "paper";
 const THEME_NATURE_PURE: &str = "nature-pure";
 const THEME_DOPAMINE: &str = "dopamine";
 const THEME_MERMAIDCORE: &str = "mermaidcore";
-const THEME_VIBRANT_ELEGANCE: &str = "vibrant-elegance";
 const THEME_COOL_ELEGANCE: &str = "cool-elegance";
 const THEME_BANANA_YELLOW: &str = "banana-yellow";
 const THEME_CLUBROOM_CONTRAST: &str = "clubroom-contrast";
 const THEME_SUN_WASHED_SOFT: &str = "sun-washed-soft";
 const THEME_VINTAGE_NEUTRAL: &str = "vintage-neutral";
+const THEME_DRACULA: &str = "dracula";
+const THEME_NORD: &str = "nord";
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Theme {
@@ -33,12 +34,13 @@ pub enum Theme {
     NaturePure,
     Dopamine,
     Mermaidcore,
-    VibrantElegance,
     CoolElegance,
     BananaYellow,
     ClubroomContrast,
     SunWashedSoft,
     VintageNeutral,
+    Dracula,
+    Nord,
 }
 
 impl Display for Theme {
@@ -55,12 +57,13 @@ impl Display for Theme {
                 Theme::NaturePure => THEME_NATURE_PURE,
                 Theme::Dopamine => THEME_DOPAMINE,
                 Theme::Mermaidcore => THEME_MERMAIDCORE,
-                Theme::VibrantElegance => THEME_VIBRANT_ELEGANCE,
                 Theme::CoolElegance => THEME_COOL_ELEGANCE,
                 Theme::BananaYellow => THEME_BANANA_YELLOW,
                 Theme::ClubroomContrast => THEME_CLUBROOM_CONTRAST,
                 Theme::SunWashedSoft => THEME_SUN_WASHED_SOFT,
                 Theme::VintageNeutral => THEME_VINTAGE_NEUTRAL,
+                Theme::Dracula => THEME_DRACULA,
+                Theme::Nord => THEME_NORD,
             }
         )
     }
@@ -79,18 +82,39 @@ impl FromStr for Theme {
             THEME_NATURE_PURE => Ok(Theme::NaturePure),
             THEME_DOPAMINE => Ok(Theme::Dopamine),
             THEME_MERMAIDCORE => Ok(Theme::Mermaidcore),
-            THEME_VIBRANT_ELEGANCE => Ok(Theme::VibrantElegance),
             THEME_COOL_ELEGANCE => Ok(Theme::CoolElegance),
             THEME_BANANA_YELLOW => Ok(Theme::BananaYellow),
             THEME_CLUBROOM_CONTRAST => Ok(Theme::ClubroomContrast),
             THEME_SUN_WASHED_SOFT => Ok(Theme::SunWashedSoft),
             THEME_VINTAGE_NEUTRAL => Ok(Theme::VintageNeutral),
+            THEME_DRACULA => Ok(Theme::Dracula),
+            THEME_NORD => Ok(Theme::Nord),
             _ => info_err_res!("Unknown theme: {s}"),
         }
     }
 }
 
 impl Theme {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Theme::Dark => "Dark",
+            Theme::Bright => "Bright",
+            Theme::Aurora => "Aurora",
+            Theme::Monokai => "Monokai",
+            Theme::Paper => "Paper",
+            Theme::NaturePure => "Nature Pure",
+            Theme::Dopamine => "Dopamine",
+            Theme::Mermaidcore => "Mermaidcore",
+            Theme::CoolElegance => "Cool Elegance",
+            Theme::BananaYellow => "Banana Yellow",
+            Theme::ClubroomContrast => "Clubroom Contrast",
+            Theme::SunWashedSoft => "Sun-Washed Soft",
+            Theme::VintageNeutral => "Vintage Neutral",
+            Theme::Dracula => "Dracula",
+            Theme::Nord => "Nord",
+        }
+    }
+
     pub const fn is_light(self) -> bool {
         matches!(
             self,
@@ -113,13 +137,14 @@ impl Theme {
             Theme::Paper => Theme::NaturePure,
             Theme::NaturePure => Theme::Dopamine,
             Theme::Dopamine => Theme::Mermaidcore,
-            Theme::Mermaidcore => Theme::VibrantElegance,
-            Theme::VibrantElegance => Theme::CoolElegance,
+            Theme::Mermaidcore => Theme::CoolElegance,
             Theme::CoolElegance => Theme::BananaYellow,
             Theme::BananaYellow => Theme::ClubroomContrast,
             Theme::ClubroomContrast => Theme::SunWashedSoft,
             Theme::SunWashedSoft => Theme::VintageNeutral,
-            Theme::VintageNeutral => Theme::Dark,
+            Theme::VintageNeutral => Theme::Dracula,
+            Theme::Dracula => Theme::Nord,
+            Theme::Nord => Theme::Dark,
         }
     }
 
@@ -145,12 +170,13 @@ impl Theme {
             | Theme::NaturePure
             | Theme::Dopamine
             | Theme::Mermaidcore
-            | Theme::VibrantElegance
             | Theme::CoolElegance
             | Theme::BananaYellow
             | Theme::ClubroomContrast
             | Theme::SunWashedSoft
-            | Theme::VintageNeutral => set_local_storage_item(TP_THEME_KEY, &self.to_string()),
+            | Theme::VintageNeutral
+            | Theme::Dracula
+            | Theme::Nord => set_local_storage_item(TP_THEME_KEY, &self.to_string()),
         }
     }
 
