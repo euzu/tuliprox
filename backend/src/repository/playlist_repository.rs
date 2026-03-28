@@ -74,7 +74,12 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
 
             let uuid = header.get_uuid();
             let item_type = header.item_type;
-            header.virtual_id = target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, 0);
+            let parent_virtual_id = if matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
+                target_id_mapping.get_parent_virtual_id_by_uuid(uuid).unwrap_or_default()
+            } else {
+                0
+            };
+            header.virtual_id = target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, parent_virtual_id);
         }
     }
 
@@ -729,6 +734,47 @@ mod tests {
 
         assert_eq!(record.parent_virtual_id, series_virtual_id);
         assert_eq!(playlist[0].channels[0].header.virtual_id, episode_virtual_id);
+    }
+
+    #[test]
+    fn initial_virtual_id_assignment_preserves_existing_parent_for_series_episode_without_parent_match() {
+        let dir = tempdir().expect("tempdir");
+        let mapping_path = dir.path().join("id_mapping.db");
+        let mut target_id_mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping");
+
+        let input_name = "provider-input".intern();
+        let mut episode = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "201".intern(),
+                url: "http://provider.example.com/series/user/pass/201.mkv".intern(),
+                input_name,
+                item_type: PlaylistItemType::Series,
+                xtream_cluster: XtreamCluster::Series,
+                ..PlaylistItemHeader::default()
+            },
+        };
+
+        let provider_id = episode.header.get_provider_id().unwrap_or_default();
+        let uuid = *episode.header.get_uuid();
+        let original_virtual_id = target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, episode.header.item_type, 77);
+
+        let preserved_parent_virtual_id = target_id_mapping.get_parent_virtual_id_by_uuid(&uuid).unwrap_or_default();
+        episode.header.virtual_id = target_id_mapping.get_and_update_virtual_id(
+            &uuid,
+            provider_id,
+            episode.header.item_type,
+            preserved_parent_virtual_id,
+        );
+        target_id_mapping.persist().expect("persist");
+
+        let mut query = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&mapping_path).expect("query");
+        let record = query
+            .query_zero_copy(&original_virtual_id)
+            .expect("query ok")
+            .expect("record missing");
+
+        assert_eq!(record.parent_virtual_id, 77);
+        assert_eq!(episode.header.virtual_id, original_virtual_id);
     }
 
     #[test]
