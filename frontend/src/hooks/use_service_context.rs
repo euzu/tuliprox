@@ -1,8 +1,8 @@
 use crate::{
     model::WebConfig,
     services::{
-        AuthService, ConfigService, EventService, PlaylistService, RbacService, StatusService, StreamsService,
-        ToastrService, UserApiService, UserService, WebSocketService,
+        AuthService, ConfigService, EventService, FlagsService, PlaylistService, RbacService, StatusService,
+        StreamsService, ToastrService, UserApiService, UserService, WebSocketService,
     },
 };
 use std::rc::Rc;
@@ -20,10 +20,11 @@ pub struct Services {
     pub toastr: Rc<ToastrService>,
     pub websocket: Rc<WebSocketService>,
     pub rbac: Rc<RbacService>,
+    pub flags: Rc<FlagsService>,
 }
 
 impl Services {
-    pub fn new(web_config: &WebConfig) -> Self {
+    pub fn new(web_config: &WebConfig, flags_service: FlagsService) -> Self {
         let event = Rc::new(EventService::new());
         let auth = Rc::new(AuthService::new());
         let config = Rc::new(ConfigService::new(web_config, Rc::clone(&auth), Rc::clone(&event)));
@@ -35,7 +36,8 @@ impl Services {
         let user_api = Rc::new(UserApiService::new());
         let websocket = Rc::new(WebSocketService::new(Rc::clone(&status), Rc::clone(&event)));
         let rbac = Rc::new(RbacService::new());
-        Self { auth, config, status, streams, event, playlist, user, user_api, toastr, websocket, rbac }
+        let flags = Rc::new(flags_service);
+        Self { auth, config, status, streams, event, playlist, user, user_api, toastr, websocket, rbac, flags }
     }
 }
 
@@ -51,7 +53,9 @@ pub struct ServiceContext {
 }
 
 impl ServiceContext {
-    pub fn new(config: &WebConfig) -> Self { Self { services: Rc::new(Services::new(config)) } }
+    pub fn new(config: &WebConfig, flags: FlagsService) -> Self {
+        Self { services: Rc::new(Services::new(config, flags)) }
+    }
 
     pub fn services(&self) -> Rc<Services> { self.services.clone() }
 }

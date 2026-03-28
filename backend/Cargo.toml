@@ -61,6 +61,7 @@ paste.workspace = true
 indexmap.workspace = true
 parking_lot = "0.12.5"
 lz4_flex.workspace = true
+brotli.workspace = true
 memmap2 = "0.9.10"
 fs2 = "0.4.3"
 notify = "8.2.0"
@@ -103,3 +104,8 @@ tokio-rustls = "0.26.4"
 
 [features]
 proxy-auth-regression = []
+
+
+[[bin]]
+name = "flags_builder"
+path = "src/tools/flags_builder.rs"
