@@ -46,7 +46,7 @@ $toggle-switch-toggle-end-pos: calc($toggle-switch-width - ($toggle-switch-toggl
     border-radius: 50%;
     transition: 0.3s;
     transform: translateX(0);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.8);
+    box-shadow: var(--toggle-switch-toggle-shadow);
   }
   &__active {
 

@@ -231,7 +231,7 @@ fn playlist_comparator(
     value_a: &str,
     value_b: &str,
 ) -> Ordering {
-    if matches!(order, SortOrder::None) {
+    if matches!(order, SortOrder::None) && sequence.is_none() {
         return Ordering::Equal;
     }
 
@@ -291,6 +291,10 @@ fn compare_cached_rule_entries(
     Ordering::Equal
 }
 
+fn is_effective_rule(rule: &ConfigSortRule) -> bool {
+    rule.order != SortOrder::None || rule.sequence.as_ref().is_some_and(|sequence| !sequence.is_empty())
+}
+
 pub(in crate::processing::processor) fn sort_playlist(
     target: &ConfigTarget,
     playlist: &mut Vec<PlaylistGroup>,
@@ -317,7 +321,7 @@ fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_
     let group_rules: Vec<_> = rules
         .iter()
         .filter(|r| matches!(r.target, SortTarget::Group))
-        .filter(|r| r.order != SortOrder::None)
+        .filter(|r| is_effective_rule(r))
         .map(PreparedRule::new)
         .collect();
 
@@ -354,7 +358,7 @@ fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule
     let channel_rules: Vec<_> = rules
         .iter()
         .filter(|r| matches!(r.target, SortTarget::Channel))
-        .filter(|r| r.order != SortOrder::None)
+        .filter(|r| is_effective_rule(r))
         .map(PreparedRule::new)
         .collect();
 
@@ -746,5 +750,113 @@ mod tests {
         assert_eq!(groups[0].channels[0].header.source_ordinal, 7);
         assert_eq!(groups[1].title.as_ref(), "zero");
         assert_eq!(groups[1].channels[0].header.source_ordinal, 0);
+    }
+
+    #[test]
+    fn test_channel_sequence_applies_even_when_order_is_none() {
+        let channels: Vec<PlaylistItem> = vec!["HD", "UHD", "FHD", "SD"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, title)| PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: title.to_string().into(),
+                    source_ordinal: u32::try_from(i).unwrap(),
+                    ..Default::default()
+                },
+            })
+            .collect();
+
+        let channel_sort = ConfigSortRule {
+            target: SortTarget::Channel,
+            field: ItemField::Caption,
+            order: SortOrder::None,
+            sequence: Some(vec![
+                shared::model::REGEX_CACHE.get_or_compile(r"^UHD$").unwrap(),
+                shared::model::REGEX_CACHE.get_or_compile(r"^FHD$").unwrap(),
+                shared::model::REGEX_CACHE.get_or_compile(r"^HD$").unwrap(),
+            ]),
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![make_group(1, "G1", channels)];
+        sort_channels_in_groups(groups.as_mut_slice(), &[channel_sort], false);
+
+        let sorted = groups[0].channels.iter().map(|pli| pli.header.title.clone()).collect::<Vec<_>>();
+        let expected = vec!["UHD", "FHD", "HD", "SD"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
+        assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_group_sequence_applies_even_when_order_is_none() {
+        let group_hd = make_group(
+            1,
+            "hd",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader { title: Arc::from("HD"), source_ordinal: 2, ..Default::default() },
+            }],
+        );
+        let group_uhd = make_group(
+            2,
+            "uhd",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader { title: Arc::from("UHD"), source_ordinal: 3, ..Default::default() },
+            }],
+        );
+        let group_fhd = make_group(
+            3,
+            "fhd",
+            vec![PlaylistItem {
+                header: PlaylistItemHeader { title: Arc::from("FHD"), source_ordinal: 1, ..Default::default() },
+            }],
+        );
+
+        let group_sort = ConfigSortRule {
+            target: SortTarget::Group,
+            field: ItemField::Caption,
+            order: SortOrder::None,
+            sequence: Some(vec![
+                shared::model::REGEX_CACHE.get_or_compile(r"^UHD$").unwrap(),
+                shared::model::REGEX_CACHE.get_or_compile(r"^FHD$").unwrap(),
+                shared::model::REGEX_CACHE.get_or_compile(r"^HD$").unwrap(),
+            ]),
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![group_hd, group_uhd, group_fhd];
+        sort_groups(&mut groups, &[group_sort], false);
+
+        let sorted = groups.iter().map(|group| group.channels[0].header.title.clone()).collect::<Vec<_>>();
+        let expected = vec!["UHD", "FHD", "HD"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
+        assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_empty_sequence_with_none_order_is_ignored() {
+        let channels: Vec<PlaylistItem> = vec!["B", "A"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, title)| PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: title.to_string().into(),
+                    source_ordinal: u32::try_from(i + 1).unwrap(),
+                    ..Default::default()
+                },
+            })
+            .collect();
+
+        let channel_sort = ConfigSortRule {
+            target: SortTarget::Channel,
+            field: ItemField::Caption,
+            order: SortOrder::None,
+            sequence: Some(vec![]),
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![make_group(1, "G1", channels)];
+        sort_channels_in_groups(groups.as_mut_slice(), &[channel_sort], false);
+
+        let sorted = groups[0].channels.iter().map(|pli| pli.header.title.clone()).collect::<Vec<_>>();
+        let expected = vec!["B", "A"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
+        assert_eq!(expected, sorted);
     }
 }

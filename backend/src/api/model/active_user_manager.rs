@@ -1076,9 +1076,9 @@ impl ActiveUserManager {
             {
                 if let Ok(mut user_connections) = self.connections.try_write() {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-                    user_connections
-                        .by_key
-                        .retain(|_k, v| now.saturating_sub(v.ts) < USER_CON_TTL && (v.connections > 0 || !v.streams.is_empty()));
+                    user_connections.by_key.retain(|_k, v| {
+                        v.connections > 0 || !v.streams.is_empty() || now.saturating_sub(v.ts) < USER_CON_TTL
+                    });
                     for connection_data in user_connections.by_key.values_mut() {
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
                     }
@@ -1745,6 +1745,50 @@ mod tests {
         let connections = manager.connections.read().await;
         assert!(!connections.key_by_addr.contains_key(&stale_addr));
         assert!(connections.key_by_addr.contains_key(&fresh_addr));
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_active_ts_streams_even_when_user_timestamp_is_stale() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55013".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-key-ts".to_string(), "127.0.0.1".to_string(), addr);
+
+        manager.add_connection(&addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 144,
+                meter_uid: 244,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_channel(9001),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await
+            .expect("ts stream should register");
+
+        {
+            let mut connections = manager.connections.write().await;
+            let connection_data = connections.by_key.get_mut("user1").expect("user entry should exist");
+            connection_data.ts = connection_data.ts.saturating_sub(USER_CON_TTL + 1);
+        }
+
+        if let Some(gc_ts) = &manager.gc_ts {
+            gc_ts.store(current_time_secs().saturating_sub(USER_GC_TTL + 1), Ordering::Release);
+        }
+
+        manager.active_streams().await;
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get("user1").expect("active user entry must survive gc");
+        assert_eq!(connection_data.connections, 1);
+        assert_eq!(connection_data.streams.len(), 1);
     }
 }
 

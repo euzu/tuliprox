@@ -45,6 +45,7 @@ mod tag_list;
 mod text_button;
 mod textarea;
 mod theme;
+mod theme_picker;
 mod toastr;
 mod toggle_switch;
 mod userlist;
@@ -72,6 +73,7 @@ pub(crate) use self::{
     home::*, icon_button::*, key_value_editor::*, loading_screen::*, login::*, no_access::*, no_content::*, panel::*,
     particle_flow_background::*, playlist::*, radio_button_group::*, rbac::*, reveal_content::*, role_based_content::*,
     search::*, select::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, table::*, tabset::*, tag_list::*,
-    text_button::*, textarea::*, title_card::*, toastr::*, toggle_switch::*, userlist::*, websocket_status::*,
+    text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
+    websocket_status::*,
 };
 pub use self::{confirm_dialog::*, content_dialog::*};

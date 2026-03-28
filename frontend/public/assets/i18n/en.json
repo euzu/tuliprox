@@ -663,7 +663,7 @@
       "ENABLED": "Enables or disables authentication for the Web-UI.",
       "ISSUER": "The issuer name embedded in JWT auth tokens.",
       "SECRET": "The secret key used to sign and verify JWT auth tokens. Changing this logs out everyone.",
-      "TOKEN_TTL_MINS": "How many minutes a login session remains valid (default 3600).",
+      "TOKEN_TTL_MINS": "How many minutes a login session remains valid (default 30).",
       "USERFILE": "Path to the text file containing WebUI users (default user.txt).",
       "GROUPFILE": "Path to the text file containing WebUI groups and permissions (default groups.txt)."
     },
