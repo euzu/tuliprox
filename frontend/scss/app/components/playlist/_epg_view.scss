@@ -87,12 +87,6 @@ $epg-border-size: 4px;
     background-color: var(--card-background-color);
     border-bottom: $epg-border-size solid var(--background-color);
     border-top: $epg-border-size solid var(--background-color);
-
-    &-icon {
-       img {
-         width: 2.5rem;
-       }
-    }
   }
 
   &__channel-icon {
