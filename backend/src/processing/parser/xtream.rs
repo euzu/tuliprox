@@ -10,7 +10,7 @@ use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup
                     PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
                     SeriesStreamProperties, StreamProperties, VideoStreamProperties,
                     XtreamCluster, XtreamPlaylistItem};
-use shared::utils::{generate_playlist_uuid, trim_last_slash, Internable};
+use shared::utils::{generate_provider_playlist_uuid, trim_last_slash, Internable};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
@@ -107,7 +107,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
 
             PlaylistItem {
                 header: PlaylistItemHeader {
-                    uuid: generate_playlist_uuid(&input.name, &episode_id, PlaylistItemType::Series, &episode_url),
+                    uuid: generate_provider_playlist_uuid(&input.name, &episode_id, PlaylistItemType::Series),
                     id: episode_id.into(),
                     // we use parent_code to track the parent series
                     parent_code: parent_uuid.intern(),
@@ -202,7 +202,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                         let item = PlaylistItem {
                             header: PlaylistItemHeader {
                                 id: stream.get_stream_id().intern(),
-                                uuid: generate_playlist_uuid(&input_name, &stream.get_stream_id().to_string(), item_type, &stream_url),
+                                uuid: generate_provider_playlist_uuid(&input_name, &stream.get_stream_id().to_string(), item_type),
                                 name: Arc::clone(&stream.get_name()),
                                 logo: Arc::clone(&stream.get_stream_icon()),
                                 group: Arc::clone(category_name),
@@ -374,7 +374,7 @@ where
     let item = PlaylistItem {
         header: PlaylistItemHeader {
             id: stream.get_stream_id().intern(),
-            uuid: generate_playlist_uuid(input_name, &stream.get_stream_id().to_string(), item_type, &stream_url),
+            uuid: generate_provider_playlist_uuid(input_name, &stream.get_stream_id().to_string(), item_type),
             name: stream.get_name(),
             logo: stream.get_stream_icon(),
             group: category_name.clone(),

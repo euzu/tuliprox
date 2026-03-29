@@ -130,6 +130,7 @@ async fn m3u_api_stream(
 
     if pli.item_type.is_local() {
         let connection_permission = user.connection_permission(app_state).await;
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
         return local_stream_response(
             fingerprint,
             app_state,
@@ -139,6 +140,7 @@ async fn m3u_api_stream(
             &target,
             &user,
             connection_permission,
+            Some(playback_session_token.as_str()),
             true,
         )
         .await

@@ -87,6 +87,12 @@ fn preserve_local_probe_state_if_unchanged(new_item: &mut XtreamPlaylistItem, ol
                 if new_details.audio.is_none() {
                     new_details.audio.clone_from(&old_details.audio);
                 }
+                if new_details.duration_secs.is_none() {
+                    new_details.duration_secs.clone_from(&old_details.duration_secs);
+                }
+                if new_details.bitrate == 0 {
+                    new_details.bitrate = old_details.bitrate;
+                }
             }
         }
         (Some(StreamProperties::Episode(new_props)), Some(StreamProperties::Episode(old_props))) => {
@@ -149,7 +155,14 @@ mod tests {
     use shared::utils::Internable;
     use shared::model::{EpisodeStreamProperties, VideoStreamDetailProperties, VideoStreamProperties};
 
-    fn video_item(url: &str, added: &str, video: Option<&str>, audio: Option<&str>) -> XtreamPlaylistItem {
+    fn video_item(
+        url: &str,
+        added: &str,
+        video: Option<&str>,
+        audio: Option<&str>,
+        duration_secs: Option<&str>,
+        bitrate: u32,
+    ) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
             virtual_id: 1,
             provider_id: 1,
@@ -168,6 +181,8 @@ mod tests {
                 details: Some(VideoStreamDetailProperties {
                     video: video.map(Internable::intern),
                     audio: audio.map(Internable::intern),
+                    duration_secs: duration_secs.map(Internable::intern),
+                    bitrate,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -180,7 +195,12 @@ mod tests {
         }
     }
 
-    fn episode_item(url: &str, added: Option<&str>, video: Option<&str>, audio: Option<&str>) -> XtreamPlaylistItem {
+    fn episode_item(
+        url: &str,
+        added: Option<&str>,
+        video: Option<&str>,
+        audio: Option<&str>,
+    ) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
             virtual_id: 2,
             provider_id: 2,
@@ -217,12 +237,14 @@ mod tests {
 
     #[test]
     fn keeps_movie_probe_when_file_unchanged() {
-        let mut new_item = video_item("file:///media/a.mkv", "100", None, None);
+        let mut new_item = video_item("file:///media/a.mkv", "100", None, None, None, 0);
         let old_item = video_item(
             "file:///media/a.mkv",
             "100",
             Some("{\"codec_name\":\"h264\"}"),
             Some("{\"codec_name\":\"aac\"}"),
+            Some("120"),
+            1500,
         );
 
         preserve_local_probe_state_if_unchanged(&mut new_item, &old_item);
@@ -232,6 +254,8 @@ mod tests {
                 let details = v.details.expect("details expected");
                 assert_eq!(details.video, Some("{\"codec_name\":\"h264\"}".intern()));
                 assert_eq!(details.audio, Some("{\"codec_name\":\"aac\"}".intern()));
+                assert_eq!(details.duration_secs, Some("120".intern()));
+                assert_eq!(details.bitrate, 1500);
             }
             _ => panic!("expected video properties"),
         }
@@ -239,12 +263,14 @@ mod tests {
 
     #[test]
     fn does_not_keep_movie_probe_when_mtime_changed() {
-        let mut new_item = video_item("file:///media/a.mkv", "200", None, None);
+        let mut new_item = video_item("file:///media/a.mkv", "200", None, None, None, 0);
         let old_item = video_item(
             "file:///media/a.mkv",
             "100",
             Some("{\"codec_name\":\"h264\"}"),
             Some("{\"codec_name\":\"aac\"}"),
+            Some("120"),
+            1500,
         );
 
         preserve_local_probe_state_if_unchanged(&mut new_item, &old_item);
@@ -254,6 +280,8 @@ mod tests {
                 let details = v.details.expect("details expected");
                 assert!(details.video.is_none());
                 assert!(details.audio.is_none());
+                assert!(details.duration_secs.is_none());
+                assert_eq!(details.bitrate, 0);
             }
             _ => panic!("expected video properties"),
         }

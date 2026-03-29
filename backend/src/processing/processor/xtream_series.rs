@@ -935,7 +935,7 @@ pub async fn update_series_metadata(
                             )
                             .await
                             {
-                                ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+                                ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
                                     if let Some(v) = raw_video {
                                         ep.video = Some(v.to_string().into());
                                         properties_updated = true;

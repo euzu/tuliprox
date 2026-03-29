@@ -301,10 +301,10 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                             <>
                                 <div class="tp__stream-display__list">
                                     { for streams.iter().cloned().map(|stream| {
-                                        let uid = stream.uid;
+                                        let key = format!("{}-{}", stream.addr, stream.uid);
                                         html! {
                                             <StreamDisplayItem
-                                                key={uid}
+                                                key={key}
                                                 stream={stream}
                                                 metrics_enabled={metrics_enabled}
                                                 on_popup_click={handle_popup_onclick.clone()}

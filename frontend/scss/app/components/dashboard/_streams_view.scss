@@ -4,6 +4,7 @@
   display: flex;
   flex-flow: column;
   flex: 1 1 auto;
+  min-height: 0;
   box-sizing: border-box;
   width: 100%;
   overflow: hidden;
@@ -16,6 +17,8 @@
   &__body {
     display: flex;
     flex-flow: column;
+    flex: 1 1 auto;
+    min-height: 0;
     gap: var(--gap-larger);
     overflow: hidden;
   }
@@ -81,6 +84,7 @@
   &__body {
     display: flex;
     flex: 1 1 auto;
+    min-height: 0;
     overflow: hidden;
     padding: var(--padding-default);
   }
@@ -91,7 +95,9 @@
     flex-flow: column;
     gap: var(--gap-small);
     min-height: 0;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
     padding-right: var(--padding-small);
   }
 

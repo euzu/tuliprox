@@ -5,6 +5,7 @@
   flex-flow: row;
   overflow: hidden;
   flex: 1 1 auto;
+  min-height: 0;
   box-sizing: border-box;
   max-width: 100%;
   color: var(--text-color);
@@ -14,6 +15,7 @@
     display: flex;
     flex-flow: column;
     flex: 1 1 auto;
+    min-height: 0;
     align-content: flex-start;
     justify-content: flex-start;
     overflow: hidden;
@@ -21,14 +23,26 @@
     &__body {
       display: flex;
       flex-flow: column;
+      flex: 1 1 auto;
+      min-height: 0;
       box-sizing: border-box;
       padding: 0 var(--padding-larger);
       align-items: center;
       overflow: hidden;
-      height: 100vh;
       @media (max-width: size.$mobile-breakpoint) {
         padding: 0 var(--padding-micro);
       }
+    }
+
+    &__body > .tp__panel {
+      display: flex;
+      flex-flow: column;
+      flex: 1 1 auto;
+      min-height: 0;
+      align-self: stretch;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
     }
 
   }

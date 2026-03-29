@@ -1,17 +1,22 @@
 use crate::api::model::create_http_client;
-use crate::library::metadata::{EpisodeMetadata, MediaMetadata, MetadataCacheEntry};
+use crate::library::metadata::{EpisodeMetadata, MediaMetadata, MetadataCacheEntry, SeriesMetadata, TechnicalMetadata};
 use crate::library::metadata_resolver::MetadataResolver;
 use crate::library::metadata_storage::MetadataStorage;
 use crate::library::scanner::LibraryScanner;
 use crate::library::{MediaGroup, MediaGrouper, thumbnail::{self, ThumbnailExtractor}};
 use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
-use crate::utils::ffmpeg::FfmpegExecutor;
+use crate::utils::ffmpeg::{FfmpegExecutor, ProbeUrlOutcome};
 use log::{debug, error, info, warn};
 use path_clean::PathClean;
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+
+type FfprobeAvailabilityFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+type FfprobeAvailabilityChecker = Arc<dyn Fn() -> FfprobeAvailabilityFuture + Send + Sync>;
 
 // Action taken when processing a file
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +33,9 @@ pub struct LibraryProcessor {
     resolver: MetadataResolver,
     storage: MetadataStorage,
     thumbnail_extractor: Option<ThumbnailExtractor>,
+    metadata_update_config: Option<MetadataUpdateConfig>,
     app_config: Option<Arc<AppConfig>>, // Need access to global config for FFprobe settings
+    ffprobe_availability_checker: FfprobeAvailabilityChecker,
 }
 
 pub fn resolve_metadata_storage_path(
@@ -53,6 +60,10 @@ pub fn resolve_metadata_storage_path(
 }
 
 impl LibraryProcessor {
+    fn default_ffprobe_availability_checker() -> FfprobeAvailabilityChecker {
+        Arc::new(|| Box::pin(async { FfmpegExecutor::new().check_ffprobe_availability().await }))
+    }
+
     // Creates a new Library processor from application config
     pub fn from_app_config(app_config: &AppConfig) -> Option<Self> {
         let Ok(client) = create_http_client(app_config) else {
@@ -78,6 +89,22 @@ impl LibraryProcessor {
         client: reqwest::Client,
         storage_dir: &str,
     ) -> Self {
+        Self::new_with_ffprobe_availability_checker(
+            config,
+            metadata_update_config,
+            client,
+            storage_dir,
+            Self::default_ffprobe_availability_checker(),
+        )
+    }
+
+    fn new_with_ffprobe_availability_checker(
+        config: LibraryConfig,
+        metadata_update_config: Option<&MetadataUpdateConfig>,
+        client: reqwest::Client,
+        storage_dir: &str,
+        ffprobe_availability_checker: FfprobeAvailabilityChecker,
+    ) -> Self {
         let storage_path = resolve_metadata_storage_path(metadata_update_config, storage_dir);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
@@ -95,7 +122,9 @@ impl LibraryProcessor {
             resolver,
             storage,
             thumbnail_extractor,
+            metadata_update_config: metadata_update_config.cloned(),
             app_config: None,
+            ffprobe_availability_checker,
         }
     }
 
@@ -130,11 +159,7 @@ impl LibraryProcessor {
         };
 
         // Check global ffprobe config
-        let ffprobe_enabled = if let Some(app_cfg) = &self.app_config {
-            app_cfg.is_ffprobe_enabled().await
-        } else {
-            false
-        };
+        let ffprobe_enabled = self.is_local_ffprobe_enabled().await;
 
         let ffmpeg_available = if self.thumbnail_extractor.is_some() {
             if let Some(app_cfg) = &self.app_config {
@@ -237,7 +262,7 @@ impl LibraryProcessor {
         group: &MediaGroup,
         existing_map: &HashMap<String, MetadataCacheEntry>,
         force_rescan: bool,
-        _can_probe: bool,
+        can_probe: bool,
         can_extract_thumbnails: bool,
     ) -> Result<ProcessAction, String> {
         let MediaGroup::Movie { file, .. } = group else { return Err(format!("Expected movie to resolve but got {group}")) };
@@ -251,8 +276,8 @@ impl LibraryProcessor {
 
             debug!("File modified, updating metadata: {}", file.file_path);
             // Reuse existing UUID
-            let metadata = self.resolve_metadata(group).await?;
-            //self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe);
+            let mut metadata = self.resolve_metadata(group).await?;
+            self.enrich_movie_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe).await;
 
             let entry = MetadataCacheEntry {
                 uuid: existing_entry.uuid.clone(),
@@ -267,8 +292,8 @@ impl LibraryProcessor {
             (entry, ProcessAction::Updated)
         } else {
             debug!("New file, resolving metadata: {}", file.file_path);
-            let metadata = self.resolve_metadata(group).await?;
-            //self.enrich_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe);
+            let mut metadata = self.resolve_metadata(group).await?;
+            self.enrich_movie_metadata_with_ffprobe(&mut metadata, &file.file_path, can_probe).await;
 
             let entry = MetadataCacheEntry::new(
                 file.file_path.clone(),
@@ -298,7 +323,7 @@ impl LibraryProcessor {
         group: &MediaGroup,
         existing_map: &HashMap<String, MetadataCacheEntry>,
         force_rescan: bool,
-        _can_probe: bool,
+        can_probe: bool,
         can_extract_thumbnails: bool,
     ) -> Result<ProcessAction, String> {
         let MediaGroup::Series { show_key, episodes } = group else { return Err(format!("Expected series to resolve but got {group}")) };
@@ -316,6 +341,7 @@ impl LibraryProcessor {
         // Build a map of existing per-episode thumbnail state so it can be
         // carried forward when the series metadata is rebuilt from scratch.
         let mut existing_ep_thumbs: HashMap<(u32, u32), (Option<String>, i64)> = HashMap::new();
+        let mut existing_ep_technical: HashMap<String, (i64, Option<TechnicalMetadata>)> = HashMap::new();
 
         // Check if file already exists in cache
         let (mut chache_entry, status) = if let Some(existing_entry) = existing_map.get(&series_file_path) {
@@ -336,6 +362,9 @@ impl LibraryProcessor {
                             (ep.season, ep.episode),
                             (ep.thumbnail_id.clone(), ep.file_modified),
                         );
+                        if !ep.file_path.is_empty() {
+                            existing_ep_technical.insert(ep.file_path.clone(), (ep.file_modified, ep.technical.clone()));
+                        }
                     }
                 }
             }
@@ -367,72 +396,104 @@ impl LibraryProcessor {
         };
 
         if let (MediaMetadata::Series(ref mut series_metadata), MediaGroup::Series { episodes, .. }) = (&mut chache_entry.metadata, group) {
-            let series_episodes = series_metadata.episodes.get_or_insert_with(|| {
-                // No episode list from TMDB/NFO — synthesize stubs from scanned files
-                // so that file paths, sizes and timestamps get populated below.
-                episodes.iter().map(|ep| EpisodeMetadata {
-                    title: ep.metadata.title.clone(),
-                    season: ep.season,
-                    episode: ep.episode,
-                    file_path: String::new(),
-                    file_size: 0,
-                    file_modified: 0,
-                    ..EpisodeMetadata::default()
-                }).collect()
-            });
+            {
+                let series_episodes = series_metadata.episodes.get_or_insert_with(|| {
+                    // No episode list from TMDB/NFO — synthesize stubs from scanned files
+                    // so that file paths, sizes and timestamps get populated below.
+                    episodes.iter().map(|ep| EpisodeMetadata {
+                        title: ep.metadata.title.clone(),
+                        season: ep.season,
+                        episode: ep.episode,
+                        file_path: String::new(),
+                        file_size: 0,
+                        file_modified: 0,
+                        ..EpisodeMetadata::default()
+                    }).collect()
+                });
 
-            // maybe we have the same episode as 2 different files
-            let mut double_episodes = vec![];
-            for episode in episodes {
-                for series_episode in &mut *series_episodes {
-                    if episode.episode == series_episode.episode && episode.season == series_episode.season {
-                        let previous_file_modified = series_episode.file_modified;
-                        if series_episode.file_path.is_empty() {
-                            // Carry forward existing thumbnail state so we don't
-                            // re-extract thumbnails that are already cached.
-                            let prev_mtime = if let Some((ref existing_thumb_id, existing_mtime)) =
-                                existing_ep_thumbs.get(&(episode.season, episode.episode))
-                            {
-                                series_episode.thumbnail_id.clone_from(existing_thumb_id);
-                                Some(*existing_mtime)
+                // maybe we have the same episode as 2 different files
+                let mut double_episodes = vec![];
+                for episode in episodes {
+                    let mut matched_existing_episode = false;
+                    for series_episode in &mut *series_episodes {
+                        if episode.episode == series_episode.episode && episode.season == series_episode.season {
+                            matched_existing_episode = true;
+                            let previous_file_modified = series_episode.file_modified;
+                            if series_episode.file_path.is_empty() {
+                                // Carry forward existing thumbnail state so we don't
+                                // re-extract thumbnails that are already cached.
+                                let prev_mtime = if let Some((ref existing_thumb_id, existing_mtime)) =
+                                    existing_ep_thumbs.get(&(episode.season, episode.episode))
+                                {
+                                    series_episode.thumbnail_id.clone_from(existing_thumb_id);
+                                    Some(*existing_mtime)
+                                } else {
+                                    None
+                                };
+                                series_episode.file_path.clone_from(&episode.file.file_path);
+                                series_episode.file_modified = episode.file.modified_timestamp;
+                                series_episode.file_size = episode.file.size_bytes;
+                                self.update_episode_thumbnail(
+                                    series_episode,
+                                    &episode.file.file_path,
+                                    episode.file.modified_timestamp,
+                                    prev_mtime,
+                                    can_extract_thumbnails,
+                                ).await;
                             } else {
-                                None
-                            };
-                            series_episode.file_path.clone_from(&episode.file.file_path);
-                            series_episode.file_modified = episode.file.modified_timestamp;
-                            series_episode.file_size = episode.file.size_bytes;
-                            self.update_episode_thumbnail(
-                                series_episode,
-                                &episode.file.file_path,
-                                episode.file.modified_timestamp,
-                                prev_mtime,
-                                can_extract_thumbnails,
-                            ).await;
-                        } else {
-                            let mut new_episode = series_episode.clone();
-                            new_episode.file_path.clone_from(&episode.file.file_path);
-                            new_episode.file_modified = episode.file.modified_timestamp;
-                            new_episode.file_size = episode.file.size_bytes;
-                            self.update_episode_thumbnail(
-                                &mut new_episode,
-                                &episode.file.file_path,
-                                episode.file.modified_timestamp,
-                                Some(previous_file_modified),
-                                can_extract_thumbnails,
-                            ).await;
-                            double_episodes.push(new_episode);
+                                let mut new_episode = series_episode.clone();
+                                new_episode.file_path.clone_from(&episode.file.file_path);
+                                new_episode.file_modified = episode.file.modified_timestamp;
+                                new_episode.file_size = episode.file.size_bytes;
+                                self.update_episode_thumbnail(
+                                    &mut new_episode,
+                                    &episode.file.file_path,
+                                    episode.file.modified_timestamp,
+                                    Some(previous_file_modified),
+                                    can_extract_thumbnails,
+                                ).await;
+                                double_episodes.push(new_episode);
+                            }
                         }
                     }
+
+                    if !matched_existing_episode {
+                        let (thumbnail_id, previous_file_modified) = existing_ep_thumbs
+                            .get(&(episode.season, episode.episode))
+                            .map_or((None, None), |(existing_thumb_id, existing_mtime)| {
+                                (existing_thumb_id.clone(), Some(*existing_mtime))
+                            });
+                        let mut new_episode = EpisodeMetadata {
+                            title: episode.metadata.title.clone(),
+                            season: episode.season,
+                            episode: episode.episode,
+                            file_path: episode.file.file_path.clone(),
+                            file_modified: episode.file.modified_timestamp,
+                            file_size: episode.file.size_bytes,
+                            thumbnail_id,
+                            ..EpisodeMetadata::default()
+                        };
+                        self.update_episode_thumbnail(
+                            &mut new_episode,
+                            &episode.file.file_path,
+                            episode.file.modified_timestamp,
+                            previous_file_modified,
+                            can_extract_thumbnails,
+                        ).await;
+                        double_episodes.push(new_episode);
+                    }
+                }
+                if !double_episodes.is_empty() {
+                    series_episodes.append(&mut double_episodes);
+                    series_episodes.sort_by_key(|episode| (episode.season, episode.episode));
                 }
             }
-            if !double_episodes.is_empty() {
-                series_episodes.append(&mut double_episodes);
-                series_episodes.sort_by_key(|episode| (episode.season, episode.episode));
-            }
-
-            series_metadata.number_of_episodes = u32::try_from(series_episodes.len()).unwrap_or(0);
+            self.enrich_series_episode_metadata_with_ffprobe(series_metadata, &existing_ep_technical, can_probe).await;
+            let episode_count = series_metadata.episodes.as_ref().map_or(0, Vec::len);
+            series_metadata.number_of_episodes = u32::try_from(episode_count).unwrap_or(0);
             if series_metadata.number_of_seasons == 0 {
-                series_metadata.number_of_seasons = unique_season_count(series_episodes);
+                let season_count = series_metadata.episodes.as_ref().map_or(0, |series_episodes| unique_season_count(series_episodes));
+                series_metadata.number_of_seasons = season_count;
             }
         }
 
@@ -585,6 +646,89 @@ impl LibraryProcessor {
     pub async fn get_all_entries(&self) -> Vec<MetadataCacheEntry> {
         self.storage.load_all().await
     }
+
+    async fn is_local_ffprobe_enabled(&self) -> bool {
+        if let Some(app_cfg) = &self.app_config {
+            return app_cfg.is_ffprobe_enabled().await;
+        }
+
+        let ffprobe_enabled_in_config = self
+            .metadata_update_config
+            .as_ref()
+            .is_some_and(|config| config.ffprobe.enabled);
+        if !ffprobe_enabled_in_config {
+            return false;
+        }
+
+        (self.ffprobe_availability_checker)().await
+    }
+
+    async fn enrich_movie_metadata_with_ffprobe(&self, metadata: &mut MediaMetadata, file_path: &str, can_probe: bool) {
+        if !can_probe {
+            return;
+        }
+
+        let MediaMetadata::Movie(movie) = metadata else {
+            return;
+        };
+        movie.technical = self.probe_local_file(file_path).await;
+    }
+
+    async fn enrich_series_episode_metadata_with_ffprobe(
+        &self,
+        series: &mut SeriesMetadata,
+        existing_technical: &HashMap<String, (i64, Option<TechnicalMetadata>)>,
+        can_probe: bool,
+    ) {
+        let Some(episodes) = series.episodes.as_mut() else {
+            return;
+        };
+
+        for episode in episodes {
+            if episode.file_path.is_empty() {
+                continue;
+            }
+
+            if let Some((previous_mtime, previous_technical)) = existing_technical.get(&episode.file_path) {
+                if *previous_mtime == episode.file_modified {
+                    episode.technical.clone_from(previous_technical);
+                    continue;
+                }
+            }
+
+            if can_probe {
+                episode.technical = self.probe_local_file(&episode.file_path).await;
+            }
+        }
+    }
+
+    async fn probe_local_file(&self, file_path: &str) -> Option<TechnicalMetadata> {
+        let ffprobe = self.metadata_update_config.as_ref().map(|config| &config.ffprobe)?;
+        if !ffprobe.enabled {
+            return None;
+        }
+
+        match FfmpegExecutor::new()
+            .probe_url(
+                file_path,
+                None,
+                ffprobe.analyze_duration_micros,
+                ffprobe.probe_size_bytes,
+                ffprobe.timeout.unwrap_or(60),
+                // Local file probing does not traverse the network, so no proxy config is applied.
+                None,
+            )
+            .await
+        {
+            ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => Some(TechnicalMetadata {
+                video: raw_video.map(|value| value.to_string()),
+                audio: raw_audio.map(|value| value.to_string()),
+                duration_secs: stats.duration_secs,
+                bitrate: stats.bitrate,
+            }),
+            ProbeUrlOutcome::Failed(_) => None,
+        }
+    }
 }
 
 fn unique_season_count(episodes: &[EpisodeMetadata]) -> u32 {
@@ -598,6 +742,8 @@ fn unique_season_count(episodes: &[EpisodeMetadata]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::MetadataUpdateConfig;
+    use shared::model::{FfprobeConfigDto, LibraryConfigDto};
 
     #[test]
     fn test_scan_result_creation() {
@@ -624,5 +770,26 @@ mod tests {
         ];
 
         assert_eq!(unique_season_count(&episodes), 3);
+    }
+
+    #[tokio::test]
+    async fn local_ffprobe_enablement_falls_back_to_metadata_update_config_without_app_config() {
+        let mut processor = LibraryProcessor::new_with_ffprobe_availability_checker(
+            LibraryConfig::from(&LibraryConfigDto::default()),
+            Some(&MetadataUpdateConfig::default()),
+            reqwest::Client::new(),
+            "/tmp",
+            Arc::new(|| Box::pin(async { false })),
+        );
+        processor.app_config = None;
+
+        let mut metadata_update = MetadataUpdateConfig::default();
+        metadata_update.ffprobe = crate::model::FfprobeConfig::from(&FfprobeConfigDto {
+            enabled: true,
+            ..FfprobeConfigDto::default()
+        });
+        processor.metadata_update_config = Some(metadata_update);
+
+        assert!(!processor.is_local_ffprobe_enabled().await);
     }
 }
