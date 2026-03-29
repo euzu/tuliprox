@@ -128,7 +128,13 @@ pub fn v1_api_register(
 
     let system_write = axum::routing::Router::new()
         .route("/geoip/update", axum::routing::get(geoip_update))
-        .route("/file/download", axum::routing::post(download_api::queue_download_file));
+        .route("/file/download", axum::routing::post(download_api::queue_download_file))
+        .route("/file/record", axum::routing::post(download_api::queue_recording_file))
+        .route("/file/download/pause", axum::routing::post(download_api::pause_download))
+        .route("/file/download/resume", axum::routing::post(download_api::resume_download))
+        .route("/file/download/cancel", axum::routing::post(download_api::cancel_download))
+        .route("/file/download/remove", axum::routing::post(download_api::remove_download))
+        .route("/file/download/retry", axum::routing::post(download_api::retry_download));
 
     let mut router = axum::routing::Router::new();
 

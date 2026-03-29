@@ -4,6 +4,7 @@ use std::{fmt, str::FromStr};
 const DASHBOARD: &str = "dashboard";
 const STATS: &str = "stats";
 const STREAMS: &str = "streams";
+const DOWNLOADS: &str = "downloads";
 const USERS: &str = "users";
 const CONFIG: &str = "config";
 const PLAYLIST_UPDATE: &str = "playlist_update";
@@ -21,6 +22,7 @@ pub enum ViewType {
     Dashboard,
     Stats,
     Streams,
+    Downloads,
     Users,
     Config,
     SourceEditor,
@@ -39,6 +41,7 @@ impl FromStr for ViewType {
             DASHBOARD => Ok(ViewType::Dashboard),
             STATS => Ok(ViewType::Stats),
             STREAMS => Ok(ViewType::Streams),
+            DOWNLOADS => Ok(ViewType::Downloads),
             USERS => Ok(ViewType::Users),
             CONFIG => Ok(ViewType::Config),
             SOURCE_EDITOR => Ok(ViewType::SourceEditor),
@@ -60,6 +63,7 @@ impl fmt::Display for ViewType {
             ViewType::Dashboard => DASHBOARD,
             ViewType::Stats => STATS,
             ViewType::Streams => STREAMS,
+            ViewType::Downloads => DOWNLOADS,
             ViewType::Users => USERS,
             ViewType::Config => CONFIG,
             ViewType::SourceEditor => SOURCE_EDITOR,

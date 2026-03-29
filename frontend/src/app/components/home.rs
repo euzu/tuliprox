@@ -1,10 +1,10 @@
 use crate::{
     app::{
         components::{
-            config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
-            IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
-            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ThemePicker,
-            ToastrView, UserlistView, WebsocketStatus,
+            config::ConfigView, downloads::DownloadsView, loading_indicator::BusyIndicator, theme::Theme, AppIcon,
+            DashboardView, EpgView, IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground,
+            PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor,
+            StatsView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -290,6 +290,11 @@ pub fn Home() -> Html {
                                               <StreamsView embedded={false}/>
                                             </Panel>
                                         })}
+                                       { html_if!(can_read_system_status, {
+                                       <Panel class="tp__full-width" value={ViewType::Downloads.to_string()} active={view_visible.to_string()}>
+                                         <DownloadsView/>
+                                       </Panel>
+                                       })}
                                        { html_if!(can_read_users, {
                                        <Panel class="tp__full-width" value={ViewType::Users.to_string()} active={view_visible.to_string()}>
                                           <UserlistView/>

@@ -145,6 +145,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
                 <MenuItem class={if *active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
              })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <MenuItem class={if *active_menu == ViewType::Downloads { "active" } else {""}} icon="Download" name={ViewType::Downloads.to_string()} label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></MenuItem>
+             })}
             {html_if!(
                 auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
                 {

@@ -202,6 +202,7 @@ async fn create_shared_data(
     forced_targets: &Arc<ProcessTargets>,
 ) -> Result<(AppState, mpsc::Receiver<Arc<ProcessTargets>>), TuliproxError> {
     let config = app_config.config.load();
+    let downloads_state_file = std::path::PathBuf::from(&config.storage_dir).join("downloads_state.json");
 
     let use_geoip = config.is_geoip_enabled();
     let geoip = if use_geoip {
@@ -240,13 +241,12 @@ async fn create_shared_data(
 
     let (manual_update_sender, manual_update_rx) = mpsc::channel::<Arc<ProcessTargets>>(1);
 
-    Ok((
-        AppState {
+    let app_state = AppState {
             forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
             app_config: Arc::clone(app_config),
             http_client: Arc::new(ArcSwap::from_pointee(client)),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
-            downloads: Arc::new(DownloadQueue::new()),
+            downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
             cache: Arc::new(ArcSwapOption::from(cache)),
             shared_stream_manager,
             active_users,
@@ -259,9 +259,28 @@ async fn create_shared_data(
             update_guard: UpdateGuard::new(),
             metadata_manager,
             manual_update_sender,
-        },
-        manual_update_rx,
-    ))
+        };
+
+    app_state.downloads.load_from_disk().await.map_err(|err| {
+        TuliproxError::new(shared::error::TuliproxErrorKind::Info, format!("Failed to load persisted downloads: {err}"))
+    })?;
+
+    if config.video.as_ref().and_then(|video| video.download.as_ref()).is_some()
+        && (!app_state.downloads.queue.lock().await.is_empty() || app_state.downloads.active.read().await.is_some())
+    {
+        if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
+            crate::api::endpoints::download_api::ensure_download_worker_running(app_config, download_cfg, &app_state.downloads)
+                .await
+                .map_err(|err| {
+                    TuliproxError::new(
+                        shared::error::TuliproxErrorKind::Info,
+                        format!("Failed to resume persisted downloads: {err}"),
+                    )
+                })?;
+        }
+    }
+
+    Ok((app_state, manual_update_rx))
 }
 
 async fn run_manual_update_worker(
