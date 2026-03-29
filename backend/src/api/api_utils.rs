@@ -1451,12 +1451,24 @@ pub async fn local_stream_response(
     }
 
     if connection_permission == UserConnectionPermission::Exhausted {
-        return create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserConnectionsExhausted,
-        )
-        .into_response();
+        let allow_session_reopen = if let Some(session_token) = playback_session_token {
+            user.max_connections > 0
+                && app_state
+                    .active_users
+                    .connection_permission_for_session(&user.username, user.max_connections, session_token)
+                    .await
+                    != UserConnectionPermission::Exhausted
+        } else {
+            false
+        };
+        if !allow_session_reopen {
+            return create_custom_video_stream_response(
+                app_state,
+                &fingerprint.addr,
+                CustomVideoStreamType::UserConnectionsExhausted,
+            )
+            .into_response();
+        }
     }
 
     let path = PathBuf::from(pli.url.strip_prefix("file://").unwrap_or(&pli.url));
@@ -2459,6 +2471,77 @@ mod tests {
 
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "stable playback token should reuse the tracked local connection");
+        assert_eq!(active_streams[0].session_token.as_deref(), Some(playback_session_token));
+        assert_eq!(active_streams[0].addr, second_fingerprint.addr);
+    }
+
+    #[tokio::test]
+    async fn local_stream_response_allows_exhausted_reopen_for_same_playback_session_token() {
+        let app_state = create_test_app_state();
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("local-test.mkv");
+        tokio::fs::write(&file_path, Bytes::from_static(b"local-stream")).await.expect("write local file");
+
+        let channel = create_test_local_channel(&format!("file://{}", file_path.display()));
+        let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user1".to_string();
+        user.max_connections = 1;
+        let target = ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "test".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        };
+        let playback_session_token = "local-playback-token";
+
+        let first_fingerprint = create_test_fingerprint("127.0.0.1:55127".parse().unwrap_or_else(|_| unreachable!()));
+        let second_fingerprint = create_test_fingerprint("127.0.0.1:55128".parse().unwrap_or_else(|_| unreachable!()));
+
+        let _first_response = local_stream_response(
+            &first_fingerprint,
+            &app_state,
+            channel.clone(),
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            Some(playback_session_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        let second_response = local_stream_response(
+            &second_fingerprint,
+            &app_state,
+            channel,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Exhausted,
+            Some(playback_session_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let active_streams = app_state.active_users.active_streams().await;
+        assert_eq!(active_streams.len(), 1);
         assert_eq!(active_streams[0].session_token.as_deref(), Some(playback_session_token));
         assert_eq!(active_streams[0].addr, second_fingerprint.addr);
     }
