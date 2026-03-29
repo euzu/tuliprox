@@ -414,8 +414,10 @@ impl LibraryProcessor {
                 // maybe we have the same episode as 2 different files
                 let mut double_episodes = vec![];
                 for episode in episodes {
+                    let mut matched_existing_episode = false;
                     for series_episode in &mut *series_episodes {
                         if episode.episode == series_episode.episode && episode.season == series_episode.season {
+                            matched_existing_episode = true;
                             let previous_file_modified = series_episode.file_modified;
                             if series_episode.file_path.is_empty() {
                                 // Carry forward existing thumbnail state so we don't
@@ -453,6 +455,32 @@ impl LibraryProcessor {
                                 double_episodes.push(new_episode);
                             }
                         }
+                    }
+
+                    if !matched_existing_episode {
+                        let (thumbnail_id, previous_file_modified) = existing_ep_thumbs
+                            .get(&(episode.season, episode.episode))
+                            .map_or((None, None), |(existing_thumb_id, existing_mtime)| {
+                                (existing_thumb_id.clone(), Some(*existing_mtime))
+                            });
+                        let mut new_episode = EpisodeMetadata {
+                            title: episode.metadata.title.clone(),
+                            season: episode.season,
+                            episode: episode.episode,
+                            file_path: episode.file.file_path.clone(),
+                            file_modified: episode.file.modified_timestamp,
+                            file_size: episode.file.size_bytes,
+                            thumbnail_id,
+                            ..EpisodeMetadata::default()
+                        };
+                        self.update_episode_thumbnail(
+                            &mut new_episode,
+                            &episode.file.file_path,
+                            episode.file.modified_timestamp,
+                            previous_file_modified,
+                            can_extract_thumbnails,
+                        ).await;
+                        double_episodes.push(new_episode);
                     }
                 }
                 if !double_episodes.is_empty() {

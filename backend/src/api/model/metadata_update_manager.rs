@@ -4189,6 +4189,56 @@ mod tests {
     }
 
     #[test]
+    fn collect_vod_virtual_updates_resolves_text_ids_via_video_uuid() {
+        let dir = tempdir().expect("tempdir should be created");
+        let mapping_path = dir.path().join("target_id_mapping.db");
+        let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
+        let uuid = generate_provider_playlist_uuid("input_vod", "vod-text-id", PlaylistItemType::Video);
+        let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, PlaylistItemType::Video, 0);
+        mapping.persist().expect("mapping should persist");
+
+        let mut batch = BatchResultCollector::new();
+        batch.add_vod(ProviderIdType::from("vod-text-id"), VideoStreamProperties::default());
+
+        let mut provider_virtual_ids = HashMap::new();
+        let mut uuid_virtual_ids = HashMap::new();
+        let updates = InputWorker::collect_vod_virtual_updates(
+            &mapping,
+            "input_vod",
+            &batch,
+            &mut provider_virtual_ids,
+            &mut uuid_virtual_ids,
+        );
+
+        assert!(updates.contains_key(&virtual_id));
+    }
+
+    #[test]
+    fn collect_live_virtual_updates_resolves_text_ids_via_live_uuid() {
+        let dir = tempdir().expect("tempdir should be created");
+        let mapping_path = dir.path().join("target_id_mapping.db");
+        let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
+        let uuid = generate_provider_playlist_uuid("input_live", "live-text-id", PlaylistItemType::Live);
+        let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, PlaylistItemType::Live, 0);
+        mapping.persist().expect("mapping should persist");
+
+        let mut batch = BatchResultCollector::new();
+        batch.add_live(ProviderIdType::from("live-text-id"), LiveStreamProperties::default());
+
+        let mut provider_virtual_ids = HashMap::new();
+        let mut uuid_virtual_ids = HashMap::new();
+        let updates = InputWorker::collect_live_virtual_updates(
+            &mapping,
+            "input_live",
+            &batch,
+            &mut provider_virtual_ids,
+            &mut uuid_virtual_ids,
+        );
+
+        assert!(updates.contains_key(&virtual_id));
+    }
+
+    #[test]
     fn strip_tmdb_reasons_returns_none_for_tmdb_only_resolve_task() {
         let task = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(100),

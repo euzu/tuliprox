@@ -1541,8 +1541,12 @@ pub async fn local_stream_response(
     } else {
         stream
     };
+    let mut grace_period_options = app_state.get_grace_options();
+    if connection_permission != UserConnectionPermission::GracePeriod {
+        grace_period_options.period_millis = 0;
+    }
     let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
-        stream_details: StreamDetails::from_stream(stream, app_state.get_grace_options()),
+        stream_details: StreamDetails::from_stream(stream, grace_period_options),
         app_state,
         user,
         connection_permission,
@@ -1577,6 +1581,7 @@ pub async fn local_stream_response(
         }
     }
 
+    mark_response_as_uncompressed(&mut response);
     response
 }
 
@@ -2340,5 +2345,51 @@ mod tests {
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "local file streaming should register an active stream");
         assert_eq!(active_streams[0].channel.item_type, PlaylistItemType::LocalVideo);
+    }
+
+    #[tokio::test]
+    async fn local_stream_response_disables_response_compression() {
+        let app_state = create_test_app_state();
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("local-test.mkv");
+        tokio::fs::write(&file_path, Bytes::from_static(b"local-stream")).await.expect("write local file");
+
+        let addr = "127.0.0.1:55124".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let channel = create_test_local_channel(&format!("file://{}", file_path.display()));
+        let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
+        let user = ProxyUserCredentials::default();
+        let target = ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "test".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        };
+
+        let response = local_stream_response(
+            &fingerprint,
+            &app_state,
+            channel,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            false,
+        )
+        .await
+        .into_response();
+
+        assert!(!should_compress_response(&response));
     }
 }
