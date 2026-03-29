@@ -29,6 +29,18 @@ pub struct VideoClipMetadata {
     pub video_type: String, // "Trailer", "Teaser"
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TechnicalMetadata {
+    #[serde(default)]
+    pub video: Option<String>,
+    #[serde(default)]
+    pub audio: Option<String>,
+    #[serde(default)]
+    pub duration_secs: Option<u32>,
+    #[serde(default)]
+    pub bitrate: Option<u32>,
+}
+
 // Movie metadata
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct MovieMetadata {
@@ -74,6 +86,8 @@ pub struct MovieMetadata {
     pub source: MetadataSource,
     pub last_updated: i64,
     pub videos: Option<Vec<VideoClipMetadata>>,
+    #[serde(default)]
+    pub technical: Option<TechnicalMetadata>,
 }
 
 // Series/TV show metadata
@@ -163,6 +177,8 @@ pub struct EpisodeMetadata {
     pub file_path: String,
     pub file_size: u64,
     pub file_modified: i64,
+    #[serde(default)]
+    pub technical: Option<TechnicalMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

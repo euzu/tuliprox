@@ -678,6 +678,10 @@ impl XtreamMappingOptions {
         resource_url: &str,
         resource_field: &str,
     ) -> String {
+        if !self.web_ui_request && Self::is_trusted_web_ui_resource_path(resource_url) {
+            return concat_path(&self.base_url, resource_url);
+        }
+
         if self.web_ui_request {
             if resource_url.is_empty() {
                 return resource_url.to_string();
@@ -707,6 +711,10 @@ impl XtreamMappingOptions {
         resource_field: &str,
         index: usize,
     ) -> String {
+        if !self.web_ui_request && Self::is_trusted_web_ui_resource_path(resource_url) {
+            return concat_path(&self.base_url, resource_url);
+        }
+
         if self.web_ui_request {
             if resource_url.is_empty() {
                 return resource_url.to_string();
@@ -777,6 +785,45 @@ mod tests {
                 0,
             ),
             "/api/v1/library/thumbnail/backdrop",
+        );
+    }
+
+    #[test]
+    fn get_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "http://proxy.example/base".to_string();
+        options.reverse_item_types = PlaylistItemTypeSet::empty();
+
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::LocalSeries,
+                1,
+                "/api/v1/library/thumbnail/abc",
+                "logo",
+            ),
+            "http://proxy.example/base/api/v1/library/thumbnail/abc",
+        );
+    }
+
+    #[test]
+    fn get_bd_path_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "http://proxy.example/base".to_string();
+        options.reverse_item_types = PlaylistItemTypeSet::empty();
+
+        assert_eq!(
+            options.get_bd_path_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::LocalSeries,
+                1,
+                "/api/v1/library/thumbnail/backdrop",
+                "backdrop_",
+                0,
+            ),
+            "http://proxy.example/base/api/v1/library/thumbnail/backdrop",
         );
     }
 

@@ -140,7 +140,7 @@ pub async fn update_generic_stream_metadata(
     }
 
     let (raw_video, raw_audio) = match probe_data {
-        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => (raw_video, raw_audio),
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => (raw_video, raw_audio),
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Probe target not found (404) for generic stream: {unique_id}");
             return Err(shared::error::info_err!("Probe target returned 404 Not Found for stream {unique_id}"));

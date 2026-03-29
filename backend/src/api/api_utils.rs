@@ -10,7 +10,7 @@ use crate::{
         },
     },
     auth::Fingerprint,
-    model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
+    model::{ConfigInput, ConfigTarget, GracePeriodOptions, ProxyUserCredentials},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -1441,7 +1441,7 @@ pub async fn local_stream_response(
     req_headers: &HeaderMap,
     _input: &ConfigInput,
     _target: &ConfigTarget,
-    _user: &ProxyUserCredentials,
+    user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
     check_path: bool,
 ) -> impl IntoResponse + Send {
@@ -1531,11 +1531,31 @@ pub async fn local_stream_response(
         }
     }
 
-    let stream = ReaderStream::new(file.take(content_length));
-    let body_stream =
-        prepare_body_stream::<_>(app_state, pli.item_type, stream.map_err(|err| StreamError::Stream(err.to_string())));
+    let stream = ReaderStream::new(file.take(content_length))
+        .map_err(|err| StreamError::Stream(err.to_string()))
+        .boxed();
+    let throttle_kbps = usize::try_from(get_stream_throttle(app_state)).unwrap_or_default();
+    let stream = if is_throttled_stream(pli.item_type, throttle_kbps) {
+        info!("Stream throttling active: {}", human_readable_kbps(u64::try_from(throttle_kbps).unwrap_or_default()));
+        ThrottledStream::new(stream, throttle_kbps).boxed()
+    } else {
+        stream
+    };
+    let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
+        stream_details: StreamDetails::from_stream(stream, GracePeriodOptions::default()),
+        app_state,
+        user,
+        connection_permission,
+        fingerprint,
+        stream_channel: pli.clone(),
+        session_token: None,
+        req_headers,
+        meter_uid: 0,
+        meter_stream: false,
+    })
+    .await;
 
-    let mut response = Response::new(body_stream);
+    let mut response = Response::new(axum::body::Body::from_stream(stream));
 
     *response.status_mut() = if range.is_some() { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
 
@@ -2054,10 +2074,24 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, Response};
-    use shared::{
-        model::XtreamCluster,
-        utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
+    use crate::{
+        api::model::{
+            AppState, CancelTokens, ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, MetadataUpdateManager,
+            PlaylistStorageState, SharedStreamManager,
+        },
+        auth::Fingerprint,
+        model::{AppConfig, Config, ConfigInput, ConfigTarget, MediaToolCapabilities, ProcessTargets, ProxyUserCredentials, SourcesConfig},
+        utils::{GeoIp, FileLockManager},
     };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use bytes::Bytes;
+    use shared::{
+        foundation::Filter,
+        model::{ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder, StreamChannel, XtreamCluster},
+        utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
+    };
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -2154,5 +2188,157 @@ mod tests {
             282,
             "http://provider/live/other.ts"
         ));
+    }
+
+    fn create_test_app_config() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "local_media".intern(),
+            input_type: InputType::Library,
+            headers: HashMap::default(),
+            url: "file:///tmp".to_string(),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        }
+    }
+
+    fn create_test_app_state() -> Arc<AppState> {
+        let app_cfg = Arc::new(create_test_app_config());
+        let event_manager = Arc::new(EventManager::new());
+        let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let config = app_cfg.config.load();
+        let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+        let connection_manager =
+            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+
+        let tokens = CancelTokens::default();
+        let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+        let (manual_update_sender, _) = mpsc::channel::<Arc<ProcessTargets>>(1);
+
+        Arc::new(AppState {
+            forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
+                enabled: false,
+                inputs: Vec::new(),
+                targets: Vec::new(),
+                target_names: Vec::new(),
+            })),
+            app_config: app_cfg,
+            http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            downloads: Arc::new(crate::api::model::DownloadQueue::new()),
+            cache: Arc::new(ArcSwapOption::default()),
+            shared_stream_manager,
+            active_users,
+            active_provider,
+            connection_manager,
+            event_manager,
+            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            playlists: Arc::new(PlaylistStorageState::new()),
+            geoip,
+            update_guard: crate::api::model::UpdateGuard::new(),
+            metadata_manager,
+            manual_update_sender,
+        })
+    }
+
+    fn create_test_fingerprint(addr: std::net::SocketAddr) -> Fingerprint {
+        Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
+    }
+
+    fn create_test_local_channel(url: &str) -> StreamChannel {
+        StreamChannel {
+            target_id: 1,
+            virtual_id: 41,
+            provider_id: 0,
+            item_type: PlaylistItemType::LocalVideo,
+            cluster: XtreamCluster::Video,
+            group: "Local Movies".intern(),
+            title: "Local Test".intern(),
+            url: url.into(),
+            shared: false,
+            technical: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_stream_response_registers_active_local_stream() {
+        let app_state = create_test_app_state();
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("local-test.mkv");
+        tokio::fs::write(&file_path, Bytes::from_static(b"local-stream")).await.expect("write local file");
+
+        let addr = "127.0.0.1:55123".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let channel = create_test_local_channel(&format!("file://{}", file_path.display()));
+        let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
+        let user = ProxyUserCredentials::default();
+        let target = ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "test".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        };
+
+        let _response = local_stream_response(
+            &fingerprint,
+            &app_state,
+            channel,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            false,
+        )
+        .await
+        .into_response();
+
+        let active_streams = app_state.active_users.active_streams().await;
+        assert_eq!(active_streams.len(), 1, "local file streaming should register an active stream");
+        assert_eq!(active_streams[0].channel.item_type, PlaylistItemType::LocalVideo);
     }
 }

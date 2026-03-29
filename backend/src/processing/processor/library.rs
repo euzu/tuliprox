@@ -1,4 +1,4 @@
-use crate::library::{EpisodeMetadata, MediaMetadata, MetadataAsyncIter, MetadataCacheEntry};
+use crate::library::{EpisodeMetadata, MediaMetadata, MetadataAsyncIter, MetadataCacheEntry, TechnicalMetadata};
 use crate::library::resolve_metadata_storage_path;
 use crate::model::{AppConfig, ConfigInput};
 use shared::concat_string;
@@ -21,6 +21,24 @@ fn episode_thumbnail_url(episode: &EpisodeMetadata, api_base_path: &str) -> Opti
         .thumbnail_id
         .as_deref()
         .map(|id| concat_path_leading_slash(api_base_path, &format!("library/thumbnail/{id}")))
+}
+
+fn duration_secs_to_xtream_duration(duration_secs: u32) -> Arc<str> {
+    let hours = duration_secs / 3600;
+    let minutes = (duration_secs % 3600) / 60;
+    let seconds = duration_secs % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}").into()
+}
+
+fn technical_duration_secs(technical: Option<&TechnicalMetadata>) -> Option<u32> {
+    technical.and_then(|metadata| metadata.duration_secs).filter(|value| *value > 0)
+}
+
+fn technical_bitrate(technical: Option<&TechnicalMetadata>) -> u32 {
+    technical
+        .and_then(|metadata| metadata.bitrate)
+        .filter(|value| *value > 0)
+        .unwrap_or_default()
 }
 
 pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
@@ -262,6 +280,9 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
         .map(ToString::to_string).unwrap_or_default();
 
     let actor_names = movie.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ").intern());
+    let technical = movie.technical.as_ref();
+    let duration_secs = technical_duration_secs(technical).or_else(|| movie.runtime.map(|runtime| runtime * 60));
+    let duration = duration_secs.map(duration_secs_to_xtream_duration);
 
     let properties = VideoStreamProperties {
         name: movie.title.clone().into(),
@@ -302,17 +323,12 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
                 .filter(|s| !s.is_empty())
                 .map(|f| vec![f.clone().into()])
                 .or_else(|| poster.map(|p| vec![p.into()])),
-            duration_secs: movie.runtime.map(|r| (r * 60).to_string().into()),
-            duration: movie.runtime.map(|r| {
-                let h = r / 60;
-                let m = r % 60;
-                format!("{h:02}:{m:02}:00").into()
-            }),
-
-            video: None,
-            audio: None,
-            bitrate: 0,
-            runtime: movie.runtime.map(|r| (r * 60).to_string().into()),
+            duration_secs: duration_secs.map(|value| value.to_string().into()),
+            duration: duration.clone(),
+            video: technical.and_then(|metadata| metadata.video.as_ref()).map(|value| value.as_str().into()),
+            audio: technical.and_then(|metadata| metadata.audio.as_ref()).map(|value| value.as_str().into()),
+            bitrate: technical_bitrate(technical),
+            runtime: duration_secs.map(|value| value.to_string().into()),
             status: Some("Released".intern()),
         }),
     };
@@ -333,18 +349,21 @@ pub fn metadata_cache_entry_to_xtream_series_info(
     let actor_names: Arc<str> = series.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default().into();
     let release_date = series.year.map(|y| format!("{y}-01-01"));
     let youtube_trailer = series.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone())).unwrap_or_default();
+    let series_thumbnail = thumbnail_url(entry, api_base_path);
+    let series_art = series.poster.clone().or(series_thumbnail.clone());
 
     let mut season_data = HashMap::new();
     series.seasons.as_ref().iter().for_each(|seasons| seasons.iter().for_each(|season_metadata| {
+        let season_art = season_metadata.poster_path.clone().or_else(|| series_art.clone());
         season_data.insert(season_metadata.season_number, SeriesStreamDetailSeasonProperties {
             name: season_metadata.name.clone().into(),
             season_number: season_metadata.season_number,
             episode_count: 0,
             overview: season_metadata.overview.clone().map(Into::into),
             air_date: season_metadata.air_date.clone().map(Into::into),
-            cover: season_metadata.poster_path.clone().map(Into::into),
-            cover_tmdb: season_metadata.poster_path.clone().map(Into::into),
-            cover_big: None,
+            cover: season_art.clone().map(Into::into),
+            cover_tmdb: season_art.clone().map(Into::into),
+            cover_big: season_art.map(Into::into),
             duration: Some(String::from("0").into()),
         });
     }));
@@ -360,17 +379,19 @@ pub fn metadata_cache_entry_to_xtream_series_info(
             let tmdb_id = (episode.tmdb_id > 0).then_some(episode.tmdb_id);
             let raw_episode_title: Arc<str> = episode.title.clone().into();
             let series_title: Arc<str> = series.title.clone().into();
+            let technical = episode.technical.as_ref();
+            let duration_secs = technical_duration_secs(technical).or_else(|| episode.runtime.map(|runtime| runtime * 60));
 
             let season_entry = season_data.entry(episode.season).or_insert_with(|| {
                 SeriesStreamDetailSeasonProperties {
                     name: concat_string!(&series.title, " ", &episode.season.to_string()).into(),
                     season_number: episode.season,
                     episode_count: 0,
-                    overview: series.poster.clone().map(Into::into),
+                    overview: None,
                     air_date: episode.aired.clone().map(Into::into),
-                    cover: series.poster.clone().map(Into::into),
-                    cover_tmdb: None,
-                    cover_big: None,
+                    cover: series_art.clone().map(Into::into),
+                    cover_tmdb: series_art.clone().map(Into::into),
+                    cover_big: series_art.clone().map(Into::into),
                     duration: None,
                 }
             });
@@ -390,19 +411,18 @@ pub fn metadata_cache_entry_to_xtream_series_info(
                 series_release_date: None,
                 plot: episode.plot.clone().map(Into::into),
                 crew: Some(Arc::clone(&actor_names)),
-                duration_secs: episode.runtime.map_or(0, |r| r * 60),
-                duration: episode.runtime
-                    .map(|r| format!("{:02}:{:02}:00", r / 60, r % 60))
-                    .unwrap_or_default().into(),
+                duration_secs: duration_secs.unwrap_or_default(),
+                duration: duration_secs.map(duration_secs_to_xtream_duration).unwrap_or_default(),
                 movie_image: episode
                     .thumb
                     .clone()
                     .or_else(|| episode_thumbnail_url(episode, api_base_path))
+                    .or_else(|| series_art.clone())
                     .unwrap_or_default()
                     .into(),
-                audio: None,
-                video: None,
-                bitrate: 0,
+                audio: technical.and_then(|metadata| metadata.audio.as_ref()).map(|value| value.as_str().into()),
+                video: technical.and_then(|metadata| metadata.video.as_ref()).map(|value| value.as_str().into()),
+                bitrate: technical_bitrate(technical),
                 rating: None,
             }
         }).collect::<Vec<_>>()
@@ -422,12 +442,12 @@ pub fn metadata_cache_entry_to_xtream_series_info(
             .filter(|s| !s.is_empty())
             .map(|f| vec![f.clone().into()])
             .or_else(|| {
-                series.poster.as_ref()
+                series_art.as_ref()
                     .filter(|s| !s.is_empty())
                     .map(|p| vec![p.clone().into()])
             }),
         cast: Arc::clone(&actor_names),
-        cover: series.poster.clone().unwrap_or_default().into(),
+        cover: series_art.unwrap_or_default().into(),
         director: series.directors.as_ref().map(|d| d.join(", ")).unwrap_or_default().into(),
         episode_run_time: None,
         genre: series.genres.as_ref().map(|d| d.join(", ").into()),
@@ -451,7 +471,7 @@ pub fn metadata_cache_entry_to_xtream_series_info(
 #[cfg(test)]
 mod tests {
     use super::{metadata_cache_entry_to_xtream_series_info, thumbnail_url};
-    use crate::library::{MediaMetadata, MetadataCacheEntry, MovieMetadata, SeriesMetadata, EpisodeMetadata};
+    use crate::library::{EpisodeMetadata, MediaMetadata, MetadataCacheEntry, MovieMetadata, SeriesMetadata, TechnicalMetadata};
     use shared::model::StreamProperties;
 
     #[test]
@@ -501,5 +521,140 @@ mod tests {
             episode.movie_image.as_ref(),
             "/api/v1/library/thumbnail/31fedbc18dca3fa273fba98afda584486ad4f1d8e1ca06740435b97b14f2ec8b",
         );
+    }
+
+    #[test]
+    fn series_info_uses_local_thumbnail_when_series_poster_missing() {
+        let mut entry = MetadataCacheEntry::new(
+            "/tmp/show/S01E01.mkv".to_string(),
+            123,
+            456,
+            MediaMetadata::Series(SeriesMetadata {
+                title: "Test Series".to_string(),
+                episodes: Some(vec![EpisodeMetadata {
+                    title: "Episode 1".to_string(),
+                    season: 1,
+                    episode: 1,
+                    file_path: "/tmp/show/S01E01.mkv".to_string(),
+                    ..EpisodeMetadata::default()
+                }]),
+                ..SeriesMetadata::default()
+            }),
+        );
+        entry.uuid = "series-thumb-uuid".to_string();
+        entry.thumbnail_hash = Some("thumb-hash".to_string());
+
+        let Some(StreamProperties::Series(series)) = metadata_cache_entry_to_xtream_series_info(&entry, "/api/v1") else {
+            panic!("expected series stream properties");
+        };
+
+        assert_eq!(series.cover.as_ref(), "/api/v1/library/thumbnail/series-thumb-uuid");
+
+        let seasons = series.details.as_ref().and_then(|details| details.seasons.as_ref()).expect("seasons missing");
+        let season = seasons.first().expect("season missing");
+        assert_eq!(season.cover.as_deref().map(|v| v.as_ref()), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
+        assert_eq!(season.cover_tmdb.as_deref().map(|v| v.as_ref()), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
+        assert_eq!(season.cover_big.as_deref().map(|v| v.as_ref()), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
+        assert!(season.overview.is_none());
+    }
+
+    #[test]
+    fn series_episode_falls_back_to_series_thumbnail_when_episode_thumb_missing() {
+        let mut entry = MetadataCacheEntry::new(
+            "/tmp/show/S01E01.mkv".to_string(),
+            123,
+            456,
+            MediaMetadata::Series(SeriesMetadata {
+                title: "Test Series".to_string(),
+                episodes: Some(vec![EpisodeMetadata {
+                    title: "Episode 1".to_string(),
+                    season: 1,
+                    episode: 1,
+                    file_path: "/tmp/show/S01E01.mkv".to_string(),
+                    ..EpisodeMetadata::default()
+                }]),
+                ..SeriesMetadata::default()
+            }),
+        );
+        entry.uuid = "series-thumb-uuid".to_string();
+        entry.thumbnail_hash = Some("thumb-hash".to_string());
+
+        let Some(StreamProperties::Series(series)) = metadata_cache_entry_to_xtream_series_info(&entry, "/api/v1") else {
+            panic!("expected series stream properties");
+        };
+        let episodes = series.details.as_ref().and_then(|details| details.episodes.as_ref()).expect("episodes missing");
+        let episode = episodes.first().expect("episode missing");
+
+        assert_eq!(episode.movie_image.as_ref(), "/api/v1/library/thumbnail/series-thumb-uuid");
+    }
+
+    #[test]
+    fn movie_info_prefers_local_technical_metadata_for_probe_fields() {
+        let entry = MetadataCacheEntry::new(
+            "/tmp/movie/Test.Movie.2024.mkv".to_string(),
+            123,
+            456,
+            MediaMetadata::Movie(MovieMetadata {
+                title: "Test Movie".to_string(),
+                runtime: Some(90),
+                technical: Some(TechnicalMetadata {
+                    video: Some("{\"codec_name\":\"hevc\"}".to_string()),
+                    audio: Some("{\"codec_name\":\"aac\"}".to_string()),
+                    duration_secs: Some(5_430),
+                    bitrate: Some(8_200_000),
+                }),
+                ..MovieMetadata::default()
+            }),
+        );
+
+        let Some(StreamProperties::Video(video)) = super::metadata_cache_entry_to_xtream_movie_info(&entry, "/api/v1") else {
+            panic!("expected video stream properties");
+        };
+        let details = video.details.as_ref().expect("details missing");
+
+        assert_eq!(details.video.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"hevc\"}"));
+        assert_eq!(details.audio.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"aac\"}"));
+        assert_eq!(details.duration_secs.as_deref().map(|value| value.as_ref()), Some("5430"));
+        assert_eq!(details.duration.as_deref().map(|value| value.as_ref()), Some("01:30:30"));
+        assert_eq!(details.runtime.as_deref().map(|value| value.as_ref()), Some("5430"));
+        assert_eq!(details.bitrate, 8_200_000);
+    }
+
+    #[test]
+    fn series_episode_prefers_local_technical_metadata_for_probe_fields() {
+        let entry = MetadataCacheEntry::new(
+            "/tmp/show/S01E01.mkv".to_string(),
+            123,
+            456,
+            MediaMetadata::Series(SeriesMetadata {
+                title: "Test Series".to_string(),
+                episodes: Some(vec![EpisodeMetadata {
+                    title: "Episode 1".to_string(),
+                    season: 1,
+                    episode: 1,
+                    file_path: "/tmp/show/S01E01.mkv".to_string(),
+                    technical: Some(TechnicalMetadata {
+                        video: Some("{\"codec_name\":\"h264\"}".to_string()),
+                        audio: Some("{\"codec_name\":\"ac3\"}".to_string()),
+                        duration_secs: Some(1_541),
+                        bitrate: Some(3_100_000),
+                    }),
+                    ..EpisodeMetadata::default()
+                }]),
+                ..SeriesMetadata::default()
+            }),
+        );
+
+        let Some(StreamProperties::Series(series)) = metadata_cache_entry_to_xtream_series_info(&entry, "/api/v1") else {
+            panic!("expected series stream properties");
+        };
+        let episodes = series.details.as_ref().and_then(|details| details.episodes.as_ref()).expect("episodes missing");
+        let episode = episodes.first().expect("episode missing");
+
+        assert_eq!(episode.video.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"h264\"}"));
+        assert_eq!(episode.audio.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"ac3\"}"));
+        assert_eq!(episode.duration_secs, 1_541);
+        assert_eq!(episode.duration.as_ref(), "00:25:41");
+        assert_eq!(episode.bitrate, 3_100_000);
     }
 }

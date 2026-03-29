@@ -143,7 +143,7 @@ pub async fn update_live_stream_metadata(
     )
     .await
     {
-        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
             // 3. Update properties on success
             if let Some(v) = raw_video {
                 properties.video = Some(v.to_string().into());

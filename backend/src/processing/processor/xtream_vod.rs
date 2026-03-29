@@ -852,7 +852,7 @@ pub async fn update_vod_metadata(
                 )
                 .await
                 {
-                    ProbeUrlOutcome::Success(_quality, raw_video, raw_audio) => {
+                    ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
                         if let Some(details) = properties.details.as_mut() {
                             if let Some(v) = raw_video {
                                 details.video = Some(v.to_string().into());
