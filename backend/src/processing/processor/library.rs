@@ -5,7 +5,7 @@ use shared::concat_string;
 use shared::error::TuliproxError;
 use shared::model::UUIDType;
 use shared::model::{EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, normalize_episode_title};
-use shared::utils::{concat_path_leading_slash, generate_playlist_uuid, Internable};
+use shared::utils::{concat_path_leading_slash, generate_local_playlist_uuid, Internable};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -215,7 +215,7 @@ fn build_series_episode_playlist_item(
         header: PlaylistItemHeader {
             id: episode.id.to_string().into(),
             parent_code: entry.uuid.clone().into(),
-            uuid: generate_playlist_uuid(input_name, &episode.id.to_string(), PlaylistItemType::LocalSeries, &episode.direct_source),
+            uuid: generate_local_playlist_uuid(input_name, PlaylistItemType::LocalSeries, &episode.direct_source),
             logo: logo.clone(),
             name: episode.title.clone(),
             group: Arc::clone(group_name),

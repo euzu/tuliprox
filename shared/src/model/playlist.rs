@@ -5,7 +5,7 @@ use crate::{
         SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
     },
     utils::{
-        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_playlist_uuid,
+        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_runtime_playlist_uuid,
         get_provider_id, obfuscate_text, Internable,
     },
 };
@@ -307,7 +307,7 @@ impl Default for PlaylistItemHeader {
 impl PlaylistItemHeader {
     #[inline]
     pub fn gen_uuid(&mut self) {
-        self.uuid = generate_playlist_uuid(&self.input_name, &self.id, self.item_type, &self.url);
+        self.uuid = generate_runtime_playlist_uuid(&self.input_name, &self.id, self.item_type, &self.url);
     }
 
     #[inline]
@@ -553,7 +553,7 @@ impl PlaylistEntry for M3uPlaylistItem {
     fn get_provider_url(&self) -> Arc<str> { Arc::clone(&self.url) }
 
     fn get_uuid(&self) -> UUIDType {
-        generate_playlist_uuid(&self.input_name, &self.provider_id, self.item_type, &self.url)
+        generate_runtime_playlist_uuid(&self.input_name, &self.provider_id, self.item_type, &self.url)
     }
 
     #[inline]
@@ -900,7 +900,7 @@ impl PlaylistEntry for XtreamPlaylistItem {
 
     #[inline]
     fn get_uuid(&self) -> UUIDType {
-        generate_playlist_uuid(&self.input_name, &self.provider_id.to_string(), self.item_type, &self.url)
+        generate_runtime_playlist_uuid(&self.input_name, &self.provider_id.to_string(), self.item_type, &self.url)
     }
     #[inline]
     fn get_item_type(&self) -> PlaylistItemType { self.item_type }
@@ -1290,7 +1290,7 @@ impl PlaylistEntry for PlaylistItem {
     #[inline]
     fn get_uuid(&self) -> UUIDType {
         let header = &self.header;
-        generate_playlist_uuid(&header.input_name, &header.id, header.item_type, &header.url)
+        generate_runtime_playlist_uuid(&header.input_name, &header.id, header.item_type, &header.url)
     }
 
     #[inline]

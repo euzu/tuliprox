@@ -24,7 +24,7 @@ use shared::{
         InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties,
         XtreamCluster, XtreamPlaylistItem,
     },
-    utils::generate_playlist_uuid,
+    utils::generate_provider_playlist_uuid,
 };
 use std::{
     cmp::min,
@@ -2800,12 +2800,7 @@ impl InputWorker {
                     }
                 }
                 ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_playlist_uuid(
-                        input_name,
-                        provider_id_text,
-                        PlaylistItemType::Video,
-                        props.direct_source.as_ref(),
-                    );
+                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Video);
                     if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                         virtual_updates.insert(virtual_id, props);
                     }
@@ -2839,7 +2834,7 @@ impl InputWorker {
                     }
                 }
                 ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Series, "");
+                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Series);
                     if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                         virtual_updates.insert(virtual_id, props);
                     }
@@ -2873,12 +2868,7 @@ impl InputWorker {
                     }
                 }
                 ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_playlist_uuid(
-                        input_name,
-                        provider_id_text,
-                        PlaylistItemType::Live,
-                        props.direct_source.as_ref(),
-                    );
+                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Live);
                     if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                         virtual_updates.insert(virtual_id, props);
                     }

@@ -122,17 +122,39 @@ fn url_path_and_more(url: &str) -> Option<String> {
     Some(out)
 }
 
-pub fn generate_playlist_uuid(key: &str, provider_id: &str, item_type: PlaylistItemType, url: &str) -> UUIDType {
-    if provider_id.is_empty() || provider_id == "0" {
-        if let Some(url_path) = url_path_and_more(url) {
-            return hash_string(&url_path);
-        }
-    }
+pub fn generate_provider_playlist_uuid(key: &str, provider_id: &str, item_type: PlaylistItemType) -> UUIDType {
     let mut hasher = blake3::Hasher::new();
     hasher.update(key.as_bytes());
     hasher.update(provider_id.as_bytes());
     hasher.update(item_type.to_string().as_bytes());
     UUIDType(hasher.finalize().into())
+}
+
+pub fn generate_local_playlist_uuid(key: &str, item_type: PlaylistItemType, url: &str) -> UUIDType {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(key.as_bytes());
+    hasher.update(item_type.to_string().as_bytes());
+
+    if let Some(url_path) = url_path_and_more(url) {
+        hasher.update(url_path.as_bytes());
+    } else {
+        hasher.update(url.as_bytes());
+    }
+
+    UUIDType(hasher.finalize().into())
+}
+
+pub fn generate_runtime_playlist_uuid(
+    key: &str,
+    provider_id: &str,
+    item_type: PlaylistItemType,
+    url: &str,
+) -> UUIDType {
+    if item_type.is_local() {
+        generate_local_playlist_uuid(key, item_type, url)
+    } else {
+        generate_provider_playlist_uuid(key, provider_id, item_type)
+    }
 }
 
 pub fn u32_to_base64(value: u32) -> String {
@@ -494,42 +516,59 @@ mod tests {
         assert_eq!(get_provider_id("100", "http://x.com/live/200.ts"), Some(100));
     }
 
-    // ── generate_playlist_uuid ───────────────────────────────────────
+    // ── provider/local playlist uuid ────────────────────────────────
 
     #[test]
-    fn generate_playlist_uuid_deterministic() {
-        let a = generate_playlist_uuid("k", "1", PlaylistItemType::Live, "http://x.com/1.ts");
-        let b = generate_playlist_uuid("k", "1", PlaylistItemType::Live, "http://x.com/1.ts");
+    fn generate_provider_playlist_uuid_deterministic() {
+        let a = generate_provider_playlist_uuid("k", "1", PlaylistItemType::Live);
+        let b = generate_provider_playlist_uuid("k", "1", PlaylistItemType::Live);
         assert_eq!(a, b);
     }
 
     #[test]
-    fn generate_playlist_uuid_different_key() {
-        let a = generate_playlist_uuid("k1", "1", PlaylistItemType::Live, "http://x.com/1.ts");
-        let b = generate_playlist_uuid("k2", "1", PlaylistItemType::Live, "http://x.com/1.ts");
+    fn generate_provider_playlist_uuid_different_key() {
+        let a = generate_provider_playlist_uuid("k1", "1", PlaylistItemType::Live);
+        let b = generate_provider_playlist_uuid("k2", "1", PlaylistItemType::Live);
         assert_ne!(a, b);
     }
 
     #[test]
-    fn generate_playlist_uuid_empty_provider_uses_url_path() {
-        let a = generate_playlist_uuid("k", "", PlaylistItemType::Live, "http://x.com/path/to/stream");
-        let b = generate_playlist_uuid("k", "", PlaylistItemType::Live, "http://y.com/path/to/stream");
-        // Same path → same UUID (host is stripped by Url::parse → path())
+    fn generate_local_playlist_uuid_uses_url_path() {
+        let a = generate_local_playlist_uuid("k", PlaylistItemType::LocalSeries, "http://x.com/path/to/stream");
+        let b = generate_local_playlist_uuid("k", PlaylistItemType::LocalSeries, "http://y.com/path/to/stream");
         assert_eq!(a, b);
     }
 
     #[test]
-    fn generate_playlist_uuid_zero_provider_uses_url_path() {
-        let a = generate_playlist_uuid("k", "0", PlaylistItemType::Live, "http://x.com/stream");
-        let b = generate_playlist_uuid("k", "0", PlaylistItemType::Live, "http://x.com/stream");
+    fn generate_local_playlist_uuid_is_deterministic() {
+        let a = generate_local_playlist_uuid("k", PlaylistItemType::LocalSeries, "http://x.com/stream");
+        let b = generate_local_playlist_uuid("k", PlaylistItemType::LocalSeries, "http://x.com/stream");
         assert_eq!(a, b);
     }
 
     #[test]
-    fn generate_playlist_uuid_different_type() {
-        let a = generate_playlist_uuid("k", "1", PlaylistItemType::Live, "http://x.com/1.ts");
-        let b = generate_playlist_uuid("k", "1", PlaylistItemType::Video, "http://x.com/1.ts");
+    fn generate_local_playlist_uuid_keeps_local_series_info_and_episode_distinct() {
+        let url = "file:///library/show/Season%201/Episode%2001.mkv";
+        let series_info = generate_local_playlist_uuid("library", PlaylistItemType::LocalSeriesInfo, url);
+        let episode = generate_local_playlist_uuid("library", PlaylistItemType::LocalSeries, url);
+
+        assert_ne!(series_info, episode);
+    }
+
+    #[test]
+    fn generate_provider_playlist_uuid_different_type() {
+        let a = generate_provider_playlist_uuid("k", "1", PlaylistItemType::Live);
+        let b = generate_provider_playlist_uuid("k", "1", PlaylistItemType::Video);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn generate_runtime_playlist_uuid_dispatches_by_item_type() {
+        let provider = generate_runtime_playlist_uuid("input", "100", PlaylistItemType::Series, "file:///ignored.mkv");
+        let local =
+            generate_runtime_playlist_uuid("input", "100", PlaylistItemType::LocalSeries, "file:///ignored.mkv");
+
+        assert_ne!(provider, local);
     }
 
     // ── u32_to_base64 / base64_to_u32 ───────────────────────────────
