@@ -281,6 +281,7 @@ async fn xtream_player_api_stream(
 
     if pli.item_type.is_local() {
         let connection_permission = user.connection_permission(app_state).await;
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
         return local_stream_response(
             fingerprint,
             app_state,
@@ -290,6 +291,7 @@ async fn xtream_player_api_stream(
             &target,
             &user,
             connection_permission,
+            Some(playback_session_token.as_str()),
             true,
         )
         .await
@@ -511,6 +513,7 @@ async fn xtream_player_api_stream_with_token(
         let user = create_api_proxy_user(app_state);
 
         if pli.item_type.is_local() {
+            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id);
             return local_stream_response(
                 fingerprint,
                 app_state,
@@ -520,6 +523,7 @@ async fn xtream_player_api_stream_with_token(
                 &target,
                 &user,
                 UserConnectionPermission::Allowed,
+                Some(playback_session_token.as_str()),
                 true,
             )
             .await

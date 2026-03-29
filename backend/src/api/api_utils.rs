@@ -1443,6 +1443,7 @@ pub async fn local_stream_response(
     _target: &ConfigTarget,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
+    playback_session_token: Option<&str>,
     check_path: bool,
 ) -> impl IntoResponse + Send {
     if log_enabled!(log::Level::Trace) {
@@ -1552,7 +1553,7 @@ pub async fn local_stream_response(
         connection_permission,
         fingerprint,
         stream_channel: pli.clone(),
-        session_token: None,
+        session_token: playback_session_token,
         req_headers,
         meter_uid: 0,
         meter_stream: false,
@@ -2337,6 +2338,7 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            None,
             false,
         )
         .await
@@ -2385,11 +2387,79 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            None,
             false,
         )
         .await
         .into_response();
 
         assert!(!should_compress_response(&response));
+    }
+
+    #[tokio::test]
+    async fn local_stream_response_reuses_stable_playback_session_token_across_reopens() {
+        let app_state = create_test_app_state();
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("local-test.mkv");
+        tokio::fs::write(&file_path, Bytes::from_static(b"local-stream")).await.expect("write local file");
+
+        let channel = create_test_local_channel(&format!("file://{}", file_path.display()));
+        let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
+        let user = ProxyUserCredentials::default();
+        let target = ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "test".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        };
+        let playback_session_token = "local-playback-token";
+
+        let first_fingerprint = create_test_fingerprint("127.0.0.1:55125".parse().unwrap_or_else(|_| unreachable!()));
+        let second_fingerprint = create_test_fingerprint("127.0.0.1:55126".parse().unwrap_or_else(|_| unreachable!()));
+
+        let _first_response = local_stream_response(
+            &first_fingerprint,
+            &app_state,
+            channel.clone(),
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            Some(playback_session_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        let _second_response = local_stream_response(
+            &second_fingerprint,
+            &app_state,
+            channel,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            Some(playback_session_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        let active_streams = app_state.active_users.active_streams().await;
+        assert_eq!(active_streams.len(), 1, "stable playback token should reuse the tracked local connection");
+        assert_eq!(active_streams[0].session_token.as_deref(), Some(playback_session_token));
+        assert_eq!(active_streams[0].addr, second_fingerprint.addr);
     }
 }
