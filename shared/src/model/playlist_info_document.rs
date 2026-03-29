@@ -294,7 +294,7 @@ impl StreamProperties {
                         })
                         .collect()
                 }),
-                tmdb: series.tmdb.unwrap_or_default().to_string().intern(),
+                tmdb: series.tmdb.map(|value| value.to_string().intern()).unwrap_or_else(|| "".intern()),
                 youtube_trailer: Arc::clone(&series.youtube_trailer),
                 episode_run_time: series.episode_run_time.as_ref().map(Arc::clone).unwrap_or_else(|| "".intern()),
                 category_id: category_id.to_string().intern(),

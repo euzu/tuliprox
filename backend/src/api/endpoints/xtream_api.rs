@@ -52,7 +52,7 @@ use shared::{
         UserConnectionPermission, XtreamCluster, XtreamPlaylistItem,
     },
     utils::{
-        deserialize_as_string, extract_extension_from_url, generate_playlist_uuid, sanitize_sensitive_info, trim_slash,
+        deserialize_as_string, extract_extension_from_url, generate_provider_playlist_uuid, sanitize_sensitive_info, trim_slash,
         Internable, HLS_EXT,
     },
 };
@@ -281,6 +281,7 @@ async fn xtream_player_api_stream(
 
     if pli.item_type.is_local() {
         let connection_permission = user.connection_permission(app_state).await;
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
         return local_stream_response(
             fingerprint,
             app_state,
@@ -290,6 +291,7 @@ async fn xtream_player_api_stream(
             &target,
             &user,
             connection_permission,
+            Some(playback_session_token.as_str()),
             true,
         )
         .await
@@ -511,6 +513,7 @@ async fn xtream_player_api_stream_with_token(
         let user = create_api_proxy_user(app_state);
 
         if pli.item_type.is_local() {
+            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id);
             return local_stream_response(
                 fingerprint,
                 app_state,
@@ -520,6 +523,7 @@ async fn xtream_player_api_stream_with_token(
                 &target,
                 &user,
                 UserConnectionPermission::Allowed,
+                Some(playback_session_token.as_str()),
                 true,
             )
             .await
@@ -1046,7 +1050,7 @@ async fn xtream_get_catchup_response(
         if let Some(cp_id) =
             epg_list_item.get(crate::model::XC_TAG_ID).and_then(Value::as_str).and_then(|id| id.parse::<u32>().ok())
         {
-            let uuid = generate_playlist_uuid(&pli_uuid_str, &cp_id.to_string(), pli.item_type, &pli.input_name);
+            let uuid = generate_provider_playlist_uuid(&pli_uuid_str, &cp_id.to_string(), pli.item_type);
             tasks.push((idx, uuid, cp_id));
         }
     }

@@ -451,6 +451,7 @@ async fn hls_api_stream(
                 &target,
                 &user,
                 connection_permission,
+                Some(&session.token),
                 false,
             )
             .await

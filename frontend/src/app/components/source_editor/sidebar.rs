@@ -9,7 +9,7 @@ pub const BLOCK_TYPES_INPUT: [BlockType; 3] = [BlockType::InputXtream, BlockType
 pub const BLOCK_TYPES_TARGET: [BlockType; 1] = [BlockType::Target];
 
 pub const BLOCK_TYPES_OUTPUT: [BlockType; 4] =
-    [BlockType::OutputM3u, BlockType::OutputXtream, BlockType::OutputHdHomeRun, BlockType::OutputStrm];
+    [BlockType::OutputXtream, BlockType::OutputM3u, BlockType::OutputHdHomeRun, BlockType::OutputStrm];
 
 fn create_brick(t: &BlockType, on_drag_start: Callback<DragEvent>, label: String) -> Html {
     html! {

@@ -18,8 +18,14 @@ pub enum ProbeFailureKind {
 }
 
 pub enum ProbeUrlOutcome {
-    Success(MediaQuality, Option<Value>, Option<Value>),
+    Success(MediaQuality, Option<Value>, Option<Value>, ProbeStreamStats),
     Failed(ProbeFailureKind),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProbeStreamStats {
+    pub duration_secs: Option<u32>,
+    pub bitrate: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -96,6 +102,7 @@ impl FfmpegExecutor {
         command
             .arg("-v").arg("error")
             .arg("-show_streams")
+            .arg("-show_format")
             .arg("-of").arg("json")
             .arg("-analyzeduration").arg(analyze_duration.to_string())
             .arg("-probesize").arg(probe_size.to_string());
@@ -153,10 +160,12 @@ impl FfmpegExecutor {
                             let audio_str = audio_stream.map(Value::to_string);
                             let mq = MediaQuality::from_ffprobe_info(audio_str.as_deref(), video_str.as_deref());
                             if let Some(quality) = mq {
+                                let stats = extract_probe_stream_stats(&json, video_stream, audio_stream);
                                 return ProbeUrlOutcome::Success(
                                     quality,
                                     video_stream.cloned(),
                                     audio_stream.cloned(),
+                                    stats,
                                 );
                             }
                         }
@@ -301,6 +310,54 @@ fn is_not_found_probe_error(stderr: &str) -> bool {
     .any(|needle| normalized.contains(needle))
 }
 
+fn extract_probe_stream_stats(json: &Value, video_stream: Option<&Value>, audio_stream: Option<&Value>) -> ProbeStreamStats {
+    let format = json.get("format");
+    ProbeStreamStats {
+        duration_secs: format
+            .and_then(|value| parse_duration_secs(value.get("duration")))
+            .or_else(|| parse_duration_secs(video_stream.and_then(|value| value.get("duration"))))
+            .or_else(|| parse_duration_secs(audio_stream.and_then(|value| value.get("duration")))),
+        bitrate: format
+            .and_then(|value| parse_u32_field(value.get("bit_rate")))
+            .or_else(|| parse_u32_field(video_stream.and_then(|value| value.get("bit_rate"))))
+            .or_else(|| parse_u32_field(audio_stream.and_then(|value| value.get("bit_rate")))),
+    }
+}
+
+fn parse_duration_secs(value: Option<&Value>) -> Option<u32> {
+    let seconds = value.and_then(|value| match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    })?;
+
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+
+    let rounded = seconds.round();
+    if !(1.0..=f64::from(u32::MAX)).contains(&rounded) {
+        return None;
+    }
+
+    Some(rounded_duration_secs_to_u32(rounded))
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn rounded_duration_secs_to_u32(rounded_seconds: f64) -> u32 {
+    rounded_seconds as u32
+}
+
+fn parse_u32_field(value: Option<&Value>) -> Option<u32> {
+    let raw = value.and_then(|value| match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.parse::<u64>().ok(),
+        _ => None,
+    })?;
+
+    u32::try_from(raw).ok().filter(|parsed| *parsed > 0)
+}
+
 fn build_thumbnail_scale_filter(width: u32, height: u32) -> String {
     let w = if width < 1 { default_thumbnail_width() } else { width };
     let h = if height < 1 { default_thumbnail_height() } else { height };
@@ -328,8 +385,12 @@ fn build_thumbnail_args(input_path: &str, output_path: &Path, scale_filter: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ffprobe_proxy_url, build_thumbnail_args, build_thumbnail_scale_filter, format_ffmpeg_timeout_error, FFMPEG_TIMEOUT};
+    use super::{
+        build_ffprobe_proxy_url, build_thumbnail_args, build_thumbnail_scale_filter, extract_probe_stream_stats,
+        format_ffmpeg_timeout_error, FFMPEG_TIMEOUT, ProbeStreamStats,
+    };
     use crate::model::ProxyConfig;
+    use serde_json::json;
     use shared::utils::{default_thumbnail_height, default_thumbnail_width};
     use std::path::Path;
 
@@ -409,5 +470,41 @@ mod tests {
         assert!(!super::is_not_found_probe_error("host not found"));
         assert!(!super::is_not_found_probe_error("file not found"));
         assert!(!super::is_not_found_probe_error("protocol handler not found"));
+    }
+
+    #[test]
+    fn extract_probe_stream_stats_prefers_format_section() {
+        let payload = json!({
+            "format": {
+                "duration": "1541.4",
+                "bit_rate": "3100000"
+            },
+            "streams": []
+        });
+
+        assert_eq!(
+            extract_probe_stream_stats(&payload, None, None),
+            ProbeStreamStats {
+                duration_secs: Some(1541),
+                bitrate: Some(3_100_000),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_probe_stream_stats_falls_back_to_stream_values() {
+        let payload = json!({});
+        let video = json!({
+            "duration": "120.0",
+            "bit_rate": "1500"
+        });
+
+        assert_eq!(
+            extract_probe_stream_stats(&payload, Some(&video), None),
+            ProbeStreamStats {
+                duration_secs: Some(120),
+                bitrate: Some(1500),
+            }
+        );
     }
 }

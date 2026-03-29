@@ -5,7 +5,7 @@ use crate::{
         SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
     },
     utils::{
-        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_playlist_uuid,
+        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_runtime_playlist_uuid,
         get_provider_id, obfuscate_text, Internable,
     },
 };
@@ -307,7 +307,7 @@ impl Default for PlaylistItemHeader {
 impl PlaylistItemHeader {
     #[inline]
     pub fn gen_uuid(&mut self) {
-        self.uuid = generate_playlist_uuid(&self.input_name, &self.id, self.item_type, &self.url);
+        self.uuid = generate_runtime_playlist_uuid(&self.input_name, &self.id, self.item_type, &self.url);
     }
 
     #[inline]
@@ -553,7 +553,7 @@ impl PlaylistEntry for M3uPlaylistItem {
     fn get_provider_url(&self) -> Arc<str> { Arc::clone(&self.url) }
 
     fn get_uuid(&self) -> UUIDType {
-        generate_playlist_uuid(&self.input_name, &self.provider_id, self.item_type, &self.url)
+        generate_runtime_playlist_uuid(&self.input_name, &self.provider_id, self.item_type, &self.url)
     }
 
     #[inline]
@@ -678,6 +678,10 @@ impl XtreamMappingOptions {
         resource_url: &str,
         resource_field: &str,
     ) -> String {
+        if !self.web_ui_request && Self::is_trusted_web_ui_resource_path(resource_url) {
+            return concat_path(&self.base_url, resource_url);
+        }
+
         if self.web_ui_request {
             if resource_url.is_empty() {
                 return resource_url.to_string();
@@ -707,6 +711,10 @@ impl XtreamMappingOptions {
         resource_field: &str,
         index: usize,
     ) -> String {
+        if !self.web_ui_request && Self::is_trusted_web_ui_resource_path(resource_url) {
+            return concat_path(&self.base_url, resource_url);
+        }
+
         if self.web_ui_request {
             if resource_url.is_empty() {
                 return resource_url.to_string();
@@ -777,6 +785,45 @@ mod tests {
                 0,
             ),
             "/api/v1/library/thumbnail/backdrop",
+        );
+    }
+
+    #[test]
+    fn get_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "http://proxy.example/base".to_string();
+        options.reverse_item_types = PlaylistItemTypeSet::empty();
+
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::LocalSeries,
+                1,
+                "/api/v1/library/thumbnail/abc",
+                "logo",
+            ),
+            "http://proxy.example/base/api/v1/library/thumbnail/abc",
+        );
+    }
+
+    #[test]
+    fn get_bd_path_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "http://proxy.example/base".to_string();
+        options.reverse_item_types = PlaylistItemTypeSet::empty();
+
+        assert_eq!(
+            options.get_bd_path_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::LocalSeries,
+                1,
+                "/api/v1/library/thumbnail/backdrop",
+                "backdrop_",
+                0,
+            ),
+            "http://proxy.example/base/api/v1/library/thumbnail/backdrop",
         );
     }
 
@@ -900,7 +947,7 @@ impl PlaylistEntry for XtreamPlaylistItem {
 
     #[inline]
     fn get_uuid(&self) -> UUIDType {
-        generate_playlist_uuid(&self.input_name, &self.provider_id.to_string(), self.item_type, &self.url)
+        generate_runtime_playlist_uuid(&self.input_name, &self.provider_id.to_string(), self.item_type, &self.url)
     }
     #[inline]
     fn get_item_type(&self) -> PlaylistItemType { self.item_type }
@@ -1290,7 +1337,7 @@ impl PlaylistEntry for PlaylistItem {
     #[inline]
     fn get_uuid(&self) -> UUIDType {
         let header = &self.header;
-        generate_playlist_uuid(&header.input_name, &header.id, header.item_type, &header.url)
+        generate_runtime_playlist_uuid(&header.input_name, &header.id, header.item_type, &header.url)
     }
 
     #[inline]

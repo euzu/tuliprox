@@ -189,6 +189,7 @@ impl TmdbMovieDetails {
                         .map(TmdbVideo::to_meta_data)
                         .collect::<Vec<_>>()
                 }).filter(|v| !v.is_empty()),
+            technical: None,
         }
     }
 }
@@ -235,6 +236,7 @@ impl TmdbSeriesInfoEpisodeDetails {
             file_path: String::new(),
             file_size: 0,
             file_modified: 0,
+            technical: None,
         }
     }
 }
