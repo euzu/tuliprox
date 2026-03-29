@@ -10,7 +10,7 @@ use crate::{
         },
     },
     auth::Fingerprint,
-    model::{ConfigInput, ConfigTarget, GracePeriodOptions, ProxyUserCredentials},
+    model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -1542,7 +1542,7 @@ pub async fn local_stream_response(
         stream
     };
     let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
-        stream_details: StreamDetails::from_stream(stream, GracePeriodOptions::default()),
+        stream_details: StreamDetails::from_stream(stream, app_state.get_grace_options()),
         app_state,
         user,
         connection_permission,

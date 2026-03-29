@@ -4,7 +4,7 @@ use crate::model::{AppConfig};
 use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};
 use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
 use crate::utils::debug_if_enabled;
-use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome};
 use log::{info, warn};
 use shared::error::TuliproxError;
 use shared::model::{EpisodeStreamProperties, InputType, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, LiveStreamProperties, M3uPlaylistItem, XtreamCluster, XtreamPlaylistItem};
@@ -139,8 +139,8 @@ pub async fn update_generic_stream_metadata(
         handle.release().await;
     }
 
-    let (raw_video, raw_audio) = match probe_data {
-        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => (raw_video, raw_audio),
+    let (raw_video, raw_audio, stats) = match probe_data {
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => (raw_video, raw_audio, stats),
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Probe target not found (404) for generic stream: {unique_id}");
             return Err(shared::error::info_err!("Probe target returned 404 Not Found for stream {unique_id}"));
@@ -175,6 +175,7 @@ pub async fn update_generic_stream_metadata(
                         item.virtual_id,
                         raw_video,
                         raw_audio,
+                        stats,
                     );
                     tree_update
                         .update(&key, item)
@@ -198,6 +199,7 @@ pub async fn update_generic_stream_metadata(
                         item.virtual_id,
                         raw_video,
                         raw_audio,
+                        stats,
                     );
                     tree_update
                         .update(&uuid, item)
@@ -228,6 +230,7 @@ pub async fn update_generic_stream_metadata(
                         item.virtual_id,
                         raw_video,
                         raw_audio,
+                        stats,
                     );
                     tree_update
                         .update(&provider_id, item)
@@ -260,7 +263,8 @@ fn update_properties(
     name: &str, 
     virtual_id: u32,
     raw_video: Option<serde_json::Value>, 
-    raw_audio: Option<serde_json::Value>
+    raw_audio: Option<serde_json::Value>,
+    stats: ProbeStreamStats,
 ) {
     if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
        let mut props = if let Some(StreamProperties::Video(p)) = props_opt {
@@ -283,6 +287,12 @@ fn update_properties(
            }
            if let Some(a) = raw_audio {
                details.audio = Some(a.to_string().into());
+           }
+           if let Some(duration_secs) = stats.duration_secs {
+               details.duration_secs = Some(duration_secs.to_string().into());
+           }
+           if let Some(bitrate) = stats.bitrate {
+               details.bitrate = bitrate;
            }
        }
        *props_opt = Some(StreamProperties::Video(Box::new(props)));
@@ -343,6 +353,7 @@ fn update_properties(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::ffmpeg::ProbeStreamStats;
 
     #[test]
     fn library_probe_does_not_require_provider_connection() {
@@ -365,5 +376,30 @@ mod tests {
         assert!(requires_provider_connection_for_generic_probe(
             InputType::XtreamBatch
         ));
+    }
+
+    #[test]
+    fn update_properties_applies_probe_stats_to_video_details() {
+        let mut props_opt = None;
+
+        update_properties(
+            &mut props_opt,
+            PlaylistItemType::Video,
+            "Example",
+            77,
+            None,
+            None,
+            ProbeStreamStats {
+                duration_secs: Some(1_541),
+                bitrate: Some(3_100_000),
+            },
+        );
+
+        let Some(StreamProperties::Video(video)) = props_opt else {
+            panic!("expected video properties");
+        };
+        let details = video.details.as_ref().unwrap_or_else(|| unreachable!());
+        assert_eq!(details.duration_secs.as_deref().map(|value| value.as_ref()), Some("1541"));
+        assert_eq!(details.bitrate, 3_100_000);
     }
 }

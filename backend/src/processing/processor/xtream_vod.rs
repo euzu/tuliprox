@@ -852,7 +852,7 @@ pub async fn update_vod_metadata(
                 )
                 .await
                 {
-                    ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
+                    ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => {
                         if let Some(details) = properties.details.as_mut() {
                             if let Some(v) = raw_video {
                                 details.video = Some(v.to_string().into());
@@ -860,6 +860,14 @@ pub async fn update_vod_metadata(
                             }
                             if let Some(a) = raw_audio {
                                 details.audio = Some(a.to_string().into());
+                                properties_updated = true;
+                            }
+                            if let Some(duration_secs) = stats.duration_secs {
+                                details.duration_secs = Some(duration_secs.to_string().into());
+                                properties_updated = true;
+                            }
+                            if let Some(bitrate) = stats.bitrate {
+                                details.bitrate = bitrate;
                                 properties_updated = true;
                             }
                         }

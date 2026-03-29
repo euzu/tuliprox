@@ -2834,7 +2834,7 @@ impl InputWorker {
                     }
                 }
                 ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Series);
+                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::SeriesInfo);
                     if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                         virtual_updates.insert(virtual_id, props);
                     }
@@ -4161,6 +4161,31 @@ mod tests {
         };
 
         assert!(InputWorker::task_needs_provider_connection(&task, InputType::Library));
+    }
+
+    #[test]
+    fn collect_series_virtual_updates_resolves_text_ids_via_series_info_uuid() {
+        let dir = tempdir().expect("tempdir should be created");
+        let mapping_path = dir.path().join("target_id_mapping.db");
+        let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
+        let uuid = generate_provider_playlist_uuid("input_series", "series-text-id", PlaylistItemType::SeriesInfo);
+        let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, PlaylistItemType::SeriesInfo, 0);
+        mapping.persist().expect("mapping should persist");
+
+        let mut batch = BatchResultCollector::new();
+        batch.add_series(ProviderIdType::from("series-text-id"), SeriesStreamProperties::default());
+
+        let mut provider_virtual_ids = HashMap::new();
+        let mut uuid_virtual_ids = HashMap::new();
+        let updates = InputWorker::collect_series_virtual_updates(
+            &mapping,
+            "input_series",
+            &batch,
+            &mut provider_virtual_ids,
+            &mut uuid_virtual_ids,
+        );
+
+        assert!(updates.contains_key(&virtual_id));
     }
 
     #[test]

@@ -10,8 +10,13 @@ use log::{debug, error, info, warn};
 use path_clean::PathClean;
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+
+type FfprobeAvailabilityFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+type FfprobeAvailabilityChecker = Arc<dyn Fn() -> FfprobeAvailabilityFuture + Send + Sync>;
 
 // Action taken when processing a file
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +35,7 @@ pub struct LibraryProcessor {
     thumbnail_extractor: Option<ThumbnailExtractor>,
     metadata_update_config: Option<MetadataUpdateConfig>,
     app_config: Option<Arc<AppConfig>>, // Need access to global config for FFprobe settings
+    ffprobe_availability_checker: FfprobeAvailabilityChecker,
 }
 
 pub fn resolve_metadata_storage_path(
@@ -54,6 +60,10 @@ pub fn resolve_metadata_storage_path(
 }
 
 impl LibraryProcessor {
+    fn default_ffprobe_availability_checker() -> FfprobeAvailabilityChecker {
+        Arc::new(|| Box::pin(async { FfmpegExecutor::new().check_ffprobe_availability().await }))
+    }
+
     // Creates a new Library processor from application config
     pub fn from_app_config(app_config: &AppConfig) -> Option<Self> {
         let Ok(client) = create_http_client(app_config) else {
@@ -79,6 +89,22 @@ impl LibraryProcessor {
         client: reqwest::Client,
         storage_dir: &str,
     ) -> Self {
+        Self::new_with_ffprobe_availability_checker(
+            config,
+            metadata_update_config,
+            client,
+            storage_dir,
+            Self::default_ffprobe_availability_checker(),
+        )
+    }
+
+    fn new_with_ffprobe_availability_checker(
+        config: LibraryConfig,
+        metadata_update_config: Option<&MetadataUpdateConfig>,
+        client: reqwest::Client,
+        storage_dir: &str,
+        ffprobe_availability_checker: FfprobeAvailabilityChecker,
+    ) -> Self {
         let storage_path = resolve_metadata_storage_path(metadata_update_config, storage_dir);
         let scanner = LibraryScanner::new(config.clone());
         let storage = MetadataStorage::new(storage_path);
@@ -98,6 +124,7 @@ impl LibraryProcessor {
             thumbnail_extractor,
             metadata_update_config: metadata_update_config.cloned(),
             app_config: None,
+            ffprobe_availability_checker,
         }
     }
 
@@ -605,7 +632,7 @@ impl LibraryProcessor {
             return false;
         }
 
-        FfmpegExecutor::new().check_ffprobe_availability().await
+        (self.ffprobe_availability_checker)().await
     }
 
     async fn enrich_movie_metadata_with_ffprobe(&self, metadata: &mut MediaMetadata, file_path: &str, can_probe: bool) {
@@ -660,6 +687,7 @@ impl LibraryProcessor {
                 ffprobe.analyze_duration_micros,
                 ffprobe.probe_size_bytes,
                 ffprobe.timeout.unwrap_or(60),
+                // Local file probing does not traverse the network, so no proxy config is applied.
                 None,
             )
             .await
@@ -718,11 +746,12 @@ mod tests {
 
     #[tokio::test]
     async fn local_ffprobe_enablement_falls_back_to_metadata_update_config_without_app_config() {
-        let mut processor = LibraryProcessor::new(
+        let mut processor = LibraryProcessor::new_with_ffprobe_availability_checker(
             LibraryConfig::from(&LibraryConfigDto::default()),
             Some(&MetadataUpdateConfig::default()),
             reqwest::Client::new(),
             "/tmp",
+            Arc::new(|| Box::pin(async { false })),
         );
         processor.app_config = None;
 
@@ -733,7 +762,6 @@ mod tests {
         });
         processor.metadata_update_config = Some(metadata_update);
 
-        let expected = FfmpegExecutor::new().check_ffprobe_availability().await;
-        assert_eq!(processor.is_local_ffprobe_enabled().await, expected);
+        assert!(!processor.is_local_ffprobe_enabled().await);
     }
 }
