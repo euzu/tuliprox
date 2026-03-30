@@ -12,6 +12,7 @@ use crate::{
     model::DialogResult,
     services::DialogService,
 };
+use gloo_timers::callback::Timeout;
 use shared::{
     model::{
         permission::Permission, ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType,
@@ -25,7 +26,7 @@ use std::{
     rc::Rc,
 };
 use wasm_bindgen::{prelude::Closure, JsCast};
-use web_sys::{Element, HtmlElement, MouseEvent, WheelEvent};
+use web_sys::{window, Element, Event, HtmlElement, MouseEvent, TouchEvent, WheelEvent};
 use yew::{platform::spawn_local, prelude::*};
 
 const PENDING_LINE: &str = "pending-line";
@@ -33,12 +34,16 @@ const SELECTION_RECT: &str = "selection-rect";
 
 const BLOCK_MIDDLE_Y: f32 = (BLOCK_HEIGHT + BLOCK_HEADER_HEIGHT + BLOCK_PORT_HEIGHT) / 2.0;
 const PORT_SNAP_THRESHOLD: f32 = 100.0;
+const MIN_ZOOM_FACTOR: f32 = 0.5;
+const MAX_ZOOM_FACTOR: f32 = 1.0;
+const ZOOM_INDICATOR_TIMEOUT_MS: u32 = 900;
 
 const LABEL_SOURCE_EDITOR: &str = "LABEL.SOURCE_EDITOR";
 const LABEL_SAVE: &str = "LABEL.SAVE";
 
 type Position = (f32, f32);
 type MoveBlockParams = (f32, f32, Position, Vec<(BlockId, Position)>);
+type BlockCreatePosition = (BlockType, Position);
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct SourceEditorProps {
@@ -165,6 +170,8 @@ impl SelectionState {
 
 struct EditorState {
     canvas_offset: Position,
+    zoom_factor: f32,
+    pinch_distance: Option<f32>,
     pan_start: Position,
     drag: DragState,
     selection: SelectionState,
@@ -183,6 +190,8 @@ impl Default for EditorState {
     fn default() -> Self {
         Self {
             canvas_offset: (0.0f32, 0.0f32),
+            zoom_factor: 1.0,
+            pinch_distance: None,
             pan_start: (0.0f32, 0.0f32),
             drag: DragState::default(),
             selection: SelectionState::default(),
@@ -213,6 +222,45 @@ impl EditorState {
         self.pending_line = None;
         self.pending_line_element = None;
     }
+}
+
+fn clear_active_interaction(editor_state: &mut EditorState) -> bool {
+    let had_active_interaction = editor_state.is_panning
+        || editor_state.drag.block_id.is_some()
+        || editor_state.selection.is_selecting
+        || editor_state.selection.selection_rect.is_some();
+    editor_state.block_elements.clear();
+    editor_state.connection_elements.clear();
+    if editor_state.drag.block_id.is_some() {
+        editor_state.drag.reset_dragging();
+    }
+    editor_state.selection.stop_selection();
+    editor_state.is_panning = false;
+    editor_state.pinch_distance = None;
+    had_active_interaction
+}
+
+fn screen_from_world(position: Position, canvas_offset: Position, zoom_factor: f32) -> Position {
+    ((position.0 * zoom_factor) + canvas_offset.0, (position.1 * zoom_factor) + canvas_offset.1)
+}
+
+fn world_from_screen(position: Position, canvas_offset: Position, zoom_factor: f32) -> Position {
+    ((position.0 - canvas_offset.0) / zoom_factor, (position.1 - canvas_offset.1) / zoom_factor)
+}
+
+fn clamp_zoom_factor(zoom_factor: f32) -> f32 { zoom_factor.clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR) }
+
+fn apply_zoom_at_screen_point(editor_state: &mut EditorState, next_zoom: f32, anchor_screen: Position) -> bool {
+    let next_zoom = clamp_zoom_factor(next_zoom);
+    if (next_zoom - editor_state.zoom_factor).abs() < f32::EPSILON {
+        return false;
+    }
+
+    let world_anchor = world_from_screen(anchor_screen, editor_state.canvas_offset, editor_state.zoom_factor);
+    editor_state.zoom_factor = next_zoom;
+    editor_state.canvas_offset =
+        (anchor_screen.0 - (world_anchor.0 * next_zoom), anchor_screen.1 - (world_anchor.1 * next_zoom));
+    true
 }
 
 fn create_instance(block_type: BlockType) -> BlockInstance {
@@ -393,6 +441,61 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     // Delete mode toggle
     let delete_mode = use_state(|| false);
     let cursor_grabbing = use_state(|| false);
+    let is_mobile = use_state(|| false);
+    let sidebar_collapsed = use_state(|| false);
+    let zoom_indicator_visible = use_state(|| false);
+    let zoom_indicator_timeout = use_mut_ref(|| None::<Timeout>);
+
+    let check_mobile_state = {
+        let is_mobile = is_mobile.clone();
+        let sidebar_collapsed = sidebar_collapsed.clone();
+        Callback::from(move |_| {
+            let Some(browser_window) = window() else {
+                return;
+            };
+            if let Ok(inner_width) = browser_window.inner_width() {
+                let mobile_view = inner_width.as_f64().unwrap_or(0.0) < 780.0;
+                if mobile_view != *is_mobile {
+                    is_mobile.set(mobile_view);
+                    sidebar_collapsed.set(mobile_view);
+                }
+            }
+        })
+    };
+
+    {
+        let check_mobile_state = check_mobile_state.clone();
+        use_effect_with((), move |_| {
+            check_mobile_state.emit(());
+            || {}
+        });
+    }
+
+    let resize_callback_handle = use_mut_ref(|| None::<Closure<dyn FnMut(Event)>>);
+
+    {
+        let resize_callback_handle = resize_callback_handle.clone();
+        let check_mobile_state = check_mobile_state.clone();
+        use_effect_with(check_mobile_state, move |check_mobile_state| {
+            let check_mobile_state = check_mobile_state.clone();
+            let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| check_mobile_state.emit(())));
+
+            let browser_window = window();
+            if let Some(browser_window) = browser_window.as_ref() {
+                let _ = browser_window.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+            }
+            *resize_callback_handle.borrow_mut() = Some(closure);
+
+            move || {
+                if let Some(closure) = resize_callback_handle.borrow_mut().take() {
+                    if let Some(browser_window) = browser_window.as_ref() {
+                        let _ = browser_window
+                            .remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                    }
+                }
+            }
+        });
+    }
 
     let emit_sources_change = {
         let on_sources_change = props.on_sources_change.clone();
@@ -511,6 +614,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         {
                             let mut editor_state = editor_state_ref.borrow_mut();
                             editor_state.canvas_offset = (0.0, 0.0);
+                            editor_state.zoom_factor = 1.0;
+                            editor_state.pinch_distance = None;
                             editor_state.pan_start = (0.0, 0.0);
                             editor_state.drag.reset_dragging();
                             editor_state.selection.reset_selection();
@@ -581,9 +686,57 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let connections = editor_state.connections.clone();
             layout(&mut editor_state.blocks, &connections);
             editor_state.canvas_offset = (0.0, 0.0);
+            editor_state.zoom_factor = 1.0;
+            editor_state.pinch_distance = None;
             editor_state.pan_start = (0.0, 0.0);
 
             force_update.set(*force_update + 1);
+        })
+    };
+
+    let handle_toggle_sidebar = {
+        let sidebar_collapsed = sidebar_collapsed.clone();
+        Callback::from(move |_| sidebar_collapsed.set(!*sidebar_collapsed))
+    };
+
+    let show_zoom_indicator = {
+        let zoom_indicator_visible = zoom_indicator_visible.clone();
+        let zoom_indicator_timeout = zoom_indicator_timeout.clone();
+        Callback::from(move |_| {
+            zoom_indicator_visible.set(true);
+            if let Some(timeout) = zoom_indicator_timeout.borrow_mut().take() {
+                timeout.cancel();
+            }
+
+            let zoom_indicator_visible = zoom_indicator_visible.clone();
+            *zoom_indicator_timeout.borrow_mut() = Some(Timeout::new(ZOOM_INDICATOR_TIMEOUT_MS, move || {
+                zoom_indicator_visible.set(false);
+            }));
+        })
+    };
+
+    let add_block_at_position = {
+        let editor_state_ref = editor_state_ref.clone();
+        let force_update = force_update.clone();
+        let emit_sources_change = emit_sources_change.clone();
+        Callback::from(move |(block_type, position): BlockCreatePosition| {
+            if !can_write_sources {
+                return;
+            }
+
+            let mut editor_state = editor_state_ref.borrow_mut();
+            let next_id = editor_state.next_id;
+            editor_state.blocks.push(Block {
+                id: next_id,
+                block_type,
+                position,
+                instance: create_instance(block_type),
+            });
+            editor_state.next_id += 1;
+            drop(editor_state);
+
+            force_update.set(*force_update + 1);
+            emit_sources_change.emit(());
         })
     };
 
@@ -662,7 +815,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let canvas_ref = canvas_ref.clone();
         let cursor_grabbing = cursor_grabbing.clone();
-        let emit_sources_change = emit_sources_change.clone();
+        let add_block_at_position = add_block_at_position.clone();
 
         Callback::from(move |e: DragEvent| {
             if !can_write_sources {
@@ -671,7 +824,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             e.prevent_default();
             e.stop_propagation();
             cursor_grabbing.set(false);
-            let mut changed = false;
             if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
                 if let Some(data_transfer) = e.data_transfer() {
                     if let Ok(data) = data_transfer.get_data("text/plain") {
@@ -684,26 +836,10 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         };
 
                         let block_type = BlockType::from(data.as_str());
-                        {
-                            let mut editor_state = editor_state_ref.borrow_mut();
-                            let next_id = editor_state.next_id;
-                            editor_state.blocks.push(Block {
-                                id: next_id,
-                                block_type,
-                                position: (
-                                    mouse_x - offset_x - canvas_ox, // <-- subtract canvas offset
-                                    mouse_y - offset_y - canvas_oy,
-                                ),
-                                instance: create_instance(block_type),
-                            });
-                            editor_state.next_id += 1;
-                            changed = true;
-                        }
+                        add_block_at_position
+                            .emit((block_type, (mouse_x - offset_x - canvas_ox, mouse_y - offset_y - canvas_oy)));
                     }
                 }
-            }
-            if changed {
-                emit_sources_change.emit(());
             }
         })
     };
@@ -721,6 +857,37 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
+    let handle_add_sidebar_block = {
+        let editor_state_ref = editor_state_ref.clone();
+        let canvas_ref = canvas_ref.clone();
+        let add_block_at_position = add_block_at_position.clone();
+        let sidebar_collapsed = sidebar_collapsed.clone();
+        let is_mobile = is_mobile.clone();
+
+        Callback::from(move |block_type: BlockType| {
+            let position = if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
+                let rect = canvas.get_bounding_client_rect();
+                let (canvas_offset, zoom_factor) = {
+                    let editor_state = editor_state_ref.borrow();
+                    (editor_state.canvas_offset, editor_state.zoom_factor)
+                };
+                let block_height = BLOCK_HEIGHT + BLOCK_HEADER_HEIGHT + BLOCK_PORT_HEIGHT;
+                world_from_screen(
+                    ((rect.width() as f32 - BLOCK_WIDTH) / 2.0, (rect.height() as f32 - block_height) / 2.0),
+                    canvas_offset,
+                    zoom_factor,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+
+            add_block_at_position.emit((block_type, position));
+            if *is_mobile {
+                sidebar_collapsed.set(true);
+            }
+        })
+    };
+
     // ----------------- Connection logic -----------------
     let handle_connection_start = {
         let editor_state_ref = editor_state_ref.clone();
@@ -733,8 +900,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 let editor_state = editor_state_ref.borrow();
                 if let Some(block) = editor_state.get_block(from_id) {
                     let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
-                    let x = block.position.0 + BLOCK_WIDTH + canvas_ox;
-                    let y = block.position.1 + BLOCK_MIDDLE_Y + canvas_oy;
+                    let zoom_factor = editor_state.zoom_factor;
+                    let x = (block.position.0 * zoom_factor) + (BLOCK_WIDTH * zoom_factor) + canvas_ox;
+                    let y = (block.position.1 * zoom_factor) + (BLOCK_MIDDLE_Y * zoom_factor) + canvas_oy;
                     Some(((x, y), (x, y)))
                 } else {
                     None
@@ -874,6 +1042,63 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
+    let handle_block_touch_start = {
+        let editor_state_ref = editor_state_ref.clone();
+        let canvas_ref = canvas_ref.clone();
+        let cursor_grabbing = cursor_grabbing.clone();
+
+        Callback::from(move |(block_id, e): (BlockId, TouchEvent)| {
+            if !can_write_sources {
+                return;
+            }
+            e.prevent_default();
+            e.stop_propagation();
+
+            if editor_state_ref.borrow().pending_line.is_some() {
+                return;
+            }
+
+            if let Some(touch) = e.touches().item(0) {
+                if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
+                    cursor_grabbing.set(true);
+                    let rect = canvas.get_bounding_client_rect();
+                    let touch_x = touch.client_x() as f32 - rect.left() as f32;
+                    let touch_y = touch.client_y() as f32 - rect.top() as f32;
+
+                    let possible_block = editor_state_ref.borrow().get_block(block_id).cloned();
+                    let mut editor_state = editor_state_ref.borrow_mut();
+
+                    if let Some(block) = possible_block {
+                        editor_state.selection.group_initial_positions.clear();
+                        editor_state.drag.dragging_group.clear();
+
+                        let selected_blocks = if editor_state.selection.selected_blocks.contains(&block_id) {
+                            editor_state.selection.selected_blocks.clone()
+                        } else {
+                            HashSet::from([block_id])
+                        };
+
+                        let mut initial_pos = Vec::new();
+                        for id in &selected_blocks {
+                            if let Some(b) = editor_state.get_block(*id) {
+                                initial_pos.push((*id, b.position));
+                            }
+                        }
+
+                        editor_state.drag.dragging_group = selected_blocks.clone();
+                        editor_state.selection.group_initial_positions = initial_pos;
+                        editor_state
+                            .drag
+                            .with_drag_block_offset(block_id, (touch_x - block.position.0, touch_y - block.position.1));
+                        editor_state.selection.selected_blocks.clear();
+                        editor_state.selection.selected_blocks.extend(selected_blocks);
+                        editor_state.selection.group_anchor_mouse = (touch_x, touch_y);
+                    }
+                }
+            }
+        })
+    };
+
     // ----------------- Canvas mouse down (start panning or marquee selection) -----------------
     let handle_canvas_mouse_down = {
         let editor_state_ref = editor_state_ref.clone();
@@ -945,24 +1170,27 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let dy = mouse_y - anchor_y;
 
             let mut editor_state = editor_state_ref.borrow_mut();
+            let zoom_factor = editor_state.zoom_factor;
             for (id, (ix, iy)) in initial_positions {
                 if let Some(b) = editor_state.get_block_mut(id) {
-                    b.position = (ix + dx, iy + dy);
+                    b.position = (ix + (dx / zoom_factor), iy + (dy / zoom_factor));
                     moved_block_ids.insert(b.id);
                 }
             }
 
             if !moved_block_ids.is_empty() {
                 let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
+                let zoom_factor = editor_state.zoom_factor;
 
                 for block_id in &moved_block_ids {
                     if let Some(div) = editor_state.block_elements.get(block_id) {
                         if let Some(block) = editor_state.get_block(*block_id) {
-                            let (x, y) = block.position;
+                            let (x, y) = screen_from_world(block.position, (canvas_ox, canvas_oy), zoom_factor);
                             let _ = div.style().set_property(
                                 "transform",
-                                &format!("translate3d({}px,{}px, 0)", x + canvas_ox, y + canvas_oy),
+                                &format!("translate3d({x}px,{y}px, 0) scale({zoom_factor})"),
                             );
+                            let _ = div.style().set_property("transform-origin", "top left");
                         }
                     }
                 }
@@ -978,7 +1206,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         if let (Some(from_block), Some(to_block)) =
                             (&editor_state.get_block(*from), &editor_state.get_block(*to))
                         {
-                            let (d, _) = update_connection(canvas_ox, canvas_oy, from_block, to_block);
+                            let (d, _) = update_connection(canvas_ox, canvas_oy, zoom_factor, from_block, to_block);
                             let _ = path_el.set_attribute("d", &d);
                         }
                     }
@@ -1038,10 +1266,16 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     if let Some(((from_x, from_y), _)) = editor_state.pending_line {
                         let mut snapped = (mouse_x, mouse_y);
                         let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
+                        let zoom_factor = editor_state.zoom_factor;
                         for block in &editor_state.blocks {
-                            if let Some(port_snap) =
-                                compute_port_snap_distance(block.position, mouse_x, mouse_y, canvas_ox, canvas_oy)
-                            {
+                            if let Some(port_snap) = compute_port_snap_distance(
+                                block.position,
+                                mouse_x,
+                                mouse_y,
+                                canvas_ox,
+                                canvas_oy,
+                                zoom_factor,
+                            ) {
                                 snapped = port_snap;
                                 break;
                             }
@@ -1065,12 +1299,13 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     }
                 }
 
-                let (is_selecting, selection_start, canvas_offset) = {
+                let (is_selecting, selection_start, canvas_offset, zoom_factor) = {
                     let editor_state = editor_state_ref.borrow();
                     (
                         editor_state.selection.is_selecting,
                         editor_state.selection.selection_start,
                         editor_state.canvas_offset,
+                        editor_state.zoom_factor,
                     )
                 };
 
@@ -1084,7 +1319,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             .borrow()
                             .blocks
                             .iter()
-                            .filter(|b| b.intersects_rect((x, y), (x + w, y + h), canvas_offset))
+                            .filter(|b| b.intersects_rect((x, y), (x + w, y + h), canvas_offset, zoom_factor))
                             .map(|b| b.id)
                             .collect()
                     };
@@ -1160,18 +1395,167 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let force_update = force_update.clone();
         Callback::from(move |_e: MouseEvent| {
             let mut editor_state = editor_state_ref.borrow_mut();
-            let had_active_interaction = editor_state.is_panning
-                || editor_state.drag.block_id.is_some()
-                || editor_state.selection.is_selecting
-                || editor_state.selection.selection_rect.is_some();
-            editor_state.block_elements.clear();
-            editor_state.connection_elements.clear();
-            // Stop any block dragging and stop panning
-            if editor_state.drag.block_id.is_some() {
-                editor_state.drag.reset_dragging();
+            let had_active_interaction = clear_active_interaction(&mut editor_state);
+            cursor_grabbing.set(false);
+            if had_active_interaction {
+                force_update.set(*force_update + 1);
             }
-            editor_state.selection.stop_selection();
-            editor_state.is_panning = false;
+        })
+    };
+
+    let handle_canvas_touch_start = {
+        let editor_state_ref = editor_state_ref.clone();
+        let canvas_ref = canvas_ref.clone();
+        let cursor_grabbing = cursor_grabbing.clone();
+        let show_zoom_indicator = show_zoom_indicator.clone();
+
+        Callback::from(move |e: TouchEvent| {
+            if e.touches().length() == 2 {
+                if let (Some(first), Some(second)) = (e.touches().item(0), e.touches().item(1)) {
+                    e.prevent_default();
+                    e.stop_propagation();
+                    let dx = second.client_x() as f32 - first.client_x() as f32;
+                    let dy = second.client_y() as f32 - first.client_y() as f32;
+                    let distance = (dx * dx + dy * dy).sqrt();
+                    let mut editor_state = editor_state_ref.borrow_mut();
+                    editor_state.selection.reset_selection();
+                    editor_state.is_panning = false;
+                    editor_state.drag.reset_dragging();
+                    editor_state.pinch_distance = Some(distance);
+                    cursor_grabbing.set(false);
+                    show_zoom_indicator.emit(());
+                }
+                return;
+            }
+            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
+                if let Some(canvas) = canvas_ref.cast::<web_sys::Element>() {
+                    let tag = target.tag_name().to_lowercase();
+                    if target.is_same_node(Some(&canvas)) || tag == "svg" {
+                        if let Some(touch) = e.touches().item(0) {
+                            e.prevent_default();
+                            e.stop_propagation();
+                            let mut editor_state = editor_state_ref.borrow_mut();
+                            editor_state.selection.reset_selection();
+                            cursor_grabbing.set(true);
+                            editor_state.is_panning = true;
+                            editor_state.pan_start = (touch.client_x() as f32, touch.client_y() as f32);
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    let handle_canvas_touch_move = {
+        let editor_state_ref = editor_state_ref.clone();
+        let canvas_ref = canvas_ref.clone();
+        let last_frame = RefCell::new(0.0);
+        let move_blocks = move_blocks.clone();
+        let force_update = force_update.clone();
+        let show_zoom_indicator = show_zoom_indicator.clone();
+
+        Callback::from(move |e: TouchEvent| {
+            let now = web_sys::js_sys::Date::now();
+            if now - *last_frame.borrow() < 16.0 {
+                return;
+            }
+            *last_frame.borrow_mut() = now;
+
+            if e.touches().length() == 2 {
+                if let (Some(first), Some(second), Some(canvas)) =
+                    (e.touches().item(0), e.touches().item(1), canvas_ref.cast::<HtmlElement>())
+                {
+                    e.prevent_default();
+                    e.stop_propagation();
+                    let rect = canvas.get_bounding_client_rect();
+                    let mid_x = ((first.client_x() + second.client_x()) as f32 / 2.0) - rect.left() as f32;
+                    let mid_y = ((first.client_y() + second.client_y()) as f32 / 2.0) - rect.top() as f32;
+                    let dx = second.client_x() as f32 - first.client_x() as f32;
+                    let dy = second.client_y() as f32 - first.client_y() as f32;
+                    let distance = (dx * dx + dy * dy).sqrt();
+                    let mut editor_state = editor_state_ref.borrow_mut();
+                    let previous_distance = editor_state.pinch_distance.unwrap_or(distance);
+                    if previous_distance > 0.0 {
+                        let next_zoom = editor_state.zoom_factor * (distance / previous_distance);
+                        if apply_zoom_at_screen_point(&mut editor_state, next_zoom, (mid_x, mid_y)) {
+                            show_zoom_indicator.emit(());
+                            force_update.set(*force_update + 1);
+                        }
+                    }
+                    editor_state.pinch_distance = Some(distance);
+                }
+                return;
+            }
+
+            if let Some(touch) = e.touches().item(0) {
+                let (is_panning, drag_block_id, group_anchor_mouse, group_initial_positions, single_block_position) = {
+                    let editor_state = editor_state_ref.borrow();
+                    let drag_block_id = editor_state.drag.block_id;
+                    let single_block_position =
+                        drag_block_id.and_then(|block_id| editor_state.get_block(block_id).map(|block| block.position));
+                    (
+                        editor_state.is_panning,
+                        drag_block_id,
+                        editor_state.selection.group_anchor_mouse,
+                        editor_state.selection.group_initial_positions.clone(),
+                        single_block_position,
+                    )
+                };
+                if is_panning {
+                    e.prevent_default();
+                    e.stop_propagation();
+
+                    let initial_positions: Vec<(BlockId, Position)> =
+                        { editor_state_ref.borrow().blocks.iter().map(|b| (b.id, b.position)).collect() };
+
+                    {
+                        let mut editor_state = editor_state_ref.borrow_mut();
+                        let (start_x, start_y) = editor_state.pan_start;
+                        let dx = touch.client_x() as f32 - start_x;
+                        let dy = touch.client_y() as f32 - start_y;
+                        let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
+                        editor_state.canvas_offset = (canvas_ox + dx, canvas_oy + dy);
+                        editor_state.pan_start = (touch.client_x() as f32, touch.client_y() as f32);
+                    }
+
+                    move_blocks.emit((0.0, 0.0, (0.0, 0.0), initial_positions));
+                } else if let Some(block_id) = drag_block_id {
+                    e.prevent_default();
+                    e.stop_propagation();
+
+                    if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
+                        let rect = canvas.get_bounding_client_rect();
+                        let touch_x = touch.client_x() as f32 - rect.left() as f32;
+                        let touch_y = touch.client_y() as f32 - rect.top() as f32;
+
+                        let to_move = if !group_initial_positions.is_empty() {
+                            Some((touch_x, touch_y, group_anchor_mouse, group_initial_positions))
+                        } else {
+                            single_block_position
+                                .map(|position| (touch_x, touch_y, group_anchor_mouse, vec![(block_id, position)]))
+                        };
+
+                        if let Some(move_it) = to_move {
+                            move_blocks.emit(move_it);
+                        } else {
+                            force_update.set(*force_update + 1);
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    let handle_canvas_touch_end = {
+        let editor_state_ref = editor_state_ref.clone();
+        let cursor_grabbing = cursor_grabbing.clone();
+        let force_update = force_update.clone();
+        Callback::from(move |_e: TouchEvent| {
+            let mut editor_state = editor_state_ref.borrow_mut();
+            if editor_state.pinch_distance.take().is_some() {
+                force_update.set(*force_update + 1);
+            }
+            let had_active_interaction = clear_active_interaction(&mut editor_state);
             cursor_grabbing.set(false);
             if had_active_interaction {
                 force_update.set(*force_update + 1);
@@ -1181,11 +1565,30 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
     let handle_canvas_wheel = {
         let editor_state_ref = editor_state_ref.clone();
+        let canvas_ref = canvas_ref.clone();
         let move_blocks = move_blocks.clone();
+        let force_update = force_update.clone();
+        let show_zoom_indicator = show_zoom_indicator.clone();
         Callback::from(move |e: WheelEvent| {
             e.prevent_default();
             e.stop_propagation();
             let mut editor_state = editor_state_ref.borrow_mut();
+
+            if e.ctrl_key() {
+                if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
+                    let rect = canvas.get_bounding_client_rect();
+                    let anchor = (e.client_x() as f32 - rect.left() as f32, e.client_y() as f32 - rect.top() as f32);
+                    let delta = if e.delta_y() < 0.0 { 0.05 } else { -0.05 };
+                    let next_zoom = editor_state.zoom_factor + delta;
+                    if apply_zoom_at_screen_point(&mut editor_state, next_zoom, anchor) {
+                        show_zoom_indicator.emit(());
+                        drop(editor_state);
+                        force_update.set(*force_update + 1);
+                    }
+                    return;
+                }
+            }
+
             let delta_y = e.delta_y() as f32;
             let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
             editor_state.canvas_offset = (canvas_ox, canvas_oy - delta_y);
@@ -1207,32 +1610,54 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         use_effect(move || {
             let handler = Closure::wrap(Box::new(move |_event: MouseEvent| {
                 let mut editor_state = editor_state_ref.borrow_mut();
-                let had_active_interaction = editor_state.is_panning
-                    || editor_state.drag.block_id.is_some()
-                    || editor_state.selection.is_selecting
-                    || editor_state.selection.selection_rect.is_some();
+                let had_active_interaction = clear_active_interaction(&mut editor_state);
                 if !had_active_interaction {
                     return;
                 }
-
-                editor_state.block_elements.clear();
-                editor_state.connection_elements.clear();
-                if editor_state.drag.block_id.is_some() {
-                    editor_state.drag.reset_dragging();
-                }
-                editor_state.selection.stop_selection();
-                editor_state.is_panning = false;
                 cursor_grabbing.set(false);
                 force_update.set(*force_update + 1);
             }) as Box<dyn FnMut(_)>);
 
-            if let Some(window) = web_sys::window() {
-                let _ = window.add_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
+            if let Some(browser_window) = window() {
+                let _ = browser_window.add_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
             }
 
             move || {
-                if let Some(window) = web_sys::window() {
-                    let _ = window.remove_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
+                if let Some(browser_window) = window() {
+                    let _ =
+                        browser_window.remove_event_listener_with_callback("mouseup", handler.as_ref().unchecked_ref());
+                }
+            }
+        });
+    }
+
+    {
+        let editor_state_ref = editor_state_ref.clone();
+        let cursor_grabbing = cursor_grabbing.clone();
+        let force_update = force_update.clone();
+        use_effect(move || {
+            let handler = Closure::wrap(Box::new(move |_event: TouchEvent| {
+                let mut editor_state = editor_state_ref.borrow_mut();
+                let had_active_interaction = clear_active_interaction(&mut editor_state);
+                if !had_active_interaction {
+                    return;
+                }
+                cursor_grabbing.set(false);
+                force_update.set(*force_update + 1);
+            }) as Box<dyn FnMut(_)>);
+
+            if let Some(browser_window) = window() {
+                let _ = browser_window.add_event_listener_with_callback("touchend", handler.as_ref().unchecked_ref());
+                let _ =
+                    browser_window.add_event_listener_with_callback("touchcancel", handler.as_ref().unchecked_ref());
+            }
+
+            move || {
+                if let Some(browser_window) = window() {
+                    let _ = browser_window
+                        .remove_event_listener_with_callback("touchend", handler.as_ref().unchecked_ref());
+                    let _ = browser_window
+                        .remove_event_listener_with_callback("touchcancel", handler.as_ref().unchecked_ref());
                 }
             }
         });
@@ -1395,9 +1820,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let grabbed = *cursor_grabbing;
 
     let editor_state = editor_state_ref.borrow();
-    let ((canvas_off_x, canvas_off_y), pending_line) = {
+    let ((canvas_off_x, canvas_off_y), zoom_factor, pending_line) = {
         let canvas_offset = editor_state.canvas_offset; // Apply virtual canvas offset
-        (canvas_offset, editor_state.pending_line)
+        (canvas_offset, editor_state.zoom_factor, editor_state.pending_line)
     };
     let (selected_input_blocks, selected_target_blocks, selected_output_blocks) = {
         let mut inputs = HashSet::<BlockId>::new();
@@ -1420,12 +1845,13 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let port_status = get_port_status(b);
         let mut shifted_block = b.clone();
         let block_id = shifted_block.id;
-        shifted_block.position = (b.position.0 + canvas_off_x, b.position.1 + canvas_off_y);
+        shifted_block.position = screen_from_world(b.position, (canvas_off_x, canvas_off_y), zoom_factor);
         let is_block_selected = editor_state.selection.selected_blocks.contains(&block_id);
         html! {
             <BlockView
                 key={block_id}
                 block={shifted_block}
+                zoom_factor={zoom_factor}
                 edited={edited_block_id == block_id}
                 selected={is_block_selected}
                 delete_mode={*delete_mode}
@@ -1433,16 +1859,18 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 port_status={port_status}
                 on_edit={handle_block_edit.clone()}
                 on_mouse_down={handle_block_mouse_down.clone()}
+                on_touch_start={handle_block_touch_start.clone()}
                 on_connection_drop={handle_connection_drop.clone()}
                 on_connection_start={handle_connection_start.clone()}
             />
         }
     };
+    let zoom_percent = (zoom_factor * 100.0).round();
 
     // ----------------- Render -----------------
     html! {
         <ContextProvider<SourceEditorContext> context={editor_context}>
-        <div class="tp__source-editor">
+        <div class={classes!("tp__source-editor", if *is_mobile { "mobile" } else { "" })}>
             <div class="tp__source-editor__header tp__config-view__header">
                 <h1>{ translate.t(LABEL_SOURCE_EDITOR) } </h1>
                 <div class="tp__config-view__header-tools">
@@ -1464,13 +1892,26 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         <div class="tp__source-editor__content">
             <SourceEditorSidebar
                 allow_write={can_write_sources}
+                collapsed={*sidebar_collapsed}
+                is_mobile={*is_mobile}
                 delete_mode={*delete_mode}
                 on_drag_start={handle_drag_start.clone()}
+                on_add_block={handle_add_sidebar_block.clone()}
+                on_toggle_sidebar={handle_toggle_sidebar.clone()}
                 on_toggle_delete={handle_toggle_delete_mode.clone()}
                 on_layout={handle_layout.clone()}
             />
             // Canvas
             <div class="tp__source-editor__canvas-wrapper">
+            {
+                if *zoom_indicator_visible {
+                    html! {
+                        <div class="tp__source-editor__zoom-indicator">{ format!("{zoom_percent:.0}%") }</div>
+                    }
+                } else {
+                    html! {}
+                }
+            }
             <div
                 ref={canvas_ref.clone()}
                 class={classes!("tp__source-editor__canvas", "graph-paper-advanced",
@@ -1483,6 +1924,10 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 onwheel={handle_canvas_wheel.clone()}
                 onmousedown={handle_canvas_mouse_down.clone()}
                 onmouseup={handle_canvas_mouse_up.clone()}
+                ontouchstart={handle_canvas_touch_start.clone()}
+                ontouchmove={handle_canvas_touch_move.clone()}
+                ontouchend={handle_canvas_touch_end.clone()}
+                ontouchcancel={handle_canvas_touch_end.clone()}
                 oncontextmenu={handle_canvas_right_click.clone()}>
 
                 // SVG for connections
@@ -1496,7 +1941,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             let from_block = editor_state.get_block(c.from)?;
                             let to_block = editor_state.get_block(c.to)?;
                             let (d, (from_x, from_y, to_x, to_y)) =
-                                update_connection(canvas_off_x, canvas_off_y, from_block, to_block);
+                                update_connection(canvas_off_x, canvas_off_y, zoom_factor, from_block, to_block);
                             let is_active_connection = selected_input_blocks.contains(&c.from)
                                 || selected_target_blocks.contains(&c.from)
                                 || selected_target_blocks.contains(&c.to)
@@ -1565,11 +2010,17 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     }
 }
 
-fn update_connection(ox: f32, oy: f32, from_block: &Block, to_block: &Block) -> (String, (f32, f32, f32, f32)) {
-    let from_x = from_block.position.0 + BLOCK_WIDTH + ox;
-    let from_y = from_block.position.1 + BLOCK_MIDDLE_Y + oy;
-    let to_x = to_block.position.0 + ox;
-    let to_y = to_block.position.1 + BLOCK_MIDDLE_Y + oy;
+fn update_connection(
+    ox: f32,
+    oy: f32,
+    zoom_factor: f32,
+    from_block: &Block,
+    to_block: &Block,
+) -> (String, (f32, f32, f32, f32)) {
+    let from_x = (from_block.position.0 * zoom_factor) + (BLOCK_WIDTH * zoom_factor) + ox;
+    let from_y = (from_block.position.1 * zoom_factor) + (BLOCK_MIDDLE_Y * zoom_factor) + oy;
+    let to_x = (to_block.position.0 * zoom_factor) + ox;
+    let to_y = (to_block.position.1 * zoom_factor) + (BLOCK_MIDDLE_Y * zoom_factor) + oy;
     let dx = to_x - from_x;
     let ctrl = dx * 0.5;
     (
@@ -1606,9 +2057,10 @@ fn compute_port_snap_distance(
     mouse_y: f32,
     canvas_ox: f32,
     canvas_oy: f32,
+    zoom_factor: f32,
 ) -> Option<Position> {
-    let port_x = block_position.0 + canvas_ox;
-    let port_y = block_position.1 + BLOCK_MIDDLE_Y + canvas_oy;
+    let port_x = (block_position.0 * zoom_factor) + canvas_ox;
+    let port_y = (block_position.1 * zoom_factor) + (BLOCK_MIDDLE_Y * zoom_factor) + canvas_oy;
     let dx = mouse_x - port_x;
     let dy = mouse_y - port_y;
     let dist_sq = dx * dx + dy * dy;

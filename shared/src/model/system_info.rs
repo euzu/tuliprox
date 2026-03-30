@@ -9,4 +9,8 @@ pub struct SystemInfo {
     pub memory_usage: u64,
     /// Total system memory in bytes
     pub memory_total: u64,
+    /// Network receive bytes per second (system-wide)
+    pub net_rx_bytes_per_sec: f64,
+    /// Network transmit bytes per second (system-wide)
+    pub net_tx_bytes_per_sec: f64,
 }

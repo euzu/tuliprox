@@ -171,7 +171,7 @@ impl StreamHistoryRecord {
             item_type: Some(info.channel.item_type.to_string()),
             title: Some(info.channel.title.to_string()),
             group: Some(info.channel.group.to_string()),
-            country: info.country.clone(),
+            country: info.country_code.clone(),
             user_agent: if info.user_agent.is_empty() { None } else { Some(info.user_agent.clone()) },
             shared: Some(info.channel.shared),
             provider_id: Some(info.channel.provider_id),

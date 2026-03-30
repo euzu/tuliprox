@@ -1368,7 +1368,7 @@ pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
 
 pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_type: PlaylistItemType) -> u64 {
     match item_type {
-        PlaylistItemType::LiveHls => get_hls_session_ttl_secs(app_state),
+        PlaylistItemType::LiveHls | PlaylistItemType::LiveDash => get_hls_session_ttl_secs(app_state),
         PlaylistItemType::Catchup => get_catchup_session_ttl_secs(app_state),
         _ => 0,
     }
@@ -2110,6 +2110,7 @@ mod tests {
     };
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::mpsc;
+    use crate::model::StreamHistoryConfig;
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -2167,6 +2168,15 @@ mod tests {
                 default_catchup_session_ttl_secs()
             ),
             default_catchup_session_ttl_secs()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_session_reservation_ttl_secs_uses_hls_ttl_for_live_dash() {
+        let app_state = create_test_app_state();
+        assert_eq!(
+            get_session_reservation_ttl_secs(&app_state, PlaylistItemType::LiveDash),
+            default_hls_session_ttl_secs()
         );
     }
 
@@ -2255,13 +2265,14 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+        let history_config = Some(StreamHistoryConfig::default());
         active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
         let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
         let connection_manager =
-            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager, history_config.as_ref()));
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));

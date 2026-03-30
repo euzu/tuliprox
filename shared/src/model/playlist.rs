@@ -737,119 +737,6 @@ impl XtreamMappingOptions {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{PlaylistItemType, XtreamCluster, XtreamMappingFlags};
-
-    fn sample_options() -> XtreamMappingOptions {
-        XtreamMappingOptions {
-            base_url: "/api/v1/playlist/resource".to_string(),
-            username: "user".to_string(),
-            password: "pass".to_string(),
-            force_redirect: None,
-            reverse_item_types: PlaylistItemTypeSet::from_item(PlaylistItemType::Live),
-            web_ui_request: true,
-            flags: XtreamMappingFlags::RewriteResourceUrl.into(),
-            encrypt_secret: [3u8; 16],
-        }
-    }
-
-    #[test]
-    fn get_resource_url_keeps_internal_paths_for_web_ui_requests() {
-        let options = sample_options();
-
-        assert_eq!(
-            options.get_resource_url(
-                XtreamCluster::Series,
-                PlaylistItemType::Series,
-                1,
-                "/api/v1/library/thumbnail/abc",
-                "logo",
-            ),
-            "/api/v1/library/thumbnail/abc",
-        );
-    }
-
-    #[test]
-    fn get_bd_path_resource_url_keeps_internal_thumbnail_paths_for_web_ui_requests() {
-        let options = sample_options();
-
-        assert_eq!(
-            options.get_bd_path_resource_url(
-                XtreamCluster::Series,
-                PlaylistItemType::Series,
-                1,
-                "/api/v1/library/thumbnail/backdrop",
-                "backdrop_",
-                0,
-            ),
-            "/api/v1/library/thumbnail/backdrop",
-        );
-    }
-
-    #[test]
-    fn get_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
-        let mut options = sample_options();
-        options.web_ui_request = false;
-        options.base_url = "http://proxy.example/base".to_string();
-        options.reverse_item_types = PlaylistItemTypeSet::empty();
-
-        assert_eq!(
-            options.get_resource_url(
-                XtreamCluster::Series,
-                PlaylistItemType::LocalSeries,
-                1,
-                "/api/v1/library/thumbnail/abc",
-                "logo",
-            ),
-            "http://proxy.example/base/api/v1/library/thumbnail/abc",
-        );
-    }
-
-    #[test]
-    fn get_bd_path_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
-        let mut options = sample_options();
-        options.web_ui_request = false;
-        options.base_url = "http://proxy.example/base".to_string();
-        options.reverse_item_types = PlaylistItemTypeSet::empty();
-
-        assert_eq!(
-            options.get_bd_path_resource_url(
-                XtreamCluster::Series,
-                PlaylistItemType::LocalSeries,
-                1,
-                "/api/v1/library/thumbnail/backdrop",
-                "backdrop_",
-                0,
-            ),
-            "http://proxy.example/base/api/v1/library/thumbnail/backdrop",
-        );
-    }
-
-    #[test]
-    fn get_resource_url_obfuscates_protocol_relative_urls_for_web_ui_requests() {
-        let options = sample_options();
-        let resource_url = "//cdn.example.com/poster.jpg";
-
-        assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
-            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
-        );
-    }
-
-    #[test]
-    fn get_resource_url_does_not_bypass_untrusted_root_relative_paths_for_web_ui_requests() {
-        let options = sample_options();
-        let resource_url = "/provider-controlled/poster.jpg";
-
-        assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
-            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
-        );
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XtreamPlaylistItem {
     pub virtual_id: VirtualId,
@@ -1163,7 +1050,7 @@ impl PlaylistItem {
 impl From<&PlaylistItem> for XtreamPlaylistItem {
     fn from(item: &PlaylistItem) -> Self {
         let header = &item.header;
-        let provider_id = header.id.parse::<u32>().unwrap_or_default();
+        let provider_id = get_provider_id(&header.id, &header.url).unwrap_or_default();
         let additional_properties = PlaylistItem::get_additional_properties(header);
 
         XtreamPlaylistItem {
@@ -1395,5 +1282,135 @@ impl PlaylistGroup {
         F: Fn(&PlaylistItem) -> bool,
     {
         self.channels.iter().filter(|&c| filter(c)).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{PlaylistItemType, XtreamCluster, XtreamMappingFlags};
+
+    fn sample_options() -> XtreamMappingOptions {
+        XtreamMappingOptions {
+            base_url: "/api/v1/playlist/resource".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            force_redirect: None,
+            reverse_item_types: PlaylistItemTypeSet::from_item(PlaylistItemType::Live),
+            web_ui_request: true,
+            flags: XtreamMappingFlags::RewriteResourceUrl.into(),
+            encrypt_secret: [3u8; 16],
+        }
+    }
+
+    #[test]
+    fn get_resource_url_keeps_internal_paths_for_web_ui_requests() {
+        let options = sample_options();
+
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                1,
+                "/api/v1/library/thumbnail/abc",
+                "logo",
+            ),
+            "/api/v1/library/thumbnail/abc",
+        );
+    }
+
+    #[test]
+    fn get_bd_path_resource_url_keeps_internal_thumbnail_paths_for_web_ui_requests() {
+        let options = sample_options();
+
+        assert_eq!(
+            options.get_bd_path_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                1,
+                "/api/v1/library/thumbnail/backdrop",
+                "backdrop_",
+                0,
+            ),
+            "/api/v1/library/thumbnail/backdrop",
+        );
+    }
+
+    #[test]
+    fn get_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "http://proxy.example/base".to_string();
+        options.reverse_item_types = PlaylistItemTypeSet::empty();
+
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::LocalSeries,
+                1,
+                "/api/v1/library/thumbnail/abc",
+                "logo",
+            ),
+            "http://proxy.example/base/api/v1/library/thumbnail/abc",
+        );
+    }
+
+    #[test]
+    fn get_bd_path_resource_url_absolutizes_internal_thumbnail_paths_for_xtream_clients() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "http://proxy.example/base".to_string();
+        options.reverse_item_types = PlaylistItemTypeSet::empty();
+
+        assert_eq!(
+            options.get_bd_path_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::LocalSeries,
+                1,
+                "/api/v1/library/thumbnail/backdrop",
+                "backdrop_",
+                0,
+            ),
+            "http://proxy.example/base/api/v1/library/thumbnail/backdrop",
+        );
+    }
+
+    #[test]
+    fn get_resource_url_obfuscates_protocol_relative_urls_for_web_ui_requests() {
+        let options = sample_options();
+        let resource_url = "//cdn.example.com/poster.jpg";
+
+        assert_eq!(
+            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+        );
+    }
+
+    #[test]
+    fn get_resource_url_does_not_bypass_untrusted_root_relative_paths_for_web_ui_requests() {
+        let options = sample_options();
+        let resource_url = "/provider-controlled/poster.jpg";
+
+        assert_eq!(
+            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+        );
+    }
+
+    #[test]
+    fn xtream_playlist_item_conversion_falls_back_to_numeric_id_in_url() {
+        let item = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "channel-alpha".intern(),
+                url: "http://provider.example/live/user/pass/12345.ts".intern(),
+                input_name: "input".intern(),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..PlaylistItemHeader::default()
+            },
+        };
+
+        let xtream_item = XtreamPlaylistItem::from(&item);
+        assert_eq!(xtream_item.provider_id, 12345);
     }
 }

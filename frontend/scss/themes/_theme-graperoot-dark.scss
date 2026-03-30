@@ -1,6 +1,7 @@
 body[data-theme="graperoot-dark"] {
   --theme-palette-page: #0b0a12;
-  --theme-palette-page-alt: #08070f;
+  --theme-palette-particle: #08070f;
+  --theme-palette-particle-alt: #2f1d47;
   --theme-palette-neutral-surface-980: rgba(10, 8, 18, 0.94);
   --theme-palette-neutral-surface-960: rgba(16, 13, 28, 0.97);
   --theme-palette-neutral-surface-940: rgba(22, 18, 38, 0.86);
@@ -244,7 +245,7 @@ body[data-theme="graperoot-dark"] {
   --theme-palette-graph-input-xtream: #60a5fa;
   --theme-palette-graph-input-m3u: #c084fc;
   --theme-palette-graph-input-library: #e9d5ff;
-  --theme-palette-graph-target: #facc15;
+  --theme-palette-graph-target: #1cb45e;
   --theme-palette-graph-output: #facc15;
   --theme-palette-graph-output-xtream: #38bdf8;
   --theme-palette-graph-output-m3u: #d8b4fe;

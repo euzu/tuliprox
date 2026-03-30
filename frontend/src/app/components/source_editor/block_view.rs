@@ -3,11 +3,12 @@ use crate::{
     html_if,
     i18n::use_translation,
 };
-use web_sys::{HtmlElement, MouseEvent};
+use web_sys::{HtmlElement, MouseEvent, TouchEvent};
 use yew::{classes, component, html, use_effect_with, use_node_ref, Callback, Html, Properties, TargetCast};
 #[derive(Properties, PartialEq)]
 pub struct BlockProps {
     pub(crate) block: Block,
+    pub(crate) zoom_factor: f32,
     pub(crate) edited: bool,
     pub(crate) selected: bool,
     pub(crate) delete_mode: bool,
@@ -15,6 +16,7 @@ pub struct BlockProps {
     pub(crate) port_status: PortStatus,
     pub(crate) on_edit: Callback<BlockId>,
     pub(crate) on_mouse_down: Callback<(BlockId, MouseEvent)>,
+    pub(crate) on_touch_start: Callback<(BlockId, TouchEvent)>,
     pub(crate) on_connection_drop: Callback<BlockId>,  // to_id
     pub(crate) on_connection_start: Callback<BlockId>, // from_id
 }
@@ -63,12 +65,29 @@ pub fn BlockView(props: &BlockProps) -> Html {
         let on_edit = props.on_edit.clone();
         Callback::from(move |_| on_edit.emit(block_id))
     };
+    let handle_touch_start = {
+        let on_block_touch_start = props.on_touch_start.clone();
+        Callback::from(move |e: TouchEvent| {
+            e.prevent_default();
+            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
+                let tag = target.tag_name().to_lowercase();
+                if &tag == "span" {
+                    return;
+                }
+            }
+            e.stop_propagation();
+            on_block_touch_start.emit((block_id, e))
+        })
+    };
     {
         let block_ref = block_ref.clone();
         let position = block.position;
-        use_effect_with(position, move |(x, y)| {
+        let zoom_factor = props.zoom_factor;
+        use_effect_with((position, zoom_factor), move |((x, y), zoom_factor)| {
             if let Some(el) = block_ref.cast::<HtmlElement>() {
-                let _ = el.style().set_property("transform", &format!("translate3d({x}px, {y}px, 0)"));
+                let _ =
+                    el.style().set_property("transform", &format!("translate3d({x}px, {y}px, 0) scale({zoom_factor})"));
+                let _ = el.style().set_property("transform-origin", "top left");
             }
         });
     }
@@ -99,7 +118,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
               ref={block_ref} title={title.clone()}>
             <div class={"tp__source-editor__block-header"}>
                 // Block handle (drag)
-                <div class="tp__source-editor__block-handle" onmousedown={handle_mouse_down.clone()} />
+                <div class="tp__source-editor__block-handle" onmousedown={handle_mouse_down.clone()} ontouchstart={handle_touch_start.clone()} />
                 // Delete button for block
                 {
                     html_if!(delete_mode, {
@@ -111,7 +130,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                     })
                 }
             </div>
-            <div class={if is_batch { "tp__source-editor__block-content  tp__source-editor__block-batch" } else { "tp__source-editor__block-content" }} onmousedown={handle_mouse_down} ondblclick={handle_edit}>
+            <div class={if is_batch { "tp__source-editor__block-content  tp__source-editor__block-batch" } else { "tp__source-editor__block-content" }} onmousedown={handle_mouse_down} ontouchstart={handle_touch_start} ondblclick={handle_edit}>
                 <div class={"tp__source-editor__block-content-body"}>
                     <div class="tp__source-editor__block-label">
                         { title }
