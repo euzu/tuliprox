@@ -171,7 +171,7 @@
             .tp__source-editor__brick {
                padding: var(--padding-small) var(--padding-mini);
                font-size: 0.85rem;
-               word-break: break-word;
+               overflow-wrap: anywhere;
             }
          }
       }

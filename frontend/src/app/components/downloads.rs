@@ -5,14 +5,14 @@ use crate::{
     utils::format_bytes,
 };
 use shared::{
-    model::{FileDownloadDto, SortOrder},
+    model::{DownloadsResponse, FileDownloadDto, ProtocolMessage, SortOrder},
     utils::unix_ts_to_str,
 };
 use std::{cmp::Ordering, rc::Rc};
 use yew::{platform::spawn_local, prelude::*};
-use yew_hooks::use_interval;
 
 const HEADERS: [&str; 9] = [
+    "LABEL.ACTIONS",
     "LABEL.NAME",
     "LABEL.TYPE",
     "LABEL.STATUS",
@@ -21,14 +21,24 @@ const HEADERS: [&str; 9] = [
     "LABEL.START",
     "LABEL.DURATION",
     "LABEL.ERROR",
-    "LABEL.ACTIONS",
 ];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum DownloadTab {
     Queue,
-    Active,
     Finished,
+}
+
+fn normalize_download_tab(
+    current: &DownloadTab,
+    queue: &[FileDownloadDto],
+    finished: &[FileDownloadDto],
+    active: Option<&FileDownloadDto>,
+) -> DownloadTab {
+    match current {
+        DownloadTab::Finished if finished.is_empty() && (active.is_some() || !queue.is_empty()) => DownloadTab::Queue,
+        _ => current.clone(),
+    }
 }
 
 fn collect_downloads_for_tab(
@@ -38,8 +48,12 @@ fn collect_downloads_for_tab(
     active: &Option<Rc<FileDownloadDto>>,
 ) -> Vec<Rc<FileDownloadDto>> {
     match tab {
-        DownloadTab::Queue => queue.iter().cloned().map(Rc::new).collect(),
-        DownloadTab::Active => active.iter().cloned().collect(),
+        DownloadTab::Queue => {
+            // Active download always first, then the rest of the queue
+            let mut items: Vec<Rc<FileDownloadDto>> = active.iter().cloned().collect();
+            items.extend(queue.iter().cloned().map(Rc::new));
+            items
+        }
         DownloadTab::Finished => finished.iter().cloned().map(Rc::new).collect(),
     }
 }
@@ -96,19 +110,30 @@ fn format_download_duration(download: &FileDownloadDto) -> String {
 
 fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Ordering {
     match col {
-        0 => a.filename.cmp(&b.filename),
-        1 => a.kind.cmp(&b.kind),
-        2 => a.state.cmp(&b.state),
-        3 => a.filesize.cmp(&b.filesize),
-        4 => a.total_size.unwrap_or(a.filesize).cmp(&b.total_size.unwrap_or(b.filesize)),
-        5 => a.start_at.unwrap_or_default().cmp(&b.start_at.unwrap_or_default()),
-        6 => a.duration_secs.unwrap_or_default().cmp(&b.duration_secs.unwrap_or_default()),
-        7 => a.error.as_deref().unwrap_or_default().cmp(b.error.as_deref().unwrap_or_default()),
+        1 => a.filename.cmp(&b.filename),
+        2 => a.kind.cmp(&b.kind),
+        3 => a.state.cmp(&b.state),
+        4 => a.filesize.cmp(&b.filesize),
+        5 => a.total_size.unwrap_or(a.filesize).cmp(&b.total_size.unwrap_or(b.filesize)),
+        6 => a.start_at.unwrap_or_default().cmp(&b.start_at.unwrap_or_default()),
+        7 => a.duration_secs.unwrap_or_default().cmp(&b.duration_secs.unwrap_or_default()),
+        8 => a.error.as_deref().unwrap_or_default().cmp(b.error.as_deref().unwrap_or_default()),
         _ => Ordering::Equal,
     }
 }
 
 fn is_sortable(col: usize) -> bool { col < 8 }
+
+fn apply_download_snapshot(
+    response: &DownloadsResponse,
+    queue_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
+    finished_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
+    active_download: &UseStateHandle<Option<Rc<FileDownloadDto>>>,
+) {
+    queue_state.set(Rc::new(response.queue.clone()));
+    finished_state.set(Rc::new(response.downloads.clone()));
+    active_download.set(response.active.clone().map(Rc::new));
+}
 
 #[function_component(DownloadsView)]
 pub fn downloads_view() -> Html {
@@ -121,46 +146,32 @@ pub fn downloads_view() -> Html {
     let active_download = use_state(|| None::<Rc<FileDownloadDto>>);
     let table_items = use_state(|| None::<Rc<Vec<Rc<FileDownloadDto>>>>);
 
-    let fetch_downloads = {
-        let queue_state = queue_state.clone();
-        let finished_state = finished_state.clone();
-        let active_download = active_download.clone();
+    let request_downloads = {
         let services = services.clone();
         Callback::from(move |_| {
-            let queue_state = queue_state.clone();
-            let finished_state = finished_state.clone();
-            let active_download = active_download.clone();
-            let services = services.clone();
-            spawn_local(async move {
-                if let Ok(response) = services.downloads.get_downloads().await {
-                    queue_state.set(Rc::new(response.queue.clone()));
-                    finished_state.set(Rc::new(response.downloads.clone()));
-                    active_download.set(response.active.map(Rc::new));
-                }
-            });
+            let _ = services.websocket.send_message(ProtocolMessage::DownloadsRequest);
         })
     };
 
     {
-        let fetch = fetch_downloads.clone();
-        use_effect_with((), move |_| {
-            fetch.emit(());
-            || {}
-        });
-    }
-
-    {
-        let fetch = fetch_downloads.clone();
         let queue_state = queue_state.clone();
+        let finished_state = finished_state.clone();
         let active_download = active_download.clone();
-        use_interval(
-            move || {
-                if active_download.is_some() || !queue_state.is_empty() {
-                    fetch.emit(());
+        let services = services.clone();
+        let request_downloads_effect = request_downloads.clone();
+        use_effect_with((), move |_| {
+            request_downloads_effect.emit(());
+            let sub_id = services.event.subscribe(move |msg| match msg {
+                crate::model::EventMessage::DownloadsUpdate(snapshot) => {
+                    apply_download_snapshot(&snapshot, &queue_state, &finished_state, &active_download);
                 }
-            },
-            2000,
-        );
+                crate::model::EventMessage::WebSocketStatus(true) => {
+                    request_downloads_effect.emit(());
+                }
+                _ => {}
+            });
+            move || services.event.unsubscribe(sub_id)
+        });
     }
 
     {
@@ -168,11 +179,17 @@ pub fn downloads_view() -> Html {
         let queue_state = queue_state.clone();
         let finished_state = finished_state.clone();
         let active_download = active_download.clone();
+        let active_tab_set = active_tab.clone();
         let table_items = table_items.clone();
         use_effect_with(
             ((*active_tab).clone(), (*queue_state).clone(), (*finished_state).clone(), (*active_download).clone()),
             move |(tab, queue, finished, active)| {
-                let items = collect_downloads_for_tab(tab, queue, finished, active);
+                let normalized_tab =
+                    normalize_download_tab(tab, queue.as_slice(), finished.as_slice(), active.as_deref());
+                if normalized_tab != *tab {
+                    active_tab_set.set(normalized_tab.clone());
+                }
+                let items = collect_downloads_for_tab(&normalized_tab, queue, finished, active);
                 table_items.set((!items.is_empty()).then(|| Rc::new(items)));
                 || ()
             },
@@ -180,85 +197,85 @@ pub fn downloads_view() -> Html {
     }
 
     let handle_pause = {
-        let fetch = fetch_downloads.clone();
+        let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
         Callback::from(move |uuid: String| {
-            let fetch = fetch.clone();
+            let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
                 if services.downloads.pause_download(uuid).await.is_ok() {
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_PAUSED"));
-                    fetch.emit(());
+                    request_downloads.emit(());
                 }
             });
         })
     };
 
     let handle_resume = {
-        let fetch = fetch_downloads.clone();
+        let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
         Callback::from(move |uuid: String| {
-            let fetch = fetch.clone();
+            let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
                 if services.downloads.resume_download(uuid).await.is_ok() {
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RESUMED"));
-                    fetch.emit(());
+                    request_downloads.emit(());
                 }
             });
         })
     };
 
     let handle_cancel = {
-        let fetch = fetch_downloads.clone();
+        let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
         Callback::from(move |uuid: String| {
-            let fetch = fetch.clone();
+            let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
                 if services.downloads.cancel_download(uuid).await.is_ok() {
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_CANCELLED"));
-                    fetch.emit(());
+                    request_downloads.emit(());
                 }
             });
         })
     };
 
     let handle_remove = {
-        let fetch = fetch_downloads.clone();
+        let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
         Callback::from(move |uuid: String| {
-            let fetch = fetch.clone();
+            let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
                 if services.downloads.remove_download(uuid).await.is_ok() {
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_REMOVED"));
-                    fetch.emit(());
+                    request_downloads.emit(());
                 }
             });
         })
     };
 
     let handle_retry = {
-        let fetch = fetch_downloads.clone();
+        let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
         Callback::from(move |uuid: String| {
-            let fetch = fetch.clone();
+            let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
                 if services.downloads.retry_download(uuid).await.is_ok() {
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RETRIED"));
-                    fetch.emit(());
+                    request_downloads.emit(());
                 }
             });
         })
@@ -282,17 +299,7 @@ pub fn downloads_view() -> Html {
         let handle_retry = handle_retry.clone();
         Callback::<(usize, usize, Rc<FileDownloadDto>), Html>::from(
             move |(_row, col, dto): (usize, usize, Rc<FileDownloadDto>)| match col {
-                0 => html! { <span class="tp__table__nowrap">{dto.filename.clone()}</span> },
-                1 => html! { format_download_kind(&translate, &dto.kind) },
-                2 => html! { format_download_state(&translate, &dto.state) },
-                3 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
-                4 => {
-                    html! { <span class="tp__table__nowrap">{dto.total_size.map_or_else(String::new, format_bytes)}</span> }
-                }
-                5 => html! { <span class="tp__table__nowrap">{format_download_start(&dto)}</span> },
-                6 => html! { format_download_duration(&dto) },
-                7 => html! { dto.error.clone().unwrap_or_default() },
-                8 => {
+                0 => {
                     let can_pause = dto.state == "Downloading";
                     let can_resume = dto.state == "Paused";
                     let can_cancel = dto.state == "Downloading" || dto.state == "Queued" || dto.state == "Scheduled";
@@ -329,6 +336,16 @@ pub fn downloads_view() -> Html {
                         </div>
                     }
                 }
+                1 => html! { <span class="tp__table__nowrap">{dto.filename.clone()}</span> },
+                2 => html! { format_download_kind(&translate, &dto.kind) },
+                3 => html! { format_download_state(&translate, &dto.state) },
+                4 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
+                5 => {
+                    html! { <span class="tp__table__nowrap">{dto.total_size.map_or_else(String::new, format_bytes)}</span> }
+                }
+                6 => html! { <span class="tp__table__nowrap">{format_download_start(&dto)}</span> },
+                7 => html! { format_download_duration(&dto) },
+                8 => html! { dto.error.clone().unwrap_or_default() },
                 _ => html! {},
             },
         )
@@ -365,7 +382,7 @@ pub fn downloads_view() -> Html {
     let render_filter_button = |tab: DownloadTab, icon: &str, label: String| {
         let active_tab = active_tab.clone();
         let button_tab = tab.clone();
-        let class = if *active_tab == tab { "active" } else { "secondary" };
+        let class = if *active_tab == tab { "active" } else { "primary" };
         html! {
             <TextButton
                 class={class}
@@ -384,9 +401,8 @@ pub fn downloads_view() -> Html {
                 <div class="tp__downloads-list tp__list-list">
                     <div class="tp__downloads-list__header tp__list-list__header">
                         <h1>{translate.t("LABEL.DOWNLOADS")}</h1>
-                        <div class="tp__downloads-list__header-toolbar">
+                        <div class="tp__downloads-list__header-toolbar tp__radio-button-group ">
                             {render_filter_button(DownloadTab::Queue, "Download", translate.t("LABEL.DOWNLOAD_QUEUE"))}
-                            {render_filter_button(DownloadTab::Active, "Play", translate.t("LABEL.DOWNLOAD_ACTIVE"))}
                             {render_filter_button(DownloadTab::Finished, "TaskDone", translate.t("LABEL.DOWNLOAD_FINISHED"))}
                         </div>
                     </div>
@@ -401,7 +417,7 @@ pub fn downloads_view() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_downloads_for_tab, DownloadTab};
+    use super::{collect_downloads_for_tab, normalize_download_tab, DownloadTab};
     use shared::model::FileDownloadDto;
     use std::rc::Rc;
 
@@ -422,20 +438,52 @@ mod tests {
     }
 
     #[test]
-    fn collect_downloads_for_active_tab_only_returns_active_download() {
-        let queue = Rc::new(vec![download("queued", "Queued")]);
-        let finished = Rc::new(vec![download("done", "Completed")]);
+    fn queue_tab_shows_active_download_first_then_queue() {
+        let queue = Rc::new(vec![download("q1", "Queued"), download("q2", "Queued")]);
+        let finished = Rc::new(vec![]);
         let active = Some(Rc::new(download("active", "Downloading")));
 
-        let active_items = collect_downloads_for_tab(&DownloadTab::Active, &queue, &finished, &active);
-        let queue_items = collect_downloads_for_tab(&DownloadTab::Queue, &queue, &finished, &active);
-        let finished_items = collect_downloads_for_tab(&DownloadTab::Finished, &queue, &finished, &active);
+        let items = collect_downloads_for_tab(&DownloadTab::Queue, &queue, &finished, &active);
 
-        assert_eq!(active_items.len(), 1);
-        assert_eq!(active_items[0].uuid, "active");
-        assert_eq!(queue_items.len(), 1);
-        assert_eq!(queue_items[0].uuid, "queued");
-        assert_eq!(finished_items.len(), 1);
-        assert_eq!(finished_items[0].uuid, "done");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].uuid, "active");
+        assert_eq!(items[1].uuid, "q1");
+        assert_eq!(items[2].uuid, "q2");
+    }
+
+    #[test]
+    fn queue_tab_works_without_active_download() {
+        let queue = Rc::new(vec![download("q1", "Queued")]);
+        let finished = Rc::new(vec![]);
+        let active = None;
+
+        let items = collect_downloads_for_tab(&DownloadTab::Queue, &queue, &finished, &active);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].uuid, "q1");
+    }
+
+    #[test]
+    fn finished_tab_stays_when_has_items() {
+        let queue = vec![];
+        let finished = vec![download("done", "Completed")];
+        let active = None;
+
+        assert_eq!(
+            normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
+            DownloadTab::Finished
+        );
+    }
+
+    #[test]
+    fn finished_tab_falls_back_to_queue_when_empty() {
+        let queue = vec![download("q1", "Queued")];
+        let finished = vec![];
+        let active = None;
+
+        assert_eq!(
+            normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
+            DownloadTab::Queue
+        );
     }
 }

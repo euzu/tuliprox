@@ -20,7 +20,7 @@ pub struct FileDownloadDto {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct DownloadsResponse {
     pub completed: bool,
     pub queue: Vec<FileDownloadDto>,
@@ -29,7 +29,7 @@ pub struct DownloadsResponse {
     pub active: Option<FileDownloadDto>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct DownloadActionResponse {
     pub success: bool,
 }

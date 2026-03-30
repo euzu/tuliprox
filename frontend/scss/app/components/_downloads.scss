@@ -2,7 +2,6 @@
   &__header-toolbar {
     display: flex;
     flex-flow: row wrap;
-    gap: var(--gap-default);
     box-sizing: border-box;
     justify-content: flex-end;
   }
@@ -18,7 +17,6 @@
     flex-flow: row wrap;
     align-items: center;
     gap: var(--gap-small);
-    min-width: 8rem;
   }
 }
 

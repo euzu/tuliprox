@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        endpoints::v1_api::create_status_check,
+        endpoints::{download_api::download_queue_snapshot, v1_api::create_status_check},
         model::{AppState, EventMessage},
     },
     auth::verify_token,
@@ -160,6 +160,13 @@ async fn handle_protocol_message(
                     }
                 } else {
                     Some(ProtocolMessage::UserActionResponse(false))
+                }
+            }
+            Ok(ProtocolMessage::DownloadsRequest) => {
+                if websocket_requires_system_read(auth_required, mem) && (!auth_required || mem.token.is_some()) {
+                    Some(ProtocolMessage::DownloadsResponse(download_queue_snapshot(&app_state.downloads).await))
+                } else {
+                    Some(ProtocolMessage::Unauthorized)
                 }
             }
             Ok(ProtocolMessage::StreamMeterSubscribe) => {
@@ -337,6 +344,10 @@ async fn handle_event_message(
                             .send(Message::Binary(msg))
                             .await
                             .map_err(|e| format!("Library scan progress event: {e} "))?;
+                    }
+                    EventMessage::DownloadsUpdate(downloads) => {
+                        let msg = ProtocolMessage::DownloadsResponse(downloads).to_bytes().map_err(|e| e.to_string())?;
+                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Downloads event: {e} "))?;
                     }
                     EventMessage::InputMetadataUpdatesCompleted(_)
                     | EventMessage::InputMetadataUpdatesStarted(_) => {

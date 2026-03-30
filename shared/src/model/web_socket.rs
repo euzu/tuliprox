@@ -1,6 +1,6 @@
 use crate::model::{
-    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PermissionSet,
-    PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo,
+    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, DownloadsResponse, LibraryScanSummary,
+    PermissionSet, PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,7 @@ pub enum ProtocolMessage {
     Authorized,
     StreamMeterSubscribe,
     StreamMeterUnsubscribe,
+    DownloadsRequest,
     ServerError(String),
     StatusRequest(String),
     UserAction(UserCommand),
@@ -103,6 +104,7 @@ pub enum ProtocolMessage {
     SystemInfoResponse(SystemInfo),
     LibraryScanProgressResponse(LibraryScanSummary),
     StreamMeterBatchResponse(Vec<StreamMeterEntry>),
+    DownloadsResponse(DownloadsResponse),
 }
 
 impl ProtocolMessage {

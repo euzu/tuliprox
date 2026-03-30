@@ -269,10 +269,16 @@ async fn create_shared_data(
         crate::api::endpoints::download_api::start_download_scheduler(
             Arc::clone(app_config),
             Arc::clone(&app_state.downloads),
+            Arc::clone(&app_state.event_manager),
         );
 
         if !app_state.downloads.queue.lock().await.is_empty() || app_state.downloads.active.read().await.is_some() {
-            crate::api::endpoints::download_api::ensure_download_worker_running(app_config, download_cfg, &app_state.downloads)
+            crate::api::endpoints::download_api::ensure_download_worker_running(
+                app_config,
+                download_cfg,
+                &app_state.downloads,
+                &app_state.event_manager,
+            )
                 .await
                 .map_err(|err| {
                     TuliproxError::new(

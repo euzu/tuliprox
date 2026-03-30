@@ -347,6 +347,9 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::LibraryScanProgressResponse(msg) => {
                         event_service.broadcast(EventMessage::LibraryScanProgress(msg));
                     }
+                    ProtocolMessage::DownloadsResponse(downloads) => {
+                        event_service.broadcast(EventMessage::DownloadsUpdate(Rc::new(downloads)));
+                    }
                     ProtocolMessage::Version(version) => {
                         attempt_counter.set(0);
                         peer_version.set(version);
@@ -365,6 +368,7 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::Auth(_)
                     | ProtocolMessage::StreamMeterSubscribe
                     | ProtocolMessage::StreamMeterUnsubscribe
+                    | ProtocolMessage::DownloadsRequest
                     | ProtocolMessage::ActiveProviderCountRequest(_)
                     | ProtocolMessage::StatusRequest(_)
                     | ProtocolMessage::UserAction(_) => {}

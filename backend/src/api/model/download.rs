@@ -1,6 +1,7 @@
 use crate::model::VideoDownloadConfig;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use shared::model::FileDownloadDto;
 use shared::utils::{deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
 use std::{
     collections::VecDeque,
@@ -206,6 +207,39 @@ impl FileDownload {
         recording.kind = DownloadKind::Recording;
         Some(recording)
     }
+}
+
+impl From<&FileDownload> for FileDownloadDto {
+    fn from(value: &FileDownload) -> Self {
+        Self {
+            uuid: value.uuid.clone(),
+            filename: value.filename.clone(),
+            kind: match value.kind {
+                DownloadKind::Download => "Download".to_string(),
+                DownloadKind::Recording => "Recording".to_string(),
+            },
+            filesize: value.size,
+            total_size: value.total_size,
+            finished: value.finished,
+            paused: value.paused,
+            state: match value.state {
+                DownloadState::Queued => "Queued".to_string(),
+                DownloadState::Scheduled => "Scheduled".to_string(),
+                DownloadState::Downloading => "Downloading".to_string(),
+                DownloadState::Paused => "Paused".to_string(),
+                DownloadState::Completed => "Completed".to_string(),
+                DownloadState::Failed => "Failed".to_string(),
+                DownloadState::Cancelled => "Cancelled".to_string(),
+            },
+            start_at: value.start_at,
+            duration_secs: value.duration_secs,
+            error: value.error.clone(),
+        }
+    }
+}
+
+impl From<FileDownload> for FileDownloadDto {
+    fn from(value: FileDownload) -> Self { Self::from(&value) }
 }
 
 pub struct DownloadQueue {
