@@ -29,9 +29,10 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 const USER_GC_TTL: u64 = 900; // 15 Min
-const USER_CON_TTL: u64 = 10_800; // 3 hours
+const USER_CON_TTL: u64 = 1_800; // 30 minutes
 const USER_SESSION_LIMIT: usize = 50;
 const ANON_SOCKET_TTL: u64 = 300; // 5 Min
+const DEFAULT_ACTIVE_SOCKET_TTL_SECS: u64 = 90;
 
 fn get_grace_options(config: &Config) -> (u64, u64) {
     let (grace_period_millis, grace_period_timeout_secs) =
@@ -780,22 +781,85 @@ impl ActiveUserManager {
     }
 
     pub async fn update_session_addr(&self, username: &str, token: &str, addr: &SocketAddr) {
+        let now = current_time_secs();
         let mut user_connections = self.connections.write().await;
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
             if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 let previous_addr = session.addr;
 
                 session.addr = *addr;
+                session.ts = now;
                 for stream in &mut connection_data.streams {
                     if stream.addr == previous_addr {
                         stream.addr = *addr;
+                        stream.ts = now;
                     }
+                }
+                if let Some(registration) = user_connections.key_by_addr.get_mut(addr) {
+                    registration.ts = now;
                 }
                 debug_if_enabled!(
                     "Updated session {token} for {username} address {} -> {}",
                     sanitize_sensitive_info(&previous_addr.to_string()),
                     sanitize_sensitive_info(&addr.to_string())
                 );
+            }
+        }
+    }
+
+    pub fn active_socket_ttl_secs(&self) -> u64 {
+        let configured_ttl = self.adaptive_session_ttl_secs.load(Ordering::Relaxed);
+        if configured_ttl == 0 { DEFAULT_ACTIVE_SOCKET_TTL_SECS } else { configured_ttl }
+    }
+
+    pub async fn socket_expiry_deadline(&self, addr: &SocketAddr) -> Option<u64> {
+        let ttl_secs = self.active_socket_ttl_secs();
+        self.connections.read().await.key_by_addr.get(addr).and_then(|registration| {
+            if registration.username.is_empty() {
+                None
+            } else {
+                Some(registration.ts.saturating_add(ttl_secs))
+            }
+        })
+    }
+
+    pub async fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
+        let now = current_time_secs();
+        let mut user_connections = self.connections.write().await;
+
+        let registration = user_connections
+            .key_by_addr
+            .entry(*addr)
+            .or_insert_with(SocketRegistration::anonymous);
+        registration.username = username.to_string();
+        registration.ts = now;
+
+        let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+            return;
+        };
+
+        connection_data.ts = now;
+
+        let mut touched_session = false;
+        for session in &mut connection_data.sessions {
+            if session.token == token {
+                session.ts = now;
+                session.addr = *addr;
+                touched_session = true;
+                break;
+            }
+        }
+
+        if !touched_session {
+            return;
+        }
+
+        for stream in &mut connection_data.streams {
+            if stream.session_token.as_deref() == Some(token) || stream.addr == *addr {
+                stream.ts = now;
+                if stream.session_token.as_deref() == Some(token) {
+                    stream.addr = *addr;
+                }
             }
         }
     }
@@ -1721,6 +1785,115 @@ mod tests {
         let connections = manager.connections.read().await;
         assert!(!connections.key_by_addr.contains_key(&stale_addr));
         assert!(connections.key_by_addr.contains_key(&fresh_addr));
+    }
+
+    #[tokio::test]
+    async fn named_socket_registration_exposes_expiry_deadline() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let stale_addr: SocketAddr = "127.0.0.1:55021".parse().unwrap();
+        let fresh_addr: SocketAddr = "127.0.0.1:55022".parse().unwrap();
+        let stale_fp = Fingerprint::new("fp-stale".to_string(), "127.0.0.1".to_string(), stale_addr);
+        let fresh_fp = Fingerprint::new("fp-fresh".to_string(), "127.0.0.1".to_string(), fresh_addr);
+
+        manager.add_connection(&stale_addr).await;
+        manager.add_connection(&fresh_addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 201,
+                meter_uid: 301,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &stale_fp,
+                provider: "provider-a",
+                stream_channel: &test_channel(9201),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await
+            .expect("stale stream should register");
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 202,
+                meter_uid: 302,
+                username: "user2",
+                max_connections: 1,
+                fingerprint: &fresh_fp,
+                provider: "provider-b",
+                stream_channel: &test_channel(9202),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await
+            .expect("fresh stream should register");
+
+        {
+            let mut connections = manager.connections.write().await;
+            let stale_registration = connections
+                .key_by_addr
+                .get_mut(&stale_addr)
+                .expect("stale registration should exist");
+            stale_registration.ts = stale_registration.ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 1);
+        }
+
+        let stale_deadline = manager
+            .socket_expiry_deadline(&stale_addr)
+            .await
+            .expect("stale named socket should have an expiry deadline");
+        let fresh_deadline = manager
+            .socket_expiry_deadline(&fresh_addr)
+            .await
+            .expect("fresh named socket should have an expiry deadline");
+        assert!(stale_deadline < fresh_deadline);
+    }
+
+    #[tokio::test]
+    async fn touch_http_activity_refreshes_session_and_registration_without_stream() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55024".parse().unwrap();
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-http-touch",
+                virtual_id: 9302,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+            })
+            .await;
+
+        let previous_ts = {
+            let mut connections = manager.connections.write().await;
+            let previous_ts = {
+                let registration = connections.key_by_addr.get_mut(&addr).expect("registration should exist");
+                registration.ts = registration.ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
+                registration.ts
+            };
+            let connection_data = connections.by_key.get_mut("user1").expect("user should exist");
+            connection_data.sessions[0].ts = connection_data.sessions[0].ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
+            previous_ts
+        };
+
+        manager.touch_http_activity("user1", "tok-http-touch", &addr).await;
+
+        let connections = manager.connections.read().await;
+        let registration = connections.key_by_addr.get(&addr).expect("registration should still exist");
+        let connection_data = connections.by_key.get("user1").expect("user should still exist");
+        assert!(registration.ts > previous_ts);
+        assert!(connection_data.sessions[0].ts >= registration.ts);
     }
 
     #[tokio::test]

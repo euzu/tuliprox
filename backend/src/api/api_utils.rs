@@ -1368,7 +1368,7 @@ pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
 
 pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_type: PlaylistItemType) -> u64 {
     match item_type {
-        PlaylistItemType::LiveHls => get_hls_session_ttl_secs(app_state),
+        PlaylistItemType::LiveHls | PlaylistItemType::LiveDash => get_hls_session_ttl_secs(app_state),
         PlaylistItemType::Catchup => get_catchup_session_ttl_secs(app_state),
         _ => 0,
     }
@@ -2167,6 +2167,15 @@ mod tests {
                 default_catchup_session_ttl_secs()
             ),
             default_catchup_session_ttl_secs()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_session_reservation_ttl_secs_uses_hls_ttl_for_live_dash() {
+        let app_state = create_test_app_state();
+        assert_eq!(
+            get_session_reservation_ttl_secs(&app_state, PlaylistItemType::LiveDash),
+            default_hls_session_ttl_secs()
         );
     }
 
