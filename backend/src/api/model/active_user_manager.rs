@@ -784,9 +784,8 @@ impl ActiveUserManager {
         let now = current_time_secs();
         let mut user_connections = self.connections.write().await;
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
-            if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
+            let update_result = if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 let previous_addr = session.addr;
-
                 session.addr = *addr;
                 session.ts = now;
                 for stream in &mut connection_data.streams {
@@ -795,8 +794,29 @@ impl ActiveUserManager {
                         stream.ts = now;
                     }
                 }
+                let prune_previous_registration = previous_addr != *addr
+                    && !connection_data.sessions.iter().any(|active_session| active_session.addr == previous_addr)
+                    && !connection_data.streams.iter().any(|stream| stream.addr == previous_addr);
+                Some((previous_addr, prune_previous_registration))
+            } else {
+                None
+            };
+
+            if let Some((previous_addr, prune_previous_registration)) = update_result {
                 if let Some(registration) = user_connections.key_by_addr.get_mut(addr) {
                     registration.ts = now;
+                    registration.username = username.to_string();
+                } else {
+                    user_connections.key_by_addr.insert(
+                        *addr,
+                        SocketRegistration {
+                            username: username.to_string(),
+                            ts: now,
+                        },
+                    );
+                }
+                if prune_previous_registration {
+                    user_connections.key_by_addr.remove(&previous_addr);
                 }
                 debug_if_enabled!(
                     "Updated session {token} for {username} address {} -> {}",
@@ -1894,6 +1914,67 @@ mod tests {
         let connection_data = connections.by_key.get("user1").expect("user should still exist");
         assert!(registration.ts > previous_ts);
         assert!(connection_data.sessions[0].ts >= registration.ts);
+    }
+
+    #[tokio::test]
+    async fn update_session_addr_prunes_previous_registration_when_session_moves_to_new_socket() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let old_addr: SocketAddr = "127.0.0.1:55121".parse().unwrap();
+        let new_addr: SocketAddr = "127.0.0.1:55122".parse().unwrap();
+        let old_fingerprint = Fingerprint::new("fp-old".to_string(), "127.0.0.1".to_string(), old_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
+
+        manager.add_connection(&old_addr).await;
+        manager.add_connection(&new_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-move",
+                virtual_id: 9101,
+                provider: "provider-a",
+                stream_url: "http://localhost/movie.mkv",
+                addr: &old_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 301,
+                meter_uid: 401,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &old_fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::Video,
+                    ..test_channel(9101)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-move"),
+            })
+            .await
+            .expect("initial movie stream should register");
+
+        manager.update_session_addr("user1", "tok-move", &new_addr).await;
+
+        let connections = manager.connections.read().await;
+        assert!(
+            !connections.key_by_addr.contains_key(&old_addr),
+            "previous range-request socket registration should be pruned once the session moved"
+        );
+        assert!(connections.key_by_addr.contains_key(&new_addr));
+
+        let connection_data = connections.by_key.get("user1").expect("user connection data");
+        assert_eq!(connection_data.sessions.len(), 1);
+        assert_eq!(connection_data.sessions[0].addr, new_addr);
+        assert_eq!(connection_data.streams.len(), 1);
+        assert_eq!(connection_data.streams[0].addr, new_addr);
     }
 
     #[tokio::test]

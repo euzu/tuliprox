@@ -1,12 +1,9 @@
 @use "../../size" as size;
 
 .tp__app-sidebar.expanded {
-  min-width: var(--sidebar-width-expaned);
-  max-width: var(--sidebar-width-expaned);
   width: var(--sidebar-width-expaned);
 
   .tp__app-sidebar__content {
-    padding: var(--padding-larger) var(--padding-large);
   }
 
   .tp__app-header__logo {

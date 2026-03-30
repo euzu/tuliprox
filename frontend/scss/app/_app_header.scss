@@ -1,5 +1,7 @@
 @use "../size" as size;
 
+$mobile-header-sidebar-offset: 3rem;
+
 .tp__app-header {
   display: flex;
   align-items: center;
@@ -42,6 +44,6 @@
 
 @media (max-width: size.$mobile-breakpoint) {
   .tp__app-main__header {
-    padding-left: 3rem;
+    padding-left: $mobile-header-sidebar-offset;
   }
 }

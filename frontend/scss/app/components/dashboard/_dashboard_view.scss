@@ -17,13 +17,13 @@
   &__body {
     display: flex;
     flex-flow: column;
-    gap: var(--gap-larger);
+    gap: var(--gap-large);
     overflow: auto;
 
     &-actions {
       display: grid;
       grid-template-columns: var(--action-card-width) var(--action-card-width);
-      gap: var(--gap-larger);
+      gap: var(--gap-large);
 
       @media (max-width: size.$dashboard-mobile-breakpoint) {
         grid-template-columns: var(--action-card-width);
@@ -37,7 +37,7 @@
     &-stats {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(var(--action-card-width), 1fr));
-      gap: var(--gap-larger);
+      gap: var(--gap-large);
     }
   }
 

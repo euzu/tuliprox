@@ -152,11 +152,13 @@
          min-width: 3rem;
          max-width: 3rem;
          width: 3rem;
+         flex: 0 0 3rem;
 
          &.expanded {
-            min-width: min(7rem, 35vw);
-            max-width: min(7rem, 35vw);
-            width: min(7rem, 35vw);
+            min-width: min(6rem, 30vw);
+            max-width: min(6rem, 30vw);
+            width: min(6rem, 30vw);
+            flex: 0 0 min(6rem, 30vw);
          }
 
          &-actions {

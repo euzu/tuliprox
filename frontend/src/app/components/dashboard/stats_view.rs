@@ -39,9 +39,9 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         html! {
            <div class="tp__stats__body-group">
                <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()} /></Card>
+               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
                <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()} /></Card>
                <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.NETWORK")} data={net.clone()} /></Card>
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
             </div>
         }
     };

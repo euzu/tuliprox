@@ -17,20 +17,20 @@
   &__body {
     display: flex;
     flex-flow: column;
-    gap: var(--gap-larger);
+    gap: var(--gap-default);
     overflow: auto;
 
     &-group {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: var(--gap-larger);
+      display: flex;
+      flex-flow: row wrap;
+      gap: var(--gap-default);
     }
 
     &-group-provider {
       @media (max-width: size.$dashboard-mobile-breakpoint) {
         display: flex;
         flex-flow: row wrap;
-        gap: var(--gap-larger);
+        gap: var(--gap-default);
       }
     }
   }

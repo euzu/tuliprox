@@ -74,6 +74,7 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
         let popup_ref = popup_ref.clone();
         let on_close = props.on_close.clone();
         use_effect_with(props.is_open, move |is_open| {
+            let browser_window = web_sys::window();
             let handler = if *is_open {
                 let handler = Closure::wrap(Box::new(move |event: MouseEvent| {
                     if let Some(popup) = popup_ref.cast::<HtmlElement>() {
@@ -85,10 +86,9 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
                     }
                 }) as Box<dyn FnMut(_)>);
 
-                window()
-                    .unwrap()
-                    .add_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref())
-                    .unwrap();
+                if let Some(win) = browser_window.as_ref() {
+                    let _ = win.add_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref());
+                }
                 Some(handler)
             } else {
                 None
@@ -97,10 +97,9 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
             // Cleanup-Funktion
             move || {
                 if let Some(handler) = handler {
-                    window()
-                        .unwrap()
-                        .remove_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref())
-                        .unwrap();
+                    if let Some(win) = browser_window.as_ref() {
+                        let _ = win.remove_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref());
+                    }
                 }
             }
         });

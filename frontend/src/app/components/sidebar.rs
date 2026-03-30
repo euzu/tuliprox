@@ -12,6 +12,8 @@ use web_sys::window;
 use yew::prelude::*;
 use yew_hooks::use_mount;
 
+const MOBILE_BREAKPOINT_PX: f64 = 780.0;
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CollapseState {
     AutoCollapsed,
@@ -77,7 +79,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             let window = window().expect("no global window");
 
             if let Ok(inner_width) = window.inner_width() {
-                let mobile_view = inner_width.as_f64().unwrap_or(0.0) < 720.0;
+                let mobile_view = inner_width.as_f64().unwrap_or(0.0) < MOBILE_BREAKPOINT_PX;
 
                 match *collapsed {
                     CollapseState::AutoExpanded | CollapseState::ManualExpanded => {

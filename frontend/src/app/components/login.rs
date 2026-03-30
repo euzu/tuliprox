@@ -66,6 +66,9 @@ pub fn Login() -> Html {
     let handle_theme_select = {
         let theme = theme.clone();
         Callback::from(move |new_theme: Theme| {
+            if new_theme == *theme {
+                return;
+            }
             new_theme.switch_theme();
             theme.set(new_theme);
         })
