@@ -2,6 +2,7 @@
 
 .tp__app-sidebar.expanded {
   width: var(--sidebar-width-expaned);
+  min-width: var(--sidebar-width-expaned);
 
   .tp__app-sidebar__content {
   }

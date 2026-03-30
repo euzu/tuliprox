@@ -816,7 +816,13 @@ impl ActiveUserManager {
                     );
                 }
                 if prune_previous_registration {
-                    user_connections.key_by_addr.remove(&previous_addr);
+                    let can_remove_previous = user_connections
+                        .key_by_addr
+                        .get(&previous_addr)
+                        .is_some_and(|registration| registration.username == username);
+                    if can_remove_previous {
+                        user_connections.key_by_addr.remove(&previous_addr);
+                    }
                 }
                 debug_if_enabled!(
                     "Updated session {token} for {username} address {} -> {}",

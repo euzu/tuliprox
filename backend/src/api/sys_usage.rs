@@ -141,17 +141,12 @@ impl FallbackSampler {
             .with_processes(sysinfo::ProcessRefreshKind::nothing().with_cpu().with_memory());
 
         let networks = sysinfo::Networks::new_with_refreshed_list();
-        let (init_rx, init_tx) = sum_sysinfo_network_bytes(&networks);
 
         Self {
             inner: sysinfo::System::new_with_specifics(refresh_kind),
             networks,
             pid: sysinfo::Pid::from_u32(std::process::id()),
-            net_tracker: {
-                let mut tracker = NetTracker::new();
-                let _ = tracker.sample(init_rx, init_tx);
-                tracker
-            },
+            net_tracker: NetTracker::new(),
         }
     }
 
@@ -217,11 +212,6 @@ mod platform {
             read_into_buffer(&mut resident_pages_file, &mut resident_pages_buf).ok()?;
             let cpu_time_secs = parse_linux_proc_stat(&proc_stat_buf[..proc_stat_len])
                 .map(|(utime, stime)| ticks_to_cpu_secs(utime, stime, clock_ticks_per_sec))?;
-            let mut net_tracker = super::NetTracker::new();
-            if let Some((init_rx, init_tx)) = read_proc_net_dev_bytes() {
-                let _ = net_tracker.sample(init_rx, init_tx);
-            }
-
             Some(Self {
                 proc_stat_file,
                 resident_pages_file,
@@ -231,7 +221,7 @@ mod platform {
                 clock_ticks_per_sec,
                 memory_total,
                 cpu_tracker: CpuTracker::new(cpu_time_secs),
-                net_tracker,
+                net_tracker: super::NetTracker::new(),
             })
         }
 
@@ -394,15 +384,12 @@ mod platform {
             let memory_total = query_memory_total()?;
             let cpu_time_secs = query_process_cpu_time_secs(process)?;
             let networks = sysinfo::Networks::new_with_refreshed_list();
-            let (init_rx, init_tx) = super::sum_sysinfo_network_bytes(&networks);
-            let mut net_tracker = super::NetTracker::new();
-            let _ = net_tracker.sample(init_rx, init_tx);
             Some(Self {
                 process,
                 memory_total,
                 cpu_tracker: CpuTracker::new(cpu_time_secs),
                 networks,
-                net_tracker,
+                net_tracker: super::NetTracker::new(),
             })
         }
 
@@ -517,14 +504,11 @@ mod platform {
             let memory_total = query_memory_total()?;
             let cpu_time_secs = query_process_cpu_time_secs()?;
             let networks = sysinfo::Networks::new_with_refreshed_list();
-            let (init_rx, init_tx) = super::sum_sysinfo_network_bytes(&networks);
-            let mut net_tracker = super::NetTracker::new();
-            let _ = net_tracker.sample(init_rx, init_tx);
             Some(Self {
                 memory_total,
                 cpu_tracker: CpuTracker::new(cpu_time_secs),
                 networks,
-                net_tracker,
+                net_tracker: super::NetTracker::new(),
             })
         }
 

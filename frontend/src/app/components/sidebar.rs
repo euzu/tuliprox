@@ -65,9 +65,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
                 CollapseState::AutoExpanded | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
             };
-            if current != next {
-                collapsed.set(next);
-            }
+            collapsed.set(next);
         })
     };
 

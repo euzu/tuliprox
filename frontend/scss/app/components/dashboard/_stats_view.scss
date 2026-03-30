@@ -38,6 +38,7 @@
   &__system {
     background-color: var(--tertiary-background-color);
     border-color: var(--tertiary-border-color);
+    min-width: 120px;
 
     .tp__status-card__body {
       color:  var(--tertiary-text-color);
