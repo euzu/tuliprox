@@ -668,7 +668,7 @@ body {
   --brick-port-hover-color: var(--theme-brand-brick-port-hover);
 
   --source-editor-delete-color: var(--theme-brand-danger-strong);
-  --source-editor-line-color: var(--theme-brand-text-inverse);
+  --source-editor-line-color: color-mix(in srgb, var(--theme-brand-text) 48%, var(--theme-brand-primary-border) 52%);
   --source-editor-active-line-color: var(--theme-brand-positive);
   --source-editor-pending-line-color: var(--theme-brand-warning-strong);
   --source-editor-block-shadow: var(--theme-brand-source-block-shadow);

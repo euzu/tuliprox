@@ -8,6 +8,7 @@ use yew::{classes, component, html, use_effect_with, use_node_ref, Callback, Htm
 #[derive(Properties, PartialEq)]
 pub struct BlockProps {
     pub(crate) block: Block,
+    pub(crate) zoom_factor: f32,
     pub(crate) edited: bool,
     pub(crate) selected: bool,
     pub(crate) delete_mode: bool,
@@ -81,9 +82,14 @@ pub fn BlockView(props: &BlockProps) -> Html {
     {
         let block_ref = block_ref.clone();
         let position = block.position;
-        use_effect_with(position, move |(x, y)| {
+        let zoom_factor = props.zoom_factor;
+        use_effect_with((position, zoom_factor), move |((x, y), zoom_factor)| {
             if let Some(el) = block_ref.cast::<HtmlElement>() {
-                let _ = el.style().set_property("transform", &format!("translate3d({x}px, {y}px, 0)"));
+                let _ = el.style().set_property(
+                    "transform",
+                    &format!("translate3d({x}px, {y}px, 0) scale({zoom_factor})"),
+                );
+                let _ = el.style().set_property("transform-origin", "top left");
             }
         });
     }

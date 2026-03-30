@@ -95,6 +95,22 @@
       border: 1px solid var(--card-border-color);
    }
 
+   &__zoom-indicator {
+      position: absolute;
+      top: var(--padding-small);
+      right: var(--padding-small);
+      z-index: 3;
+      min-width: 3.5rem;
+      padding: var(--padding-micro) var(--padding-small);
+      border: 1px solid var(--border-color);
+      border-radius: var(--border-radius);
+      background-color: color-mix(in srgb, var(--card-background-color) 86%, transparent);
+      color: var(--text-color);
+      font-size: 0.85rem;
+      text-align: center;
+      pointer-events: none;
+   }
+
    &__canvas,
    &__connections {
       position: absolute;

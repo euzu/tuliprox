@@ -100,20 +100,26 @@ pub struct Block {
 
 impl Block {
     /// Liefert die Bounding-Box des Blocks unter Berücksichtigung der Canvas-Verschiebung.
-    pub fn bounds(&self, canvas_offset: (f32, f32)) -> (f32, f32, f32, f32) {
+    pub fn bounds(&self, canvas_offset: (f32, f32), zoom_factor: f32) -> (f32, f32, f32, f32) {
         let (ox, oy) = canvas_offset;
-        let bx = self.position.0 + ox;
-        let by = self.position.1 + oy;
+        let bx = (self.position.0 * zoom_factor) + ox;
+        let by = (self.position.1 * zoom_factor) + oy;
         let b_left = bx;
         let b_top = by;
-        let b_right = bx + BLOCK_WIDTH;
-        let b_bottom = by + (BLOCK_HEIGHT + BLOCK_HEADER_HEIGHT + BLOCK_PORT_HEIGHT);
+        let b_right = bx + (BLOCK_WIDTH * zoom_factor);
+        let b_bottom = by + ((BLOCK_HEIGHT + BLOCK_HEADER_HEIGHT + BLOCK_PORT_HEIGHT) * zoom_factor);
         (b_left, b_top, b_right, b_bottom)
     }
 
     /// Prüft, ob der Block von einem Auswahlrechteck getroffen wird.
-    pub fn intersects_rect(&self, rect_start: (f32, f32), rect_end: (f32, f32), canvas_offset: (f32, f32)) -> bool {
-        let (b_left, b_top, b_right, b_bottom) = self.bounds(canvas_offset);
+    pub fn intersects_rect(
+        &self,
+        rect_start: (f32, f32),
+        rect_end: (f32, f32),
+        canvas_offset: (f32, f32),
+        zoom_factor: f32,
+    ) -> bool {
+        let (b_left, b_top, b_right, b_bottom) = self.bounds(canvas_offset, zoom_factor);
 
         // Rechteck normalisieren
         let (x1, y1) = rect_start;
