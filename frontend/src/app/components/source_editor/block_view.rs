@@ -85,10 +85,8 @@ pub fn BlockView(props: &BlockProps) -> Html {
         let zoom_factor = props.zoom_factor;
         use_effect_with((position, zoom_factor), move |((x, y), zoom_factor)| {
             if let Some(el) = block_ref.cast::<HtmlElement>() {
-                let _ = el.style().set_property(
-                    "transform",
-                    &format!("translate3d({x}px, {y}px, 0) scale({zoom_factor})"),
-                );
+                let _ =
+                    el.style().set_property("transform", &format!("translate3d({x}px, {y}px, 0) scale({zoom_factor})"));
                 let _ = el.style().set_property("transform-origin", "top left");
             }
         });

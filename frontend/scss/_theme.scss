@@ -669,8 +669,8 @@ body {
 
   --source-editor-delete-color: var(--theme-brand-danger-strong);
   --source-editor-line-color: color-mix(in srgb, var(--theme-brand-text) 48%, var(--theme-brand-primary-border) 52%);
-  --source-editor-active-line-color: var(--theme-brand-positive);
-  --source-editor-pending-line-color: var(--theme-brand-warning-strong);
+  --source-editor-active-line-color: color-mix(in srgb, var(--theme-brand-text) 18%, var(--theme-brand-positive) 82%);
+  --source-editor-pending-line-color: color-mix(in srgb, var(--theme-brand-text) 20%, var(--theme-brand-warning-strong) 80%);
   --source-editor-block-shadow: var(--theme-brand-source-block-shadow);
 
   --selection-area-border-color: var(--theme-brand-border-selection);

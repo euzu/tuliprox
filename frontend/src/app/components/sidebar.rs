@@ -263,9 +263,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             </div>
             <div class="tp__app-sidebar__scroll">
                 {
-                    if matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
-                        render_collapsed()
-                    } else if *is_mobile {
+                    if *is_mobile || matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
                         render_collapsed()
                     } else {
                         render_expanded()

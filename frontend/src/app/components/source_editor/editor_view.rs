@@ -241,17 +241,11 @@ fn clear_active_interaction(editor_state: &mut EditorState) -> bool {
 }
 
 fn screen_from_world(position: Position, canvas_offset: Position, zoom_factor: f32) -> Position {
-    (
-        (position.0 * zoom_factor) + canvas_offset.0,
-        (position.1 * zoom_factor) + canvas_offset.1,
-    )
+    ((position.0 * zoom_factor) + canvas_offset.0, (position.1 * zoom_factor) + canvas_offset.1)
 }
 
 fn world_from_screen(position: Position, canvas_offset: Position, zoom_factor: f32) -> Position {
-    (
-        (position.0 - canvas_offset.0) / zoom_factor,
-        (position.1 - canvas_offset.1) / zoom_factor,
-    )
+    ((position.0 - canvas_offset.0) / zoom_factor, (position.1 - canvas_offset.1) / zoom_factor)
 }
 
 fn clamp_zoom_factor(zoom_factor: f32) -> f32 { zoom_factor.clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR) }
@@ -264,10 +258,8 @@ fn apply_zoom_at_screen_point(editor_state: &mut EditorState, next_zoom: f32, an
 
     let world_anchor = world_from_screen(anchor_screen, editor_state.canvas_offset, editor_state.zoom_factor);
     editor_state.zoom_factor = next_zoom;
-    editor_state.canvas_offset = (
-        anchor_screen.0 - (world_anchor.0 * next_zoom),
-        anchor_screen.1 - (world_anchor.1 * next_zoom),
-    );
+    editor_state.canvas_offset =
+        (anchor_screen.0 - (world_anchor.0 * next_zoom), anchor_screen.1 - (world_anchor.1 * next_zoom));
     true
 }
 
@@ -1276,16 +1268,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         let (canvas_ox, canvas_oy) = editor_state.canvas_offset;
                         let zoom_factor = editor_state.zoom_factor;
                         for block in &editor_state.blocks {
-                            if let Some(port_snap) =
-                                compute_port_snap_distance(
-                                    block.position,
-                                    mouse_x,
-                                    mouse_y,
-                                    canvas_ox,
-                                    canvas_oy,
-                                    zoom_factor,
-                                )
-                            {
+                            if let Some(port_snap) = compute_port_snap_distance(
+                                block.position,
+                                mouse_x,
+                                mouse_y,
+                                canvas_ox,
+                                canvas_oy,
+                                zoom_factor,
+                            ) {
                                 snapped = port_snap;
                                 break;
                             }
