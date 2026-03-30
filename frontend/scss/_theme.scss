@@ -22,7 +22,7 @@
 body {
   --mobile-size: size.$mobile-breakpoint;
   --dashboard-mobile-size: size.$dashboard-mobile-breakpoint;
-  --sidebar-width-expaned: 270px;
+  --sidebar-width-expanded: 160px;
   --sidebar-width-collapsed: 42px;
   --max-view-width: size.$dashboard-mobile-breakpoint;
   --max-table-cell-width: 240px;
@@ -184,7 +184,8 @@ body {
   --theme-brand-text-disabled-surface: var(--theme-palette-text-disabled-surface);
 
   --theme-brand-page: var(--theme-palette-page);
-  --theme-brand-page-alt: var(--theme-palette-page-alt);
+  --theme-brand-particle: var(--theme-palette-particle);
+  --theme-brand-particle-alt: var(--theme-palette-particle-alt);
   --theme-brand-surface: var(--theme-palette-surface);
   --theme-brand-surface-soft: var(--theme-palette-surface-soft);
   --theme-brand-surface-muted: var(--theme-palette-surface-muted);
@@ -357,7 +358,8 @@ body {
   --theme-color: var(--theme-brand-primary);
 
   --background-color: var(--theme-brand-page);
-  --particle-flow-background-color: var(--theme-brand-page-alt);
+  --particle-flow-background-color: var(--theme-brand-particle);
+  --particle-flow-background-color-alt: var(--theme-brand-particle-alt);
   --particle-flow-background-accent-color-1: var(--theme-brand-particle-1);
   --particle-flow-background-accent-color-2: var(--theme-brand-particle-2);
   --particle-flow-background-alpha-boost: var(--theme-brand-particle-alpha-boost);
@@ -666,9 +668,9 @@ body {
   --brick-port-hover-color: var(--theme-brand-brick-port-hover);
 
   --source-editor-delete-color: var(--theme-brand-danger-strong);
-  --source-editor-line-color: var(--theme-brand-text-inverse);
-  --source-editor-active-line-color: var(--theme-brand-positive);
-  --source-editor-pending-line-color: var(--theme-brand-warning-strong);
+  --source-editor-line-color: color-mix(in srgb, var(--theme-brand-text) 48%, var(--theme-brand-primary-border) 52%);
+  --source-editor-active-line-color: color-mix(in srgb, var(--theme-brand-text) 18%, var(--theme-brand-positive) 82%);
+  --source-editor-pending-line-color: color-mix(in srgb, var(--theme-brand-text) 20%, var(--theme-brand-warning-strong) 80%);
   --source-editor-block-shadow: var(--theme-brand-source-block-shadow);
 
   --selection-area-border-color: var(--theme-brand-border-selection);

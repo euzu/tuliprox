@@ -83,7 +83,7 @@ http-body-util = "0.1.3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38.4", default-features = false, features = ["system", "network"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi", "sysinfoapi"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }

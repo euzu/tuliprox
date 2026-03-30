@@ -16,6 +16,16 @@ use std::rc::Rc;
 use web_sys::MouseEvent;
 use yew::{prelude::*, virtual_dom::AttrValue};
 
+fn display_country_code(country_code: Option<&str>) -> Option<String> {
+    let normalized = country_code?.trim().to_ascii_uppercase();
+    let is_iso_country = normalized.len() == 2 && normalized.as_bytes().iter().all(|byte| byte.is_ascii_alphabetic());
+    if is_iso_country {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
 #[derive(Properties, PartialEq, Clone)]
 pub struct StreamDisplayItemProps {
     pub stream: Rc<StreamInfo>,
@@ -29,7 +39,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
     let services = use_service_context();
     let stream = props.stream.clone();
     let chips = build_technical_chips(stream.channel.item_type, stream.channel.technical.as_ref());
-    let country_code = stream.country_code.as_ref().map(|code| code.to_ascii_uppercase());
+    let country_code = display_country_code(stream.country_code.as_deref());
     let country = country_code.as_ref().map_or_else(String::new, |code| {
         t_safe(&translate, &format!("COUNTRY.{code}")).unwrap_or_else(|| code.clone())
     });
@@ -59,32 +69,40 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                 <span class="tp__stream-display__channel_type">{render_cluster(&stream.channel)}</span>
                                 {" • "}
                                 <span class="tp__stream-display__provider">{stream.provider.clone()}</span>
-                                if !country.is_empty() || country_code.is_some() {
-                                    <>
-                                        {" • "}
-                                        <span class="tp__stream-display__country">
-                                            if let Some(svg) = flag_svg.as_ref() {
-                                                <span class="tp__stream-display__flag" aria-hidden="true">
-                                                    // SAFETY: flags.dat is built offline by flags_builder from a trusted flag directory.
-                                                    // If this source ever becomes user-controlled, replace this with sanitized SVG rendering.
-                                                    {Html::from_html_unchecked(AttrValue::from(svg.clone()))}
-                                                </span>
-                                            }
-                                            if !country.is_empty() {
-                                                <span class="tp__stream-display__country-name">{country.clone()}</span>
-                                            }
-                                        </span>
-                                    </>
-                                }
                             </div>
                         </div>
                     </div>
                 </div>
                 <div class="tp__stream-display__stats">
-                    <div class="tp__stream-display__stat">
-                        <span class="tp__stream-display__stat-label">{translate.t("LABEL.CLIENT_IP")}</span>
-                        <span class="tp__stream-display__stat-value">{client_ip.clone()}</span>
+                    <div class="tp__stream-display__stat tp__stream-display__stat--category">
+                        <span class="tp__stream-display__stat-label">{translate.t("LABEL.GROUP")}</span>
+                        <span class="tp__stream-display__stat-value">{stream.channel.group.to_string()}</span>
                     </div>
+                    <div class="tp__stream-display__stat tp__stream-display__stat--client">
+                        <span class="tp__stream-display__stat-label">{translate.t("LABEL.CLIENT_IP")}</span>
+                        <span class="tp__stream-display__stat-value tp__stream-display__stat-value--ip">{client_ip.clone()}</span>
+                    </div>
+                    if !country.is_empty() || country_code.is_some() {
+                        <div class="tp__stream-display__stat tp__stream-display__stat--country">
+                            <span class="tp__stream-display__stat-label">{translate.t("LABEL.COUNTRY")}</span>
+                            <span class="tp__stream-display__stat-value">
+                                <span class="tp__stream-display__country tp__stream-display__country--stat">
+                                    if let Some(svg) = flag_svg.as_ref() {
+                                        <span class="tp__stream-display__flag" aria-hidden="true">
+                                            // SAFETY: flags.dat is built offline by flags_builder from a trusted flag directory.
+                                            // If this source ever becomes user-controlled, replace this with sanitized SVG rendering.
+                                            {Html::from_html_unchecked(AttrValue::from(svg.clone()))}
+                                        </span>
+                                    }
+                                    if !country.is_empty() {
+                                        <span class="tp__stream-display__country-name">{country.clone()}</span>
+                                    } else if let Some(code) = country_code.as_ref() {
+                                        <span class="tp__stream-display__country-code">{code.clone()}</span>
+                                    }
+                                </span>
+                            </span>
+                        </div>
+                    }
                     <div class="tp__stream-display__stat">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.SHARED")}</span>
                         <span class="tp__stream-display__stat-value"><ToggleSwitch value={stream.channel.shared} readonly={true} /></span>
@@ -109,6 +127,12 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                             </span>
                         </div>
                     }
+                    <div class="tp__stream-display__stat tp__stream-display__detail">
+                        <span class="tp__stream-display__stat-label">{translate.t("LABEL.PLAYER")}</span>
+                        <span class="tp__stream-display__stat-value">
+                            <RevealContent preview={Some(html! { &stream.user_agent })}>{&stream.user_agent}</RevealContent>
+                        </span>
+                    </div>
                 </div>
            </div>
            <div class="tp__stream-display__row">
@@ -119,20 +143,21 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         })}
                     </div>
                 }
-                <div class="tp__stream-display__details">
-                    <div class="tp__stream-display__detail">
-                        <span class="tp__stream-display__detail-label">{translate.t("LABEL.GROUP")}</span>
-                        <span class="tp__stream-display__detail-value">{stream.channel.group.to_string()}</span>
-                    </div>
-                    <div class="tp__stream-display__detail tp__stream-display__detail">
-                        <span class="tp__stream-display__detail-label">{translate.t("LABEL.PLAYER")}</span>
-                        <span class="tp__stream-display__detail-value">
-                            <RevealContent preview={Some(html! { &stream.user_agent })}>{&stream.user_agent}</RevealContent>
-                        </span>
-                    </div>
-                </div>
             </div>
         </div>
         </article>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_country_code;
+
+    #[test]
+    fn display_country_code_filters_special_network_labels() {
+        assert_eq!(display_country_code(Some("de")), Some("DE".to_string()));
+        assert_eq!(display_country_code(Some("LOOPBACK")), None);
+        assert_eq!(display_country_code(Some("LAN")), None);
+        assert_eq!(display_country_code(Some("  ")), None);
     }
 }

@@ -38,6 +38,29 @@ fn dedupe_streams_by_identity(streams: &mut Vec<StreamInfo>) {
     streams.retain(|stream| seen.insert(stream_identity_key(stream)));
 }
 
+fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserConnectionChange) {
+    match event {
+        ActiveUserConnectionChange::Updated(stream_info) => {
+            if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
+                server_status.active_user_streams[pos] = stream_info;
+            } else {
+                server_status.active_user_streams.push(stream_info);
+            }
+            dedupe_streams_by_identity(&mut server_status.active_user_streams);
+        }
+        ActiveUserConnectionChange::Disconnected(addr) => {
+            server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr);
+        }
+        ActiveUserConnectionChange::Connections(user_count, connections) => {
+            server_status.active_users = user_count;
+            server_status.active_user_connections = connections;
+            if connections == 0 {
+                server_status.active_user_streams.clear();
+            }
+        }
+    }
+}
+
 #[hook]
 pub fn use_server_status(
     status: UseStateHandle<Option<Rc<StatusCheck>>>,
@@ -76,26 +99,7 @@ pub fn use_server_status(
                                 StatusCheck::default()
                             }
                         };
-
-                        match event {
-                            ActiveUserConnectionChange::Updated(stream_info) => {
-                                if let Some(pos) =
-                                    find_stream_update_index(&server_status.active_user_streams, &stream_info)
-                                {
-                                    server_status.active_user_streams[pos] = stream_info;
-                                } else {
-                                    server_status.active_user_streams.push(stream_info);
-                                }
-                                dedupe_streams_by_identity(&mut server_status.active_user_streams);
-                            }
-                            ActiveUserConnectionChange::Disconnected(addr) => {
-                                server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr);
-                            }
-                            ActiveUserConnectionChange::Connections(user_count, connections) => {
-                                server_status.active_users = user_count;
-                                server_status.active_user_connections = connections;
-                            }
-                        }
+                        apply_active_user_change(&mut server_status, event);
 
                         let new_status = Rc::new(server_status);
                         *status_holder_signal.borrow_mut() = Some(Rc::clone(&new_status));
@@ -158,9 +162,9 @@ pub fn use_server_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{dedupe_streams_by_identity, find_stream_update_index};
+    use super::{apply_active_user_change, dedupe_streams_by_identity, find_stream_update_index};
     use shared::{
-        model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+        model::{ActiveUserConnectionChange, PlaylistItemType, StatusCheck, StreamChannel, StreamInfo, XtreamCluster},
         utils::Internable,
     };
     use std::net::SocketAddr;
@@ -222,5 +226,22 @@ mod tests {
         assert_eq!(streams.len(), 2);
         assert_eq!(streams[0].addr, "127.0.0.1:1234".parse::<SocketAddr>().unwrap_or_else(|_| unreachable!()));
         assert_eq!(streams[1].addr, "127.0.0.1:5678".parse::<SocketAddr>().unwrap_or_else(|_| unreachable!()));
+    }
+
+    #[test]
+    fn test_connections_zero_clears_stale_stream_rows() {
+        let mut status = StatusCheck::default();
+        status.active_users = 1;
+        status.active_user_connections = 1;
+        status.active_user_streams = vec![
+            test_stream(1, "127.0.0.1:1234", Some("tok-a"), PlaylistItemType::Video),
+            test_stream(2, "127.0.0.1:5678", Some("tok-b"), PlaylistItemType::Series),
+        ];
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Connections(0, 0));
+
+        assert_eq!(status.active_users, 0);
+        assert_eq!(status.active_user_connections, 0);
+        assert!(status.active_user_streams.is_empty());
     }
 }

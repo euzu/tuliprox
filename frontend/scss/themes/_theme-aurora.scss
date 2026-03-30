@@ -1,6 +1,7 @@
 body[data-theme="aurora"] {
   --theme-palette-page: #06151b;
-  --theme-palette-page-alt: #0b2230;
+  --theme-palette-particle: #0b2230;
+  --theme-palette-particle-alt: #113449;
   --theme-palette-neutral-surface-980: rgba(4, 20, 28, 0.9);
   --theme-palette-neutral-surface-960: rgba(9, 33, 44, 0.96);
   --theme-palette-neutral-surface-940: rgba(12, 44, 54, 0.78);
@@ -265,4 +266,3 @@ body[data-theme="aurora"] {
     rgba(6, 21, 27, 0) 86%
   );
 }
-

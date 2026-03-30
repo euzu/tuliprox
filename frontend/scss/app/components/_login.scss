@@ -5,7 +5,7 @@
   flex-flow: column;
   gap: 8px;
   margin: auto;
-  overflow: hidden;
+  overflow: visible;
   position: relative;
   z-index: 1;
   padding: 40px 20px;
@@ -20,6 +20,16 @@
   width: 400px;
   @media(max-width: size.$mobile-breakpoint) {
     width: 280px;
+  }
+
+  &__toolbar {
+    position: fixed;
+    top: var(--padding-default);
+    right: var(--padding-default);
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    z-index: 2;
   }
 
   &::before {
@@ -54,6 +64,8 @@
     background-color: transparent;
     padding: 0 8px;
     margin-bottom: 1rem;
+    position: relative;
+    z-index: 1;
     &-title {
       color: var(--text-color);
       padding: 8px;
@@ -88,6 +100,8 @@
     align-items: center;
     color: var(--card-color);
     font-size: 0.8rem;
+    position: relative;
+    z-index: 1;
   }
 
   &__form {
@@ -96,6 +110,8 @@
     gap: 20px;
     padding: 8px;
     fill: var(--modest-text-color);
+    position: relative;
+    z-index: 1;
 
     .tp__input-wrapper {
       max-height: 3rem;

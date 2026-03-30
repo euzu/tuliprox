@@ -1,3 +1,5 @@
+@use "../../../size" as size;
+
 $form-width: 520px;
 
 .tp__source-editor-form-wrapper {
@@ -96,4 +98,25 @@ $form-width: 520px;
 
 .tp__input-form__body {
   width: 100%;
+}
+
+@media (max-width: size.$mobile-breakpoint) {
+  .tp__source-editor-form-wrapper {
+    left: 100%;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .tp__source-editor-form-wrapper.active {
+    left: 0;
+  }
+
+  .tp__source-editor-form {
+    padding: 0;
+    min-width: 0;
+
+    &__content {
+      min-width: 0;
+    }
+  }
 }

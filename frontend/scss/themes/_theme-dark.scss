@@ -1,6 +1,7 @@
 body[data-theme="dark"] {
   --theme-palette-page: #0b1220;
-  --theme-palette-page-alt: #070f1d;
+  --theme-palette-particle: #070f1d;
+  --theme-palette-particle-alt: #132b52;
   --theme-palette-neutral-surface-980: rgba(7, 12, 24, 0.82);
   --theme-palette-neutral-surface-960: rgba(15, 23, 42, 0.94);
   --theme-palette-neutral-surface-940: rgba(15, 23, 42, 0.78);
@@ -225,7 +226,7 @@ body[data-theme="dark"] {
   --theme-palette-graph-grid-1: #e0e0e030;
   --theme-palette-graph-grid-2: #c0c0c030;
 
-  --theme-palette-particle-1: #6ea8ff;
+  --theme-palette-particle-1: #b61818;
   --theme-palette-particle-2: #273240;
   --theme-palette-particle-alpha-boost: 1;
 
