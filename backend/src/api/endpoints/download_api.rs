@@ -12,19 +12,30 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use shared::{error::to_io_error, utils::bytes_to_megabytes};
 use std::{ops::Deref, sync::Arc};
-use tokio::{fs, io::AsyncWriteExt, sync::RwLock};
+use tokio::{fs, io::AsyncWriteExt, sync::RwLock, time::{self, Duration}};
 
 enum DownloadExecutionResult {
     Completed,
     Paused,
     Cancelled,
+    Retryable(String),
+    Failed(String),
 }
 
+fn recording_deadline_reached(download: &FileDownload, now_ts: i64) -> bool {
+    download.kind == crate::api::model::DownloadKind::Recording
+        && download
+            .start_at
+            .zip(download.duration_secs)
+            .is_some_and(|(start_at, duration_secs)| now_ts >= start_at.saturating_add(i64::try_from(duration_secs).unwrap_or(90)))
+}
+
+#[allow(clippy::too_many_lines)]
 async fn download_file(
     active: Arc<RwLock<Option<FileDownload>>>,
     client: &reqwest::Client,
     control_signal: Arc<RwLock<DownloadControl>>,
-) -> Result<DownloadExecutionResult, String> {
+) -> DownloadExecutionResult {
     if let Some(file_download) = active.read().await.as_ref().as_ref() {
         let url = file_download.url.clone();
         let file_path = file_download.file_path.clone();
@@ -32,21 +43,21 @@ async fn download_file(
 
         // Check for existing partial file for resume
         let existing_size = if file_path.exists() {
-            tokio::fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0)
+            tokio::fs::metadata(&file_path).await.map_or(0, |m| m.len())
         } else {
             0
         };
 
         let mut request_builder = client.get(url.clone());
         if existing_size > 0 {
-            request_builder = request_builder.header("Range", format!("bytes={}-", existing_size));
+            request_builder = request_builder.header("Range", format!("bytes={existing_size}-"));
         }
 
         match request_builder.send().await {
             Ok(response) => {
                 let status = response.status();
                 if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
-                    return Err(format!("Download request failed for {} with HTTP {}", &url, status));
+                    return DownloadExecutionResult::Failed(format!("Download request failed for {url} with HTTP {status}"));
                 }
                 let is_resume = status == reqwest::StatusCode::PARTIAL_CONTENT;
 
@@ -54,7 +65,7 @@ async fn download_file(
                     if is_resume {
                         response.headers().get("content-range").and_then(|v| {
                             v.to_str().ok().and_then(|s| {
-                                s.split('/').last().and_then(|total| total.parse::<u64>().ok())
+                                s.split('/').next_back().and_then(|total| total.parse::<u64>().ok())
                             })
                         })
                     } else {
@@ -93,9 +104,13 @@ async fn download_file(
                                                     download.paused = true;
                                                     download.state = DownloadState::Paused;
                                                 }
-                                                buf_writer.flush().await.map_err(|err| err.to_string())?;
-                                                buf_writer.shutdown().await.map_err(|err| err.to_string())?;
-                                                return Ok(DownloadExecutionResult::Paused);
+                                                if let Err(err) = buf_writer.flush().await {
+                                                    return DownloadExecutionResult::Failed(err.to_string());
+                                                }
+                                                if let Err(err) = buf_writer.shutdown().await {
+                                                    return DownloadExecutionResult::Failed(err.to_string());
+                                                }
+                                                return DownloadExecutionResult::Paused;
                                             }
                                             DownloadControl::Cancel => {
                                                 if let Some(download) = active.write().await.as_mut() {
@@ -106,11 +121,33 @@ async fn download_file(
                                                         download.error = Some("Cancelled by user".to_string());
                                                     }
                                                 }
-                                                buf_writer.flush().await.map_err(|err| err.to_string())?;
-                                                buf_writer.shutdown().await.map_err(|err| err.to_string())?;
-                                                return Ok(DownloadExecutionResult::Cancelled);
+                                                if let Err(err) = buf_writer.flush().await {
+                                                    return DownloadExecutionResult::Failed(err.to_string());
+                                                }
+                                                if let Err(err) = buf_writer.shutdown().await {
+                                                    return DownloadExecutionResult::Failed(err.to_string());
+                                                }
+                                                return DownloadExecutionResult::Cancelled;
                                             }
                                             DownloadControl::None => {}
+                                        }
+
+                                        if let Some(download) = active.read().await.as_ref() {
+                                            if recording_deadline_reached(download, chrono::Utc::now().timestamp()) {
+                                                if let Some(lock) = active.write().await.as_mut() {
+                                                    lock.paused = false;
+                                                    lock.finished = true;
+                                                    lock.state = DownloadState::Completed;
+                                                    lock.error = None;
+                                                }
+                                                if let Err(err) = buf_writer.flush().await {
+                                                    return DownloadExecutionResult::Failed(err.to_string());
+                                                }
+                                                if let Err(err) = buf_writer.shutdown().await {
+                                                    return DownloadExecutionResult::Failed(err.to_string());
+                                                }
+                                                return DownloadExecutionResult::Completed;
+                                            }
                                         }
 
                                         match stream.try_next().await {
@@ -120,7 +157,9 @@ async fn download_file(
                                                         Ok(()) => {
                                                             write_counter += chunk.len();
                                                             if write_counter >= IO_BUFFER_SIZE {
-                                                                buf_writer.flush().await.map_err(|err| err.to_string())?;
+                                                                if let Err(err) = buf_writer.flush().await {
+                                                                    return DownloadExecutionResult::Failed(err.to_string());
+                                                                }
                                                                 write_counter = 0;
                                                             }
 
@@ -130,9 +169,9 @@ async fn download_file(
                                                             }
                                                         }
                                                         Err(err) => {
-                                                            return Err(format!(
+                                                            return DownloadExecutionResult::Failed(format!(
                                                                 "Error while writing to file: {file_path_str} {err}"
-                                                            ))
+                                                            ));
                                                         }
                                                     }
                                                 } else {
@@ -144,35 +183,52 @@ async fn download_file(
                                                         lock.finished = true;
                                                         lock.state = DownloadState::Completed;
                                                     }
-                                                    buf_writer.flush().await.map_err(|err| err.to_string())?;
-                                                    buf_writer.shutdown().await.map_err(|err| err.to_string())?;
-                                                    return Ok(DownloadExecutionResult::Completed);
+                                                    if let Err(err) = buf_writer.flush().await {
+                                                        return DownloadExecutionResult::Failed(err.to_string());
+                                                    }
+                                                    if let Err(err) = buf_writer.shutdown().await {
+                                                        return DownloadExecutionResult::Failed(err.to_string());
+                                                    }
+                                                    return DownloadExecutionResult::Completed;
                                                 }
                                             }
                                             Err(err) => {
-                                                return Err(format!("Error while writing to file: {file_path_str} {err}"))
+                                                return DownloadExecutionResult::Retryable(format!(
+                                                    "Error while downloading file: {file_path_str} {err}"
+                                                ))
                                             }
                                         }
                                     }
                                 }
-                                Err(err) => Err(format!("Error while opening file: {file_path_str} {err}")),
+                                Err(err) => DownloadExecutionResult::Failed(format!("Error while opening file: {file_path_str} {err}")),
                             }
                         } else {
-                            Err("Error file-download file-path unknown".to_string())
+                            DownloadExecutionResult::Failed("Error file-download file-path unknown".to_string())
                         }
                     }
-                    Err(err) => Err(format!(
+                    Err(err) => DownloadExecutionResult::Failed(format!(
                         "Error while creating directory for file: {} {}",
                         &file_download.file_dir.to_str().unwrap_or("?"),
                         err
                     )),
                 }
             }
-            Err(err) => Err(format!("Error while opening url: {} {}", &url, err)),
+            Err(err) => DownloadExecutionResult::Retryable(format!("Error while opening url: {} {}", &url, err)),
         }
     } else {
-        Err("No active file download".to_string())
+        DownloadExecutionResult::Failed("No active file download".to_string())
     }
+}
+
+async fn requeue_active_download_for_retry(download_queue: &DownloadQueue) {
+    if let Some(mut download) = download_queue.active.write().await.take() {
+        download.finished = false;
+        download.paused = false;
+        download.error = None;
+        download.state = DownloadState::Queued;
+        download_queue.queue.lock().await.push_front(download);
+    }
+    let _ = download_queue.persist_to_disk().await;
 }
 
 pub(in crate::api) async fn ensure_download_worker_running(
@@ -218,7 +274,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                             *control_signal.write().await = DownloadControl::None;
 
                             match download_file(Arc::clone(&dq.active), &client, Arc::clone(&control_signal)).await {
-                                Ok(DownloadExecutionResult::Completed) => {
+                                DownloadExecutionResult::Completed => {
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         fd.finished = true;
                                         fd.state = DownloadState::Completed;
@@ -228,11 +284,11 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     *dq.active.write().await = dq.queue.lock().await.pop_front();
                                     let _ = dq.persist_to_disk().await;
                                 }
-                                Ok(DownloadExecutionResult::Paused) => {
+                                DownloadExecutionResult::Paused => {
                                     let _ = dq.persist_to_disk().await;
                                     break;
                                 }
-                                Ok(DownloadExecutionResult::Cancelled) => {
+                                DownloadExecutionResult::Cancelled => {
                                     if let Some(fd) = dq.active.write().await.take() {
                                         dq.finished.write().await.push(fd);
                                     }
@@ -241,7 +297,13 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     *dq.active.write().await = dq.queue.lock().await.pop_front();
                                     let _ = dq.persist_to_disk().await;
                                 }
-                                Err(err) => {
+                                DownloadExecutionResult::Retryable(_err) => {
+                                    requeue_active_download_for_retry(&dq).await;
+                                    time::sleep(Duration::from_secs(1)).await;
+                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
+                                    let _ = dq.persist_to_disk().await;
+                                }
+                                DownloadExecutionResult::Failed(err) => {
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         fd.finished = true;
                                         fd.paused = false;
@@ -265,6 +327,28 @@ pub(in crate::api) async fn ensure_download_worker_running(
         }
     }
     Ok(())
+}
+
+pub(in crate::api) fn start_download_scheduler(app_config: Arc<AppConfig>, download_queue: Arc<DownloadQueue>) {
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            if download_queue.promote_due_scheduled_now().await == 0 {
+                continue;
+            }
+
+            let config = app_config.config.load();
+            let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) else {
+                continue;
+            };
+
+            let _ = ensure_download_worker_running(&app_config, download_cfg, &download_queue).await;
+        }
+    });
 }
 
 macro_rules! download_info {
@@ -471,4 +555,59 @@ pub async fn retry_download(
         }
     }
     axum::Json(json!({"success": retried})).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recording_deadline_reached, requeue_active_download_for_retry};
+    use crate::api::model::{DownloadKind, DownloadQueue, DownloadState, FileDownload};
+    use std::path::PathBuf;
+
+    fn make_download(kind: DownloadKind, state: DownloadState, start_at: Option<i64>, duration_secs: Option<u64>) -> FileDownload {
+        FileDownload {
+            uuid: "id".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/file.ts"),
+            filename: "file.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/file.ts").expect("valid url"),
+            finished: false,
+            size: 128,
+            total_size: Some(1024),
+            paused: false,
+            error: Some("transient".to_string()),
+            state,
+            start_at,
+            duration_secs,
+            kind,
+        }
+    }
+
+    #[test]
+    fn recording_deadline_uses_start_plus_duration() {
+        let recording = make_download(DownloadKind::Recording, DownloadState::Downloading, Some(1_000), Some(60));
+        let normal = make_download(DownloadKind::Download, DownloadState::Downloading, Some(1_000), Some(60));
+
+        assert!(!recording_deadline_reached(&recording, 1_059));
+        assert!(recording_deadline_reached(&recording, 1_060));
+        assert!(!recording_deadline_reached(&normal, 1_060));
+    }
+
+    #[tokio::test]
+    async fn retry_requeues_active_download_at_front() {
+        let queue = DownloadQueue::new();
+        let queued = make_download(DownloadKind::Download, DownloadState::Queued, None, None);
+        let active = make_download(DownloadKind::Download, DownloadState::Downloading, None, None);
+
+        queue.queue.lock().await.push_back(queued);
+        *queue.active.write().await = Some(active);
+
+        requeue_active_download_for_retry(&queue).await;
+
+        assert!(queue.active.read().await.is_none());
+        let queued_items = queue.queue.lock().await.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(queued_items.len(), 2);
+        assert_eq!(queued_items[0].state, DownloadState::Queued);
+        assert_eq!(queued_items[0].size, 128);
+        assert!(queued_items[0].error.is_none());
+    }
 }

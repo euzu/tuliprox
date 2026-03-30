@@ -102,7 +102,11 @@ fn build_download_filename(title: &str, url: &str) -> String {
         .filter(|ext| !ext.is_empty())
         .map(|ext| format!(".{ext}"))
         .unwrap_or_else(|| ".mp4".to_string());
-    if base.ends_with(&ext) { base } else { format!("{base}{ext}") }
+    if base.ends_with(&ext) {
+        base
+    } else {
+        format!("{base}{ext}")
+    }
 }
 
 fn default_record_start_value() -> String { chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string() }
@@ -412,7 +416,9 @@ pub fn PlaylistExplorer() -> Html {
 
                                 let filename = build_download_filename(&selected.title, &resolved_url);
                                 match services.downloads.queue_download(resolved_url, filename).await {
-                                    Ok(_) => services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED")),
+                                    Ok(_) => {
+                                        services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"))
+                                    }
                                     Err(_) => services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL")),
                                 }
                             });
@@ -488,9 +494,10 @@ pub fn PlaylistExplorer() -> Html {
                                         .cast::<HtmlInputElement>()
                                         .map(|input| input.value())
                                         .unwrap_or_else(|| "90".to_string());
-                                    let start_ts = chrono::NaiveDateTime::parse_from_str(&start_value, "%Y-%m-%dT%H:%M")
-                                        .ok()
-                                        .map(|dt| dt.and_utc().timestamp());
+                                    let start_ts =
+                                        chrono::NaiveDateTime::parse_from_str(&start_value, "%Y-%m-%dT%H:%M")
+                                            .ok()
+                                            .map(|dt| dt.and_utc().timestamp());
                                     let duration_mins = duration_value.parse::<u64>().ok();
 
                                     match (start_ts, duration_mins) {

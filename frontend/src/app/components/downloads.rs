@@ -9,8 +9,7 @@ use shared::{
     utils::unix_ts_to_str,
 };
 use std::{cmp::Ordering, rc::Rc};
-use yew::platform::spawn_local;
-use yew::prelude::*;
+use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_interval;
 
 const HEADERS: [&str; 9] = [
@@ -171,12 +170,7 @@ pub fn downloads_view() -> Html {
         let active_download = active_download.clone();
         let table_items = table_items.clone();
         use_effect_with(
-            (
-                (*active_tab).clone(),
-                (*queue_state).clone(),
-                (*finished_state).clone(),
-                (*active_download).clone(),
-            ),
+            ((*active_tab).clone(), (*queue_state).clone(), (*finished_state).clone(), (*active_download).clone()),
             move |(tab, queue, finished, active)| {
                 let items = collect_downloads_for_tab(tab, queue, finished, active);
                 table_items.set((!items.is_empty()).then(|| Rc::new(items)));
@@ -273,7 +267,9 @@ pub fn downloads_view() -> Html {
     let render_header_cell = {
         let translate = translate.clone();
         Callback::<usize, Html>::from(move |col| {
-            html! { { HEADERS.get(col).map_or_else(String::new, |key| translate.t(*key)) } }
+            let header_text = HEADERS.get(col).copied().map(|key| translate.t(key)).unwrap_or_else(|| "".into());
+
+            html! { { header_text } }
         })
     };
 
@@ -286,53 +282,55 @@ pub fn downloads_view() -> Html {
         let handle_retry = handle_retry.clone();
         Callback::<(usize, usize, Rc<FileDownloadDto>), Html>::from(
             move |(_row, col, dto): (usize, usize, Rc<FileDownloadDto>)| match col {
-            0 => html! { <span class="tp__table__nowrap">{dto.filename.clone()}</span> },
-            1 => html! { format_download_kind(&translate, &dto.kind) },
-            2 => html! { format_download_state(&translate, &dto.state) },
-            3 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
-            4 => html! { <span class="tp__table__nowrap">{dto.total_size.map_or_else(String::new, format_bytes)}</span> },
-            5 => html! { <span class="tp__table__nowrap">{format_download_start(&dto)}</span> },
-            6 => html! { format_download_duration(&dto) },
-            7 => html! { dto.error.clone().unwrap_or_default() },
-            8 => {
-                let can_pause = dto.state == "Downloading";
-                let can_resume = dto.state == "Paused";
-                let can_cancel = dto.state == "Downloading" || dto.state == "Queued" || dto.state == "Scheduled";
-                let can_remove =
-                    dto.finished || dto.state == "Failed" || dto.state == "Completed" || dto.state == "Cancelled";
-                let can_retry = dto.state == "Failed";
-                let pause_uuid = dto.uuid.clone();
-                let resume_uuid = dto.uuid.clone();
-                let cancel_uuid = dto.uuid.clone();
-                let retry_uuid = dto.uuid.clone();
-                let remove_uuid = dto.uuid.clone();
-                let pause_handle = handle_pause.clone();
-                let resume_handle = handle_resume.clone();
-                let cancel_handle = handle_cancel.clone();
-                let retry_handle = handle_retry.clone();
-                let remove_handle = handle_remove.clone();
-                html! {
-                    <div class="tp__downloads-table__actions">
-                        if can_pause {
-                            <IconButton name="Pause" icon="Pause" onclick={Callback::from(move |_| pause_handle.emit(pause_uuid.clone()))} />
-                        }
-                        if can_resume {
-                            <IconButton name="Resume" icon="Play" onclick={Callback::from(move |_| resume_handle.emit(resume_uuid.clone()))} />
-                        }
-                        if can_cancel {
-                            <IconButton name="Cancel" icon="Stop" onclick={Callback::from(move |_| cancel_handle.emit(cancel_uuid.clone()))} />
-                        }
-                        if can_retry {
-                            <IconButton name="Retry" icon="Refresh" onclick={Callback::from(move |_| retry_handle.emit(retry_uuid.clone()))} />
-                        }
-                        if can_remove {
-                            <IconButton name="Remove" icon="Delete" onclick={Callback::from(move |_| remove_handle.emit(remove_uuid.clone()))} />
-                        }
-                    </div>
+                0 => html! { <span class="tp__table__nowrap">{dto.filename.clone()}</span> },
+                1 => html! { format_download_kind(&translate, &dto.kind) },
+                2 => html! { format_download_state(&translate, &dto.state) },
+                3 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
+                4 => {
+                    html! { <span class="tp__table__nowrap">{dto.total_size.map_or_else(String::new, format_bytes)}</span> }
                 }
-            }
-            _ => html! {},
-        },
+                5 => html! { <span class="tp__table__nowrap">{format_download_start(&dto)}</span> },
+                6 => html! { format_download_duration(&dto) },
+                7 => html! { dto.error.clone().unwrap_or_default() },
+                8 => {
+                    let can_pause = dto.state == "Downloading";
+                    let can_resume = dto.state == "Paused";
+                    let can_cancel = dto.state == "Downloading" || dto.state == "Queued" || dto.state == "Scheduled";
+                    let can_remove =
+                        dto.finished || dto.state == "Failed" || dto.state == "Completed" || dto.state == "Cancelled";
+                    let can_retry = dto.state == "Failed";
+                    let pause_uuid = dto.uuid.clone();
+                    let resume_uuid = dto.uuid.clone();
+                    let cancel_uuid = dto.uuid.clone();
+                    let retry_uuid = dto.uuid.clone();
+                    let remove_uuid = dto.uuid.clone();
+                    let pause_handle = handle_pause.clone();
+                    let resume_handle = handle_resume.clone();
+                    let cancel_handle = handle_cancel.clone();
+                    let retry_handle = handle_retry.clone();
+                    let remove_handle = handle_remove.clone();
+                    html! {
+                        <div class="tp__downloads-table__actions">
+                            if can_pause {
+                                <IconButton name="Pause" icon="Pause" onclick={Callback::from(move |_| pause_handle.emit(pause_uuid.clone()))} />
+                            }
+                            if can_resume {
+                                <IconButton name="Resume" icon="Play" onclick={Callback::from(move |_| resume_handle.emit(resume_uuid.clone()))} />
+                            }
+                            if can_cancel {
+                                <IconButton name="Cancel" icon="Stop" onclick={Callback::from(move |_| cancel_handle.emit(cancel_uuid.clone()))} />
+                            }
+                            if can_retry {
+                                <IconButton name="Retry" icon="Refresh" onclick={Callback::from(move |_| retry_handle.emit(retry_uuid.clone()))} />
+                            }
+                            if can_remove {
+                                <IconButton name="Remove" icon="Delete" onclick={Callback::from(move |_| remove_handle.emit(remove_uuid.clone()))} />
+                            }
+                        </div>
+                    }
+                }
+                _ => html! {},
+            },
         )
     };
 

@@ -265,10 +265,13 @@ async fn create_shared_data(
         TuliproxError::new(shared::error::TuliproxErrorKind::Info, format!("Failed to load persisted downloads: {err}"))
     })?;
 
-    if config.video.as_ref().and_then(|video| video.download.as_ref()).is_some()
-        && (!app_state.downloads.queue.lock().await.is_empty() || app_state.downloads.active.read().await.is_some())
-    {
-        if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
+    if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
+        crate::api::endpoints::download_api::start_download_scheduler(
+            Arc::clone(app_config),
+            Arc::clone(&app_state.downloads),
+        );
+
+        if !app_state.downloads.queue.lock().await.is_empty() || app_state.downloads.active.read().await.is_some() {
             crate::api::endpoints::download_api::ensure_download_worker_running(app_config, download_cfg, &app_state.downloads)
                 .await
                 .map_err(|err| {

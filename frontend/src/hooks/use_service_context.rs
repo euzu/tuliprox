@@ -39,7 +39,21 @@ impl Services {
         let websocket = Rc::new(WebSocketService::new(Rc::clone(&status), Rc::clone(&event)));
         let rbac = Rc::new(RbacService::new());
         let flags = Rc::new(flags_service);
-        Self { auth, config, status, streams, downloads, event, playlist, user, user_api, toastr, websocket, rbac, flags }
+        Self {
+            auth,
+            config,
+            status,
+            streams,
+            downloads,
+            event,
+            playlist,
+            user,
+            user_api,
+            toastr,
+            websocket,
+            rbac,
+            flags,
+        }
     }
 }
 

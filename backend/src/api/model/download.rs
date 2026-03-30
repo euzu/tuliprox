@@ -1,4 +1,5 @@
 use crate::model::VideoDownloadConfig;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use shared::utils::{deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
 use std::{
@@ -444,6 +445,44 @@ impl DownloadQueue {
             false
         }
     }
+
+    pub async fn promote_due_scheduled(&self, now_ts: i64) -> usize {
+        let mut scheduled = self.scheduled.write().await;
+        if scheduled.is_empty() {
+            return 0;
+        }
+
+        let mut due_downloads = Vec::new();
+        scheduled.retain(|download| {
+            let is_due = download.start_at.is_some_and(|start_at| start_at <= now_ts);
+            if is_due {
+                let mut queued = download.clone();
+                queued.state = DownloadState::Queued;
+                queued.paused = false;
+                queued.finished = false;
+                queued.error = None;
+                queued.size = 0;
+                queued.total_size = None;
+                due_downloads.push(queued);
+            }
+            !is_due
+        });
+        drop(scheduled);
+
+        if due_downloads.is_empty() {
+            return 0;
+        }
+
+        let due_count = due_downloads.len();
+        let mut queue = self.queue.lock().await;
+        queue.extend(due_downloads);
+        drop(queue);
+
+        let _ = self.persist_to_disk().await;
+        due_count
+    }
+
+    pub async fn promote_due_scheduled_now(&self) -> usize { self.promote_due_scheduled(Utc::now().timestamp()).await }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -651,6 +690,58 @@ mod tests {
         assert_eq!(restored_scheduled[0].kind, DownloadKind::Recording);
 
         let _ = std::fs::remove_file(state_file);
+    }
+
+    #[tokio::test]
+    async fn promote_due_scheduled_moves_only_ready_recordings_to_queue() {
+        let queue = DownloadQueue::new();
+        let due = FileDownload {
+            uuid: "due".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/due.ts"),
+            filename: "due.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/due").expect("valid url"),
+            finished: false,
+            size: 123,
+            total_size: Some(999),
+            paused: false,
+            error: Some("old error".to_string()),
+            state: DownloadState::Scheduled,
+            start_at: Some(100),
+            duration_secs: Some(60),
+            kind: DownloadKind::Recording,
+        };
+        let future = FileDownload {
+            uuid: "future".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/future.ts"),
+            filename: "future.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/future").expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Scheduled,
+            start_at: Some(200),
+            duration_secs: Some(60),
+            kind: DownloadKind::Recording,
+        };
+
+        queue.scheduled.write().await.extend([due, future]);
+
+        let promoted = queue.promote_due_scheduled(150).await;
+
+        assert_eq!(promoted, 1);
+        let queued_items = queue.queue.lock().await.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(queued_items.len(), 1);
+        assert_eq!(queued_items[0].uuid, "due");
+        assert_eq!(queued_items[0].state, DownloadState::Queued);
+        assert_eq!(queued_items[0].size, 0);
+        assert!(queued_items[0].error.is_none());
+        let scheduled_items = queue.scheduled.read().await.clone();
+        assert_eq!(scheduled_items.len(), 1);
+        assert_eq!(scheduled_items[0].uuid, "future");
     }
 
     #[test]

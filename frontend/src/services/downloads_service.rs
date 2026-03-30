@@ -3,8 +3,10 @@ use crate::{
     services::{get_base_href, request_get, request_post, Encoding},
 };
 use serde::Serialize;
-use shared::model::{DownloadActionResponse, DownloadsResponse, FileDownloadDto};
-use shared::utils::concat_path_leading_slash;
+use shared::{
+    model::{DownloadActionResponse, DownloadsResponse, FileDownloadDto},
+    utils::concat_path_leading_slash,
+};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct QueueDownloadRequest {
@@ -41,9 +43,14 @@ impl DownloadsService {
 
     pub async fn queue_download(&self, url: String, filename: String) -> Result<FileDownloadDto, Error> {
         let request = QueueDownloadRequest { url, filename };
-        request_post::<&QueueDownloadRequest, FileDownloadDto>(&self.downloads_api_path, &request, None, Some(Encoding::Json))
-            .await?
-            .ok_or(Error::RequestError)
+        request_post::<&QueueDownloadRequest, FileDownloadDto>(
+            &self.downloads_api_path,
+            &request,
+            None,
+            Some(Encoding::Json),
+        )
+        .await?
+        .ok_or(Error::RequestError)
     }
 
     pub async fn get_downloads(&self) -> Result<DownloadsResponse, Error> {
