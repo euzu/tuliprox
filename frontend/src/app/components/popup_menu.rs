@@ -1,6 +1,6 @@
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, HtmlElement, MouseEvent};
-use yew::prelude::*;
+use yew::{create_portal, prelude::*};
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct PopupMenuProps {
@@ -106,11 +106,19 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
         });
     }
 
-    html! {
+    let popup = html! {
         <div class={classes!("tp__popup-menu", (*style).clone())} ref={popup_ref}>
             <ul>
                 { for props.children.iter().map(|child| html! { <li>{child.clone()}</li> }) }
             </ul>
         </div>
+    };
+
+    if let Some(document) = window().and_then(|win| win.document()) {
+        if let Some(body) = document.body() {
+            return create_portal(popup, body.into());
+        }
     }
+
+    popup
 }

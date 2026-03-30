@@ -41,7 +41,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();
     let collapsed = use_state(|| CollapseState::AutoExpanded);
-    let block_sidebar_toggle = use_state(|| false);
+    let is_mobile = use_state(|| false);
     let active_menu = use_state(|| ViewType::Dashboard);
 
     let handle_menu_click = {
@@ -57,34 +57,31 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 
     let toggle_sidebar = {
         let collapsed = collapsed.clone();
-        let block_sidebar_toggle = block_sidebar_toggle.clone();
         Callback::from(move |_| {
-            if !*block_sidebar_toggle {
-                let current = *collapsed;
-                let next = match current {
-                    CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
-                    CollapseState::AutoExpanded | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
-                };
-                if current != next {
-                    collapsed.set(next);
-                }
+            let current = *collapsed;
+            let next = match current {
+                CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
+                CollapseState::AutoExpanded | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
+            };
+            if current != next {
+                collapsed.set(next);
             }
         })
     };
 
     let check_sidebar_state = {
         let collapsed = collapsed.clone();
-        let block_sidebar_toggle = block_sidebar_toggle.clone();
+        let is_mobile = is_mobile.clone();
 
         Callback::from(move |_| {
             let window = window().expect("no global window");
 
             if let Ok(inner_width) = window.inner_width() {
-                let is_mobile = inner_width.as_f64().unwrap_or(0.0) < 720.0;
+                let mobile_view = inner_width.as_f64().unwrap_or(0.0) < 720.0;
 
                 match *collapsed {
                     CollapseState::AutoExpanded | CollapseState::ManualExpanded => {
-                        if is_mobile {
+                        if mobile_view && matches!(*collapsed, CollapseState::AutoExpanded) {
                             collapsed.set(CollapseState::AutoCollapsed);
                         }
                     }
@@ -92,12 +89,12 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                         // do nothing
                     }
                     CollapseState::AutoCollapsed => {
-                        if !is_mobile {
+                        if !mobile_view {
                             collapsed.set(CollapseState::AutoExpanded);
                         }
                     }
                 }
-                block_sidebar_toggle.set(is_mobile);
+                is_mobile.set(mobile_view);
             }
         })
     };
@@ -239,10 +236,14 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__app-sidebar", sidebar_variant_class(*collapsed))}>
+        <div class={classes!(
+            "tp__app-sidebar",
+            sidebar_variant_class(*collapsed),
+            if *is_mobile { "mobile" } else { "" }
+        )}>
             <div class="tp__app-sidebar__header tp__app-header">
               {
-                if *block_sidebar_toggle || matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded) {
+                if matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded) && !*is_mobile {
                   html! {
                    <span class="tp__app-header__logo">
                    {
@@ -258,14 +259,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                   html! {}
                 }
               }
-              { html_if!(
-                  !*block_sidebar_toggle,
-                  { <IconButton name="ToggleSidebar" icon={"Sidebar"} onclick={toggle_sidebar} /> }
-                )}
+              <IconButton name="ToggleSidebar" icon={"Sidebar"} onclick={toggle_sidebar} />
             </div>
             <div class="tp__app-sidebar__scroll">
                 {
                     if matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
+                        render_collapsed()
+                    } else if *is_mobile {
                         render_collapsed()
                     } else {
                         render_expanded()

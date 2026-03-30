@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{input::Input, svg_icon::AppIcon, ParticleFlowBackground, TextButton},
+    app::components::{input::Input, svg_icon::AppIcon, theme::Theme, ParticleFlowBackground, TextButton, ThemePicker},
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -14,6 +14,7 @@ pub fn Login() -> Html {
     let password_ref = use_node_ref();
     let auth_success = use_state(|| true);
     let translation = use_translation();
+    let theme = use_state(Theme::get_current_theme);
 
     let app_title = services.config.ui_config.app_title.as_ref().map_or("tuliprox", |v| v.as_str());
 
@@ -62,6 +63,14 @@ pub fn Login() -> Html {
         })
     };
 
+    let handle_theme_select = {
+        let theme = theme.clone();
+        Callback::from(move |new_theme: Theme| {
+            new_theme.switch_theme();
+            theme.set(new_theme);
+        })
+    };
+
     {
         let input_ref = username_ref.clone();
         use_effect(move || {
@@ -75,6 +84,9 @@ pub fn Login() -> Html {
         <>
         <ParticleFlowBackground />
         <div class="tp__login-view">
+           <div class="tp__login-view__toolbar">
+                <ThemePicker theme={*theme} on_select={handle_theme_select} />
+           </div>
            <div class={"tp__login-view__header"}>
                 <div class={"tp__login-view__header-logo"}>{app_logo.as_ref().clone()}</div>
                 <div class={"tp__login-view__header-title"}>{ format!("{app_title}") }</div>

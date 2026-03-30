@@ -1,3 +1,5 @@
+@use "../../../size" as size;
+
 .tp__source-editor {
    position: relative;
    display: flex;
@@ -27,6 +29,7 @@
       height: 100%;
       gap: var(--gap-default);
       font-size: 1rem;
+      overflow: hidden;
    }
 
    &__sidebar {
@@ -35,6 +38,13 @@
       box-sizing: border-box;
       height: 100%;
       gap: var(--gap-small);
+      transition: min-width 0.2s ease, max-width 0.2s ease, width 0.2s ease;
+
+      &.collapsed {
+         min-width: 3rem;
+         max-width: 3rem;
+         width: 3rem;
+      }
 
       &-actions {
          display: flex;
@@ -77,6 +87,7 @@
 
    &__canvas-wrapper {
       position: relative;
+      flex: 1 1 auto;
       box-sizing: border-box;
       width: 100%;
       height: 100%;
@@ -96,6 +107,7 @@
    }
 
    &__canvas {
+      touch-action: none;
    }
 
    &__connections {
@@ -111,6 +123,40 @@
 
    .tp__form-page__toolbar {
       padding: var(--padding-default) 0 var(--padding-default) var(--padding-small);
+   }
+}
+
+@media (max-width: size.$mobile-breakpoint) {
+   .tp__source-editor {
+      &__content {
+         gap: var(--gap-small);
+      }
+
+      &__sidebar {
+         min-width: 3rem;
+         max-width: 3rem;
+         width: 3rem;
+
+         &.expanded {
+            min-width: min(7rem, 35vw);
+            max-width: min(7rem, 35vw);
+            width: min(7rem, 35vw);
+         }
+
+         &-actions {
+            justify-content: center;
+         }
+
+         &-bricks {
+            overflow-y: auto;
+
+            .tp__source-editor__brick {
+               padding: var(--padding-small) var(--padding-mini);
+               font-size: 0.85rem;
+               word-break: break-word;
+            }
+         }
+      }
    }
 }
 

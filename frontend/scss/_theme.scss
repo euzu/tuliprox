@@ -22,7 +22,7 @@
 body {
   --mobile-size: size.$mobile-breakpoint;
   --dashboard-mobile-size: size.$dashboard-mobile-breakpoint;
-  --sidebar-width-expaned: 270px;
+  --sidebar-width-expaned: 220px;
   --sidebar-width-collapsed: 42px;
   --max-view-width: size.$dashboard-mobile-breakpoint;
   --max-table-cell-width: 240px;
@@ -184,7 +184,8 @@ body {
   --theme-brand-text-disabled-surface: var(--theme-palette-text-disabled-surface);
 
   --theme-brand-page: var(--theme-palette-page);
-  --theme-brand-page-alt: var(--theme-palette-page-alt);
+  --theme-brand-particle: var(--theme-palette-particle);
+  --theme-brand-particle-alt: var(--theme-palette-particle-alt);
   --theme-brand-surface: var(--theme-palette-surface);
   --theme-brand-surface-soft: var(--theme-palette-surface-soft);
   --theme-brand-surface-muted: var(--theme-palette-surface-muted);
@@ -357,7 +358,8 @@ body {
   --theme-color: var(--theme-brand-primary);
 
   --background-color: var(--theme-brand-page);
-  --particle-flow-background-color: var(--theme-brand-page-alt);
+  --particle-flow-background-color: var(--theme-brand-particle);
+  --particle-flow-background-color-alt: var(--theme-brand-particle-alt);
   --particle-flow-background-accent-color-1: var(--theme-brand-particle-1);
   --particle-flow-background-accent-color-2: var(--theme-brand-particle-2);
   --particle-flow-background-alpha-boost: var(--theme-brand-particle-alpha-boost);
