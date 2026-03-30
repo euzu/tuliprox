@@ -80,18 +80,18 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 let mobile_view = inner_width.as_f64().unwrap_or(0.0) < MOBILE_BREAKPOINT_PX;
 
                 match *collapsed {
-                    CollapseState::AutoExpanded | CollapseState::ManualExpanded => {
-                        if mobile_view && matches!(*collapsed, CollapseState::AutoExpanded) {
+                    CollapseState::AutoExpanded => {
+                        if mobile_view {
                             collapsed.set(CollapseState::AutoCollapsed);
                         }
-                    }
-                    CollapseState::ManualCollapsed => {
-                        // do nothing
                     }
                     CollapseState::AutoCollapsed => {
                         if !mobile_view {
                             collapsed.set(CollapseState::AutoExpanded);
                         }
+                    }
+                    CollapseState::ManualExpanded | CollapseState::ManualCollapsed => {
+                        // do nothing
                     }
                 }
                 is_mobile.set(mobile_view);

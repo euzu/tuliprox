@@ -1,8 +1,8 @@
 @use "../../size" as size;
 
 .tp__app-sidebar.expanded {
-  width: var(--sidebar-width-expaned);
-  min-width: var(--sidebar-width-expaned);
+  width: var(--sidebar-width-expanded);
+  min-width: var(--sidebar-width-expanded);
 
   .tp__app-sidebar__content {
   }
