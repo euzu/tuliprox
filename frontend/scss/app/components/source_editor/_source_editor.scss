@@ -104,7 +104,7 @@
       padding: var(--padding-micro) var(--padding-small);
       border: 1px solid var(--border-color);
       border-radius: var(--border-radius);
-      background-color: color-mix(in srgb, var(--card-background-color) 86%, transparent);
+      background-color: var(--card-background-color);
       color: var(--text-color);
       font-size: 0.85rem;
       text-align: center;
@@ -167,6 +167,8 @@
 
          &-bricks {
             overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            touch-action: pan-y;
 
             .tp__source-editor__brick {
                padding: var(--padding-small) var(--padding-mini);

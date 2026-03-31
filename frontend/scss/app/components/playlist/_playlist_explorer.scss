@@ -118,6 +118,9 @@ $series-backdrop-mobile-height: 150px;
       gap: var(--gap-default);
       box-sizing: border-box;
       overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+      overscroll-behavior: contain;
     }
 
     &-list {

@@ -21,21 +21,23 @@
   font-size: 1rem;
 }
 
-::-webkit-scrollbar-track {
-  -webkit-box-shadow: var(--scrollbar-track-shadow);
-  border-radius: var(--scrollbar-border-radius);
-  background-color: var(--scrollbar-track-color);
-}
+@media (pointer: fine) {
+  ::-webkit-scrollbar-track {
+    -webkit-box-shadow: var(--scrollbar-track-shadow);
+    border-radius: var(--scrollbar-border-radius);
+    background-color: var(--scrollbar-track-color);
+  }
 
-::-webkit-scrollbar {
-  width: var(--scrollbar-width);
-  height: var(--scrollbar-width);
-  background-color: transparent;
-}
+  ::-webkit-scrollbar {
+    width: var(--scrollbar-width);
+    height: var(--scrollbar-width);
+    background-color: transparent;
+  }
 
-::-webkit-scrollbar-thumb {
-  border-radius: var(--scrollbar-width);
-  background-color: var(--scrollbar-handle-color);
+  ::-webkit-scrollbar-thumb {
+    border-radius: var(--scrollbar-width);
+    background-color: var(--scrollbar-handle-color);
+  }
 }
 
 button {
@@ -73,6 +75,7 @@ option {
 }
 
 .svg-icon {
+  display: block;
   pointer-events: none;
   width: 1rem;
   height: 1rem;

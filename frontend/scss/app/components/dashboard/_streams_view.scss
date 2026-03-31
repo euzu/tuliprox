@@ -99,6 +99,8 @@
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+    overscroll-behavior: contain;
     padding-right: var(--padding-small);
   }
 
@@ -228,7 +230,6 @@
     height: 0.75rem;
     overflow: hidden;
     border-radius: 2px;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--card-border-color) 65%, transparent);
 
     svg {
       display: block;

@@ -1201,13 +1201,22 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         move_connections.insert((conn.from, conn.to), (conn.from, conn.to));
                     }
                 }
+                let document = window().and_then(|w| w.document());
                 for (from, to) in move_connections.values() {
                     if let Some(path_el) = editor_state.connection_elements.get(&(*from, *to)) {
                         if let (Some(from_block), Some(to_block)) =
                             (&editor_state.get_block(*from), &editor_state.get_block(*to))
                         {
-                            let (d, _) = update_connection(canvas_ox, canvas_oy, zoom_factor, from_block, to_block);
+                            let (d, (fx, fy, tx, ty)) = update_connection(canvas_ox, canvas_oy, zoom_factor, from_block, to_block);
                             let _ = path_el.set_attribute("d", &d);
+                            if let Some(doc) = &document {
+                                if let Some(circle_el) = doc.get_element_by_id(&format!("conn-del-{}-{}", from, to)) {
+                                    let mid_x = (fx + tx) / 2.0;
+                                    let mid_y = (fy + ty) / 2.0;
+                                    let _ = circle_el.set_attribute("cx", &mid_x.to_string());
+                                    let _ = circle_el.set_attribute("cy", &mid_y.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -1961,7 +1970,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                                 let mid_y = (from_y + to_y) / 2.0;
                                 let on_delete_connection = handle_delete_connection.clone();
                                 html! {
-                                    <circle cx={mid_x.to_string()} cy={mid_y.to_string()} r="6" fill="var(--source-editor-delete-color)" class="clickable"
+                                    <circle id={format!("conn-del-{}-{}", c.from, c.to)} cx={mid_x.to_string()} cy={mid_y.to_string()} r="6" fill="var(--source-editor-delete-color)" class="clickable"
                                         onclick={
                                             let from = c.from;
                                             let to = c.to;
