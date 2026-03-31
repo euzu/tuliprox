@@ -687,6 +687,10 @@ async fn download_input_epg(
     tvguide
 }
 
+/// `invalidate_input_cache_status` performs a non-atomic file I/O sequence
+/// (`input_cache::load_input_status` + `input_cache::save_input_status`).
+/// Call this only while holding the per-input lock from
+/// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
 async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &ConfigInput) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
     let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
@@ -694,6 +698,16 @@ async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &
     if !status.clusters.is_empty() {
         status.clusters.clear();
         input_cache::save_input_status(&storage_path, &status);
+    }
+}
+
+async fn load_cached_input_playlist(
+    ctx: &PlaylistProcessingContext,
+    input: &Arc<ConfigInput>,
+) -> (Box<dyn PlaylistSource>, Option<TuliproxError>) {
+    match load_input_playlist(ctx, input, None).await {
+        Ok(pl_source) => (pl_source, None),
+        Err(err) => (MemoryPlaylistSource::default().boxed(), Some(err)),
     }
 }
 
@@ -730,10 +744,7 @@ async fn download_input(
 
     let mut preloaded_playlist: Option<(Box<dyn PlaylistSource>, Option<TuliproxError>)> = None;
     if playlist_download_result.was_cached {
-        let (cached_playlist, cached_error) = match load_input_playlist(ctx, input, None).await {
-            Ok(pl_source) => (pl_source, None),
-            Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
-        };
+        let (cached_playlist, cached_error) = load_cached_input_playlist(ctx, input).await;
         // Defensive fallback: if cache metadata says "valid" but persisted data is unreadable,
         // retry once before forcing a refresh.
         let must_force_refresh = cached_error.is_some();
@@ -742,18 +753,30 @@ async fn download_input(
                 "Input '{}' cache hit produced unreadable playlist; retrying cached load once",
                 input.name
             );
-            if let Ok(retry_playlist) = load_input_playlist(ctx, input, None).await {
+            let (retry_playlist, retry_error) = load_cached_input_playlist(ctx, input).await;
+            if retry_error.is_none() {
                 preloaded_playlist = Some((retry_playlist, None));
             } else {
                 if input_lock.is_none() {
                     input_lock = Some(ctx.get_input_lock(&input.name).await);
                 }
-                warn!(
-                    "Input '{}' cached playlist remained unreadable after retry; invalidating cache and forcing refresh",
-                    input.name
-                );
-                invalidate_input_cache_status(ctx, input).await;
-                playlist_download_result = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
+                // Re-check immediately after locking to avoid duplicate refreshes when another worker
+                // repaired the cache between our earlier retry and lock acquisition.
+                let (locked_retry_playlist, locked_retry_error) = load_cached_input_playlist(ctx, input).await;
+                if locked_retry_error.is_none() {
+                    warn!(
+                        "Input '{}' cache became readable after lock re-check; skipping refresh",
+                        input.name
+                    );
+                    preloaded_playlist = Some((locked_retry_playlist, None));
+                } else {
+                    warn!(
+                        "Input '{}' cached playlist remained unreadable after retry and lock re-check; invalidating cache and forcing refresh",
+                        input.name
+                    );
+                    invalidate_input_cache_status(ctx, input).await;
+                    playlist_download_result = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
+                }
             }
         } else {
             preloaded_playlist = Some((cached_playlist, None));
