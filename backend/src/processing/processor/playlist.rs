@@ -735,18 +735,26 @@ async fn download_input(
             Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
         };
         // Defensive fallback: if cache metadata says "valid" but persisted data is unreadable,
-        // force one real refresh.
+        // retry once before forcing a refresh.
         let must_force_refresh = cached_error.is_some();
         if must_force_refresh {
-            if input_lock.is_none() {
-                input_lock = Some(ctx.get_input_lock(&input.name).await);
-            }
             warn!(
-                "Input '{}' cache hit produced unreadable playlist; forcing refresh",
+                "Input '{}' cache hit produced unreadable playlist; retrying cached load once",
                 input.name
             );
-            invalidate_input_cache_status(ctx, input).await;
-            playlist_download_result = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
+            if let Ok(retry_playlist) = load_input_playlist(ctx, input, None).await {
+                preloaded_playlist = Some((retry_playlist, None));
+            } else {
+                if input_lock.is_none() {
+                    input_lock = Some(ctx.get_input_lock(&input.name).await);
+                }
+                warn!(
+                    "Input '{}' cached playlist remained unreadable after retry; invalidating cache and forcing refresh",
+                    input.name
+                );
+                invalidate_input_cache_status(ctx, input).await;
+                playlist_download_result = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
+            }
         } else {
             preloaded_playlist = Some((cached_playlist, None));
         }
