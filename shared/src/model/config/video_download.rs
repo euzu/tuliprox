@@ -18,9 +18,12 @@ pub struct VideoDownloadConfigDto {
     pub directory: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub organize_into_directories: bool,
-    // TODO use ptt
     #[serde(default = "default_episode_pattern", skip_serializing_if = "is_blank_or_default_episode_pattern")]
     pub episode_pattern: Option<String>,
+    #[serde(default)]
+    pub download_priority: i8,
+    #[serde(default)]
+    pub recording_priority: i8,
 }
 
 impl VideoDownloadConfigDto {
@@ -111,6 +114,8 @@ mod tests {
                 directory: None,
                 organize_into_directories: false,
                 episode_pattern: None,
+                download_priority: 0,
+                recording_priority: 0,
             }),
             web_search: None,
         };
@@ -128,6 +133,8 @@ mod tests {
                 directory: None,
                 organize_into_directories: false,
                 episode_pattern: None,
+                download_priority: 0,
+                recording_priority: 0,
             }),
             web_search: None,
         };
@@ -145,6 +152,8 @@ mod tests {
                 directory: Some("custom-downloads".to_string()),
                 organize_into_directories: false,
                 episode_pattern: None,
+                download_priority: 0,
+                recording_priority: 0,
             }),
             web_search: None,
         };
@@ -160,6 +169,8 @@ mod tests {
             directory: Some(DEFAULT_DOWNLOAD_DIR.to_string()),
             organize_into_directories: false,
             episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
         };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(
@@ -175,6 +186,8 @@ mod tests {
             directory: Some("custom-downloads".to_string()),
             organize_into_directories: false,
             episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
         };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(serialized.contains("\"directory\""), "expected directory field for custom value, got: {serialized}");
@@ -187,6 +200,8 @@ mod tests {
             directory: None,
             organize_into_directories: false,
             episode_pattern: default_episode_pattern(),
+            download_priority: 0,
+            recording_priority: 0,
         };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(

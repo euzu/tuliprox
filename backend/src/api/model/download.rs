@@ -2,7 +2,7 @@ use crate::model::VideoDownloadConfig;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use shared::model::FileDownloadDto;
-use shared::utils::{deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
+use shared::utils::{default_user_priority, deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
 use std::{
     collections::VecDeque,
     ffi::OsStr,
@@ -42,6 +42,10 @@ pub struct FileDownload {
     pub duration_secs: Option<u64>,
     /// Distinguishes plain downloads from scheduled recordings.
     pub kind: DownloadKind,
+    /// The input source name used to acquire a provider connection.
+    pub input_name: Option<Arc<str>>,
+    /// Priority for provider connection preemption (lower = higher priority).
+    pub priority: i8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -67,6 +71,10 @@ struct PersistedFileDownload {
     start_at: Option<i64>,
     duration_secs: Option<u64>,
     kind: DownloadKind,
+    #[serde(default)]
+    input_name: Option<String>,
+    #[serde(default)]
+    priority: i8,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -133,7 +141,7 @@ impl FileDownload {
     // "accept-ranges" => "0-1975828544"
     // "content-range" => "bytes 0-1975828543/1975828544"
 
-    pub fn new(req_url: &str, req_filename: &str, download_cfg: &VideoDownloadConfig) -> Option<Self> {
+    pub fn new(req_url: &str, req_filename: &str, download_cfg: &VideoDownloadConfig, input_name: Option<Arc<str>>, priority: i8) -> Option<Self> {
         match reqwest::Url::parse(req_url) {
             Ok(url) => {
                 let tmp_filename = CONSTANTS
@@ -178,6 +186,8 @@ impl FileDownload {
                     start_at: None,
                     duration_secs: None,
                     kind: DownloadKind::Download,
+                    input_name,
+                    priority,
                 })
             }
             Err(_) => None,
@@ -190,8 +200,10 @@ impl FileDownload {
         download_cfg: &VideoDownloadConfig,
         start_at: i64,
         duration_secs: u64,
+        input_name: Option<Arc<str>>,
+        priority: i8,
     ) -> Option<Self> {
-        let mut recording = Self::new(req_url, req_filename, download_cfg)?;
+        let mut recording = Self::new(req_url, req_filename, download_cfg, input_name, priority)?;
         let identity = format!(
             "{}:{}:{}:{}:{}",
             "recording",
@@ -289,6 +301,8 @@ impl DownloadQueue {
             start_at: download.start_at,
             duration_secs: download.duration_secs,
             kind: download.kind.clone(),
+            input_name: download.input_name.as_ref().map(|s| s.to_string()),
+            priority: download.priority,
         }
     }
 
@@ -308,6 +322,8 @@ impl DownloadQueue {
             start_at: download.start_at,
             duration_secs: download.duration_secs,
             kind: download.kind,
+            input_name: download.input_name.map(|s| Arc::from(s.as_str())),
+            priority: download.priority,
         })
     }
 
@@ -523,6 +539,10 @@ impl DownloadQueue {
 pub struct FileDownloadRequest {
     pub url: String,
     pub filename: String,
+    #[serde(default)]
+    pub input_name: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i8>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -531,6 +551,10 @@ pub struct FileRecordingRequest {
     pub filename: String,
     pub start_at: i64,
     pub duration_secs: u64,
+    #[serde(default)]
+    pub input_name: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i8>,
 }
 
 #[cfg(test)]
@@ -564,6 +588,8 @@ mod tests {
             start_at: None,
             duration_secs: None,
             kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
         };
 
         *queue.active.write().await = Some(active);
@@ -600,6 +626,8 @@ mod tests {
             start_at: None,
             duration_secs: None,
             kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
         };
 
         *queue.active.write().await = Some(active);
@@ -631,6 +659,8 @@ mod tests {
             start_at: None,
             duration_secs: None,
             kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
         };
         let active = FileDownload {
             uuid: "active".to_string(),
@@ -647,6 +677,8 @@ mod tests {
             start_at: None,
             duration_secs: None,
             kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
         };
         let paused = FileDownload {
             uuid: "paused".to_string(),
@@ -663,6 +695,8 @@ mod tests {
             start_at: None,
             duration_secs: None,
             kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
         };
 
         queue.queue.lock().await.push_back(queued);
@@ -706,6 +740,8 @@ mod tests {
             start_at: Some(1_700_000_000),
             duration_secs: Some(5400),
             kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
         };
 
         queue.scheduled.write().await.push(scheduled.clone());
@@ -744,6 +780,8 @@ mod tests {
             start_at: Some(100),
             duration_secs: Some(60),
             kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
         };
         let future = FileDownload {
             uuid: "future".to_string(),
@@ -760,6 +798,8 @@ mod tests {
             start_at: Some(200),
             duration_secs: Some(60),
             kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
         };
 
         queue.scheduled.write().await.extend([due, future]);
@@ -793,6 +833,8 @@ mod tests {
             &download_cfg,
             1_700_000_000,
             5400,
+            None,
+            0,
         )
         .expect("first recording");
         let second = FileDownload::new_recording(
@@ -801,6 +843,8 @@ mod tests {
             &download_cfg,
             1_700_005_400,
             5400,
+            None,
+            0,
         )
         .expect("second recording");
 

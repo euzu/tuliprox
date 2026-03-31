@@ -20,6 +20,13 @@
   }
 }
 
+.tp__record-dialog {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  min-width: 18rem;
+}
+
 @media (max-width: 900px) {
   .tp__downloads-list {
     &__header {

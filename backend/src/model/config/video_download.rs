@@ -11,6 +11,8 @@ pub struct VideoDownloadConfig {
     pub directory: String,
     pub organize_into_directories: bool,
     pub episode_pattern: Option<Arc<Regex>>,
+    pub download_priority: i8,
+    pub recording_priority: i8,
 }
 
 macros::from_impl!(VideoDownloadConfig);
@@ -23,6 +25,8 @@ impl From<&VideoDownloadConfigDto> for VideoDownloadConfig {
             episode_pattern: dto.episode_pattern.as_ref().and_then(|s| shared::model::REGEX_CACHE.get_or_compile(s)
                 .map_err(|e| log::warn!("Invalid episode_pattern regex '{s}': {e}"))
                 .ok()),
+            download_priority: dto.download_priority,
+            recording_priority: dto.recording_priority,
         }
     }
 }
@@ -34,6 +38,8 @@ impl From<&VideoDownloadConfig> for VideoDownloadConfigDto {
             directory: Some(instance.directory.clone()),
             organize_into_directories: instance.organize_into_directories,
             episode_pattern: instance.episode_pattern.as_ref().map(std::string::ToString::to_string),
+            download_priority: instance.download_priority,
+            recording_priority: instance.recording_priority,
         }
     }
 }
