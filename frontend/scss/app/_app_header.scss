@@ -9,9 +9,15 @@ $mobile-header-sidebar-offset: 3rem;
   height: var(--app-header-height);
   min-height: var(--app-header-height);
   max-height: var(--app-header-height);
+  overflow: hidden;
   background-color: var(--app-header-background-color);
   border-bottom: 1px solid var(--border-color);
   fill: var(--menu-icon-color);
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+
+  box-sizing: border-box;
+
   .icon-AppTitle {
     width: 100px !important;
   }

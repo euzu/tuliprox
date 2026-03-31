@@ -957,8 +957,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     <>
                      { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
                      <div class="tp__config-view__cols-2">
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
-                     { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
+                     { html_if!(xtream_input, {
+                      <>
+                      { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
+                      { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
+                      </>
+                     })}
                      { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
                      { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
                      { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
@@ -981,8 +985,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <>
                  { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
                  <div class="tp__config-view__cols-2">
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
+                 { html_if!(xtream_input, {
+                   <>
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
+                     </>
+                 })}
                  { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
                  { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
                  { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }

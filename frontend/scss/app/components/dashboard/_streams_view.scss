@@ -253,18 +253,21 @@
     border: 1px solid var(--card-border-color);
   }
 
-  &__stat-label,
-  &__detail-label {
+  &__stat-label {
     color: var(--tertiary-title-text-color);
     font-size: 0.72rem;
     font-weight: 700;
     text-transform: uppercase;
   }
 
-  &__stat-value,
-  &__detail-value {
+  &__stat-value {
     font-weight: 600;
     min-width: 0;
+
+    .tp__toggle-switch {
+      height: 1rem;
+      max-height: 1rem;
+    }
   }
 
   &__stat-value--ip {
@@ -274,9 +277,6 @@
     line-height: 1.3;
   }
 
-  &__detail {
-    min-width: 0;
-  }
 
   &__duration {
     letter-spacing: 0.12em;
