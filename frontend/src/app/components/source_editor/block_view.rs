@@ -94,8 +94,12 @@ pub fn BlockView(props: &BlockProps) -> Html {
                 }
             }
 
-            let now = web_sys::js_sys::Date::now();
             let mut last_touch_end_ts = last_touch_end_ts.borrow_mut();
+            if e.touches().length() > 0 || e.changed_touches().length() != 1 {
+                *last_touch_end_ts = None;
+                return;
+            }
+            let now = web_sys::js_sys::Date::now();
             if let Some(prev) = *last_touch_end_ts {
                 if now - prev <= DOUBLE_TAP_THRESHOLD_MS {
                     *last_touch_end_ts = None;

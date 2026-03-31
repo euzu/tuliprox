@@ -430,7 +430,7 @@ async fn playlist_download_from_input(
         return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
-    let (playlist, errors, persisted, m3u_error_count, xtream_error_count) = if hybrid {
+    let (playlist, errors, persisted, m3u_error_count, xtream_error_count, m3u_has_content) = if hybrid {
         let mut playlist = Vec::new();
         let mut all_errors = Vec::new();
         let mut m3u_error_count = 0usize;
@@ -468,12 +468,19 @@ async fn playlist_download_from_input(
             }
         }
 
-        (playlist, all_errors, xtream_persisted, m3u_error_count, xtream_error_count)
+        (
+            playlist,
+            all_errors,
+            xtream_persisted,
+            m3u_error_count,
+            xtream_error_count,
+            m3u_added_groups,
+        )
     } else {
         match download_input_type {
             InputType::M3u => {
                 let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
-                (p, e, false, 0, 0)
+                (p, e, false, 0, 0, false)
             }
             InputType::Xtream => {
                 let (p, e, persisted) = xtream::download_xtream_playlist(
@@ -484,12 +491,12 @@ async fn playlist_download_from_input(
                 )
                 .await;
                 let xtream_error_count = e.len();
-                (p, e, persisted, 0, xtream_error_count)
+                (p, e, persisted, 0, xtream_error_count, false)
             }
-            InputType::M3uBatch | InputType::XtreamBatch => (vec![], vec![], false, 0, 0),
+            InputType::M3uBatch | InputType::XtreamBatch => (vec![], vec![], false, 0, 0, false),
             InputType::Library => {
                 let (p, e) = library::download_library_playlist(client, app_config, input).await;
-                (p, e, false, 0, 0)
+                (p, e, false, 0, 0, false)
             }
         }
     };
@@ -498,10 +505,21 @@ async fn playlist_download_from_input(
     let mut save_status = false;
     if hybrid {
         if needs_m3u_download {
+            let m3u_state = if m3u_error_count == 0 && m3u_has_content {
+                ClusterState::Ok
+            } else {
+                if m3u_error_count == 0 {
+                    warn!(
+                        "Input '{}' staged M3U download returned no groups; marking cache state as failed",
+                        input.name
+                    );
+                }
+                ClusterState::Failed
+            };
             input_cache::update_cluster_status(
                 &mut status,
                 "default",
-                if m3u_error_count == 0 { ClusterState::Ok } else { ClusterState::Failed },
+                m3u_state,
             );
             save_status = true;
         }
@@ -520,7 +538,16 @@ async fn playlist_download_from_input(
             }
             save_status = !xtream_clusters_to_download.is_empty();
         } else {
-            input_cache::update_cluster_status(&mut status, "default", ClusterState::Ok);
+            let default_state = if persisted || !playlist.is_empty() {
+                ClusterState::Ok
+            } else {
+                warn!(
+                    "Input '{}' download returned no groups; marking cache state as failed",
+                    input.name
+                );
+                ClusterState::Failed
+            };
+            input_cache::update_cluster_status(&mut status, "default", default_state);
             save_status = true;
         }
     } else if use_per_cluster_cache {
@@ -528,6 +555,9 @@ async fn playlist_download_from_input(
             input_cache::update_cluster_status(&mut status, &cluster.to_string(), ClusterState::Failed);
         }
         save_status = !xtream_clusters_to_download.is_empty();
+    } else {
+        input_cache::update_cluster_status(&mut status, "default", ClusterState::Failed);
+        save_status = true;
     }
 
     if save_status {
@@ -687,6 +717,16 @@ async fn download_input_epg(
     tvguide
 }
 
+async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &ConfigInput) {
+    let storage_dir = { ctx.config.config.load().storage_dir.clone() };
+    let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
+    let mut status = input_cache::load_input_status(&storage_path);
+    if !status.clusters.is_empty() {
+        status.clusters.clear();
+        input_cache::save_input_status(&storage_path, &status);
+    }
+}
+
 async fn download_input(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
@@ -698,7 +738,7 @@ async fn download_input(
     let _input_lock = if need_download { Some(ctx.get_input_lock(&input.name).await) } else { None };
     let mut mark_as_processed = false;
 
-    let playlist_download_result = if need_download {
+    let mut playlist_download_result = if need_download {
         // Check again after lock
         let already_processed = ctx.is_input_downloaded(&input.name).await;
 
@@ -718,7 +758,30 @@ async fn download_input(
         PlaylistDownloadResult::new(vec![], vec![], true, false)
     };
 
-    let (playlist, error) = if playlist_download_result.was_cached || playlist_download_result.persisted {
+    let mut preloaded_playlist: Option<(Box<dyn PlaylistSource>, Option<TuliproxError>)> = None;
+    if playlist_download_result.was_cached {
+        let (mut cached_playlist, cached_error) = match load_input_playlist(ctx, input, None).await {
+            Ok(pl_source) => (pl_source, None),
+            Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
+        };
+        // Defensive fallback: if cache metadata says "valid" but persisted data is missing/corrupt,
+        // force one real refresh instead of treating the input as empty.
+        let must_force_refresh = cached_error.is_some() || cached_playlist.is_empty();
+        if must_force_refresh {
+            warn!(
+                "Input '{}' cache hit produced empty or unreadable playlist; forcing refresh",
+                input.name
+            );
+            invalidate_input_cache_status(ctx, input).await;
+            playlist_download_result = playlist_download_from_input(&ctx.client, &ctx.config, input).await;
+        } else {
+            preloaded_playlist = Some((cached_playlist, None));
+        }
+    }
+
+    let (playlist, error) = if let Some(preloaded) = preloaded_playlist {
+        preloaded
+    } else if playlist_download_result.was_cached || playlist_download_result.persisted {
         match load_input_playlist(ctx, input, None).await {
             Ok(pl_source) => (pl_source, None),
             Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
