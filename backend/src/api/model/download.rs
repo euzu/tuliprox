@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{fs, sync::{Mutex, RwLock}};
+use tokio::{fs, sync::{Mutex, Notify, RwLock}};
 
 /// File-Download information.
 #[derive(Clone, Debug)]
@@ -254,6 +254,36 @@ impl From<FileDownload> for FileDownloadDto {
     fn from(value: FileDownload) -> Self { Self::from(&value) }
 }
 
+/// Priority-aware wait queue for download connection slots.
+/// When the provider is at capacity, download tasks register here and are
+/// woken one-at-a-time in descending priority order (lowest i8 = highest priority).
+pub struct DownloadSlotWaitQueue {
+    waiters: Arc<Mutex<Vec<(i8, Arc<Notify>)>>>,
+}
+
+impl DownloadSlotWaitQueue {
+    pub fn new() -> Self {
+        Self { waiters: Arc::new(Mutex::new(Vec::new())) }
+    }
+
+    /// Register and block until this task is signalled by `signal_next`.
+    pub async fn wait(&self, priority: i8) {
+        let notify = Arc::new(Notify::new());
+        self.waiters.lock().await.push((priority, Arc::clone(&notify)));
+        notify.notified().await;
+    }
+
+    /// Wake only the waiter with the highest priority (lowest i8).
+    /// No-op when no waiters are registered.
+    pub async fn signal_next(&self) {
+        let mut waiters = self.waiters.lock().await;
+        if let Some(idx) = waiters.iter().enumerate().min_by_key(|(_, (p, _))| *p).map(|(i, _)| i) {
+            let (_, notify) = waiters.remove(idx);
+            notify.notify_one();
+        }
+    }
+}
+
 pub struct DownloadQueue {
     pub queue: Arc<Mutex<VecDeque<FileDownload>>>,
     pub scheduled: Arc<RwLock<Vec<FileDownload>>>,
@@ -262,6 +292,8 @@ pub struct DownloadQueue {
     pub control_signal: Arc<RwLock<DownloadControl>>,
     pub worker_running: Arc<RwLock<bool>>,
     pub state_file: Option<PathBuf>,
+    /// Priority-aware waiter queue for provider connection slots.
+    pub slot_waiters: Arc<DownloadSlotWaitQueue>,
 }
 
 impl Default for DownloadQueue {
@@ -282,6 +314,7 @@ impl DownloadQueue {
             control_signal: Arc::from(RwLock::new(DownloadControl::None)),
             worker_running: Arc::from(RwLock::new(false)),
             state_file,
+            slot_waiters: Arc::new(DownloadSlotWaitQueue::new()),
         }
     }
 

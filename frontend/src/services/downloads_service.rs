@@ -12,6 +12,10 @@ use shared::{
 pub struct QueueDownloadRequest {
     pub url: String,
     pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i8>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -20,6 +24,10 @@ pub struct QueueRecordingRequest {
     pub filename: String,
     pub start_at: i64,
     pub duration_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i8>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -41,8 +49,8 @@ impl DownloadsService {
         }
     }
 
-    pub async fn queue_download(&self, url: String, filename: String) -> Result<FileDownloadDto, Error> {
-        let request = QueueDownloadRequest { url, filename };
+    pub async fn queue_download(&self, url: String, filename: String, input_name: Option<String>) -> Result<FileDownloadDto, Error> {
+        let request = QueueDownloadRequest { url, filename, input_name, priority: None };
         request_post::<&QueueDownloadRequest, FileDownloadDto>(
             &self.downloads_api_path,
             &request,
@@ -65,8 +73,10 @@ impl DownloadsService {
         filename: String,
         start_at: i64,
         duration_secs: u64,
+        input_name: Option<String>,
+        priority: Option<i8>,
     ) -> Result<FileDownloadDto, Error> {
-        let request = QueueRecordingRequest { url, filename, start_at, duration_secs };
+        let request = QueueRecordingRequest { url, filename, start_at, duration_secs, input_name, priority };
         request_post::<&QueueRecordingRequest, FileDownloadDto>(
             &concat_path_leading_slash(&get_base_href(), "api/v1/file/record"),
             &request,

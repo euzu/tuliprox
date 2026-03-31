@@ -407,14 +407,27 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 }
                             }
 
-                            // Acquire a provider connection slot for this download if it has an input source.
+                            // Acquire a provider connection slot for this download.
+                            // If the provider is at capacity, wait in the priority queue until signalled.
+                            // Never proceeds without a slot when input_name is set — account bans otherwise.
                             let provider_handle = {
-                                let active = dq.active.read().await;
-                                if let Some(dl) = active.as_ref() {
-                                    if let Some(input_name) = dl.input_name.as_ref() {
-                                        active_provider.acquire_connection_for_probe(input_name, dl.priority).await
-                                    } else {
-                                        None
+                                let (input_name, priority) = {
+                                    let active = dq.active.read().await;
+                                    active.as_ref().map_or((None, 0i8), |dl| (dl.input_name.clone(), dl.priority))
+                                };
+                                if let Some(input_name) = input_name {
+                                    loop {
+                                        if let Some(handle) = active_provider.acquire_connection_for_probe(&input_name, priority).await {
+                                            break Some(handle);
+                                        }
+                                        if *control_signal.read().await == DownloadControl::Cancel {
+                                            break None;
+                                        }
+                                        // Wait for highest-priority signal — no sleep, no polling.
+                                        dq.slot_waiters.wait(priority).await;
+                                        if *control_signal.read().await == DownloadControl::Cancel {
+                                            break None;
+                                        }
                                     }
                                 } else {
                                     None
@@ -506,6 +519,18 @@ pub(in crate::api) fn start_download_scheduler(
     active_provider: Arc<ActiveProviderManager>,
     connection_manager: Arc<ConnectionManager>,
 ) {
+    // Bridge task: whenever any provider connection is released, wake only the
+    // highest-priority download waiter. This prevents lower-priority downloads
+    // from racing ahead of higher-priority ones.
+    let capacity_notify = connection_manager.capacity_notified();
+    let slot_waiters = Arc::clone(&download_queue.slot_waiters);
+    tokio::spawn(async move {
+        loop {
+            capacity_notify.notified().await;
+            slot_waiters.signal_next().await;
+        }
+    });
+
     tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);

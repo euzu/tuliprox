@@ -35,6 +35,7 @@ struct ChannelSelection {
     cluster: XtreamCluster,
     url: String,
     title: String,
+    input_name: String,
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -175,6 +176,7 @@ pub fn PlaylistExplorer() -> Html {
                     cluster: dto.xtream_cluster,
                     url: dto.url.to_string(),
                     title: dto.title.to_string(),
+                    input_name: dto.input_name.to_string(),
                 }));
                 set_anchor_ref.set(Some(target));
                 set_is_open.set(true);
@@ -415,7 +417,8 @@ pub fn PlaylistExplorer() -> Html {
                                 }
 
                                 let filename = build_download_filename(&selected.title, &resolved_url);
-                                match services.downloads.queue_download(resolved_url, filename).await {
+                                let input_name = Some(selected.input_name.to_string());
+                                match services.downloads.queue_download(resolved_url, filename, input_name).await {
                                     Ok(_) => {
                                         services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"))
                                     }
@@ -433,6 +436,7 @@ pub fn PlaylistExplorer() -> Html {
                             spawn_local(async move {
                                 let start_ref = NodeRef::default();
                                 let duration_ref = NodeRef::default();
+                                let priority_ref = NodeRef::default();
                                 let actions = DialogActions {
                                     left: Some(vec![DialogAction::new(
                                         "cancel",
@@ -475,6 +479,19 @@ pub fn PlaylistExplorer() -> Html {
                                                         />
                                                     </div>
                                                 </div>
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            ref={priority_ref.clone()}
+                                                            type="number"
+                                                            min="-127"
+                                                            max="127"
+                                                            step="1"
+                                                            value="0"
+                                                        />
+                                                    </div>
+                                                </div>
                                                 <div class="tp__field-explanation">
                                                     {selected.title.clone()}
                                                 </div>
@@ -494,15 +511,20 @@ pub fn PlaylistExplorer() -> Html {
                                         .cast::<HtmlInputElement>()
                                         .map(|input| input.value())
                                         .unwrap_or_else(|| "90".to_string());
+                                    let priority_value = priority_ref
+                                        .cast::<HtmlInputElement>()
+                                        .map(|input| input.value());
                                     let start_ts =
                                         chrono::NaiveDateTime::parse_from_str(&start_value, "%Y-%m-%dT%H:%M")
                                             .ok()
                                             .map(|dt| dt.and_utc().timestamp());
                                     let duration_mins = duration_value.parse::<u64>().ok();
+                                    let priority = priority_value.as_deref().and_then(|s| s.parse::<i8>().ok());
 
                                     match (start_ts, duration_mins) {
                                         (Some(start_at), Some(minutes)) if minutes > 0 => {
                                             let filename = build_record_filename(&selected.title, &start_value);
+                                            let input_name = Some(selected.input_name.to_string());
                                             match services
                                                 .downloads
                                                 .queue_recording(
@@ -510,6 +532,8 @@ pub fn PlaylistExplorer() -> Html {
                                                     filename,
                                                     start_at,
                                                     minutes.saturating_mul(60),
+                                                    input_name,
+                                                    priority,
                                                 )
                                                 .await
                                             {
@@ -729,6 +753,7 @@ pub fn PlaylistExplorer() -> Html {
             cluster: XtreamCluster::Series,
             url: String::new(), // TODO provider url
             title: chan.title.to_string(),
+            input_name: String::new(),
         };
         let popup_onclick = handle_episode_popup_onclick.clone();
         let rating = chan.rating.unwrap_or_default();
