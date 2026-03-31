@@ -1207,7 +1207,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         if let (Some(from_block), Some(to_block)) =
                             (&editor_state.get_block(*from), &editor_state.get_block(*to))
                         {
-                            let (d, (fx, fy, tx, ty)) = update_connection(canvas_ox, canvas_oy, zoom_factor, from_block, to_block);
+                            let (d, (fx, fy, tx, ty)) =
+                                update_connection(canvas_ox, canvas_oy, zoom_factor, from_block, to_block);
                             let _ = path_el.set_attribute("d", &d);
                             if let Some(doc) = &document {
                                 if let Some(circle_el) = doc.get_element_by_id(&format!("conn-del-{}-{}", from, to)) {
