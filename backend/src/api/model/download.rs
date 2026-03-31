@@ -2,7 +2,7 @@ use crate::model::VideoDownloadConfig;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use shared::model::FileDownloadDto;
-use shared::utils::{default_user_priority, deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
+use shared::utils::{deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
 use std::{
     collections::VecDeque,
     ffi::OsStr,
@@ -825,6 +825,8 @@ mod tests {
             organize_into_directories: false,
             episode_pattern: None,
             headers: std::collections::HashMap::new(),
+            download_priority: 0,
+            recording_priority: 0,
         };
 
         let first = FileDownload::new_recording(

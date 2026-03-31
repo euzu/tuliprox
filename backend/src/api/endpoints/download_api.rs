@@ -1,7 +1,7 @@
 use crate::{
     api::model::{
-        AppState, DownloadControl, DownloadQueue, DownloadState, EventManager, EventMessage, FileDownload,
-        FileDownloadRequest, FileRecordingRequest,
+        AppState, ActiveProviderManager, ConnectionManager, DownloadControl, DownloadQueue, DownloadState,
+        EventManager, EventMessage, FileDownload, FileDownloadRequest, FileRecordingRequest,
     },
     model::{AppConfig, VideoDownloadConfig},
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
@@ -354,6 +354,8 @@ pub(in crate::api) async fn ensure_download_worker_running(
     download_cfg: &VideoDownloadConfig,
     download_queue: &Arc<DownloadQueue>,
     event_manager: &Arc<EventManager>,
+    active_provider: &Arc<ActiveProviderManager>,
+    connection_manager: &Arc<ConnectionManager>,
 ) -> Result<(), String> {
     if *download_queue.worker_running.read().await {
         debug!("Download worker already running");
@@ -384,6 +386,8 @@ pub(in crate::api) async fn ensure_download_worker_running(
         let dq = Arc::clone(download_queue);
         let control_signal = Arc::clone(&dq.control_signal);
         let event_manager = Arc::clone(event_manager);
+        let active_provider = Arc::clone(active_provider);
+        let connection_manager = Arc::clone(connection_manager);
 
         match create_client(cfg).default_headers(headers).build() {
             Ok(client) => {
@@ -403,6 +407,20 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 }
                             }
 
+                            // Acquire a provider connection slot for this download if it has an input source.
+                            let provider_handle = {
+                                let active = dq.active.read().await;
+                                if let Some(dl) = active.as_ref() {
+                                    if let Some(input_name) = dl.input_name.as_ref() {
+                                        active_provider.acquire_connection_for_probe(input_name, dl.priority).await
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+
                             *control_signal.write().await = DownloadControl::None;
 
                             match download_file(
@@ -415,6 +433,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                             .await
                             {
                                 DownloadExecutionResult::Completed => {
+                                    connection_manager.release_provider_handle(provider_handle).await;
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         fd.finished = true;
                                         fd.state = DownloadState::Completed;
@@ -426,11 +445,13 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     broadcast_download_queue_update(&event_manager, &dq).await;
                                 }
                                 DownloadExecutionResult::Paused => {
+                                    connection_manager.release_provider_handle(provider_handle).await;
                                     let _ = dq.persist_to_disk().await;
                                     broadcast_download_queue_update(&event_manager, &dq).await;
                                     break;
                                 }
                                 DownloadExecutionResult::Cancelled => {
+                                    connection_manager.release_provider_handle(provider_handle).await;
                                     if let Some(fd) = dq.active.write().await.take() {
                                         dq.finished.write().await.push(fd);
                                     }
@@ -441,6 +462,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     broadcast_download_queue_update(&event_manager, &dq).await;
                                 }
                                 DownloadExecutionResult::Retryable(_err) => {
+                                    connection_manager.release_provider_handle(provider_handle).await;
                                     warn!("Retrying active download after transient failure");
                                     requeue_active_download_for_retry(&dq).await;
                                     time::sleep(Duration::from_secs(1)).await;
@@ -449,6 +471,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     broadcast_download_queue_update(&event_manager, &dq).await;
                                 }
                                 DownloadExecutionResult::Failed(err) => {
+                                    connection_manager.release_provider_handle(provider_handle).await;
                                     warn!("Download failed permanently: {err}");
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         fd.finished = true;
@@ -480,6 +503,8 @@ pub(in crate::api) fn start_download_scheduler(
     app_config: Arc<AppConfig>,
     download_queue: Arc<DownloadQueue>,
     event_manager: Arc<EventManager>,
+    active_provider: Arc<ActiveProviderManager>,
+    connection_manager: Arc<ConnectionManager>,
 ) {
     tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(1));
@@ -497,7 +522,7 @@ pub(in crate::api) fn start_download_scheduler(
                 continue;
             };
 
-            let _ = ensure_download_worker_running(&app_config, download_cfg, &download_queue, &event_manager).await;
+            let _ = ensure_download_worker_running(&app_config, download_cfg, &download_queue, &event_manager, &active_provider, &connection_manager).await;
         }
     });
 }
@@ -528,7 +553,9 @@ pub async fn queue_download_file(
                 )
                     .into_response();
             }
-            match FileDownload::new(req.url.as_str(), req.filename.as_str(), download_cfg) {
+            let input_name = req.input_name.map(|s| std::sync::Arc::from(s.as_str()));
+            let priority = req.priority.unwrap_or(download_cfg.download_priority);
+            match FileDownload::new(req.url.as_str(), req.filename.as_str(), download_cfg, input_name, priority) {
                 Some(file_download) => {
                     info!(
                         "Queueing download {} ({}) from {}",
@@ -542,6 +569,8 @@ pub async fn queue_download_file(
                             download_cfg,
                             &app_state.downloads,
                             &app_state.event_manager,
+                            &app_state.active_provider,
+                            &app_state.connection_manager,
                         )
                         .await
                         {
@@ -613,7 +642,9 @@ pub async fn queue_recording_file(
 
     if let Some(video_cfg) = config.video.as_ref() {
         if let Some(download_cfg) = video_cfg.download.as_ref() {
-            match FileDownload::new_recording(req.url.as_str(), req.filename.as_str(), download_cfg, req.start_at, req.duration_secs) {
+            let input_name = req.input_name.map(|s| std::sync::Arc::from(s.as_str()));
+            let priority = req.priority.unwrap_or(download_cfg.recording_priority);
+            match FileDownload::new_recording(req.url.as_str(), req.filename.as_str(), download_cfg, req.start_at, req.duration_secs, input_name, priority) {
                 Some(recording) => {
                     app_state.downloads.scheduled.write().await.push(recording.clone());
                     let _ = app_state.downloads.persist_to_disk().await;
@@ -677,6 +708,8 @@ pub async fn resume_download(
                         download_cfg,
                         &app_state.downloads,
                         &app_state.event_manager,
+                        &app_state.active_provider,
+                        &app_state.connection_manager,
                     )
                     .await;
                 }
@@ -736,6 +769,8 @@ pub async fn retry_download(
                         download_cfg,
                         &app_state.downloads,
                         &app_state.event_manager,
+                        &app_state.active_provider,
+                        &app_state.connection_manager,
                     )
                     .await;
                 }
@@ -769,6 +804,8 @@ mod tests {
             start_at,
             duration_secs,
             kind,
+            input_name: None,
+            priority: 0,
         }
     }
 
@@ -818,6 +855,8 @@ mod tests {
             start_at: None,
             duration_secs: None,
             kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
         })));
         let snapshot = active_download_snapshot(&active).await;
         assert!(snapshot.is_some());

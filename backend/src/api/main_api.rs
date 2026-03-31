@@ -270,6 +270,8 @@ async fn create_shared_data(
             Arc::clone(app_config),
             Arc::clone(&app_state.downloads),
             Arc::clone(&app_state.event_manager),
+            Arc::clone(&app_state.active_provider),
+            Arc::clone(&app_state.connection_manager),
         );
 
         if !app_state.downloads.queue.lock().await.is_empty() || app_state.downloads.active.read().await.is_some() {
@@ -278,6 +280,8 @@ async fn create_shared_data(
                 download_cfg,
                 &app_state.downloads,
                 &app_state.event_manager,
+                &app_state.active_provider,
+                &app_state.connection_manager,
             )
                 .await
                 .map_err(|err| {
