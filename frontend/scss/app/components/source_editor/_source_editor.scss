@@ -37,6 +37,7 @@
       flex-flow: column;
       box-sizing: border-box;
       height: 100%;
+      min-height: 0;
       gap: var(--gap-small);
       transition: min-width 0.2s ease, max-width 0.2s ease, width 0.2s ease;
 
@@ -65,7 +66,15 @@
          display: flex;
          flex-flow: column;
          box-sizing: border-box;
+         flex: 1 1 auto;
+         min-height: 0;
          gap: var(--gap-large);
+         overflow-y: auto;
+         overflow-x: hidden;
+
+         .tp__collapse-panel {
+            flex-shrink: 0;
+         }
 
          &-group {
             display: flex;
