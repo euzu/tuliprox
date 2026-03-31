@@ -341,9 +341,48 @@
       "TEMPLATES": "Handlebars templates for Discord message bodies.",
       "URL": "Discord webhook URL for sending notification messages."
     },
+    "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
     "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
+    "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",
+    "MATCH_THRESHOLD": "Minimum similarity score (0-100) required for a candidate EPG match.",
+    "NAME_PREFIX": "Defines how channel prefixes are treated during normalization (ignore/prefix/suffix).",
+    "NAME_PREFIX_SEPARATOR": "List of characters used to split prefixes from channel names before matching.",
+    "NAME_PREFIX_VALUE": "Prefix/suffix text used by the Name Prefix mode.",
+    "NORMALIZE_REGEX": "Optional regex used to normalize channel names before matching.",
+    "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC').",
     "EPG_CONFIG": {
+      "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
+      "ENABLED": "Enables EPG smart matching. If disabled, no normalization/fuzzy matching rules are applied.",
+      "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",
+      "MATCH_THRESHOLD": "Minimum similarity score (0-100) required for a candidate EPG match.",
+      "NAME_PREFIX": "Defines how channel prefixes are treated during normalization (ignore/prefix/suffix).",
       "NAME_PREFIX_SEPARATOR": "List of characters (e.g. ':', '|') that separate channel prefixes from the main title during Smart Match.",
+      "NAME_PREFIX_VALUE": "Prefix/suffix text that should be removed or appended according to Name Prefix mode.",
+      "NORMALIZE_REGEX": "Optional regex used to normalize channel names before matching.",
+      "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
+    },
+    "EPG_SMART_MATCH_CONFIG": {
+      "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
+      "ENABLED": "Enables EPG smart matching. If disabled, no normalization/fuzzy matching rules are applied.",
+      "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",
+      "MATCH_THRESHOLD": "Minimum similarity score (0-100) required for a candidate EPG match.",
+      "NAME_PREFIX": "Defines how channel prefixes are treated during normalization (ignore/prefix/suffix).",
+      "NAME_PREFIX_SEPARATOR": "List of characters used to split prefixes from channel names before matching.",
+      "NAME_PREFIX_VALUE": "Prefix/suffix text used by the Name Prefix mode.",
+      "NORMALIZE_REGEX": "Optional regex used to normalize channel names before matching.",
+      "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
+    },
+    "EPG_SMART_MATCH_FORM": {
+      "NAME_PREFIX_MODE": "Defines how channel prefixes are treated during normalization (ignore/prefix/suffix)."
+    },
+    "EPG_SMART_MATCH_FORM_DATA": {
+      "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
+      "ENABLED": "Enables EPG smart matching. If disabled, no normalization/fuzzy matching rules are applied.",
+      "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",
+      "MATCH_THRESHOLD": "Minimum similarity score (0-100) required for a candidate EPG match.",
+      "NAME_PREFIX_SEPARATOR": "List of characters used to split prefixes from channel names before matching.",
+      "NAME_PREFIX_VALUE": "Prefix/suffix text used by the Name Prefix mode.",
+      "NORMALIZE_REGEX": "Optional regex used to normalize channel names before matching.",
       "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
     },
     "EPG_SOURCE": {
@@ -738,6 +777,7 @@
     "ADD_PROVIDER": "Add Provider",
     "ADD_QUALITY_TO_FILENAME": "Quality",
     "ADD_SERVER": "Add Server",
+    "ADD_STRIP_ENTRY": "Add Strip Entry",
     "ADD_TRAKT_LIST": "Add a Trakt list",
     "ADD_URL": "Add Url",
     "ADD_WATCH": "Add Watch",
@@ -863,6 +903,7 @@
     "EMPTY": "",
     "ENABLED": "Enabled",
     "EPG": "Epg",
+    "EDIT_EPG_SMART_MATCH": "Edit EPG Smart Match",
     "EPG_LOGO_OVERRIDE": "Logo Override",
     "ERROR": "Error",
     "EPG_REQUEST_TIMESHIFT": "Epg Request Timeshift",
@@ -1001,6 +1042,7 @@
     "MSG_KIND_WATCH": "Watch",
     "NAME": "Name",
     "NAME_PREFIX": "Name Prefix",
+    "NAME_PREFIX_VALUE": "Name Prefix Value",
     "NAME_PREFIX_SEPARATOR": "Name Prefix Separator",
     "NETWORK": "Network",
     "NEW_NAME": "New Name",
