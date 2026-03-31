@@ -364,9 +364,17 @@ fn create_cors_layer() -> tower_http::cors::CorsLayer {
 fn allow_response_compression(
     _status: axum::http::StatusCode,
     _version: axum::http::Version,
-    _headers: &axum::http::HeaderMap,
+    headers: &axum::http::HeaderMap,
     extensions: &axum::http::Extensions,
 ) -> bool {
+    if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
+        if let Ok(ct) = content_type.to_str() {
+        // Disable compression for wasm , WebKit browser dont like it.
+            if ct.starts_with("application/wasm") {
+                return false;
+            }
+        }
+    }
     crate::api::api_utils::should_compress_response_extensions(extensions)
 }
 

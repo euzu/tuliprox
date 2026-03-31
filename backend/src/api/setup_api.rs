@@ -39,7 +39,7 @@ use std::{
     },
 };
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tower_http::services::ServeDir;
+use tower_http::{compression::predicate::{DefaultPredicate, Predicate}, services::ServeDir};
 use shared::utils::DEFAULT_CUSTOM_STREAM_RESPONSE_PATH;
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
@@ -869,8 +869,29 @@ fn create_cors_layer() -> tower_http::cors::CorsLayer {
         .max_age(std::time::Duration::from_secs(3600))
 }
 
-fn create_compression_layer() -> tower_http::compression::CompressionLayer {
-    tower_http::compression::CompressionLayer::new().br(true).deflate(true).gzip(true).zstd(true)
+fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
+    let predicate = DefaultPredicate::new().and(|
+        _status: axum::http::StatusCode,
+        _version: axum::http::Version,
+        headers: &axum::http::HeaderMap,
+        _extensions: &axum::http::Extensions,
+    | {
+        if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
+            if let Ok(ct) = content_type.to_str() {
+                    // Disable compression for wasm , WebKit browser dont like it.
+                if ct.starts_with("application/wasm") {
+                    return false;
+                }
+            }
+        }
+        true
+    });
+    tower_http::compression::CompressionLayer::new()
+        .br(true)
+        .deflate(true)
+        .gzip(true)
+        .zstd(true)
+        .compress_when(predicate)
 }
 
 pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -> Result<(), TuliproxError> {
