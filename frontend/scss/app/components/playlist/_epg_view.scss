@@ -19,6 +19,9 @@ $epg-border-size: 4px;
     overflow-y: auto;
     position: relative;
     min-height: 0;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x pan-y;
+    overscroll-behavior: contain;
   }
 
   &__channels-header,

@@ -19,7 +19,6 @@ fn create_brick(
 ) -> Html {
     let block_type = *t;
     let handle_touch_end = Callback::from(move |e: TouchEvent| {
-        e.prevent_default();
         e.stop_propagation();
         on_add_block.emit(block_type);
     });

@@ -243,6 +243,7 @@ body {
   --theme-brand-positive-title: var(--theme-palette-success-tone-500);
 
   --theme-brand-warning: var(--theme-palette-warning-tone-420);
+  --theme-brand-warning-background: var(--theme-palette-warning-tone-background);
   --theme-brand-warning-strong: var(--theme-palette-warning-tone-520);
   --theme-brand-warning-base: var(--theme-palette-warning-tone-500);
   --theme-brand-danger: var(--theme-palette-danger-tone-520);
@@ -558,6 +559,7 @@ body {
 
   --attention-color: var(--theme-brand-danger);
   --warn-color: var(--theme-brand-warning);
+  --warn-background-color: var(--theme-brand-warning-background);
   --active-color: var(--theme-brand-active);
   --ok-color: var(--theme-brand-positive);
   --output-xtream-color: var(--theme-brand-info);

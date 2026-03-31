@@ -43,7 +43,7 @@
   &__credits-chip {
     color: var(--warn-color);
     border-color: var(--warn-color);
-    background: color-mix(in srgb, var(--warn-color) 18%, transparent);
+    background: var(--warn-background-color);
   }
 
   &__toggle {

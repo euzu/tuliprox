@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use shared::utils::CONSTANTS;
 use regex::Regex;
 use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
+use shared::utils::{default_epg_name_prefix_separator, default_epg_strip, CONSTANTS};
 use crate::model::macros;
 
 #[derive(Debug, Clone)]
@@ -28,15 +28,20 @@ impl From<&EpgSmartMatchConfigDto> for EpgSmartMatchConfig {
                 }),
                 None => CONSTANTS.re_epg_normalize.clone(),
             },
-            strip: match &dto.strip {
-                Some(list) => list.iter().map(|s| s.to_lowercase()).collect(),
-                None => ["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw", "full hd"].iter().map(std::string::ToString::to_string).collect(),
-            },
+            strip: dto
+                .strip
+                .clone()
+                .or_else(default_epg_strip)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| item.to_lowercase())
+                .collect(),
             name_prefix: dto.name_prefix.clone(),
-            name_prefix_separator: match &dto.name_prefix_separator {
-                None => vec![':', '|', '-'],
-                Some(list) => list.clone(),
-            },
+            name_prefix_separator: dto
+                .name_prefix_separator
+                .clone()
+                .or_else(default_epg_name_prefix_separator)
+                .unwrap_or_default(),
             fuzzy_matching: dto.fuzzy_matching,
             match_threshold: dto.match_threshold,
             best_match_threshold: dto.best_match_threshold,

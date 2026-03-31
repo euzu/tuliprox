@@ -23,5 +23,8 @@
     box-sizing: border-box;
     overflow-y: auto;
     width: 100%;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+    overscroll-behavior: contain;
   }
 }
