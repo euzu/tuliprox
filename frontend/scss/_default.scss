@@ -78,8 +78,6 @@ option {
   display: block;
   pointer-events: none;
   width: 1rem;
-  height: 1rem;
-  line-height: 0;
 }
 
 ul {
@@ -145,4 +143,9 @@ li {
       border-radius: 50%;
     }
   }
+}
+
+::selection {
+  background-color: #0078d4;
+  color: #ffffff;
 }

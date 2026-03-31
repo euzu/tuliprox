@@ -1051,7 +1051,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             if !can_write_sources {
                 return;
             }
-            e.prevent_default();
             e.stop_propagation();
 
             if editor_state_ref.borrow().pending_line.is_some() {
@@ -1201,7 +1200,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         move_connections.insert((conn.from, conn.to), (conn.from, conn.to));
                     }
                 }
-                let document = window().and_then(|w| w.document());
+                let update_delete_circles = !editor_state.is_panning;
+                let document = if update_delete_circles { window().and_then(|w| w.document()) } else { None };
                 for (from, to) in move_connections.values() {
                     if let Some(path_el) = editor_state.connection_elements.get(&(*from, *to)) {
                         if let (Some(from_block), Some(to_block)) =
@@ -1210,12 +1210,15 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             let (d, (fx, fy, tx, ty)) =
                                 update_connection(canvas_ox, canvas_oy, zoom_factor, from_block, to_block);
                             let _ = path_el.set_attribute("d", &d);
-                            if let Some(doc) = &document {
-                                if let Some(circle_el) = doc.get_element_by_id(&format!("conn-del-{}-{}", from, to)) {
-                                    let mid_x = (fx + tx) / 2.0;
-                                    let mid_y = (fy + ty) / 2.0;
-                                    let _ = circle_el.set_attribute("cx", &mid_x.to_string());
-                                    let _ = circle_el.set_attribute("cy", &mid_y.to_string());
+                            if update_delete_circles {
+                                if let Some(doc) = &document {
+                                    if let Some(circle_el) = doc.get_element_by_id(&format!("conn-del-{}-{}", from, to))
+                                    {
+                                        let mid_x = (fx + tx) / 2.0;
+                                        let mid_y = (fy + ty) / 2.0;
+                                        let _ = circle_el.set_attribute("cx", &mid_x.to_string());
+                                        let _ = circle_el.set_attribute("cy", &mid_y.to_string());
+                                    }
                                 }
                             }
                         }
@@ -1422,7 +1425,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         Callback::from(move |e: TouchEvent| {
             if e.touches().length() == 2 {
                 if let (Some(first), Some(second)) = (e.touches().item(0), e.touches().item(1)) {
-                    e.prevent_default();
                     e.stop_propagation();
                     let dx = second.client_x() as f32 - first.client_x() as f32;
                     let dy = second.client_y() as f32 - first.client_y() as f32;
@@ -1442,7 +1444,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     let tag = target.tag_name().to_lowercase();
                     if target.is_same_node(Some(&canvas)) || tag == "svg" {
                         if let Some(touch) = e.touches().item(0) {
-                            e.prevent_default();
                             e.stop_propagation();
                             let mut editor_state = editor_state_ref.borrow_mut();
                             editor_state.selection.reset_selection();
@@ -1475,7 +1476,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 if let (Some(first), Some(second), Some(canvas)) =
                     (e.touches().item(0), e.touches().item(1), canvas_ref.cast::<HtmlElement>())
                 {
-                    e.prevent_default();
                     e.stop_propagation();
                     let rect = canvas.get_bounding_client_rect();
                     let mid_x = ((first.client_x() + second.client_x()) as f32 / 2.0) - rect.left() as f32;
@@ -1512,7 +1512,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     )
                 };
                 if is_panning {
-                    e.prevent_default();
                     e.stop_propagation();
 
                     let initial_positions: Vec<(BlockId, Position)> =
@@ -1530,7 +1529,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
                     move_blocks.emit((0.0, 0.0, (0.0, 0.0), initial_positions));
                 } else if let Some(block_id) = drag_block_id {
-                    e.prevent_default();
                     e.stop_propagation();
 
                     if let Some(canvas) = canvas_ref.cast::<HtmlElement>() {
@@ -1966,7 +1964,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     {
                         <g>
                             <path id={format!("conn-{}-{}", c.from, c.to)} d={d} stroke={connection_color} fill="transparent" stroke-width="2"/>
-                            { if *delete_mode {
+                            { if *delete_mode && !editor_state.is_panning {
                                 let mid_x = (from_x + to_x) / 2.0;
                                 let mid_y = (from_y + to_y) / 2.0;
                                 let on_delete_connection = handle_delete_connection.clone();

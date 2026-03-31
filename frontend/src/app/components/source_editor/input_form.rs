@@ -2,8 +2,9 @@ use crate::{
     app::{
         components::{
             config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId,
-            BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSourceItemForm, IconButton, Panel,
-            ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard, ToolAction,
+            BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSmartMatchForm, EpgSourceItemForm,
+            IconButton, Panel, ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard,
+            ToolAction,
         },
         ConfigContext,
     },
@@ -19,8 +20,8 @@ use shared::{
     error::TuliproxError,
     info_err_res,
     model::{
-        ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, EpgConfigDto,
-        EpgSourceDto, InputFetchMethod, InputType, StagedInputDto, XtreamLoginRequest,
+        ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto,
+        EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, StagedInputDto, XtreamLoginRequest,
     },
 };
 use std::{
@@ -74,17 +75,19 @@ const LABEL_STAGED: &str = "LABEL.STAGED";
 const LABEL_LIVE_SOURCE: &str = "LABEL.LIVE_SOURCE";
 const LABEL_VOD_SOURCE: &str = "LABEL.VOD_SOURCE";
 const LABEL_SERIES_SOURCE: &str = "LABEL.SERIES_SOURCE";
-const LABEL_ADVANCED: &str = "LABEL.ADVANCED";
+const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
 const LABEL_PROVIDER: &str = "LABEL.PROVIDER";
 const LABEL_LIVE_STREAMS: &str = "LABEL.LIVE_STREAMS";
+const LABEL_EPG_SMART_MATCH: &str = "LABEL.EPG_SMART_MATCH";
+const LABEL_EDIT_EPG_SMART_MATCH: &str = "LABEL.EDIT_EPG_SMART_MATCH";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
     Main,
     Options,
     Staged,
-    Advanced,
+    Epg,
     Alias,
     Provider,
 }
@@ -93,7 +96,7 @@ impl InputFormPage {
     const MAIN: &str = "Main";
     const OPTIONS: &str = "Options";
     const STAGED: &str = "Staged";
-    const ADVANCED: &str = "Advanced";
+    const EPG: &str = "Epg";
     const ALIAS: &str = "Alias";
     const PROVIDER: &str = "Provider";
 }
@@ -106,7 +109,7 @@ impl FromStr for InputFormPage {
             Self::MAIN => Ok(InputFormPage::Main),
             Self::OPTIONS => Ok(InputFormPage::Options),
             Self::STAGED => Ok(InputFormPage::Staged),
-            Self::ADVANCED => Ok(InputFormPage::Advanced),
+            Self::EPG => Ok(InputFormPage::Epg),
             Self::ALIAS => Ok(InputFormPage::Alias),
             Self::PROVIDER => Ok(InputFormPage::Provider),
             _ => info_err_res!("Unknown input form page: {s}"),
@@ -123,7 +126,7 @@ impl Display for InputFormPage {
                 InputFormPage::Main => Self::MAIN,
                 InputFormPage::Options => Self::OPTIONS,
                 InputFormPage::Staged => Self::STAGED,
-                InputFormPage::Advanced => Self::ADVANCED,
+                InputFormPage::Epg => Self::EPG,
                 InputFormPage::Alias => Self::ALIAS,
                 InputFormPage::Provider => Self::PROVIDER,
             }
@@ -265,6 +268,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let providers_state = use_state(Vec::<ConfigProviderDto>::new);
     let providers_dirty_state = use_state(|| false);
 
+    let epg_smart_match_state = use_state(|| None::<EpgSmartMatchConfigDto>);
+    let show_smart_match_form_state = use_state(|| false);
+
     // State for showing item forms
     let show_epg_form_state = use_state(|| false);
     let show_alias_form_state = use_state(|| false);
@@ -294,6 +300,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let input_options_state = input_options_state.clone();
         let staged_input_state = staged_input_state.clone();
         let epg_sources_state = epg_sources_state.clone();
+        let epg_smart_match_state = epg_smart_match_state.clone();
         let aliases_state = aliases_state.clone();
         let headers_state = headers_state.clone();
         let providers_state = providers_state.clone();
@@ -307,8 +314,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 .and_then(|cfg| cfg.sources.provider.clone())
                 .unwrap_or_default();
             if let Some(input) = cfg {
-                if input.input_type.is_library()
-                    && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Advanced)
+                if input.input_type.is_library() && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Epg)
                 {
                     view_visible.set(InputFormPage::Main);
                 }
@@ -328,6 +334,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
                 // Load EPG sources
                 epg_sources_state.set(input.epg.as_ref().and_then(|epg| epg.sources.clone()).unwrap_or_default());
+
+                // Load EPG smart match
+                epg_smart_match_state.set(input.epg.as_ref().and_then(|epg| epg.smart_match.clone()));
 
                 // Load aliases
                 aliases_state.set(input.aliases.clone().unwrap_or_default());
@@ -358,6 +367,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 staged_input_state.dispatch(StagedInputFormAction::SetAll(StagedInputDto::default()));
                 headers_state.set(HashMap::new());
                 epg_sources_state.set(Vec::new());
+                epg_smart_match_state.set(None);
                 aliases_state.set(Vec::new());
                 providers_state.set(Vec::new());
                 providers_dirty_state.set(false);
@@ -544,6 +554,43 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         })
     };
 
+    let handle_submit_smart_match = {
+        let epg_smart_match_state = epg_smart_match_state.clone();
+        let show_smart_match_form = show_smart_match_form_state.clone();
+        Callback::from(move |cfg: EpgSmartMatchConfigDto| {
+            epg_smart_match_state.set(Some(cfg));
+            show_smart_match_form.set(false);
+        })
+    };
+
+    let handle_close_smart_match_form = {
+        let show_smart_match_form = show_smart_match_form_state.clone();
+        Callback::from(move |_| show_smart_match_form.set(false))
+    };
+
+    let handle_show_smart_match_form = {
+        let show_smart_match_form = show_smart_match_form_state.clone();
+        Callback::from(move |_: String| show_smart_match_form.set(true))
+    };
+
+    let handle_edit_smart_match = {
+        let show_smart_match_form = show_smart_match_form_state.clone();
+        Callback::from(move |(_, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            show_smart_match_form.set(true);
+        })
+    };
+
+    let handle_remove_smart_match = {
+        let epg_smart_match_state = epg_smart_match_state.clone();
+        Callback::from(move |(_, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            epg_smart_match_state.set(None);
+        })
+    };
+
     let handle_add_provider_item = {
         let providers = providers_state.clone();
         let providers_dirty_state = providers_dirty_state.clone();
@@ -626,6 +673,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let xtream_input = input_form_state.form.input_type.is_xtream();
 
     let render_options = || {
+        let headers = headers_state.clone();
         if !props.allow_write {
             return html! {
                 <Card class="tp__config-view__card">
@@ -670,6 +718,20 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <TitledCard title={translate.t(LABEL_METADATA)}>
                   { config_field_bool!(input_options_state.form, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb) }
                 </TitledCard>
+                { config_field_child!(translate.t(LABEL_HEADERS), "INPUT_FORM.HEADERS", {
+                    let headers_set = headers.clone();
+                    html! {
+                        <KeyValueEditor
+                            entries={(*headers).clone()}
+                            readonly={!props.allow_write}
+                            key_placeholder={translate.t("LABEL.HEADER_NAME")}
+                            value_placeholder={translate.t("LABEL.HEADER_VALUE")}
+                            on_change={Callback::from(move |new_headers: HashMap<String, String>| {
+                                headers_set.set(new_headers);
+                            })}
+                        />
+                    }
+                })}
                 </Card>
             };
         }
@@ -716,6 +778,20 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <TitledCard title={translate.t(LABEL_METADATA)}>
               { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb, ConfigInputOptionsFormAction::ResolveTmdb) }
             </TitledCard>
+            { config_field_child!(translate.t(LABEL_HEADERS), "INPUT_FORM.HEADERS", {
+                let headers_set = headers.clone();
+                html! {
+                    <KeyValueEditor
+                        entries={(*headers).clone()}
+                        readonly={!props.allow_write}
+                        key_placeholder={translate.t("LABEL.HEADER_NAME")}
+                        value_placeholder={translate.t("LABEL.HEADER_VALUE")}
+                        on_change={Callback::from(move |new_headers: HashMap<String, String>| {
+                            headers_set.set(new_headers);
+                        })}
+                    />
+                }
+            })}
             </Card>
         }
     };
@@ -731,14 +807,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let live_source_options = cluster_source_options(staged_input_state.form.live_source);
         let vod_source_options = cluster_source_options(staged_input_state.form.vod_source);
         let series_source_options = cluster_source_options(staged_input_state.form.series_source);
+        let staged_is_xtream = staged_input_state.form.input_type.is_xtream();
         if !props.allow_write {
             return html! {
                 <Card class="tp__config-view__card">
                     { config_field_bool!(staged_input_state.form, translate.t(LABEL_ENABLED), enabled) }
                     { config_field!(staged_input_state.form, translate.t(LABEL_URL), url) }
                     <div class="tp__config-view__cols-2">
+                    { html_if!(staged_is_xtream, {
+                        <>
                     { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
                     { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
+                        </>
+                    })}
                     { config_field_custom!(translate.t(LABEL_FETCH_METHOD), staged_input_state.form.method.to_string()) }
                     { config_field_custom!(translate.t(LABEL_INPUT_TYPE), staged_input_state.form.input_type.to_string()) }
                     </div>
@@ -759,8 +840,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
                 { edit_field_text!(staged_input_state, translate.t(LABEL_URL),  url, StagedInputFormAction::Url) }
                 <div class="tp__config-view__cols-2">
+                { html_if!(staged_is_xtream, {
+                  <>
                 { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
                 { edit_field_text_option!(staged_input_state, translate.t(LABEL_PASSWORD), password, StagedInputFormAction::Password, true) }
+                  </>
+                })}
                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
 
                    html! {
@@ -1176,10 +1261,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
-    let render_advanced = || {
-        let headers = headers_state.clone();
+    let render_epg = || {
         let epg_sources = epg_sources_state.clone();
+        let epg_smart_match = epg_smart_match_state.clone();
         let show_epg_form = show_epg_form_state.clone();
+        let show_smart_match_form = show_smart_match_form_state.clone();
         let edit_epg_source = edit_epg_source.clone();
 
         html! {
@@ -1191,23 +1277,14 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         initial={(*edit_epg_source).clone()}
                         readonly={!props.allow_write}
                     />
+               } else if *show_smart_match_form {
+                    <EpgSmartMatchForm
+                        on_submit={handle_submit_smart_match}
+                        on_cancel={handle_close_smart_match_form}
+                        initial={(*epg_smart_match).clone()}
+                        readonly={!props.allow_write}
+                    />
                } else  {
-                  // Headers Section
-                  { config_field_child!(translate.t(LABEL_HEADERS), "INPUT_FORM.HEADERS", {
-                      let headers_set = headers.clone();
-                      html! {
-                        <KeyValueEditor
-                            entries={(*headers).clone()}
-                            readonly={!props.allow_write}
-                            key_placeholder={translate.t("LABEL.HEADER_NAME")}
-                           value_placeholder={translate.t("LABEL.HEADER_VALUE")}
-                            on_change={Callback::from(move |new_headers: HashMap<String, String>| {
-                                headers_set.set(new_headers);
-                            })}
-                        />
-                      }
-                  })}
-
                   // EPG Sources Section
                   { config_field_child!(translate.t(LABEL_EPG_SOURCES), "INPUT_FORM.EPG_SOURCES", {
                       let epg_sources_list = epg_sources.clone();
@@ -1258,6 +1335,67 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         </div>
                       }
                   })
+                  }
+
+                  // EPG Smart Match Section
+                  { config_field_child!(translate.t(LABEL_EPG_SMART_MATCH), "INPUT_FORM.EPG_SMART_MATCH", {
+                      let smart_match = epg_smart_match.clone();
+                      let smart_match_entry = (*smart_match).clone();
+
+                      html! {
+                        <div class="tp__form-list">
+                            if let Some(cfg) = smart_match_entry {
+                                <div class="tp__form-list__items">
+                                    <div class="tp__form-list__item" key={"epg-smart-match"}>
+                                        <div class="tp__form-list__item-toolbar">
+                                            <IconButton
+                                                name={"edit_smart_match"}
+                                                icon="Edit"
+                                                onclick={handle_edit_smart_match.clone()}
+                                            />
+                                            if props.allow_write {
+                                                <IconButton
+                                                    name={"remove_smart_match"}
+                                                    icon="Delete"
+                                                    onclick={handle_remove_smart_match.clone()}
+                                                />
+                                            }
+                                        </div>
+                                        <div class="tp__form-list__item-content">
+                                            <span>
+                                                {if cfg.enabled { "enabled" } else { "disabled" }}
+                                                {" | "}
+                                                {if cfg.fuzzy_matching { "fuzzy" } else { "exact" }}
+                                                {" | "}
+                                                {cfg.match_threshold}
+                                                {" / "}
+                                                {cfg.best_match_threshold}
+                                                {"%"}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            }
+                            if props.allow_write {
+                                <div class="tp__form-list__toolbar">
+                                    <TextButton
+                                        class="primary"
+                                        name="edit_epg_smart_match"
+                                        icon={if (*smart_match).is_some() { "Edit" } else { "Add" }}
+                                        title={
+                                            if (*smart_match).is_some() {
+                                                translate.t(LABEL_EDIT_EPG_SMART_MATCH)
+                                            } else {
+                                                translate.t(LABEL_EPG_SMART_MATCH)
+                                            }
+                                        }
+                                        onclick={handle_show_smart_match_form.clone()}
+                                    />
+                                </div>
+                            }
+                        </div>
+                      }
+                  })
                }}
               </Card>
         }
@@ -1272,6 +1410,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let staged_input_state = staged_input_state.clone();
         let headers_state = headers_state.clone();
         let epg_sources_state = epg_sources_state.clone();
+        let epg_smart_match_state = epg_smart_match_state.clone();
         let aliases_state = aliases_state.clone();
         let providers_state = providers_state.clone();
         let providers_dirty_state = providers_dirty_state.clone();
@@ -1288,15 +1427,18 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             // Handle Headers
             input.headers = (*headers_state).clone();
 
-            // Handle EPG: update sources but preserve other fields if present
+            // Handle EPG: update sources and smart_match
             let epg_sources = (*epg_sources_state).clone();
-            if let Some(mut epg_cfg) = input.epg.take() {
-                epg_cfg.sources = if epg_sources.is_empty() { None } else { Some(epg_sources) };
-                input.epg =
-                    if epg_cfg.sources.is_some() || epg_cfg.smart_match.is_some() { Some(epg_cfg) } else { None };
-            } else if !epg_sources.is_empty() {
-                input.epg = Some(EpgConfigDto { sources: Some(epg_sources), ..EpgConfigDto::default() });
-            }
+            let smart_match = (*epg_smart_match_state).clone();
+            let sources_opt = if epg_sources.is_empty() { None } else { Some(epg_sources) };
+            input.epg = if sources_opt.is_some() || smart_match.is_some() {
+                let mut epg_cfg = input.epg.take().unwrap_or_default();
+                epg_cfg.sources = sources_opt;
+                epg_cfg.smart_match = smart_match;
+                Some(epg_cfg)
+            } else {
+                None
+            };
 
             // Handle Aliases
             let aliases = (*aliases_state).clone();
@@ -1351,8 +1493,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                   <Panel value={InputFormPage::Provider.to_string()} active={view_visible.to_string()}>
                    {render_provider()}
                    </Panel>
-                  <Panel value={InputFormPage::Advanced.to_string()} active={view_visible.to_string()}>
-                   {render_advanced()}
+                  <Panel value={InputFormPage::Epg.to_string()} active={view_visible.to_string()}>
+                   {render_epg()}
                   </Panel>
                   <Panel value={InputFormPage::Staged.to_string()} active={view_visible.to_string()}>
                    {render_staged()}
@@ -1364,7 +1506,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
-    let button_disabled = *show_alias_form_state || *show_epg_form_state || *show_provider_form_state;
+    let button_disabled =
+        *show_alias_form_state || *show_epg_form_state || *show_provider_form_state || *show_smart_match_form_state;
 
     let render_sidebar = || {
         html! {
@@ -1376,7 +1519,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             { html_if!(!library_input, {
                 <>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Advanced, if *view_visible == InputFormPage::Advanced { " active" } else {""})}  icon="Advanced" hint={translate.t(LABEL_ADVANCED)} name={InputFormPage::Advanced.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Epg, if *view_visible == InputFormPage::Epg { " active" } else {""})}  icon="Epg" hint={translate.t(LABEL_EPG)} name={InputFormPage::Epg.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Provider, if *view_visible == InputFormPage::Provider { " active" } else {""})}  icon="Dns" hint={translate.t(LABEL_PROVIDER)} name={InputFormPage::Provider.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>
                 </>

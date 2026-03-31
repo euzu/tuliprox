@@ -2,8 +2,10 @@ use crate::{
     error::TuliproxError,
     info_err,
     utils::{
-        default_epg_best_match_threshold, default_epg_match_threshold, is_blank_optional_string,
-        is_default_epg_best_match_threshold, is_default_epg_match_threshold, is_false,
+        default_epg_best_match_threshold, default_epg_match_threshold, default_epg_name_prefix_separator,
+        default_epg_normalize_regex, default_epg_strip, is_default_epg_best_match_threshold,
+        is_default_epg_match_threshold, is_default_epg_name_prefix_separator, is_default_epg_normalize_regex,
+        is_default_epg_strip, is_false,
     },
 };
 use log::warn;
@@ -39,13 +41,16 @@ impl Display for EpgNamePrefix {
 pub struct EpgSmartMatchConfigDto {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default = "default_epg_normalize_regex", skip_serializing_if = "is_default_epg_normalize_regex")]
     pub normalize_regex: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default = "default_epg_strip", skip_serializing_if = "is_default_epg_strip")]
     pub strip: Option<Vec<String>>,
     #[serde(default)]
     pub name_prefix: EpgNamePrefix,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_epg_name_prefix_separator",
+        skip_serializing_if = "is_default_epg_name_prefix_separator"
+    )]
     pub name_prefix_separator: Option<Vec<char>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fuzzy_matching: bool,
@@ -58,10 +63,10 @@ impl Default for EpgSmartMatchConfigDto {
     fn default() -> Self {
         EpgSmartMatchConfigDto {
             enabled: false,
-            normalize_regex: None,
-            strip: None,
+            normalize_regex: default_epg_normalize_regex(),
+            strip: default_epg_strip(),
             name_prefix: EpgNamePrefix::default(),
-            name_prefix_separator: None,
+            name_prefix_separator: default_epg_name_prefix_separator(),
             fuzzy_matching: false,
             match_threshold: default_epg_match_threshold(),
             best_match_threshold: default_epg_best_match_threshold(),
@@ -99,6 +104,16 @@ impl EpgSmartMatchConfigDto {
             || self.best_match_threshold < self.match_threshold
         {
             self.best_match_threshold = 99;
+        }
+        if self.normalize_regex.as_ref().is_none_or(|value| value.trim().is_empty()) {
+            self.normalize_regex = default_epg_normalize_regex();
+        }
+
+        if self.strip.is_none() {
+            self.strip = default_epg_strip();
+        }
+        if self.name_prefix_separator.is_none() {
+            self.name_prefix_separator = default_epg_name_prefix_separator();
         }
 
         if let Some(regstr) = self.normalize_regex.as_ref() {

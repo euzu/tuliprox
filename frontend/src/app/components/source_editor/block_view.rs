@@ -4,7 +4,11 @@ use crate::{
     i18n::use_translation,
 };
 use web_sys::{HtmlElement, MouseEvent, TouchEvent};
-use yew::{classes, component, html, use_effect_with, use_node_ref, Callback, Html, Properties, TargetCast};
+use yew::{
+    classes, component, html, use_effect_with, use_mut_ref, use_node_ref, Callback, Html, Properties, TargetCast,
+};
+
+const DOUBLE_TAP_THRESHOLD_MS: f64 = 320.0;
 #[derive(Properties, PartialEq)]
 pub struct BlockProps {
     pub(crate) block: Block,
@@ -68,7 +72,6 @@ pub fn BlockView(props: &BlockProps) -> Html {
     let handle_touch_start = {
         let on_block_touch_start = props.on_touch_start.clone();
         Callback::from(move |e: TouchEvent| {
-            e.prevent_default();
             if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
                 let tag = target.tag_name().to_lowercase();
                 if &tag == "span" {
@@ -77,6 +80,30 @@ pub fn BlockView(props: &BlockProps) -> Html {
             }
             e.stop_propagation();
             on_block_touch_start.emit((block_id, e))
+        })
+    };
+    let last_touch_end_ts = use_mut_ref(|| None::<f64>);
+    let handle_touch_end = {
+        let on_edit = props.on_edit.clone();
+        let last_touch_end_ts = last_touch_end_ts.clone();
+        Callback::from(move |e: TouchEvent| {
+            if let Some(target) = e.target_dyn_into::<web_sys::Element>() {
+                let tag = target.tag_name().to_lowercase();
+                if &tag == "span" {
+                    return;
+                }
+            }
+
+            let now = web_sys::js_sys::Date::now();
+            let mut last_touch_end_ts = last_touch_end_ts.borrow_mut();
+            if let Some(prev) = *last_touch_end_ts {
+                if now - prev <= DOUBLE_TAP_THRESHOLD_MS {
+                    *last_touch_end_ts = None;
+                    on_edit.emit(block_id);
+                    return;
+                }
+            }
+            *last_touch_end_ts = Some(now);
         })
     };
     {
@@ -130,7 +157,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                     })
                 }
             </div>
-            <div class={if is_batch { "tp__source-editor__block-content  tp__source-editor__block-batch" } else { "tp__source-editor__block-content" }} onmousedown={handle_mouse_down} ontouchstart={handle_touch_start} ondblclick={handle_edit}>
+            <div class={if is_batch { "tp__source-editor__block-content  tp__source-editor__block-batch" } else { "tp__source-editor__block-content" }} onmousedown={handle_mouse_down} ontouchstart={handle_touch_start} ontouchend={handle_touch_end} ondblclick={handle_edit}>
                 <div class={"tp__source-editor__block-content-body"}>
                     <div class="tp__source-editor__block-label">
                         { title }
