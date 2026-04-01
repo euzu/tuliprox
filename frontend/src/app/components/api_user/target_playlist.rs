@@ -235,31 +235,29 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
             let handler = handle_selection_change.clone();
             let current_filter = *filter_state.get(&cluster).unwrap_or(&FilterState::All);
 
+            let is_visible = |cat: &str| {
+                let selected = *selections.get(cat).unwrap_or(&false);
+                let filter_ok = match current_filter {
+                    FilterState::All => true,
+                    FilterState::Selected => selected,
+                    FilterState::Deselected => !selected,
+                };
+                let search_ok = match &*search_filter {
+                    SearchRequest::Clear => true,
+                    SearchRequest::Text(pattern, _) => {
+                        let lc = pattern.to_lowercase();
+                        cat.to_lowercase().contains(&lc)
+                    }
+                    SearchRequest::Regexp(pattern, _) => {
+                        shared::model::REGEX_CACHE.get_or_compile(pattern).is_ok_and(|re| re.is_match(cat))
+                    }
+                };
+                filter_ok && search_ok
+            };
+
             // Only the items that are currently visible (FilterState + search) should be
             // affected by Select All / Deselect All.
-            let visible_cats: Vec<String> = c
-                .iter()
-                .filter(|cat| {
-                    let selected = *selections.get(*cat).unwrap_or(&false);
-                    let filter_ok = match current_filter {
-                        FilterState::All => true,
-                        FilterState::Selected => selected,
-                        FilterState::Deselected => !selected,
-                    };
-                    let search_ok = match &*search_filter {
-                        SearchRequest::Clear => true,
-                        SearchRequest::Text(pattern, _) => {
-                            let lc = pattern.to_lowercase();
-                            cat.to_lowercase().contains(&lc)
-                        }
-                        SearchRequest::Regexp(pattern, _) => {
-                            shared::model::REGEX_CACHE.get_or_compile(pattern).is_ok_and(|re| re.is_match(cat))
-                        }
-                    };
-                    filter_ok && search_ok
-                })
-                .cloned()
-                .collect();
+            let visible_cats: Vec<String> = c.iter().filter(|cat| is_visible(cat)).cloned().collect();
 
             let total = c.len();
             let selected_count = c.iter().filter(|cat| *selections.get(*cat).unwrap_or(&false)).count();
@@ -339,27 +337,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                        collapse_state.set(collapse_map);
                   })}>
                     <div class="tp__api-user-target-playlist__categories">
-                        { for c.iter().filter(|cat| {
-                            let selected = *selections.get(*cat).unwrap_or(&false);
-                            let filter_ok = match current_filter {
-                                FilterState::All => true,
-                                FilterState::Selected => selected,
-                                FilterState::Deselected => !selected,
-                            };
-                            let search_ok = match &*search_filter {
-                                SearchRequest::Clear => true,
-                                SearchRequest::Text(pattern, _) => {
-                                    let lc = pattern.to_lowercase();
-                                    cat.to_lowercase().contains(&lc)
-                                }
-                                SearchRequest::Regexp(pattern, _) => {
-                                    shared::model::REGEX_CACHE
-                                        .get_or_compile(pattern)
-                                        .is_ok_and(|re| re.is_match(cat))
-                                }
-                            };
-                            filter_ok && search_ok
-                        }).map(|cat| {
+                        { for c.iter().filter(|cat| is_visible(cat)).map(|cat| {
                             let selected = *selections.get(cat).unwrap_or(&false);
                             html! {
                             <div key={cat.clone()} data-cluster={cluster.to_string()} data-category={cat.clone()} class={classes!("tp__api-user-target-playlist__categories-category", if selected {"selected"} else {""})}
