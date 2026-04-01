@@ -4,7 +4,7 @@ use std::path::Path;
 
 use lz4_flex::frame::FrameDecoder;
 
-use crate::repository::stream_history::file::{
+use crate::repository::stream_history::storage::{
     read_and_verify_file_magic, read_and_verify_block_magic, read_framed,
     deserialize_named, FileHeaderBody, BlockHeaderBody, StreamHistoryRecord,
     BLOCK_MAGIC, MAX_BLOCK_PAYLOAD_SIZE,
@@ -269,7 +269,7 @@ impl<R: Read> Iterator for StreamHistoryFileReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::stream_history::file::*;
+    use crate::repository::stream_history::storage::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -499,9 +499,9 @@ mod tests {
         // Should finish without panicking (even though it won't yield any records)
         let results: Vec<_> = reader.collect();
 
-        // All results will be errors because the file is truncated
-        // But we should have finished without OOM or panic
-        assert!(!results.is_empty() || results.iter().all(|r| r.is_err()));
+        // The iterator may be empty after graceful recovery, but it must never yield
+        // a successfully decoded record from this corrupt truncated payload.
+        assert!(results.iter().all(|r| r.is_err()));
     }
 
     // Additional test for lz4 archive round-trip:

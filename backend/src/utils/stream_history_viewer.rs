@@ -91,7 +91,26 @@ pub(crate) fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange
     }
 }
 
-const NUMERIC_FIELDS: &[&str] = &["session_id"];
+const NUMERIC_FIELDS: &[&str] = &["session_id", "virtual_id", "provider_id", "target_id"];
+const STRING_FIELDS: &[&str] = &[
+    "event_type",
+    "api_username",
+    "provider_name",
+    "provider_username",
+    "item_type",
+    "title",
+    "group",
+    "country",
+    "source_addr",
+    "disconnect_reason",
+    "user_agent",
+    "cluster",
+    "container",
+    "video_codec",
+    "audio_codec",
+    "resolution",
+    "shared",
+];
 
 enum FilterValue {
     Exact(String),
@@ -107,6 +126,9 @@ impl CompiledFilter {
     pub(crate) fn compile(raw: &HashMap<String, String>) -> Result<Self, String> {
         let mut fields = Vec::with_capacity(raw.len());
         for (key, value) in raw {
+            if !STRING_FIELDS.contains(&key.as_str()) && !NUMERIC_FIELDS.contains(&key.as_str()) {
+                return Err(format!("Unknown filter field: '{key}'"));
+            }
             let filter_value = if NUMERIC_FIELDS.contains(&key.as_str()) {
                 let n = value.parse::<u64>().map_err(|_| {
                     format!("Filter '{key}' expects a numeric value, got '{value}'")
@@ -165,6 +187,7 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "group" => RecordFieldValue::String(record.group.as_deref()),
         "country" => RecordFieldValue::String(record.country.as_deref()),
         "source_addr" => RecordFieldValue::String(record.source_addr.as_deref()),
+        "shared" => RecordFieldValue::String(record.shared.map(|shared| if shared { "true" } else { "false" })),
         "disconnect_reason" => {
             // Match against serde rename_all = "snake_case" names
             RecordFieldValue::String(record.disconnect_reason.as_ref().map(|r| match r {
@@ -189,6 +212,9 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "audio_codec" => RecordFieldValue::String(record.audio_codec.as_deref()),
         "resolution" => RecordFieldValue::String(record.resolution.as_deref()),
         "session_id" => RecordFieldValue::U64(record.session_id),
+        "virtual_id" => RecordFieldValue::U64(u64::from(record.virtual_id.unwrap_or(0))),
+        "provider_id" => RecordFieldValue::U64(u64::from(record.provider_id.unwrap_or(0))),
+        "target_id" => RecordFieldValue::U64(u64::from(record.target_id.unwrap_or(0))),
         _ => RecordFieldValue::String(None), // Unknown field: no match
     }
 }
@@ -554,6 +580,22 @@ mod tests {
         let mut raw = HashMap::new();
         raw.insert("session_id".to_string(), "not-a-number".to_string());
         assert!(CompiledFilter::compile(&raw).is_err());
+    }
+
+    #[test]
+    fn test_filter_unknown_field_is_rejected() {
+        let mut raw = HashMap::new();
+        raw.insert("usernam".to_string(), "alice".to_string());
+        assert!(CompiledFilter::compile(&raw).is_err());
+    }
+
+    #[test]
+    fn test_filter_supports_qos_metadata_fields() {
+        let mut raw = HashMap::new();
+        raw.insert("user_agent".to_string(), "VLC/3.0".to_string());
+        raw.insert("cluster".to_string(), "live".to_string());
+        raw.insert("video_codec".to_string(), "H.264".to_string());
+        assert!(CompiledFilter::compile(&raw).is_ok());
     }
 
     #[test]

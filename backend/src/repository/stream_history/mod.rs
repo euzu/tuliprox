@@ -1,10 +1,10 @@
 mod archive;
 mod writer;
-mod file;
+mod storage;
 mod reader;
 
 pub use writer::*;
 pub use archive::*;
-pub use file::*;
+pub use storage::*;
 pub use reader::*;
 

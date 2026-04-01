@@ -209,6 +209,7 @@ impl StreamHistoryRecord {
         let mut record = Self::base(info, info.ts);
         record.event_type = EventType::Connect;
         record.connect_ts_utc = Some(info.ts);
+        record.previous_session_id = info.previous_session_id;
         record
     }
 
@@ -324,6 +325,11 @@ pub fn read_and_verify_block_magic<R: Read>(reader: &mut R) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::{
+        model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+        utils::Internable,
+    };
+    use std::net::SocketAddr;
     use std::io::Cursor;
 
     fn sample_file_header() -> FileHeaderBody {
@@ -382,7 +388,7 @@ mod tests {
             video_codec: Some("H.264".to_string()),
             audio_codec: Some("AAC".to_string()),
             resolution: Some("1920x1080".to_string()),
-            connect_ts_utc: Some(1_742_600_001_000),
+            connect_ts_utc: Some(1_742_600_001),
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
@@ -428,6 +434,35 @@ mod tests {
             previous_session_id: None,
             target_id: Some(1),
         }
+    }
+
+    fn sample_stream_info() -> StreamInfo {
+        let addr: SocketAddr = "192.0.2.1:12345".parse().unwrap();
+        let mut info = StreamInfo::new(
+            999,
+            1001,
+            "alice",
+            &addr,
+            "192.0.2.1",
+            "acme-tv",
+            StreamChannel {
+                target_id: 1,
+                virtual_id: 1234,
+                provider_id: 1,
+                item_type: PlaylistItemType::Live,
+                cluster: XtreamCluster::Live,
+                group: "News".intern(),
+                title: "News Channel".intern(),
+                url: "http://localhost/stream.ts".intern(),
+                shared: false,
+                technical: None,
+            },
+            String::from("VLC/3.0"),
+            Some(String::from("DE")),
+            None,
+        );
+        info.ts = 1_742_600_001;
+        info
     }
 
     #[test]
@@ -477,6 +512,25 @@ mod tests {
         assert_eq!(connect.event_type, EventType::Connect);
         assert_eq!(disconnect.event_type, EventType::Disconnect);
         assert_eq!(disconnect.session_duration, Some(3600));
+    }
+
+    #[test]
+    fn stream_history_from_connect_uses_second_precision_session_times() {
+        let info = sample_stream_info();
+        let record = StreamHistoryRecord::from_connect(&info);
+
+        assert_eq!(record.connect_ts_utc, Some(info.ts));
+        assert!(sample_connect_record().connect_ts_utc == Some(info.ts));
+    }
+
+    #[test]
+    fn stream_history_from_connect_carries_previous_session_id() {
+        let mut info = sample_stream_info();
+        info.previous_session_id = Some(123_456);
+
+        let record = StreamHistoryRecord::from_connect(&info);
+
+        assert_eq!(record.previous_session_id, Some(123_456));
     }
 
     #[test]

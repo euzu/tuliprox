@@ -2,7 +2,7 @@ use crate::{
     app::components::{DateInput, Search, Table, TableDefinition, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
-    services::StreamHistoryRecord,
+    services::{StreamHistoryProviderSummary, StreamHistoryRecord},
     utils::{format_bytes, format_duration, format_ts},
 };
 use shared::model::SearchRequest;
@@ -10,7 +10,7 @@ use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-const NUM_COLS: usize = 9;
+const NUM_COLS: usize = 11;
 
 fn today_start_ts() -> i64 {
     let now = chrono::Utc::now();
@@ -22,6 +22,39 @@ fn ts_to_date_str(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0).map_or_else(String::new, |dt| dt.format("%Y-%m-%d").to_string())
 }
 
+fn record_details(record: &StreamHistoryRecord) -> String {
+    let mut parts = Vec::new();
+    if let Some(user_agent) = record.user_agent.as_deref() {
+        parts.push(user_agent.to_string());
+    }
+    if let Some(cluster) = record.cluster.as_deref() {
+        parts.push(cluster.to_string());
+    }
+    if record.shared.unwrap_or(false) {
+        parts.push(String::from("shared"));
+    }
+    if let Some(container) = record.container.as_deref() {
+        parts.push(container.to_string());
+    }
+    if let Some(video_codec) = record.video_codec.as_deref() {
+        parts.push(video_codec.to_string());
+    }
+    if let Some(audio_codec) = record.audio_codec.as_deref() {
+        parts.push(audio_codec.to_string());
+    }
+    if let Some(resolution) = record.resolution.as_deref() {
+        parts.push(resolution.to_string());
+    }
+    if let Some(previous_session_id) = record.previous_session_id {
+        parts.push(format!("prev #{previous_session_id}"));
+    }
+    if parts.is_empty() {
+        String::from("-")
+    } else {
+        parts.join(" | ")
+    }
+}
+
 fn record_matches(record: &StreamHistoryRecord, filter: &SearchRequest) -> bool {
     match filter {
         SearchRequest::Clear => true,
@@ -31,6 +64,11 @@ fn record_matches(record: &StreamHistoryRecord, filter: &SearchRequest) -> bool 
                 record.api_username.as_deref().unwrap_or(""),
                 record.title.as_deref().unwrap_or(""),
                 record.provider_name.as_deref().unwrap_or(""),
+                record.user_agent.as_deref().unwrap_or(""),
+                record.cluster.as_deref().unwrap_or(""),
+                record.video_codec.as_deref().unwrap_or(""),
+                record.audio_codec.as_deref().unwrap_or(""),
+                record.resolution.as_deref().unwrap_or(""),
                 record.source_addr.as_deref().unwrap_or(""),
                 record.disconnect_reason.as_deref().unwrap_or(""),
                 record.group.as_deref().unwrap_or(""),
@@ -43,11 +81,16 @@ fn record_matches(record: &StreamHistoryRecord, filter: &SearchRequest) -> bool 
                     record.api_username.as_deref().unwrap_or(""),
                     record.title.as_deref().unwrap_or(""),
                     record.provider_name.as_deref().unwrap_or(""),
+                    record.user_agent.as_deref().unwrap_or(""),
+                    record.cluster.as_deref().unwrap_or(""),
+                    record.video_codec.as_deref().unwrap_or(""),
+                    record.audio_codec.as_deref().unwrap_or(""),
+                    record.resolution.as_deref().unwrap_or(""),
                     record.source_addr.as_deref().unwrap_or(""),
                     record.disconnect_reason.as_deref().unwrap_or(""),
                     record.group.as_deref().unwrap_or(""),
                 ];
-                fields.iter().any(|f| re.is_match(*f))
+                fields.iter().any(|f| re.is_match(f))
             } else {
                 false
             }
@@ -61,7 +104,8 @@ pub fn StreamHistoryView() -> Html {
     let translate = use_translation();
     let from_date = use_state(|| Some(today_start_ts()));
     let to_date = use_state(|| Some(today_start_ts()));
-    let all_records = use_state(|| Vec::<Rc<StreamHistoryRecord>>::new());
+    let all_records = use_state(Vec::<Rc<StreamHistoryRecord>>::new);
+    let summaries = use_state(Vec::<StreamHistoryProviderSummary>::new);
     let search_filter = use_state(|| SearchRequest::Clear);
     let loading = use_state(|| false);
 
@@ -69,6 +113,7 @@ pub fn StreamHistoryView() -> Html {
     {
         let services = services.clone();
         let all_records = all_records.clone();
+        let summaries = summaries.clone();
         let loading = loading.clone();
         let from = *from_date;
         let to = *to_date;
@@ -77,10 +122,15 @@ pub fn StreamHistoryView() -> Html {
             let to_str = to.map(ts_to_date_str);
             loading.set(true);
             spawn_local(async move {
-                let result = services.stream_history.get_history(from_str.as_deref(), to_str.as_deref()).await;
-                match result {
+                let history_result = services.stream_history.get_history(from_str.as_deref(), to_str.as_deref()).await;
+                let summary_result = services.stream_history.get_summary(from_str.as_deref(), to_str.as_deref()).await;
+                match history_result {
                     Ok(Some(records)) => all_records.set(records.into_iter().map(Rc::new).collect()),
-                    Ok(None) | Err(_) => all_records.set(vec![]),
+                    Ok(None) | Err(_) => all_records.set(Vec::new()),
+                }
+                match summary_result {
+                    Ok(Some(items)) => summaries.set(items),
+                    Ok(None) | Err(_) => summaries.set(Vec::new()),
                 }
                 loading.set(false);
             });
@@ -103,19 +153,26 @@ pub fn StreamHistoryView() -> Html {
         let from_date = from_date.clone();
         let to_date = to_date.clone();
         let all_records = all_records.clone();
+        let summaries = summaries.clone();
         let loading = loading.clone();
         Callback::from(move |_: String| {
             let services = services.clone();
             let all_records = all_records.clone();
+            let summaries = summaries.clone();
             let loading = loading.clone();
             let from_str = (*from_date).map(ts_to_date_str);
             let to_str = (*to_date).map(ts_to_date_str);
             loading.set(true);
             spawn_local(async move {
-                let result = services.stream_history.get_history(from_str.as_deref(), to_str.as_deref()).await;
-                match result {
+                let history_result = services.stream_history.get_history(from_str.as_deref(), to_str.as_deref()).await;
+                let summary_result = services.stream_history.get_summary(from_str.as_deref(), to_str.as_deref()).await;
+                match history_result {
                     Ok(Some(records)) => all_records.set(records.into_iter().map(Rc::new).collect()),
-                    Ok(None) | Err(_) => all_records.set(vec![]),
+                    Ok(None) | Err(_) => all_records.set(Vec::new()),
+                }
+                match summary_result {
+                    Ok(Some(items)) => summaries.set(items),
+                    Ok(None) | Err(_) => summaries.set(Vec::new()),
                 }
                 loading.set(false);
             });
@@ -149,8 +206,10 @@ pub fn StreamHistoryView() -> Html {
                     4 => translate.t("LABEL.PROVIDER"),
                     5 => translate.t("LABEL.DURATION"),
                     6 => translate.t("LABEL.STREAM_HISTORY_BYTES"),
-                    7 => translate.t("LABEL.STREAM_HISTORY_REASON"),
-                    8 => translate.t("LABEL.STREAM_HISTORY_IP"),
+                    7 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
+                    8 => translate.t("LABEL.STREAM_HISTORY_DETAILS"),
+                    9 => translate.t("LABEL.STREAM_HISTORY_REASON"),
+                    10 => translate.t("LABEL.STREAM_HISTORY_IP"),
                     _ => String::new(),
                 };
                 html! { <span>{label}</span> }
@@ -170,7 +229,18 @@ pub fn StreamHistoryView() -> Html {
                 3 => {
                     html! { <span class="tp__stream-history__cell--title">{record.title.as_deref().unwrap_or("-")}</span> }
                 }
-                4 => html! { <span>{record.provider_name.as_deref().unwrap_or("-")}</span> },
+                4 => html! {
+                    <span>
+                        {
+                            match (record.provider_name.as_deref(), record.provider_id) {
+                                (Some(name), Some(id)) => format!("{name} (#{id})"),
+                                (Some(name), None) => name.to_string(),
+                                (None, Some(id)) => format!("#{id}"),
+                                (None, None) => String::from("-"),
+                            }
+                        }
+                    </span>
+                },
                 5 => html! {
                     <span class="tp__stream-history__cell--mono">
                         {record.session_duration.map(format_duration).unwrap_or_default()}
@@ -182,11 +252,21 @@ pub fn StreamHistoryView() -> Html {
                     </span>
                 },
                 7 => html! {
+                    <span class="tp__stream-history__cell--mono">
+                        {record.first_byte_latency_ms.map(|v| v.to_string()).unwrap_or_default()}
+                    </span>
+                },
+                8 => html! {
+                    <span>
+                        {record_details(&record)}
+                    </span>
+                },
+                9 => html! {
                     <span>
                         {record.disconnect_reason.as_deref().unwrap_or("-").replace('_', " ")}
                     </span>
                 },
-                8 => html! {
+                10 => html! {
                     <span class="tp__stream-history__cell--ip">
                         {record.source_addr.as_deref().unwrap_or("-")}
                     </span>
@@ -230,6 +310,33 @@ pub fn StreamHistoryView() -> Html {
                         <span>{translate.t("LABEL.STREAM_HISTORY_LOADING")}</span>
                     </div>
                 } else {
+                    <div class="tp__stream-history__summary">
+                        <h2>{translate.t("LABEL.STREAM_HISTORY_SUMMARY")}</h2>
+                        <table class="tp__stream-history__summary-table">
+                            <thead>
+                                <tr>
+                                    <th>{translate.t("LABEL.PROVIDER")}</th>
+                                    <th>{translate.t("LABEL.STREAM_HISTORY_SESSIONS")}</th>
+                                    <th>{translate.t("LABEL.STREAM_HISTORY_BYTES")}</th>
+                                    <th>{translate.t("LABEL.DURATION")}</th>
+                                    <th>{translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE")}</th>
+                                    <th>{translate.t("LABEL.STREAM_HISTORY_DISCONNECTS")}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {for summaries.iter().map(|summary| html! {
+                                    <tr>
+                                        <td>{summary.provider_name.clone()}</td>
+                                        <td>{summary.session_count}</td>
+                                        <td>{format_bytes(summary.total_bytes_sent)}</td>
+                                        <td>{summary.avg_session_duration_secs.map(format_duration).unwrap_or_default()}</td>
+                                        <td>{summary.avg_first_byte_latency_ms.map(|v| format!("{v} ms")).unwrap_or_default()}</td>
+                                        <td>{summary.disconnect_count}</td>
+                                    </tr>
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
                     <Table::<StreamHistoryRecord> definition={table_def} />
                 }
             </div>

@@ -194,6 +194,7 @@ mod tests {
             country_code: None,
             session_token: session_token.map(ToOwned::to_owned),
             preserved: false,
+            previous_session_id: None,
         }
     }
 
