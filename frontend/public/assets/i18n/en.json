@@ -1279,7 +1279,10 @@
     "YES": "Yes",
     "FORCE": "Force",
     "ACTIVE_STREAMS": "Active Streams",
-    "PLAYER": "Player"
+    "PLAYER": "Player",
+    "SELECTED": "Selected",
+    "FILTERED": "Filtered",
+    "TOTAL": "Total"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
