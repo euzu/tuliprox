@@ -10,6 +10,23 @@ $epg-border-size: 4px;
   &__header {
     display: flex;
     flex-flow: row;
+    align-items: center;
+    gap: var(--gap-default);
+    padding: 0 var(--padding-default);
+    flex-shrink: 0;
+
+    h1 {
+      flex-shrink: 0;
+      margin: 0;
+    }
+
+    &-toolbar {
+      display: flex;
+      flex-flow: row;
+      box-sizing: border-box;
+      width: 100%;
+      justify-content: flex-end;
+    }
   }
 
   &__body {
@@ -22,6 +39,8 @@ $epg-border-size: 4px;
     -webkit-overflow-scrolling: touch;
     touch-action: pan-x pan-y;
     overscroll-behavior: contain;
+    contain: layout style;
+    will-change: scroll-position;
   }
 
   &__channels-header,
@@ -90,6 +109,7 @@ $epg-border-size: 4px;
     background-color: var(--card-background-color);
     border-bottom: $epg-border-size solid var(--background-color);
     border-top: $epg-border-size solid var(--background-color);
+    contain: layout style size;
   }
 
   &__channel-icon {
@@ -104,9 +124,9 @@ $epg-border-size: 4px;
     display: block;
     position: relative;
     border-bottom: 1px solid var(--border-color);
+    contain: layout style size;
   }
 
-  &__header,
   &__channels-header,
   &__timeline {
     box-sizing: border-box;
@@ -135,6 +155,7 @@ $epg-border-size: 4px;
     overflow: hidden;
     border-radius: var(--border-radius);
     height: 100%;
+    contain: layout style;
 
     &-time {
       color: var(--epg-program-time-color);
