@@ -224,16 +224,8 @@ pub(crate) fn aggregate_provider_summaries(
             session_count: acc.session_count,
             disconnect_count: acc.disconnect_count,
             total_bytes_sent: acc.total_bytes_sent,
-            avg_session_duration_secs: if acc.duration_count > 0 {
-                Some(acc.total_duration / acc.duration_count)
-            } else {
-                None
-            },
-            avg_first_byte_latency_ms: if acc.first_byte_count > 0 {
-                Some(acc.total_first_byte_latency / acc.first_byte_count)
-            } else {
-                None
-            },
+            avg_session_duration_secs: acc.total_duration.checked_div(acc.duration_count),
+            avg_first_byte_latency_ms: acc.total_first_byte_latency.checked_div(acc.first_byte_count),
         })
         .collect()
 }

@@ -590,6 +590,7 @@ impl ActiveUserManager {
             .or_insert_with(SocketRegistration::anonymous);
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn update_connection(&self, update: ActiveUserConnectionParams<'_>) -> Option<StreamInfo> {
         let ActiveUserConnectionParams {
             uid,
@@ -649,14 +650,14 @@ impl ActiveUserManager {
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
-                    if !preserve_started_at {
-                        stream_info.ts = current_time_secs();
-                    } else {
+                    if preserve_started_at {
                         let now = current_time_secs();
                         if utc_day_from_secs(stream_info.ts) != utc_day_from_secs(now) {
                             stream_info.ts = now;
                             stream_info.previous_session_id = Some(old_session_id);
                         }
+                    } else {
+                        stream_info.ts = current_time_secs();
                     }
 
                     if let Some(token) = session_token {
