@@ -303,6 +303,7 @@ body {
   --theme-brand-popup-shadow: var(--theme-palette-shadow-popup);
   --theme-brand-card-shadow: var(--theme-palette-shadow-card);
   --theme-brand-scrollbar-track-shadow: var(--theme-palette-shadow-scrollbar-track);
+  --theme-brand-scrollbar-handle: var(--theme-palette-scrollbar-handle);
   --theme-brand-tab-header-shadow: var(--theme-palette-shadow-tab-header);
   --theme-brand-field-code-shadow: var(--theme-palette-shadow-field-code);
   --theme-brand-toggle-shadow: var(--theme-palette-shadow-toggle);
@@ -418,13 +419,13 @@ body {
   --menu-button-warn-color: var(--theme-brand-text-menu-warn);
   --menu-button-warn-hover-color: var(--theme-brand-text-menu-warn-strong);
   --app-header-color: var(--theme-brand-text-header);
-  --table-header-background-color: var(--theme-brand-surface-toolbar);
+  --table-header-background-color: rgb(var(--theme-brand-surface-toolbar));
   --table-card-background-color: var(--theme-brand-surface-muted);
   --table-alternate-background-color: var(--theme-brand-surface-toolbar);
   --table-border-color: var(--theme-brand-border-table);
   --playlist-rating-background-color: var(--theme-brand-surface-toolbar-alt);
   --scrollbar-track-color: var(--theme-brand-surface-toolbar-alt);
-  --scrollbar-handle-color: var(--theme-brand-text-muted);
+  --scrollbar-handle-color: var(--theme-brand-scrollbar-handle);
   --scrollbar-track-shadow: var(--theme-brand-scrollbar-track-shadow);
 
   --border-color: var(--theme-brand-border);

@@ -2,7 +2,9 @@
 .tp__playlist-list {
 
   &__body {
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
 
     > :nth-child(even) {
       border-left: 2px solid  var(--output-xtream-color);

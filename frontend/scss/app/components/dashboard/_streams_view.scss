@@ -20,7 +20,11 @@
     flex: 1 1 auto;
     min-height: 0;
     gap: var(--gap-default);
-    overflow: hidden;
+    overflow: auto;
+    pointer-events: auto;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x pan-y;
+
     padding-bottom: var(--padding-small);
   }
 
@@ -68,12 +72,10 @@
   flex-flow: column;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
   border: 1px solid var(--card-border-color);
   border-radius: var(--border-radius);
   background: var(--card-background-color);
   box-shadow: var(--card-shadow);
-
 
   &__header {
     font-size: var(--font-size-md);
@@ -85,7 +87,6 @@
     display: flex;
     flex: 1 1 auto;
     min-height: 0;
-    overflow: hidden;
     padding: var(--padding-default);
   }
 
@@ -95,12 +96,10 @@
     flex-flow: column;
     gap: var(--gap-small);
     min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-y;
     overscroll-behavior: contain;
     padding-right: var(--padding-small);
+    z-index: 1;
+    position: relative;
   }
 
   &__item {
@@ -111,6 +110,7 @@
     border: 1px solid var(--card-border-color);
     border-radius: var(--border-radius);
     background: var(--card-background-color);
+    pointer-events: auto;
 
     &-content {
       display: flex;

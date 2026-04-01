@@ -17,7 +17,9 @@
   background: var(--card-background-color);
   padding: var(--padding-default);
   box-sizing: border-box;
-  overflow: auto;
+  overflow: auto; pointer-events: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
 
   &__title {
     font-size: var(--font-size-base);
@@ -92,7 +94,9 @@
   flex: 1;
   min-width: 0;
   height: 100%;
-  overflow: auto;
+  overflow: auto; pointer-events: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
 }
 
 .tp__setup__step {
@@ -126,13 +130,17 @@
 @media (max-width: 1080px) {
   .tp__setup-assistant {
     flex-flow: column;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   .tp__setup-sidebar {
     width: 100%;
     min-width: 0;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
 
     &__list {
       flex-flow: row;
