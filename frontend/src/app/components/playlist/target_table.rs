@@ -113,7 +113,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                     },
                     9 => html! { <PlaylistProcessing order={dto.processing_order} /> },
                     10 => html! { <TargetWatch  target={Rc::clone(&dto)} /> },
-                    11 => html! { <ToggleSwitch value={dto.use_memory_cache} readonly={true} compact={true} /> },
+                    11 => html! { <ToggleSwitch value={dto.use_memory_cache} readonly={true} /> },
                     _ => html! {""},
                 }
             },
