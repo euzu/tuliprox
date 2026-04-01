@@ -106,7 +106,9 @@
   gap: var(--gap-default);
   padding: var(--padding-default) 0;
   box-sizing: border-box;
-  overflow: auto;
+  overflow: auto; pointer-events: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
 
   &__title {
     display: none;
@@ -323,7 +325,9 @@
     gap: var(--gap-default);
     box-sizing: border-box;
     width: 100%;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   &__toolbar {

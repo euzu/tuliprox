@@ -8,7 +8,9 @@
   &__card {
     background-color: var(--table-card-background-color);
     max-height: var(--max-dialog-card-height);
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   &__new-field {

@@ -12,7 +12,9 @@
     display: flex;
     flex-flow: column;
     padding-right: 1px;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   &__nowrap {

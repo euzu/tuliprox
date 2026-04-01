@@ -10,7 +10,9 @@ $form-width: 520px;
   width: $form-width;
   z-index: 10;
   transition: all 0.4s ease;
-  overflow: auto;
+  overflow: auto; pointer-events: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
 
   .tp__card {
      background-color: var(--card-background-color);

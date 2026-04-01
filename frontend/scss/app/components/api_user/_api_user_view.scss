@@ -68,7 +68,9 @@
     gap: var(--gap-default);
     padding: var(--padding-default) 0;
     box-sizing: border-box;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
 
     .tp__collapse-panel__header {
       font-size: var(--font-size-xl);

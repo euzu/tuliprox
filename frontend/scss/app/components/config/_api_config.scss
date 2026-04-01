@@ -12,7 +12,9 @@
     width: 100%;
     gap: var(--gap-default);
     box-sizing: border-box;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
 
     &-title {
       font-size: var(--font-size-xl);
@@ -57,7 +59,9 @@
     flex: 1 1 auto;
     min-height: 0;
     gap: var(--gap-default);
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   &__grid {

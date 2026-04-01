@@ -74,7 +74,9 @@
 
   &__panel {
     height: 100%;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 }
 

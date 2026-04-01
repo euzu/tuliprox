@@ -1,7 +1,9 @@
 .tp__filter {
   display: flex;
   flex-flow: column;
-  overflow: auto;
+  overflow: auto; pointer-events: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
 
   .tp__filter__code {
     font-family: monospace;
