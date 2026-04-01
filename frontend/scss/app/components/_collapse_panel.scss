@@ -21,7 +21,9 @@
     }
 
     &-title {
+      display: flex;
       flex: 1 1 auto;
+      align-items: center;
       white-space: nowrap;
       text-overflow: ellipsis;
       overflow: hidden;
