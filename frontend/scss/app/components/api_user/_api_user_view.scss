@@ -15,15 +15,15 @@
   }
 
   &__header {
+    flex-flow: row wrap;
+    gap: var(--gap-default);
+
+    &-toolbar {
+      display: flex;
       flex-flow: row wrap;
       gap: var(--gap-default);
-
-      &-toolbar {
-        display: flex;
-        flex-flow: row wrap;
-        gap: var(--gap-default);
-        box-sizing: border-box;
-      }
+      box-sizing: border-box;
+    }
   }
 
   &__content {
@@ -34,13 +34,13 @@
     overflow: hidden;
     width: 100%;
 
-     &-toolbar {
-       display: flex;
-       flex-flow: row;
-       box-sizing: border-box;
-       width: 100%;
-       justify-content: space-between;
-     }
+    &-toolbar {
+      display: flex;
+      flex-flow: row;
+      box-sizing: border-box;
+      width: 100%;
+      justify-content: space-between;
+    }
 
     &-panels {
       display: flex;
@@ -61,6 +61,10 @@
   box-sizing: border-box;
   overflow: hidden;
 
+  &__toolbar {
+    padding-top: var(--padding-small);
+  }
+
   &__body {
     display: flex;
     flex-flow: column;
@@ -68,16 +72,18 @@
     gap: var(--gap-default);
     padding: var(--padding-default) 0;
     box-sizing: border-box;
-    overflow: auto; pointer-events: auto;
+    overflow: auto;
+    pointer-events: auto;
     touch-action: pan-x pan-y;
     -webkit-overflow-scrolling: touch;
 
     .tp__collapse-panel__header {
       font-size: var(--font-size-xl);
       padding: 0;
-       span {
-         pointer-events: auto;
-       }
+
+      span {
+        pointer-events: auto;
+      }
     }
 
     > :nth-child(1) {
@@ -141,8 +147,8 @@
 
   &__section-header {
     display: flex;
-    flex-flow: row nowrap;
-    justify-content: space-between;
+    flex-flow: row wrap;
+    align-items: center;
     gap: var(--gap-default);
     box-sizing: border-box;
     overflow: hidden;
@@ -150,17 +156,60 @@
 
     &__toolbar {
       display: flex;
+      flex-grow: 1;
       flex-flow: row nowrap;
       gap: var(--gap-default);
       box-sizing: border-box;
+      justify-content: flex-end;
+
       .tp__icon-button:hover,
       .tp__icon-button:focus-visible {
         background-color: var(--action-item-background-color);
       }
+
       svg, img {
         height: 2rem;
         width: 2rem;
       }
     }
   }
+
+  &__cluster-stats {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-small);
+    padding: var(--padding-small);
+    font-size: var(--font-size-sm);
+
+    &--label {
+      font-weight: bold;
+    }
+
+    &--selected,
+    &--filtered,
+    &--total {
+      border: 1px solid transparent;
+      border-radius: var(--border-radius);
+      padding: 0 var(--padding-small);
+    }
+
+    &--selected {
+      color: var(--tag-alt-active-color);
+      background-color: var(--tag-alt-active-background-color);
+      border-color: var(--tag-alt-active-border-color);
+    }
+
+    &--filtered {
+      color: var(--tag-active-color);
+      background-color: var(--tag-active-background-color);
+      border-color: var(--tag-active-border-color);
+    }
+
+    &--total {
+      color: var(--tag-video-border-color);
+      background-color: var(--tag-series-background-color);
+      border-color: var(--tag-series-border-color);
+    }
+  }
+
 }
