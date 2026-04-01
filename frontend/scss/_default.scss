@@ -18,7 +18,7 @@
 
 .tp__error-text {
   color: var(--attention-color);
-  font-size: 1rem;
+  font-size: var(--font-size-base);
 }
 
 @media (pointer: fine) {
@@ -38,6 +38,11 @@
     border-radius: var(--scrollbar-width);
     background-color: var(--scrollbar-handle-color);
   }
+}
+
+h1 {
+  font-size: var(--font-size-xl);
+  font-weight: bold;
 }
 
 button {
@@ -77,7 +82,7 @@ option {
 .svg-icon {
   display: block;
   pointer-events: none;
-  width: 1rem;
+  width: 1.3rem;
 }
 
 ul {
@@ -115,16 +120,10 @@ li {
   -ms-user-select: none; /* IE/Edge */
 }
 
-@media (max-width: size.$mobile-breakpoint) {
-  h1 {
-    font-size: 1.1rem;
-  }
-}
-
 .tp__unauthorized {
   height: 100%;
   width: 100%;
-  font-size: 2rem;
+  font-size: var(--font-size-xl);
   color: var(--text-color);
   display: flex;
   justify-content: center;

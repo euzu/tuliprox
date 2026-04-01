@@ -29,9 +29,6 @@
       padding: 0 var(--padding-large);
       align-items: center;
       overflow: hidden;
-      @media (max-width: size.$mobile-breakpoint) {
-        padding: 0 var(--padding-micro);
-      }
     }
 
     &__body > .tp__panel {

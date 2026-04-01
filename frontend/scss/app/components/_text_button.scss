@@ -16,7 +16,7 @@
   gap: var(--gap-default);
   padding: 0 var(--padding-default);
   font-weight: bold;
-  font-size: 1rem;
+  font-size: var(--font-size-norm);
   svg {
     width: 1.5rem;
   }

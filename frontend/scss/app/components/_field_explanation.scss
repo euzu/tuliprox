@@ -10,7 +10,7 @@
         padding: 1rem;
         border-radius: 8px;
         font-family: 'JetBrains Mono', 'Fira Code', monospace;
-        font-size: 0.9rem;
+        font-size: var(--font-size-base);
         overflow-x: auto;
         margin: 1rem 0;
         border: 1px solid var(--field-explanation-code-border-color);

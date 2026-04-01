@@ -30,7 +30,7 @@
 
   &__input-subtitle {
     color: var(--modest-text-color);
-    font-size: 0.9rem;
+    font-size: var(--font-size-base);
   }
 
   &__input-status {
@@ -87,7 +87,7 @@
     gap: var(--gap-default);
 
     h2 {
-      font-size: 1.05rem;
+      font-size: var(--font-size-md);
       margin: 0;
     }
   }

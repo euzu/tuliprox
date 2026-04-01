@@ -53,7 +53,7 @@
 
   .bracket {
       font-weight: bold;
-      font-size: 1.1rem;
+      font-size: var(--font-size-md);
   }
 
   .bracket-1 { color: var(--code-bracket-1-color); }

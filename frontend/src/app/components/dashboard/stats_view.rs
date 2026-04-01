@@ -71,8 +71,10 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                  <h1>{ translate.t("LABEL.STREAMS")}</h1>
                 </div>
                 })}>
-                <div class="tp__stats__body-group">
-                    <StreamsView embedded={true} />
+                <div class="tp__stats__body">
+                  <div class="tp__stats__body-group">
+                     <StreamsView embedded={true} />
+                  </div>
                 </div>
             </CollapsePanel>
             </div>
