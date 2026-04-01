@@ -1,8 +1,7 @@
-use crate::app::components::chip::Chip;
+use crate::app::components::{chip::Chip, IconButton};
 use std::{collections::HashMap, rc::Rc};
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
-use crate::app::components::IconButton;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct KeyValue {
