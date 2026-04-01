@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "3.2.177"
+version = "3.2.178"
 dependencies = [
  "base64",
  "brotli",
@@ -4017,7 +4017,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.2.177"
+version = "3.2.178"
 dependencies = [
  "base64",
  "bitflags 2.11.0",
@@ -4607,7 +4607,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuliprox"
-version = "3.2.177"
+version = "3.2.178"
 dependencies = [
  "arc-swap",
  "async-compression",
