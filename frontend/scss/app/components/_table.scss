@@ -30,7 +30,7 @@
           position: sticky;
           top: 0;
           z-index: 2;
-          font-size: 1.1rem;
+          font-size: var(--font-size-md);
           font-weight: bold;
           //text-align: center;
           padding: var(--padding-mini);

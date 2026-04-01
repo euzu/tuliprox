@@ -70,7 +70,7 @@ pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
     base_url.join(reference).map_or_else(|_| Cow::Borrowed(reference), |u| Cow::Owned(u.to_string()))
 }
 
-fn rewrite_uri_attrib<'a>(line: &'a str, props: &RewriteHlsProps) -> Cow<'a, str> {
+fn rewrite_uri_attrib<'a>(line: &'a str, props: &RewriteHlsProps, user: &ProxyUserCredentials) -> Cow<'a, str> {
     let Some(caps) = CONSTANTS.re_hls_uri.captures(line) else {
         return Cow::Borrowed(line);
     };
@@ -78,15 +78,21 @@ fn rewrite_uri_attrib<'a>(line: &'a str, props: &RewriteHlsProps) -> Cow<'a, str
     let uri = &caps[1];
     let rewritten = rewrite_hls_url(&props.hls_url, uri);
 
-    let final_uri = if let Some(user_token) = &props.user_token {
-        Cow::Owned(create_hls_session_token_and_url(
-            props.secret,
-            user_token,
-            &rewritten,
-        ))
+    let token = if let Some(user_token) = &props.user_token {
+        create_hls_session_token_and_url(props.secret, user_token, &rewritten)
     } else {
-        rewritten
+        create_hls_url_without_session_token(props.secret, &rewritten)
     };
+
+    let final_uri = format!(
+        "{}/{HLS_PREFIX}/{}/{}/{}/{}/{}",
+        props.base_url,
+        user.username,
+        user.password,
+        props.input_id,
+        props.virtual_id,
+        token
+    );
 
     Cow::Owned(CONSTANTS
         .re_hls_uri
@@ -105,7 +111,7 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
 
         // skip comments
         if line.starts_with('#') {
-            let rewritten = rewrite_uri_attrib(line, props);
+            let rewritten = rewrite_uri_attrib(line, props, user);
             result.push(rewritten.to_string());
             continue;
         }

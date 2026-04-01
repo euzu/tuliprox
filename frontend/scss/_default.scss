@@ -18,24 +18,31 @@
 
 .tp__error-text {
   color: var(--attention-color);
-  font-size: 1rem;
+  font-size: var(--font-size-base);
 }
 
-::-webkit-scrollbar-track {
-  -webkit-box-shadow: var(--scrollbar-track-shadow);
-  border-radius: var(--scrollbar-border-radius);
-  background-color: var(--scrollbar-track-color);
+@media (pointer: fine) {
+  ::-webkit-scrollbar-track {
+    -webkit-box-shadow: var(--scrollbar-track-shadow);
+    border-radius: var(--scrollbar-border-radius);
+    background-color: var(--scrollbar-track-color);
+  }
+
+  ::-webkit-scrollbar {
+    width: var(--scrollbar-width);
+    height: var(--scrollbar-width);
+    background-color: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border-radius: var(--scrollbar-width);
+    background-color: var(--scrollbar-handle-color);
+  }
 }
 
-::-webkit-scrollbar {
-  width: var(--scrollbar-width);
-  height: var(--scrollbar-width);
-  background-color: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  border-radius: var(--scrollbar-width);
-  background-color: var(--scrollbar-handle-color);
+h1 {
+  font-size: var(--font-size-xl);
+  font-weight: bold;
 }
 
 button {
@@ -73,8 +80,9 @@ option {
 }
 
 .svg-icon {
+  display: block;
   pointer-events: none;
-  width: 1rem;
+  width: 1.3rem;
 }
 
 ul {
@@ -112,16 +120,10 @@ li {
   -ms-user-select: none; /* IE/Edge */
 }
 
-@media (max-width: size.$mobile-breakpoint) {
-  h1 {
-    font-size: 1.1rem;
-  }
-}
-
 .tp__unauthorized {
   height: 100%;
   width: 100%;
-  font-size: 2rem;
+  font-size: var(--font-size-xl);
   color: var(--text-color);
   display: flex;
   justify-content: center;
@@ -140,4 +142,9 @@ li {
       border-radius: 50%;
     }
   }
+}
+
+::selection {
+  background-color: #0078d4;
+  color: #ffffff;
 }

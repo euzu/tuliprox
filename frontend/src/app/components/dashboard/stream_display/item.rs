@@ -73,7 +73,9 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         </div>
                     </div>
                 </div>
-                <div class="tp__stream-display__stats">
+           </div>
+           <div class="tp__stream-display__row">
+            <div class="tp__stream-display__stats">
                     <div class="tp__stream-display__stat tp__stream-display__stat--category">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.GROUP")}</span>
                         <span class="tp__stream-display__stat-value">{stream.channel.group.to_string()}</span>

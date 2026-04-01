@@ -48,6 +48,7 @@ pub const USER_ACCOUNT_EXPIRED: &str = "user_account_expired.ts";
 pub const PANEL_API_PROVISIONING: &str = "panel_api_provisioning.ts";
 
 pub const DEFAULT_EPISODE_PATTERN: &str = r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*";
+pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9\-]";
 
 pub const FILENAME_TRIM_PATTERNS: &[char] = &['.', '-', '_'];
 
@@ -141,7 +142,7 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
         re_base_href_wasm: Regex::new("'(/frontend\\-)").unwrap(),
         re_env_var: Regex::new(r"\$\{env:(?P<var>[a-zA-Z_][a-zA-Z0-9_]*)}").unwrap(),
         re_memory_usage: Regex::new(r"VmRSS:\s+(\d+) kB").unwrap(),
-        re_epg_normalize: Arc::new(Regex::new(r"[^a-zA-Z0-9\-]").unwrap()),
+        re_epg_normalize: Arc::new(Regex::new(DEFAULT_EPG_NORMALIZE_REGEX).unwrap()),
         re_template_var: Regex::new("!(.*?)!").unwrap(),
         re_template_tag: Regex::new("<tag:(.*?)>").unwrap(),
         re_template_attribute: Regex::new("<(.*?)>").unwrap(),

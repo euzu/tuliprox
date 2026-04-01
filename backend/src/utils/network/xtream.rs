@@ -652,4 +652,22 @@ mod tests {
         assert!(staged_clusters.is_empty());
         assert_eq!(main_clusters, vec![XtreamCluster::Video]);
     }
+
+    #[test]
+    fn partition_routes_clusters_by_staged_xtream_cluster_sources() {
+        let staged = StagedInput {
+            enabled: true,
+            input_type: InputType::Xtream,
+            live_source: ClusterSource::Staged,
+            vod_source: ClusterSource::Input,
+            series_source: ClusterSource::Skip,
+            ..StagedInput::default()
+        };
+        let input = test_input_with_staged(staged);
+
+        let (staged_clusters, main_clusters) = partition_clusters_by_source(&input, None, &[]);
+
+        assert_eq!(staged_clusters, vec![XtreamCluster::Live]);
+        assert_eq!(main_clusters, vec![XtreamCluster::Video]);
+    }
 }

@@ -10,19 +10,18 @@
 
   &__icon {
     fill: inherit;
-    width: 3rem;
-    max-width: 3rem;
-    transform: translateY(-0.5rem);
+    width: var(--dashboard-card-icon-width);
+    max-width: var(--dashboard-card-icon-width);
 
     img {
-      width: 3rem;
-      max-width: 3rem;
+      width: var(--dashboard-card-icon-width);
+      max-width: var(--dashboard-card-icon-width);
     }
     .svg-icon {
-      width: 3rem;
-      height: 3rem;
-      max-width: 3rem;
-      max-height: 3rem;
+      width: var(--dashboard-card-icon-width);
+      height: var(--dashboard-card-icon-width);
+      max-width: var(--dashboard-card-icon-width);
+      max-height: var(--dashboard-card-icon-width);
     }
   }
 
@@ -45,7 +44,7 @@
   &__title {
     color: var(--text-color);
     font-weight: bold;
-    font-size: 1.1rem;
+    font-size: var(--font-size-md);
   }
 
   &__content {

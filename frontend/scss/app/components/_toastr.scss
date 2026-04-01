@@ -15,7 +15,7 @@
   align-items: center;
   padding: var(--padding-default) var(--padding-large);
   border-radius: var(--border-radius);
-  font-size: 1.1rem;
+  font-size: var(--font-size-md);
   box-shadow: var(--toastr-shadow);
   animation: fadeIn 0.3s ease-out;
 

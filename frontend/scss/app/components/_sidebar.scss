@@ -51,6 +51,7 @@
   gap: var(--gap-default);
   min-height: 0;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 
   &__scroll {
@@ -58,6 +59,9 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+    overscroll-behavior: contain;
   }
 
   .tp__menu-item {
@@ -95,10 +99,6 @@
       min-width: var(--sidebar-width-collapsed);
       max-width: var(--sidebar-width-collapsed);
       width: var(--sidebar-width-collapsed);
-
-      .tp__app-sidebar__content {
-        padding: var(--padding-mini) var(--padding-micro);
-      }
     }
 
     &.collapsed {
@@ -128,7 +128,6 @@
 
     .tp__app-sidebar__header {
       justify-content: center;
-      padding: var(--padding-micro);
       gap: var(--gap-small);
     }
 

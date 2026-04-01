@@ -34,7 +34,7 @@
         flex-flow: row;
         align-items: center;
         gap: var(--gap-default);
-        font-size: 1.2rem;
+        font-size: var(--font-size-lg);
     }
     &-label {
       color: var(--modest-text-color);

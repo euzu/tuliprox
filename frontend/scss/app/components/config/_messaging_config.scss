@@ -13,7 +13,7 @@
 
   h3 {
     margin: var(--gap-small) 0;
-    font-size: 1rem;
+    font-size: var(--font-size-norm);
     color: var(--text-color-secondary);
   }
 }
@@ -22,7 +22,7 @@
   margin-top: var(--gap-small);
   h3 {
     margin: var(--gap-small) 0;
-    font-size: 0.9rem;
+    font-size: var(--font-size-base);
     color: var(--text-color-secondary);
   }
 }

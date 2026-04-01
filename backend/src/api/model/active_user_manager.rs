@@ -524,8 +524,18 @@ impl ActiveUserManager {
         user_connections
             .by_key
             .values()
-            .filter(|c| c.connections > 0)
-            .fold((0usize, 0usize), |(user_count, conn_count), c| (user_count + 1, conn_count + c.connections as usize))
+            .filter_map(|c| {
+                // Preserved adaptive (HLS/DASH) streams keep the logical connection alive between
+                // segment requests so the web-UI entry is not cleared during the brief disconnect.
+                let preserved_adaptive = c
+                    .streams
+                    .iter()
+                    .filter(|s| s.preserved && s.session_token.is_some() && s.channel.item_type.is_live_adaptive())
+                    .count();
+                let effective = c.connections as usize + preserved_adaptive;
+                if effective > 0 { Some(effective) } else { None }
+            })
+            .fold((0usize, 0usize), |(user_count, conn_count), effective| (user_count + 1, conn_count + effective))
     }
 
     pub async fn update_stream_detail(
@@ -1082,77 +1092,77 @@ impl ActiveUserManager {
             return;
         }
 
-        let mut expiry_index = self.adaptive_expiry_index.lock().await;
-        let mut user_connections = self.connections.write().await;
-        for entry in due_entries {
-            let key = AdaptiveExpiryKey {
-                username: entry.username.clone(),
-                session_token: entry.session_token.clone(),
-                uid: entry.uid,
-            };
-            let Some(current_expires_at) = expiry_index.get(&key).copied() else {
-                continue;
-            };
-            if current_expires_at != entry.expires_at {
-                continue;
-            }
-
-            let mut remove_user = false;
-            if let Some(connection_data) = user_connections.by_key.get_mut(&entry.username) {
-                let stream_idx_opt = connection_data
-                    .streams
-                    .iter()
-                    .position(|stream| {
-                        stream.uid == entry.uid
-                            && stream.preserved
-                            && stream.session_token.as_deref() == Some(entry.session_token.as_str())
-                    });
-
-                if let Some(stream_idx) = stream_idx_opt {
-                    let should_remove = self.is_preserved_stream_expired(
-                        &connection_data.streams[stream_idx],
-                        &connection_data.sessions,
-                        now,
-                    );
-
-                    if should_remove {
-                        // Clone the stream before removal so the cleanup event
-                        // can be sent reliably. Only remove state after the
-                        // event is delivered to avoid silent history loss.
-                        if let Some(tx) = self.cleanup_tx.get() {
-                            let stream_clone = Box::new(connection_data.streams[stream_idx].clone());
-                            match tx.send(CleanupEvent::AdaptiveSessionExpired {
-                                stream_info: stream_clone,
-                            }).await {
-                                Ok(()) => {}
-                                Err(_) => {
-                                    debug!("Cleanup channel closed, dropping adaptive session expiry");
-                                }
-                            }
-                        }
-                        connection_data.streams.swap_remove(stream_idx);
-                        expiry_index.remove(&key);
-                    } else if let Some(replacement_entry) = self.build_preserved_stream_expiry(
-                        &entry.username,
-                        &connection_data.streams[stream_idx],
-                        &connection_data.sessions,
-                    ) {
-                        if replacement_entry.expires_at != current_expires_at {
-                            expiry_index.insert(key.clone(), replacement_entry.expires_at);
-                            self.adaptive_expiry_queue.lock().await.push(Reverse(replacement_entry));
-                            self.adaptive_expiry_notify.notify_one();
-                        }
-                    }
+        let mut removed_addrs: Vec<std::net::SocketAddr> = Vec::new();
+        {
+            let mut expiry_index = self.adaptive_expiry_index.lock().await;
+            let mut user_connections = self.connections.write().await;
+            for entry in due_entries {
+                let key = AdaptiveExpiryKey {
+                    username: entry.username.clone(),
+                    session_token: entry.session_token.clone(),
+                    uid: entry.uid,
+                };
+                let Some(current_expires_at) = expiry_index.get(&key).copied() else {
+                    continue;
+                };
+                if current_expires_at != entry.expires_at {
+                    continue;
                 }
 
-                remove_user = connection_data.connections == 0
-                    && connection_data.streams.is_empty()
-                    && connection_data.sessions.is_empty();
-            }
+                let mut remove_user = false;
+                if let Some(connection_data) = user_connections.by_key.get_mut(&entry.username) {
+                    let stream_idx_opt = connection_data
+                        .streams
+                        .iter()
+                        .position(|stream| {
+                            stream.uid == entry.uid
+                                && stream.preserved
+                                && stream.session_token.as_deref() == Some(entry.session_token.as_str())
+                        });
 
-            if remove_user {
-                user_connections.by_key.remove(&entry.username);
+                    if let Some(stream_idx) = stream_idx_opt {
+                        let should_remove = self.is_preserved_stream_expired(
+                            &connection_data.streams[stream_idx],
+                            &connection_data.sessions,
+                            now,
+                        );
+
+                        if should_remove {
+                            let addr = connection_data.streams[stream_idx].addr;
+                            connection_data.streams.swap_remove(stream_idx);
+                            expiry_index.remove(&key);
+                            removed_addrs.push(addr);
+                        } else if let Some(replacement_entry) = self.build_preserved_stream_expiry(
+                            &entry.username,
+                            &connection_data.streams[stream_idx],
+                            &connection_data.sessions,
+                        ) {
+                            if replacement_entry.expires_at != current_expires_at {
+                                expiry_index.insert(key.clone(), replacement_entry.expires_at);
+                                self.adaptive_expiry_queue.lock().await.push(Reverse(replacement_entry));
+                                self.adaptive_expiry_notify.notify_one();
+                            }
+                        }
+                    }
+
+                    remove_user = connection_data.connections == 0
+                        && connection_data.streams.is_empty()
+                        && connection_data.sessions.is_empty();
+                }
+
+                if remove_user {
+                    user_connections.by_key.remove(&entry.username);
+                }
             }
+        } // locks released here
+
+        let had_removals = !removed_addrs.is_empty();
+        for addr in removed_addrs {
+            self.event_manager
+                .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(addr)));
+        }
+        if had_removals {
+            self.log_active_user().await;
         }
     }
 
@@ -1695,8 +1705,11 @@ mod tests {
         let released = manager.release_stream(&addr).await;
         assert!(released.is_none(), "adaptive stream should remain logically preserved");
 
+        // Preserved adaptive streams keep the logical connection alive between segments.
+        // The connections counter drops to 0, but active_users_and_connections counts the
+        // preserved adaptive stream, so the reported count must remain 1.
         let event = events.recv().await.unwrap();
-        assert_eq!(event, EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)));
+        assert_eq!(event, EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(1, 1)));
     }
 
     #[tokio::test]
