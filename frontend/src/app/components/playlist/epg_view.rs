@@ -41,18 +41,18 @@ pub fn EpgView() -> Html {
 
     // State to keep track of visible channel range
     let visible_range = use_state(|| (0, 20)); // (start_index, end_index)
-    let search_filter = use_state(String::new);
+    let search_filter = use_state::<SearchRequest, _>(|| SearchRequest::Clear);
 
     let handle_search = {
         let search_filter = search_filter.clone();
         let visible_range = visible_range.clone();
+        let container_ref = container_ref.clone();
         Callback::from(move |req: SearchRequest| {
-            let text = match req {
-                SearchRequest::Clear => String::new(),
-                SearchRequest::Text(t, _) | SearchRequest::Regexp(t, _) => t,
-            };
-            search_filter.set(text);
+            search_filter.set(req);
             visible_range.set((0, 20));
+            if let Some(el) = container_ref.cast::<HtmlElement>() {
+                el.set_scroll_top(0);
+            }
         })
     };
 
@@ -61,10 +61,14 @@ pub fn EpgView() -> Html {
         let epg_set = epg.clone();
         let search_filter = search_filter.clone();
         let visible_range = visible_range.clone();
+        let container_ref = container_ref.clone();
         Callback::from(move |req: PlaylistEpgRequest| {
             epg_set.set(None);
-            search_filter.set(String::new());
+            search_filter.set(SearchRequest::Clear);
             visible_range.set((0, 20));
+            if let Some(el) = container_ref.cast::<HtmlElement>() {
+                el.set_scroll_top(0);
+            }
             let service_ctx = service_ctx.clone();
             let epg_set = epg_set.clone();
             service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Show));
@@ -237,10 +241,20 @@ pub fn EpgView() -> Html {
                         let start_window = (start_window_secs / 60).max(0);
                         let now = Utc::now().timestamp();
 
-                        let search = (*search_filter).to_lowercase();
                         let filtered_channels: Vec<_> = tv.channels.iter()
-                            .filter(|ch| {
-                                search.is_empty() || ch.title.as_ref().is_some_and(|t| t.to_lowercase().contains(&search))
+                            .filter(|ch| match &*search_filter {
+                                SearchRequest::Clear => true,
+                                SearchRequest::Text(pattern, _) => {
+                                    let lc = pattern.to_lowercase();
+                                    ch.title.as_ref().is_some_and(|t| t.to_lowercase().contains(&lc))
+                                }
+                                SearchRequest::Regexp(pattern, _) => {
+                                    ch.title.as_deref().is_some_and(|t| {
+                                        shared::model::REGEX_CACHE
+                                            .get_or_compile(pattern)
+                                            .is_ok_and(|re| re.is_match(t))
+                                    })
+                                }
                             })
                             .collect();
 
