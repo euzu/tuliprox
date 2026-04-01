@@ -81,10 +81,44 @@ pub fn EpgView() -> Html {
         })
     };
 
+    let epg_window = (*epg).as_ref().map(|tv| (tv.start, tv.stop));
+
+    // Memoized timeline — only rebuilt when EPG data changes, not on every scroll
+    let timeline_html = use_memo(epg_window, |epg_window| {
+        let Some((start, stop)) = *epg_window else { return html! {} };
+        let start_window_secs = (start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
+        let start_window = (start_window_secs / 60).max(0);
+        let end_window = (stop / 60).max(0);
+        let window_duration = (end_window - start_window).max(0);
+        let num_blocks = (window_duration + TIME_BLOCK_MINS - 1) / TIME_BLOCK_MINS;
+        let block_style =
+            format!("width:{TIME_BLOCK_WIDTH}px; min-width:{TIME_BLOCK_WIDTH}px; max-width:{TIME_BLOCK_WIDTH}px");
+        html! {
+            <div class="tp__epg__timeline">
+                { for (0..num_blocks).map(|i| {
+                    let block_start = start_window + i * TIME_BLOCK_MINS;
+                    let block_secs = block_start.saturating_mul(60);
+                    if let Some(start_time_utc) = Utc.timestamp_opt(block_secs, 0).single() {
+                        let start_time_local = start_time_utc.with_timezone(&Local);
+                        let hour_min = start_time_local.format("%H:%M").to_string();
+                        let day_month = format!("{:02}.{:02}", start_time_local.day(), start_time_local.month());
+                        html! {
+                            <div class="tp__epg__timeline-block" style={block_style.clone()}>
+                                <div class="tp__epg__timeline-block-time">{ hour_min }</div>
+                                <div class="tp__epg__timeline-block-date">{ day_month }</div>
+                            </div>
+                        }
+                    } else {
+                        html!{ <div class="tp__epg__timeline-block" style={block_style.clone()}></div> }
+                    }
+                }) }
+            </div>
+        }
+    });
+
     {
         let container_ref = container_ref.clone();
         let now_line_ref = now_line_ref.clone();
-        let epg_window = (*epg).as_ref().map(|tv| (tv.start, tv.stop));
         use_effect_with(epg_window, move |epg_window| {
             // Updates the now-line position
             let epg_window_clone = *epg_window;
@@ -153,15 +187,17 @@ pub fn EpgView() -> Html {
                     // Schedule a new update after X ms (debounce)
                     let container_ref = container_ref.clone();
                     let vr = visible_range.clone();
-                    let handle = Timeout::new(16, move || {
+                    let handle = Timeout::new(50, move || {
                         if let Some(div) = container_ref.cast::<HtmlElement>() {
                             let scroll_top = div.scroll_top();
-                            let client_height = div.client_height(); // Calculate which channel rows are visible
-
-                            // render 10 + 10 more lines
-                            let start_index = (scroll_top / (channel_row_height as i32) - 10).max(0);
-                            let end_index = ((scroll_top + client_height) / (channel_row_height as i32) + 10).max(0);
-                            vr.set((start_index as usize, end_index as usize));
+                            let client_height = div.client_height();
+                            let start_index = (scroll_top / (channel_row_height as i32) - 10).max(0) as usize;
+                            let end_index =
+                                ((scroll_top + client_height) / (channel_row_height as i32) + 10).max(0) as usize;
+                            // Only trigger re-render when visible range actually changed
+                            if *vr != (start_index, end_index) {
+                                vr.set((start_index, end_index));
+                            }
                         }
                     });
 
@@ -197,13 +233,9 @@ pub fn EpgView() -> Html {
                         html! { <NoContent /> }
                    } else {
                         let tv = epg.as_ref().unwrap();
-                        let start_window_secs = (tv.start / (TIME_BLOCK_MINS*60)) * (TIME_BLOCK_MINS*60);
-                        let start_window =  (start_window_secs / 60).max(0);
-                        let end_window = (tv.stop / 60).max(0);
-                        let window_duration = (end_window - start_window).max(0);
-                        let num_blocks = (window_duration + TIME_BLOCK_MINS - 1) / TIME_BLOCK_MINS;
+                        let start_window_secs = (tv.start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
+                        let start_window = (start_window_secs / 60).max(0);
                         let now = Utc::now().timestamp();
-                        let block_style= format!("width:{TIME_BLOCK_WIDTH}px; min-width:{TIME_BLOCK_WIDTH}px; max-width:{TIME_BLOCK_WIDTH}px");
 
                         let search = (*search_filter).to_lowercase();
                         let filtered_channels: Vec<_> = tv.channels.iter()
@@ -221,9 +253,9 @@ pub fn EpgView() -> Html {
                         <div class="tp__epg__channels">
                             <div class="tp__epg__channels-header"></div>
                             <div style={format!("height:{}px", start_index * channel_row_height)}></div>
-                            { for filtered_channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(_i, ch)| {
+                            { for filtered_channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(i, ch)| {
                                 html! {
-                                    <div class="tp__epg__channel" title={concat_string!(&ch.title.as_ref().map(ToString::to_string).unwrap_or_default(), " (",  &ch.id, ")")}
+                                    <div key={i} class="tp__epg__channel" title={concat_string!(&ch.title.as_ref().map(ToString::to_string).unwrap_or_default(), " (",  &ch.id, ")")}
                                          style={format!("max-height:{channel_row_height}px;min-height:{channel_row_height}px;height:{channel_row_height}px")}>
                                         <div class="tp__epg__channel-icon">
                                             { if let Some(icon) = &ch.icon {
@@ -242,30 +274,12 @@ pub fn EpgView() -> Html {
                         </div>
 
                         <div class="tp__epg__programs">
-                            <div class="tp__epg__timeline">
-                                { for (0..num_blocks).map(|i| {
-                                    let block_start = start_window + i * TIME_BLOCK_MINS;
-                                    let block_secs = block_start.saturating_mul(60);
-                                    if let Some(start_time_utc) = Utc.timestamp_opt(block_secs, 0).single() {
-                                        let start_time_local = start_time_utc.with_timezone(&Local);
-                                        let hour_min = start_time_local.format("%H:%M").to_string();
-                                        let day_month = format!("{:02}.{:02}", start_time_local.day(), start_time_local.month());
-                                        html! {
-                                            <div class="tp__epg__timeline-block" style={block_style.clone()}>
-                                                <div class="tp__epg__timeline-block-time">{ hour_min }</div>
-                                                <div class="tp__epg__timeline-block-date">{ day_month }</div>
-                                            </div>
-                                        }
-                                    } else {
-                                        html!{ <div class="tp__epg__timeline-block" style={block_style.clone()}></div> }
-                                    }
-                                }) }
-                            </div>
+                            { (*timeline_html).clone() }
 
                             <div style={format!("height:{}px", start_index * channel_row_height)}></div>
-                            { for filtered_channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(_i, ch)| {
+                            { for filtered_channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(i, ch)| {
                                 html! {
-                                  <div class="tp__epg__channel-programs" style={format!("max-height:{channel_row_height}px;min-height:{channel_row_height}px;height:{channel_row_height}px")}>
+                                  <div key={i} class="tp__epg__channel-programs" style={format!("max-height:{channel_row_height}px;min-height:{channel_row_height}px;height:{channel_row_height}px")}>
                                     { for ch.programmes.iter().map(|p| {
                                         let is_active = now >= p.start && now < p.stop;
                                         let left = get_pos(p.start, start_window);
