@@ -72,11 +72,6 @@
     gap: var(--gap-large);
     background-color: var(--sub-card-background-color);
     overflow: hidden;
-
-    h1 {
-      font-size: 1.2rem;
-      font-weight: bold;
-    }
   }
 
   &__cols-2,
@@ -116,7 +111,7 @@
   &__title {
     display: none;
     color: var(--modest-text-color);
-    font-size: 1.5rem;
+    font-size: var(--font-size-xl);
     margin-bottom: var(--margin-default);
     @media (max-width: size.$mobile-breakpoint) {
       display: block;
@@ -232,7 +227,7 @@
   .tp__collapse-panel {
     &__header {
       padding: var(--padding-micro) 0;
-      font-size: 1.1rem;
+      font-size: var(--font-size-md);
     }
 
     &__body {
@@ -301,7 +296,7 @@
     gap: var(--gap-default);
 
     &-item {
-      font-size: 1.1rem;
+      font-size: var(--font-size-md);
       color: var(--text-color);
     }
   }

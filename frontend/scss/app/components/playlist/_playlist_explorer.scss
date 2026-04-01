@@ -269,7 +269,7 @@ $series-backdrop-mobile-height: 150px;
         background-size: 70%;
         background-position: right top;
         border-radius: var(--border-radius);
-        font-size: 1.2rem;
+        font-size: var(--font-size-lg);
         box-sizing: border-box;
         width: 100%;
         overflow: hidden;
@@ -277,7 +277,6 @@ $series-backdrop-mobile-height: 150px;
           min-height: $series-backdrop-mobile-height;
           max-height: $series-backdrop-mobile-height;
           height: $series-backdrop-mobile-height;
-          font-size: 1rem;
         }
 
         &-backdrop {
@@ -306,7 +305,7 @@ $series-backdrop-mobile-height: 150px;
           max-width: 60%;
           background-size: cover;
           background-position: center;
-          font-size: 1.2rem;
+          font-size: var(--font-size-lg);
           color: var(--series-info-title-color);
           z-index: 1;
         }
@@ -316,10 +315,7 @@ $series-backdrop-mobile-height: 150px;
 
     &__title {
       font-weight: bold;
-      font-size: 2.5rem;
-      @media (max-width: size.$mobile-breakpoint) {
-        font-size: 1.1rem;
-      }
+      font-size: var(--font-size-lg);
 
       color: var(--series-info-title-color);
     }
@@ -338,7 +334,7 @@ $series-backdrop-mobile-height: 150px;
 
       &-title {
         font-weight: bold;
-        font-size: 2rem;
+        font-size: var(--font-size-xl);
       }
     }
   }

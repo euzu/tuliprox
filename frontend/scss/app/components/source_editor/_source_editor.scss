@@ -8,7 +8,7 @@
    width: 100%;
    height: 100%;
    gap: var(--gap-default);
-   font-size: 1rem;
+   font-size: var(--font-size-norm);
 
    &__header {
       position: relative;
@@ -17,7 +17,7 @@
       box-sizing: border-box;
       width: 100%;
       gap: var(--gap-default);
-      font-size: 1rem;
+      font-size: var(--font-size-norm);
    }
 
    &__content {
@@ -28,7 +28,7 @@
       width: 100%;
       height: 100%;
       gap: var(--gap-default);
-      font-size: 1rem;
+      font-size: var(--font-size-norm);
       overflow: hidden;
    }
 
@@ -36,15 +36,22 @@
       display: flex;
       flex-flow: column;
       box-sizing: border-box;
-      height: 100%;
-      min-height: 0;
       gap: var(--gap-small);
       transition: min-width 0.2s ease, max-width 0.2s ease, width 0.2s ease;
+      height: 100%;
+      min-height: 0;
 
+      &.expanded {
+         min-width: var(--source-editor-sidebar-expanded-width);
+         max-width: var(--source-editor-sidebar-expanded-width);
+         width: var(--source-editor-sidebar-expanded-width);
+         flex: 0 0 var(--source-editor-sidebar-expanded-width);
+      }
       &.collapsed {
-         min-width: 3rem;
-         max-width: 3rem;
-         width: 3rem;
+         min-width: var(--source-editor-sidebar-collapsed-width);
+         max-width: var(--source-editor-sidebar-collapsed-width);
+         width: var(--source-editor-sidebar-collapsed-width);
+         flex: 0 0 var(--source-editor-sidebar-collapsed-width);
       }
 
       &-actions {
@@ -115,7 +122,7 @@
       border-radius: var(--border-radius);
       background-color: var(--card-background-color);
       color: var(--text-color);
-      font-size: 0.85rem;
+      font-size: var(--font-size-sm);
       text-align: center;
       pointer-events: none;
    }
@@ -153,22 +160,8 @@
 
 @media (max-width: size.$mobile-breakpoint) {
    .tp__source-editor {
-      &__content {
-         gap: var(--gap-small);
-      }
 
       &__sidebar {
-         min-width: 3rem;
-         max-width: 3rem;
-         width: 3rem;
-         flex: 0 0 3rem;
-
-         &.expanded {
-            min-width: min(6rem, 30vw);
-            max-width: min(6rem, 30vw);
-            width: min(6rem, 30vw);
-            flex: 0 0 min(6rem, 30vw);
-         }
 
          &-actions {
             justify-content: center;
@@ -180,9 +173,7 @@
             touch-action: pan-y;
 
             .tp__source-editor__brick {
-               padding: var(--padding-small) var(--padding-mini);
-               font-size: 0.85rem;
-               overflow-wrap: anywhere;
+               word-break: break-word;
             }
          }
       }

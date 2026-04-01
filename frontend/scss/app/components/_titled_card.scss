@@ -9,7 +9,7 @@
     left: 15px;
     padding: 0 4px;
     z-index: 2;
-    font-size: 14px;
+    font-size: var(--font-size-sm);
     line-height: 1.2;
     background: var(--titled-card-title-background);
   }

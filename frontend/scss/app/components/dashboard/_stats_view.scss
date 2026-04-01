@@ -24,13 +24,12 @@
       display: flex;
       flex-flow: row wrap;
       gap: var(--gap-default);
-    }
 
-    &-group-provider {
       @media (max-width: size.$dashboard-mobile-breakpoint) {
-        display: flex;
-        flex-flow: row wrap;
-        gap: var(--gap-default);
+        &-provider {
+          display: flex;
+          flex-flow: row wrap;
+        }
       }
     }
   }

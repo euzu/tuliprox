@@ -71,7 +71,7 @@
     overflow: auto;
 
     .tp__collapse-panel__header {
-      font-size: 1.6rem;
+      font-size: var(--font-size-xl);
       padding: 0;
        span {
          pointer-events: auto;

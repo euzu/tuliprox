@@ -14,7 +14,6 @@
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(size.$form-grid-cell-width, 1fr));
       max-width: calc(size.$form-max-grid-cells * size.$form-grid-cell-width + 2 * 1rem);
-      gap: var(--gap-large);
       box-sizing: border-box;
 
       @media (max-width: size.$mobile-breakpoint) {

@@ -106,7 +106,7 @@ $port-size: 10px;
   }
 
   &-sub-label {
-    font-size: 0.8rem;
+    font-size: var(--font-size-sm);
     color: var(--modest-text-color);
     text-align: right;
     pointer-events: none;
@@ -255,7 +255,7 @@ $port-size: 10px;
       width: 100%;
       &-label {
         color: var(--modest-text-color);
-        font-size: 0.7rem;
+        font-size: var(--font-size-xs);
         font-weight: bold;
         width: 50%;
         height: 100%;

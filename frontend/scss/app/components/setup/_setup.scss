@@ -20,7 +20,7 @@
   overflow: auto;
 
   &__title {
-    font-size: 0.95rem;
+    font-size: var(--font-size-base);
     font-weight: 700;
     color: var(--modest-text-color);
     margin-bottom: var(--padding-small);
@@ -75,7 +75,7 @@
     justify-content: center;
     min-width: 1.6rem;
     height: 1.6rem;
-    font-size: 0.75rem;
+    font-size: var(--font-size-xs);
     border-radius: 999px;
     background: var(--table-header-background-color);
     color: var(--modest-text-color);
@@ -83,7 +83,7 @@
   }
 
   &__label {
-    font-size: 0.9rem;
+    font-size: var(--font-size-base);
     line-height: 1.2;
   }
 }

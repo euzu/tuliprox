@@ -6,7 +6,7 @@
   white-space: nowrap;
   vertical-align: middle;
   color: var(--text-color);
-  font-size: 1.1rem;
+  font-size: var(--font-size-md);
 
   @if $flex {
     flex: $flex;

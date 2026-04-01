@@ -7,7 +7,7 @@
   }
   &__body {
     color: var(--text-color);
-    font-size: 1.1rem;
+    font-size: var(--font-size-md);
   }
   &__footer {
     color: var(--modest-text-color);

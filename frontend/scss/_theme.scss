@@ -23,7 +23,7 @@ body {
   --mobile-size: size.$mobile-breakpoint;
   --dashboard-mobile-size: size.$dashboard-mobile-breakpoint;
   --sidebar-width-expanded: 160px;
-  --sidebar-width-collapsed: 42px;
+  --sidebar-width-collapsed: 36px;
   --max-view-width: size.$dashboard-mobile-breakpoint;
   --max-table-cell-width: 240px;
   --max-dialog-card-height: 300px;
@@ -51,6 +51,14 @@ body {
   --margin-small: 0.75rem;
   --margin-default: 1rem;
 
+  --font-size-xs: 0.7rem;
+  --font-size-sm: 0.85rem;
+  --font-size-base: 0.9rem;
+  --font-size-norm: 1rem;
+  --font-size-md: 1.1rem;
+  --font-size-lg: 1.2rem;
+  --font-size-xl: 1.5rem;
+
   --epg-row-height: 4rem;
   --epg-header-height: 2rem;
   --epg-channels-width: 300px;
@@ -59,29 +67,41 @@ body {
   --tag-padding: 0.3rem 0.5rem;
   --tag-border-radius: 0.5rem;
   --icon-button-border-radius: 4px;
-  --theme-palette-contrast-base: #000000;
-  --theme-palette-contrast-inverse: #ffffff;
+
+  --source-editor-sidebar-collapsed-width: 2rem;
+  --source-editor-sidebar-expanded-width: 6rem;
+
+  --dashboard-card-icon-width: 3rem;
 }
 
 @media (max-width: size.$mobile-breakpoint) {
   :root,
   body {
-    --gap-small: 0.2rem;
-    --gap-default: 0.3rem;
-    --gap-large: 0.5rem;
-    --gap-larger: 0.75rem;
+    --gap-mini: 0.1rem;
+    --gap-small: 0.1rem;
+    --gap-default: 0.17rem;
+    --gap-large: 0.33rem;
+    --gap-larger: 0.5rem;
 
-    --padding-micro: 0.2rem;
-    --padding-mini: 0.3rem;
-    --padding-small: 0.5rem;
-    --padding-default: 0.75rem;
-    --padding-large: 1rem;
-    --padding-larger: 1.25rem;
+    --padding-micro: 0.07rem;
+    --padding-mini: 0.17rem;
+    --padding-small: 0.25rem;
+    --padding-default: 0.33rem;
+    --padding-large: 0.5rem;
+    --padding-larger: 0.67rem;
 
-    --margin-micro: 0.2rem;
-    --margin-mini: 0.3rem;
-    --margin-small: 0.5rem;
-    --margin-default: 0.75rem;
+    --margin-micro: 0.07rem;
+    --margin-mini: 0.17rem;
+    --margin-small: 0.25rem;
+    --margin-default: 0.33rem;
+
+    --font-size-xs: 0.75rem;
+    --font-size-sm: 0.8rem;
+    --font-size-base: 0.85rem;
+    --font-size-norm: 0.9rem;
+    --font-size-md: 0.95rem;
+    --font-size-lg: 1.05rem;
+    --font-size-xl: 1.15rem;
 
     --epg-row-height: 3rem;
     --epg-header-height: 1.5rem;
@@ -91,6 +111,9 @@ body {
 
 :root,
 body {
+  --theme-palette-contrast-base: #000000;
+  --theme-palette-contrast-inverse: #ffffff;
+
   --theme-palette-surface: var(--theme-palette-neutral-surface-940);
   --theme-palette-surface-soft: var(--theme-palette-neutral-surface-920);
   --theme-palette-surface-muted: var(--theme-palette-neutral-surface-900);
@@ -480,17 +503,9 @@ body {
   --text-button-primary-hover-background-color: var(--theme-brand-primary-hover-strong);
   --text-button-primary-hover-color: var(--theme-brand-text-inverse);
   --text-button-secondary-background-color: var(--theme-brand-secondary-soft);
-  --text-button-secondary-color: color-mix(
-    in srgb,
-    var(--theme-brand-danger) 72%,
-    var(--theme-brand-text-inverse)
-  );
+  --text-button-secondary-color: color-mix(in srgb, var(--theme-brand-danger) 72%, var(--theme-brand-text-inverse));
   --text-button-secondary-hover-background-color: var(--theme-brand-secondary-hover);
-  --text-button-secondary-hover-color: color-mix(
-    in srgb,
-    var(--theme-brand-danger-strong) 74%,
-    var(--theme-brand-text-inverse)
-  );
+  --text-button-secondary-hover-color: color-mix(in srgb, var(--theme-brand-danger-strong) 74%, var(--theme-brand-text-inverse));
   --text-button-tertiary-background-color: var(--theme-brand-tertiary-surface);
   --text-button-tertiary-color: var(--theme-brand-tertiary-title);
   --text-button-tertiary-hover-background-color: var(--theme-brand-tertiary-hover);
