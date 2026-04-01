@@ -6,6 +6,8 @@ pub struct ToggleSwitchProps {
     pub value: bool,
     #[prop_or_default]
     pub readonly: bool,
+    #[prop_or_default]
+    pub compact: bool,
     #[prop_or_else(Callback::noop)]
     pub on_change: Callback<bool>,
 }
@@ -39,7 +41,11 @@ pub fn ToggleSwitch(props: &ToggleSwitchProps) -> Html {
     };
 
     html! {
-        <label class={classes!("tp__toggle-switch", if props.readonly { "tp__toggle-switch__readonly" } else {""})}>
+        <label class={classes!(
+            "tp__toggle-switch",
+            if props.readonly { "tp__toggle-switch__readonly" } else { "" },
+            if props.compact { "tp__toggle-switch--compact" } else { "" },
+        )}>
             <input type="checkbox"
                    checked={*toggled}
                    onclick={onclick}/>

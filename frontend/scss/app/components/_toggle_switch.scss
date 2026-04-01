@@ -3,6 +3,11 @@ $toggle-switch-height: 1.6rem;
 $toggle-switch-toggle-padding: 3px;
 $toggle-switch-toggle-width: calc($toggle-switch-height - $toggle-switch-toggle-padding * 2);
 $toggle-switch-toggle-end-pos: calc($toggle-switch-width - ($toggle-switch-toggle-width + $toggle-switch-toggle-padding * 2));
+$toggle-switch-compact-width: 2.1rem;
+$toggle-switch-compact-height: 1.2rem;
+$toggle-switch-compact-toggle-padding: 2px;
+$toggle-switch-compact-toggle-width: calc($toggle-switch-compact-height - $toggle-switch-compact-toggle-padding * 2);
+$toggle-switch-compact-toggle-end-pos: calc($toggle-switch-compact-width - ($toggle-switch-compact-toggle-width + $toggle-switch-compact-toggle-padding * 2));
 
 .tp__toggle-switch {
   position: relative;
@@ -54,5 +59,27 @@ $toggle-switch-toggle-end-pos: calc($toggle-switch-width - ($toggle-switch-toggl
 
   &:focus-within {
     border-color: var(--input-focus-border-color);
+  }
+
+  &--compact {
+    width: $toggle-switch-compact-width;
+    min-width: $toggle-switch-compact-width;
+    max-width: $toggle-switch-compact-width;
+    height: $toggle-switch-compact-height;
+
+    .tp__toggle-switch__track {
+      border-radius: $toggle-switch-compact-toggle-width;
+    }
+
+    .tp__toggle-switch__toggle {
+      height: $toggle-switch-compact-toggle-width;
+      width: $toggle-switch-compact-toggle-width;
+      left: $toggle-switch-compact-toggle-padding;
+      bottom: $toggle-switch-compact-toggle-padding;
+    }
+
+    input:checked + span > span {
+      transform: translateX($toggle-switch-compact-toggle-end-pos);
+    }
   }
 }

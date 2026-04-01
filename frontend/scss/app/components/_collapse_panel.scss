@@ -9,7 +9,6 @@
     flex-flow: row nowrap;
     color: var(--modest-text-color);
     fill: currentColor;
-    //max-height: 1.2rem;
     cursor: pointer;
     box-sizing: border-box;
     width: 100%;
@@ -20,12 +19,14 @@
       fill: var(--menu-item-hover-color);
       font-weight: bold;
     }
+
     &-title {
       flex: 1 1 auto;
       white-space: nowrap;
       text-overflow: ellipsis;
       overflow: hidden;
     }
+
     svg {
       width: 1.2rem;
     }
@@ -37,14 +38,23 @@
     width: 100%;
     box-sizing: border-box;
     height: fit-content;
+    min-height: 0;
     overflow: hidden;
-  //  transition: max-height 0.5s ease;
-  //  max-height: 5000px;
+    flex: 1 1 auto;
+    //  transition: max-height 0.5s ease;
+    //  max-height: 5000px;
   }
+
   &.tp__collapsed {
     .tp__collapse-panel__body {
-       display: none;
-       max-height: 0;
-     }
+      display: none;
+      max-height: 0;
+    }
+  }
+
+  &.tp__expanded {
+    .tp__collapse-panel__body {
+      height: fit-content;
+    }
   }
 }

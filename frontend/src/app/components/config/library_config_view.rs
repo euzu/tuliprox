@@ -351,10 +351,10 @@ pub fn LibraryConfigView() -> Html {
                             <Select name="type" options={options} on_select={Callback::from(move |(_, selection)| type_change.emit((idx, selection)))} />
                         </td>
                         <td>
-                            <ToggleSwitch value={dir.enabled} readonly={false} on_change={Callback::from(move |value| enabled_change.emit((idx, value)))} />
+                            <ToggleSwitch compact={true} value={dir.enabled} readonly={false} on_change={Callback::from(move |value| enabled_change.emit((idx, value)))} />
                         </td>
                         <td>
-                            <ToggleSwitch value={dir.recursive} readonly={false} on_change={Callback::from(move |value| recursive_change.emit((idx, value)))} />
+                            <ToggleSwitch compact={true} value={dir.recursive} readonly={false} on_change={Callback::from(move |value| recursive_change.emit((idx, value)))} />
                         </td>
                     </tr>
                 }

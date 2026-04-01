@@ -60,7 +60,7 @@ pub fn PlaylistMappings(props: &PlaylistMappingsProps) -> Html {
                 </div>
                 <div class="tp__playlist-mappings__mapping-section">
                     <label>{translate.t("LABEL.MATCH_AS_ASCII")}</label>
-                    <ToggleSwitch value={mapping.match_as_ascii} readonly={true} />
+                    <ToggleSwitch value={mapping.match_as_ascii} readonly={true} compact={true} />
                 </div>
                 <Accordion default_panel={None::<String>}>
                 <div class="tp__playlist-mappings__list">
