@@ -40,6 +40,9 @@ pub enum DisconnectReason {
     ClientClosed,
     ServerError,
     Timeout,
+    /// Reserved for future day-split logic: emitted at midnight for sessions that span
+    /// two calendar days so the previous day's file gets a closing record.
+    /// Not yet emitted — sessions crossing midnight have their disconnect in the new day's file.
     DayRollover,
     Shutdown,
     Unknown,
@@ -116,6 +119,8 @@ pub struct StreamHistoryRecord {
     // User and provider identity (no passwords, no tokens)
     pub api_username: Option<String>,
     pub provider_name: Option<String>,
+    /// Provider-side username (e.g. Xtream account). Always `None` until `StreamInfo`
+    /// carries the provider credential — at which point populate from there.
     pub provider_username: Option<String>,
     // Stream metadata
     pub virtual_id: Option<u32>,
@@ -132,7 +137,9 @@ pub struct StreamHistoryRecord {
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub resolution: Option<String>,
-    // Session summary — populated on disconnect
+    // Session summary — populated on disconnect.
+    // bytes_sent and first_byte_latency_ms are None for shared streams (meter serves
+    // multiple clients; per-session totals are not meaningful in that case).
     pub connect_ts_utc: Option<u64>,
     pub disconnect_ts_utc: Option<u64>,
     pub session_duration: Option<u64>,
@@ -140,8 +147,11 @@ pub struct StreamHistoryRecord {
     pub first_byte_latency_ms: Option<u64>,
     pub provider_reconnect_count: Option<u8>,
     pub disconnect_reason: Option<DisconnectReason>,
-    /// Set when this connect event continues a session that was split by day rollover.
+    /// Set when this connect event continues a session that was split by a `DayRollover`.
+    /// Always `None` until the `DayRollover` mechanism is implemented.
     pub previous_session_id: Option<u64>,
+    /// Target config id — identifies the failover bundle this stream belongs to.
+    pub target_id: Option<u16>,
 }
 
 /// `QoS` metrics collected at disconnect time, passed as a bundle to avoid growing the signature.
@@ -162,7 +172,10 @@ impl StreamHistoryRecord {
             event_type: EventType::Connect, // overridden by callers
             event_ts_utc: event_ts,
             partition_day_utc: utc_day_from_secs(event_ts),
-            session_id: u64::from(info.uid),
+            // Combine connect-timestamp (upper 32 bits) with uid (lower 32 bits).
+            // This prevents session_id collision across server restarts and uid wrap-around.
+            // Both Connect and Disconnect derive this from the same StreamInfo, so they match.
+            session_id: (info.ts << 32) | u64::from(info.uid),
             source_addr: Some(info.client_ip.clone()),
             api_username: Some(info.username.clone()),
             provider_name: Some(info.provider.clone()),
@@ -188,6 +201,7 @@ impl StreamHistoryRecord {
             provider_reconnect_count: None,
             disconnect_reason: None,
             previous_session_id: None,
+            target_id: Some(info.channel.target_id),
         }
     }
 
@@ -376,6 +390,7 @@ mod tests {
             provider_reconnect_count: None,
             disconnect_reason: None,
             previous_session_id: None,
+            target_id: Some(1),
         }
     }
 
@@ -411,6 +426,7 @@ mod tests {
             provider_reconnect_count: Some(0),
             disconnect_reason: Some(DisconnectReason::ClientClosed),
             previous_session_id: None,
+            target_id: Some(1),
         }
     }
 

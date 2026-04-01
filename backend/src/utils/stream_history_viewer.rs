@@ -622,6 +622,7 @@ mod tests {
             provider_reconnect_count: None,
             disconnect_reason: None,
             previous_session_id: None,
+            target_id: None,
         }
     }
 }

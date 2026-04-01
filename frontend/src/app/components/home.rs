@@ -3,8 +3,8 @@ use crate::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
             IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
-            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamsView, ThemePicker,
-            ToastrView, UserlistView, WebsocketStatus,
+            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView,
+            ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -288,6 +288,11 @@ pub fn Home() -> Html {
                                         { html_if!(show_streams_page && can_read_system_status, {
                                                    <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
                                               <StreamsView embedded={false}/>
+                                            </Panel>
+                                        })}
+                                        { html_if!(can_read_system_status, {
+                                            <Panel class="tp__full-width" value={ViewType::StreamHistory.to_string()} active={view_visible.to_string()}>
+                                                <StreamHistoryView/>
                                             </Panel>
                                         })}
                                        { html_if!(can_read_users, {

@@ -21,6 +21,10 @@
   font-size: var(--font-size-base);
 }
 
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 @media (pointer: fine) {
   ::-webkit-scrollbar-track {
     -webkit-box-shadow: var(--scrollbar-track-shadow);

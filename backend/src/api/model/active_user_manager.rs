@@ -248,6 +248,14 @@ impl ActiveUserManager {
         let _ = self.cleanup_tx.set(tx);
     }
 
+    /// Collect a snapshot of all currently active streams for shutdown history recording.
+    pub(crate) async fn get_all_active_streams(&self) -> Vec<shared::model::StreamInfo> {
+        let connections = self.connections.read().await;
+        connections.by_key.values()
+            .flat_map(|data| data.streams.iter().cloned())
+            .collect()
+    }
+
     async fn log_active_user(&self) {
         let is_log_user_enabled = self.is_log_user_enabled();
         let (user_count, user_connection_count) = { self.active_users_and_connections().await };
@@ -1129,9 +1137,26 @@ impl ActiveUserManager {
 
                         if should_remove {
                             let addr = connection_data.streams[stream_idx].addr;
+                            let handled_by_worker = if let Some(tx) = self.cleanup_tx.get() {
+                                let stream_clone = Box::new(connection_data.streams[stream_idx].clone());
+                                if tx.send(CleanupEvent::AdaptiveSessionExpired {
+                                    stream_info: stream_clone,
+                                }).await.is_ok() {
+                                    true
+                                } else {
+                                    debug!("Cleanup channel closed, dropping adaptive session expiry");
+                                    false
+                                }
+                            } else {
+                                false
+                            };
                             connection_data.streams.swap_remove(stream_idx);
                             expiry_index.remove(&key);
-                            removed_addrs.push(addr);
+                            // Only push when the cleanup worker is not handling the Disconnected
+                            // event — avoids a double-disconnect on the normal path.
+                            if !handled_by_worker {
+                                removed_addrs.push(addr);
+                            }
                         } else if let Some(replacement_entry) = self.build_preserved_stream_expiry(
                             &entry.username,
                             &connection_data.streams[stream_idx],

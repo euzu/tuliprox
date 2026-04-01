@@ -3,6 +3,7 @@ use crate::repository::stream_history::{
     RECORD_SCHEMA_VERSION, SOURCE_KIND_STREAM_HISTORY, StreamHistoryRecord,
     write_block_magic, write_file_magic, write_framed,
 };
+use crate::repository::stream_history::archive::finalize_and_archive;
 use crate::model::StreamHistoryConfig;
 use log::{error, info, warn};
 use std::{
@@ -306,7 +307,13 @@ impl WriterState {
 
     fn flush_and_rollover_to(&mut self, target_day: &str, config: &StreamHistoryConfig, writer_instance_id: u64) -> io::Result<()> {
         self.flush_batch()?;
-        self.finalize()?;
+        self.finalize()?; // closes and drops the BufWriter; file_path is still valid
+
+        // Archive the just-closed file and apply retention immediately.
+        // At this point all pre-rollover records are safely on disk — the first record
+        // with a new partition_day_utc triggered this rollover, so no pre-midnight record
+        // can arrive after this point. The previous-day file is now complete and safe to archive.
+        finalize_and_archive(&self.file_path, &self.directory, config.stream_history_retention_days);
 
         let new_path = pending_file_path(&self.directory, target_day);
         let new_file = open_or_create_pending_file(&new_path, target_day, writer_instance_id)?;
@@ -318,11 +325,6 @@ impl WriterState {
         self.total_record_count = 0;
         self.min_event_ts = None;
         self.max_event_ts = None;
-
-        // Apply retention after rollover
-        if let Err(e) = apply_retention(&self.directory, config.stream_history_retention_days) {
-            warn!("Stream history retention cleanup failed: {e}");
-        }
 
         Ok(())
     }
@@ -463,6 +465,7 @@ mod tests {
             provider_reconnect_count: None,
             disconnect_reason: None,
             previous_session_id: None,
+            target_id: None,
         }
     }
 

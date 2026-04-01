@@ -142,6 +142,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
                 <MenuItem class={if *active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
              })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <MenuItem class={if *active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
+            })}
             {html_if!(
                 auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
                 {
@@ -194,6 +197,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             })}
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
              <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if *active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_permission(Permission::SystemRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if *active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),

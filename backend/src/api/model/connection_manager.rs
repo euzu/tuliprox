@@ -474,8 +474,19 @@ impl ConnectionManager {
         Arc::clone(&self.capacity_notify)
     }
 
-    /// Flush and finalize the stream history writer. Call once at graceful shutdown.
+    /// Emit disconnect records for all still-active streams and flush the history writer.
+    /// Call once at graceful shutdown before dropping the `ConnectionManager`.
     pub async fn shutdown(&self) {
+        let active_streams = self.user_manager.get_all_active_streams().await;
+        for stream_info in active_streams {
+            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            emit_disconnect_record(
+                &self.history_writer,
+                &stream_info,
+                DisconnectReason::Shutdown,
+                &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
+            );
+        }
         if let Some(w) = self.history_writer.load_full() {
             w.shutdown().await;
         }

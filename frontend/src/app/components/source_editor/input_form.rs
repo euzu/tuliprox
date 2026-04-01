@@ -819,7 +819,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <Card class="tp__config-view__card">
                     { config_field_bool!(staged_input_state.form, translate.t(LABEL_ENABLED), enabled) }
                     { config_field!(staged_input_state.form, translate.t(LABEL_URL), url) }
-                    { html_if!(staged_input_state.form.input_type.is_xtream(), {
+                    { html_if!(staged_is_xtream, {
                         <div class="tp__config-view__cols-2">
                         { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
                         { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
@@ -845,7 +845,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <Card class="tp__config-view__card">
                 { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
                 { edit_field_text!(staged_input_state, translate.t(LABEL_URL),  url, StagedInputFormAction::Url) }
-                { html_if!(staged_input_state.form.input_type.is_xtream(), {
+                { html_if!(staged_is_xtream, {
                   <div class="tp__config-view__cols-2">
                   { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
                   { edit_field_text_option!(staged_input_state, translate.t(LABEL_PASSWORD), password, StagedInputFormAction::Password, true) }
