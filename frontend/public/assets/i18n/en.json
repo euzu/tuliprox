@@ -429,7 +429,7 @@
     },
     "INPUT_FORM": {
       "ALIASES": "Optional aliases used to manage multiple lines from the same provider.",
-      "EPG_SOURCES": "Associated EPG (Electronic Program Guide) sources for this input.",
+      "EPG_SOURCES": "Associated EPG (Electronic Program Guide) sources for this input.\n You can use `auto` to create the epg url based on your input settings,\nor you can write the full epg url.",
       "FETCH_METHOD": "HTTP method used to retrieve the input (e.g., GET, POST).",
       "HEADERS": "Custom HTTP headers sent when retrieving the input playlist.",
       "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
