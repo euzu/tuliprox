@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{Breadcrumbs, EpgSourceSelector, NoContent},
+    app::components::{Breadcrumbs, EpgSourceSelector, NoContent, Search},
     hooks::use_service_context,
     i18n::use_translation,
     model::{BusyStatus, EventMessage},
@@ -9,7 +9,7 @@ use chrono::{Datelike, Local, TimeZone, Utc};
 use gloo_timers::callback::{Interval, Timeout};
 use shared::{
     concat_string,
-    model::{EpgTv, PlaylistEpgRequest},
+    model::{EpgTv, PlaylistEpgRequest, SearchRequest},
 };
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{prelude::Closure, JsCast};
@@ -41,12 +41,30 @@ pub fn EpgView() -> Html {
 
     // State to keep track of visible channel range
     let visible_range = use_state(|| (0, 20)); // (start_index, end_index)
+    let search_filter = use_state(String::new);
+
+    let handle_search = {
+        let search_filter = search_filter.clone();
+        let visible_range = visible_range.clone();
+        Callback::from(move |req: SearchRequest| {
+            let text = match req {
+                SearchRequest::Clear => String::new(),
+                SearchRequest::Text(t, _) | SearchRequest::Regexp(t, _) => t,
+            };
+            search_filter.set(text);
+            visible_range.set((0, 20));
+        })
+    };
 
     let handle_select_source = {
         let service_ctx = services.clone();
         let epg_set = epg.clone();
+        let search_filter = search_filter.clone();
+        let visible_range = visible_range.clone();
         Callback::from(move |req: PlaylistEpgRequest| {
             epg_set.set(None);
+            search_filter.set(String::new());
+            visible_range.set((0, 20));
             let service_ctx = service_ctx.clone();
             let epg_set = epg_set.clone();
             service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Show));
@@ -168,6 +186,9 @@ pub fn EpgView() -> Html {
             <Breadcrumbs items={&*breadcrumbs}/>
             <div class="tp__epg__header">
                 <h1>{translate.t("LABEL.PLAYLIST_EPG")}</h1>
+                <div class="tp__epg__header-toolbar">
+                    <Search onsearch={handle_search}/>
+                </div>
             </div>
             <EpgSourceSelector on_select={handle_select_source} />
             <div class="tp__epg__body" ref={container_ref}>
@@ -184,8 +205,15 @@ pub fn EpgView() -> Html {
                         let now = Utc::now().timestamp();
                         let block_style= format!("width:{TIME_BLOCK_WIDTH}px; min-width:{TIME_BLOCK_WIDTH}px; max-width:{TIME_BLOCK_WIDTH}px");
 
+                        let search = (*search_filter).to_lowercase();
+                        let filtered_channels: Vec<_> = tv.channels.iter()
+                            .filter(|ch| {
+                                search.is_empty() || ch.title.as_ref().is_some_and(|t| t.to_lowercase().contains(&search))
+                            })
+                            .collect();
+
                         let (start_index, end_index) = *visible_range;
-                        let total_channels = tv.channels.len();
+                        let total_channels = filtered_channels.len();
                         let channel_row_height = *row_height;
 
                         html! {
@@ -193,7 +221,7 @@ pub fn EpgView() -> Html {
                         <div class="tp__epg__channels">
                             <div class="tp__epg__channels-header"></div>
                             <div style={format!("height:{}px", start_index * channel_row_height)}></div>
-                            { for tv.channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(_i, ch)| {
+                            { for filtered_channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(_i, ch)| {
                                 html! {
                                     <div class="tp__epg__channel" title={concat_string!(&ch.title.as_ref().map(ToString::to_string).unwrap_or_default(), " (",  &ch.id, ")")}
                                          style={format!("max-height:{channel_row_height}px;min-height:{channel_row_height}px;height:{channel_row_height}px")}>
@@ -235,7 +263,7 @@ pub fn EpgView() -> Html {
                             </div>
 
                             <div style={format!("height:{}px", start_index * channel_row_height)}></div>
-                            { for tv.channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(_i, ch)| {
+                            { for filtered_channels.iter().enumerate().skip(start_index).take(end_index - start_index).map(|(_i, ch)| {
                                 html! {
                                   <div class="tp__epg__channel-programs" style={format!("max-height:{channel_row_height}px;min-height:{channel_row_height}px;height:{channel_row_height}px")}>
                                     { for ch.programmes.iter().map(|p| {
