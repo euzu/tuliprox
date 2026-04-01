@@ -35,18 +35,19 @@ pub fn format_ts(ts: u64) -> String {
     chrono::DateTime::from_timestamp(ts as i64, 0)
         .map_or_else(|| ts.to_string(), |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
 }
-
 pub fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
+    let mut size = bytes as f64;
+    let units = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut unit_idx = 0;
+
+    while size >= 1024.0 && unit_idx < units.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{} B", bytes)
     } else {
-        format!("{bytes} B")
+        format!("{:.2} {}", size, units[unit_idx])
     }
 }

@@ -1,8 +1,9 @@
 use crate::{
     model::WebConfig,
     services::{
-        AuthService, ConfigService,DownloadsService, EventService, FlagsService, PlaylistService, RbacService, StatusService,
-        StreamHistoryService, StreamsService, ToastrService, UserApiService, UserService, WebSocketService,
+        AuthService, ConfigService, DownloadsService, EventService, FlagsService, PlaylistService, RbacService,
+        StatusService, StreamHistoryService, StreamsService, ToastrService, UserApiService, UserService,
+        WebSocketService,
     },
 };
 use std::rc::Rc;

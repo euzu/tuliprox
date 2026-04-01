@@ -16,7 +16,7 @@ mod user_service;
 mod websocket_service;
 
 pub use self::{
-    auth_service::*, config_service::*, dialog_service::*, downloads_service::*, event_service::*, flags_service::*, playlist_service::*,
-    rbac_service::*, requests::*, status_service::*, stream_history_service::*, streams_service::*, toastr_service::*,
-    user_api_service::*, user_service::*, websocket_service::*,
+    auth_service::*, config_service::*, dialog_service::*, downloads_service::*, event_service::*, flags_service::*,
+    playlist_service::*, rbac_service::*, requests::*, status_service::*, stream_history_service::*,
+    streams_service::*, toastr_service::*, user_api_service::*, user_service::*, websocket_service::*,
 };
