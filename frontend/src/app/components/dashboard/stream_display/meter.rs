@@ -1,5 +1,8 @@
-use super::helpers::{format_bandwidth, format_transferred};
-use crate::{hooks::use_service_context, model::EventMessage};
+use crate::{
+    hooks::use_service_context,
+    model::EventMessage,
+    utils::{format_bandwidth, format_transferred},
+};
 use shared::model::StreamMeterEntry;
 use yew::prelude::*;
 

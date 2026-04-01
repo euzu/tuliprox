@@ -1,7 +1,9 @@
 .tp__mapper-counter {
   display: flex;
   flex-flow: column;
-  overflow: auto;
+  overflow: auto; pointer-events: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
   box-sizing: border-box;
 
   &__row {

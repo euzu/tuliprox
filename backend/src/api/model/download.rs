@@ -257,8 +257,11 @@ impl From<FileDownload> for FileDownloadDto {
 /// Priority-aware wait queue for download connection slots.
 /// When the provider is at capacity, download tasks register here and are
 /// woken one-at-a-time in descending priority order (lowest i8 = highest priority).
+type DownloadWaiter = (i8, Arc<Notify>);
+type DownloadWaiters = Arc<Mutex<Vec<DownloadWaiter>>>;
+
 pub struct DownloadSlotWaitQueue {
-    waiters: Arc<Mutex<Vec<(i8, Arc<Notify>)>>>,
+    waiters: DownloadWaiters,
 }
 
 impl DownloadSlotWaitQueue {
@@ -334,7 +337,7 @@ impl DownloadQueue {
             start_at: download.start_at,
             duration_secs: download.duration_secs,
             kind: download.kind.clone(),
-            input_name: download.input_name.as_ref().map(|s| s.to_string()),
+            input_name: download.input_name.as_ref().map(std::string::ToString::to_string),
             priority: download.priority,
         }
     }

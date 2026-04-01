@@ -2,6 +2,7 @@ use crate::{
     api::{
         api_utils::get_stream_options,
         model::{
+            connection_manager::{PROVIDER_END_NOT_SET, PROVIDER_END_CLOSED, PROVIDER_END_ERROR},
             create_provider_stream, AppState, BoxedProviderStream, CleanupEvent, ConnectionManager,
             CustomVideoStreamType, EventManager, MeteringStream, ProviderHandle, ProviderStreamFactoryOptions,
             StreamDetails, StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
@@ -157,6 +158,11 @@ struct ActiveClientStreamState {
     custom_video_timeout_secs: u32,
     custom_video_timeout_mode: Option<StreamMode>,
     custom_video_timeout_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Set once when the provider stream ends. Read once in Drop. Never queried during streaming.
+    /// Separate from `send_custom_stream_flag` (`StreamMode`). Uses `PROVIDER_END_*` constants.
+    provider_end_reason: AtomicU8,
+    /// Count of successful provider reconnections during this session (grace period / deferred open).
+    provider_reconnect_count: AtomicU8,
 }
 
 impl ActiveClientStreamState {
@@ -210,6 +216,8 @@ impl ActiveClientStreamState {
         self.user_stream_released = true;
         self.connection_manager.send_cleanup(CleanupEvent::ReleaseStream {
             addr: self.fingerprint.addr,
+            provider_end_reason: self.provider_end_reason.load(Ordering::Relaxed),
+            reconnect_count: self.provider_reconnect_count.load(Ordering::Relaxed),
         });
     }
 
@@ -528,6 +536,7 @@ impl Stream for ActiveClientStream {
                                         return Poll::Pending;
                                     }
                                     Poll::Ready(DeferredProviderOpenOutcome::Stream(stream)) => {
+                                        self.state.provider_reconnect_count.fetch_add(1, Ordering::Relaxed);
                                         self.state.inner = Some(self.state.wrap_provider_stream(stream));
                                         continue;
                                     }
@@ -555,6 +564,12 @@ impl Stream for ActiveClientStream {
                         Some(Poll::Ready(Some(Ok(bytes)))) => return Poll::Ready(Some(Ok(bytes))),
                         Some(Poll::Ready(Some(Err(e)))) => {
                             error!("Inner stream error: {e:?}");
+                            let _ = self.state.provider_end_reason.compare_exchange(
+                                PROVIDER_END_NOT_SET,
+                                PROVIDER_END_ERROR,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            );
                             if self.state.grace_task_handle.is_none() {
                                 self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
                                 return Poll::Ready(None);
@@ -563,6 +578,12 @@ impl Stream for ActiveClientStream {
                             return Poll::Pending;
                         }
                         Some(Poll::Ready(None)) | None => {
+                            let _ = self.state.provider_end_reason.compare_exchange(
+                                PROVIDER_END_NOT_SET,
+                                PROVIDER_END_CLOSED,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            );
                             if self.state.grace_task_handle.is_none() {
                                 self.state.stop_provider_stream(StreamMode::ChannelUnavailable);
                                 return Poll::Ready(None);
@@ -647,7 +668,12 @@ impl Drop for ActiveClientStream {
         } else {
             self.state.user_stream_released = true;
             self.state.provider_handle_released = true;
-            self.state.connection_manager.send_cleanup(CleanupEvent::ReleaseStreamAndProviderHandle { addr, handle: handle_for_cleanup });
+            self.state.connection_manager.send_cleanup(CleanupEvent::ReleaseStreamAndProviderHandle {
+                addr,
+                handle: handle_for_cleanup,
+                provider_end_reason: self.state.provider_end_reason.load(Ordering::Relaxed),
+                reconnect_count: self.state.provider_reconnect_count.load(Ordering::Relaxed),
+            });
         }
     }
 }
@@ -827,6 +853,8 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         custom_video_timeout_secs,
         custom_video_timeout_mode: None,
         custom_video_timeout_sleep: None,
+        provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
+        provider_reconnect_count: AtomicU8::new(0),
     };
 
     ActiveClientStream { state }.boxed()
@@ -1037,6 +1065,7 @@ mod tests {
         CustomVideoBuffers, DeferredProviderOpenOutcome, DeferredProviderOpenState, StreamMode, TimedStreamContext,
         GracePeriodParams,
     };
+    use crate::api::model::connection_manager::PROVIDER_END_NOT_SET;
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CustomVideoStreamType,
@@ -1126,6 +1155,7 @@ mod tests {
             &provider_manager,
             &shared_manager,
             &event_manager,
+            None,
         ))
     }
 
@@ -1139,8 +1169,13 @@ mod tests {
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
         let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
-        let connection_manager =
-            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+        let connection_manager = Arc::new(ConnectionManager::new(
+            &active_users,
+            &active_provider,
+            &shared_stream_manager,
+            &event_manager,
+            None,
+        ));
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -1296,6 +1331,8 @@ mod tests {
             custom_video_timeout_secs: 5,
             custom_video_timeout_mode: None,
             custom_video_timeout_sleep: None,
+            provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
+            provider_reconnect_count: AtomicU8::new(0),
         };
 
         let stream = ActiveClientStream { state };
@@ -1543,6 +1580,8 @@ mod tests {
             custom_video_timeout_secs: 0,
             custom_video_timeout_mode: None,
             custom_video_timeout_sleep: None,
+            provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
+            provider_reconnect_count: AtomicU8::new(0),
         };
         let stream = ActiveClientStream { state };
         pin_mut!(stream);

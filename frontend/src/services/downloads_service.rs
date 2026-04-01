@@ -49,7 +49,12 @@ impl DownloadsService {
         }
     }
 
-    pub async fn queue_download(&self, url: String, filename: String, input_name: Option<String>) -> Result<FileDownloadDto, Error> {
+    pub async fn queue_download(
+        &self,
+        url: String,
+        filename: String,
+        input_name: Option<String>,
+    ) -> Result<FileDownloadDto, Error> {
         let request = QueueDownloadRequest { url, filename, input_name, priority: None };
         request_post::<&QueueDownloadRequest, FileDownloadDto>(
             &self.downloads_api_path,

@@ -1,6 +1,8 @@
+mod format;
 mod storage;
 
 use crate::i18n::YewI18n;
+pub use format::*;
 pub use storage::*;
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::window;

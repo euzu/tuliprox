@@ -14,7 +14,9 @@
     padding: var(--padding-default);
     gap: var(--gap-default);
     max-height: 400px;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
 
     &-container {
       border: 1px solid var(--border-color);

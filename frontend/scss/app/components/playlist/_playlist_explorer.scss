@@ -94,7 +94,9 @@ $series-backdrop-mobile-height: 150px;
     flex-flow: column;
     gap: var(--gap-default);
     box-sizing: border-box;
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
   }
 
   &__group,
@@ -128,7 +130,9 @@ $series-backdrop-mobile-height: 150px;
       gap: var(--gap-default);
       box-sizing: border-box;
       width: 100%;
-      overflow: auto;
+      overflow: auto; pointer-events: auto;
+      touch-action: pan-x pan-y;
+      -webkit-overflow-scrolling: touch;
 
       &-live {
         display: grid;
@@ -251,7 +255,9 @@ $series-backdrop-mobile-height: 150px;
       gap: var(--gap-default);
       box-sizing: border-box;
       width: 100%;
-      overflow: auto;
+      overflow: auto; pointer-events: auto;
+      touch-action: pan-x pan-y;
+      -webkit-overflow-scrolling: touch;
 
       .tp__playlist-explorer__group-list {
         overflow: unset;

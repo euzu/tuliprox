@@ -450,6 +450,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                                                 <td class="tp__table__cell--center">
                                                     <ToggleSwitch
                                                         value={read_checked}
+                                                        compact={true}
                                                         on_change={on_read}
                                                     />
                                                 </td>
@@ -457,6 +458,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                                                  { html_if!(!is_epg_domain, {
                                                     <ToggleSwitch
                                                         value={write_checked}
+                                                        compact={true}
                                                         on_change={on_write}
                                                     />
                                                   })}

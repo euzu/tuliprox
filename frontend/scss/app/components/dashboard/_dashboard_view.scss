@@ -18,7 +18,9 @@
     display: flex;
     flex-flow: column;
     gap: var(--gap-large);
-    overflow: auto;
+    overflow: auto; pointer-events: auto;
+    touch-action: pan-x pan-y;
+    -webkit-overflow-scrolling: touch;
 
     &-actions {
       display: grid;

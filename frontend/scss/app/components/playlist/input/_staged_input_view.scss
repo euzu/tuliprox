@@ -2,7 +2,9 @@
   display: flex;
   flex-flow: column;
   box-sizing: border-box;
-  overflow: auto;
+  overflow: auto; pointer-events: auto;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
   gap: var(--gap-small);
 
   &__row {

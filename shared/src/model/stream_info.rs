@@ -276,6 +276,8 @@ pub struct StreamInfo {
     pub session_token: Option<String>,
     #[serde(default)]
     pub preserved: bool,
+    #[serde(default)]
+    pub previous_session_id: Option<u64>,
 }
 
 impl StreamInfo {
@@ -305,6 +307,7 @@ impl StreamInfo {
             country_code,
             session_token: session_token.map(|token| token.to_string()),
             preserved: false,
+            previous_session_id: None,
         }
     }
 }

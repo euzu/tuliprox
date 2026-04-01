@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-- Added `reverse_proxy.stream.metrics_enabled` to enable per-stream bandwidth and transferred-bytes metrics in the Web UI streams view.
-
 ## ⚠️ Breaking Changes
 
 - `working_dir` in `config.yml` renamed to `storage_dir`.
@@ -192,6 +190,16 @@ active URL of the specified provider.
 - **Custom Stream Response Timeout**: Added support to limit how long custom fallback stream responses are served.
   Set `config.custom_stream_response_timeout_secs` to a value `> 0` to auto-stop these streams after N seconds. If unset or `0`, custom responses
   are streamed without timeout.
+- Added `reverse_proxy.stream.metrics_enabled` to enable per-stream bandwidth and transferred-bytes metrics in the Web UI streams view.
+- **Stream History QoS**: The `disconnect_reason` field in stream history records is now populated with meaningful values:
+  - `provider_error` — the upstream provider stream ended with an error.
+  - `provider_closed` — the upstream provider stream ended normally (EOF).
+  - `preempted` — the stream was replaced by a higher-priority connection.
+  - `session_expired` — the HLS session TTL elapsed (`.m3u8` / catchup streams).
+  - `client_closed` — the client disconnected (unchanged existing behaviour).
+- HLS session expiry now emits a disconnect history record with reason `session_expired`.
+- A minimal stdout logger is now initialized at the very start of the process so that
+  errors during path resolution and early startup are always visible in the console.
 
 ## 🐛 Fixes
 

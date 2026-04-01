@@ -511,9 +511,8 @@ pub fn PlaylistExplorer() -> Html {
                                         .cast::<HtmlInputElement>()
                                         .map(|input| input.value())
                                         .unwrap_or_else(|| "90".to_string());
-                                    let priority_value = priority_ref
-                                        .cast::<HtmlInputElement>()
-                                        .map(|input| input.value());
+                                    let priority_value =
+                                        priority_ref.cast::<HtmlInputElement>().map(|input| input.value());
                                     let start_ts =
                                         chrono::NaiveDateTime::parse_from_str(&start_value, "%Y-%m-%dT%H:%M")
                                             .ok()

@@ -16,12 +16,14 @@ const PLAYLIST_EXPLORER: &str = "playlist_explorer";
 const PLAYLIST_EPG: &str = "playlist_epg";
 const RBAC: &str = "rbac";
 const SOURCE_EDITOR: &str = "source_editor";
+const STREAM_HISTORY: &str = "stream_history";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ViewType {
     Dashboard,
     Stats,
     Streams,
+    StreamHistory,
     Downloads,
     Users,
     Config,
@@ -41,6 +43,7 @@ impl FromStr for ViewType {
             DASHBOARD => Ok(ViewType::Dashboard),
             STATS => Ok(ViewType::Stats),
             STREAMS => Ok(ViewType::Streams),
+            STREAM_HISTORY => Ok(ViewType::StreamHistory),
             DOWNLOADS => Ok(ViewType::Downloads),
             USERS => Ok(ViewType::Users),
             CONFIG => Ok(ViewType::Config),
@@ -63,6 +66,7 @@ impl fmt::Display for ViewType {
             ViewType::Dashboard => DASHBOARD,
             ViewType::Stats => STATS,
             ViewType::Streams => STREAMS,
+            ViewType::StreamHistory => STREAM_HISTORY,
             ViewType::Downloads => DOWNLOADS,
             ViewType::Users => USERS,
             ViewType::Config => CONFIG,

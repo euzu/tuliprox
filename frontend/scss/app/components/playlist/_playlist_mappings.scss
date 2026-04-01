@@ -39,7 +39,9 @@
 
       gap: var(--gap-default);
       box-sizing: border-box;
-      overflow: auto;
+      overflow: auto; pointer-events: auto;
+      touch-action: pan-x pan-y;
+      -webkit-overflow-scrolling: touch;
 
       &-content {
         display: flex;

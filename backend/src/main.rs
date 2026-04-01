@@ -114,6 +114,10 @@ struct Args {
 
     #[arg(long = "dbms")] // Metadata Retry Status
     db_mrs_file_name: Option<String>,
+
+    /// Query stream history (inline JSON or @file.json)
+    #[arg(long = "sh")]
+    stream_history: Option<String>,
 }
 
 impl Args {
@@ -144,6 +148,10 @@ async fn main() {
     let args = Args::parse();
 
     db_viewer(&args.db_viewer_args());
+
+    if let Some(ref sh_input) = args.stream_history {
+        utils::stream_history_viewer(sh_input);
+    }
 
     if args.genpwd {
         match generate_password() {

@@ -2110,6 +2110,7 @@ mod tests {
     };
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::mpsc;
+    use crate::model::StreamHistoryConfig;
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -2264,13 +2265,14 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+        let history_config = Some(StreamHistoryConfig::default());
         active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
         let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
         let connection_manager =
-            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager, history_config.as_ref()));
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));

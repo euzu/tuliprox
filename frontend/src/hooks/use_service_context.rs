@@ -1,8 +1,8 @@
 use crate::{
     model::WebConfig,
     services::{
-        AuthService, ConfigService, DownloadsService, EventService, FlagsService, PlaylistService, RbacService,
-        StatusService, StreamsService, ToastrService, UserApiService, UserService, WebSocketService,
+        AuthService, ConfigService,DownloadsService, EventService, FlagsService, PlaylistService, RbacService, StatusService,
+        StreamHistoryService, StreamsService, ToastrService, UserApiService, UserService, WebSocketService,
     },
 };
 use std::rc::Rc;
@@ -14,6 +14,7 @@ pub struct Services {
     pub user: Rc<UserService>,
     pub user_api: Rc<UserApiService>,
     pub status: Rc<StatusService>,
+    pub stream_history: Rc<StreamHistoryService>,
     pub streams: Rc<StreamsService>,
     pub downloads: Rc<DownloadsService>,
     pub event: Rc<EventService>,
@@ -30,6 +31,7 @@ impl Services {
         let auth = Rc::new(AuthService::new());
         let config = Rc::new(ConfigService::new(web_config, Rc::clone(&auth), Rc::clone(&event)));
         let status = Rc::new(StatusService::new());
+        let stream_history = Rc::new(StreamHistoryService::new());
         let streams = Rc::new(StreamsService::new());
         let downloads = Rc::new(DownloadsService::new());
         let playlist = Rc::new(PlaylistService::new());
@@ -44,6 +46,7 @@ impl Services {
             config,
             status,
             streams,
+            stream_history,
             downloads,
             event,
             playlist,

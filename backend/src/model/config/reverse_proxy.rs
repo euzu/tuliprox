@@ -135,6 +135,7 @@ pub struct ReverseProxyConfig {
     pub cache: Option<CacheConfig>,
     pub rate_limit: Option<RateLimitConfig>,
     pub geoip: Option<GeoIpConfig>,
+    pub stream_history: Option<crate::model::StreamHistoryConfig>,
 }
 
 macros::from_impl!(ReverseProxyConfig);
@@ -158,6 +159,7 @@ impl From<&ReverseProxyConfigDto> for ReverseProxyConfig {
             cache: dto.cache.as_ref().map(Into::into),
             rate_limit: dto.rate_limit.as_ref().map(Into::into),
             geoip: dto.geoip.as_ref().map(Into::into),
+            stream_history: dto.stream_history.as_ref().map(Into::into),
         }
     }
 }
@@ -178,6 +180,34 @@ impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
             cache: instance.cache.as_ref().map(Into::into),
             rate_limit: instance.rate_limit.as_ref().map(Into::into),
             geoip: instance.geoip.as_ref().map(Into::into),
+            stream_history: instance.stream_history.as_ref().map(Into::into),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReverseProxyConfig;
+    use shared::model::{ReverseProxyConfigDto, StreamHistoryConfigDto};
+
+    #[test]
+    fn reverse_proxy_config_preserves_nested_stream_history() {
+        let dto = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            stream_history: Some(StreamHistoryConfigDto {
+                stream_history_enabled: true,
+                stream_history_batch_size: 64,
+                stream_history_retention_days: 14,
+                stream_history_directory: "/var/lib/tuliprox/history".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        let config = ReverseProxyConfig::from(&dto);
+        let stream_history = config.stream_history.expect("stream history should exist");
+        assert!(stream_history.stream_history_enabled);
+        assert_eq!(stream_history.stream_history_batch_size, 64);
+        assert_eq!(stream_history.stream_history_retention_days, 14);
+        assert_eq!(stream_history.stream_history_directory, "/var/lib/tuliprox/history");
     }
 }

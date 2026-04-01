@@ -216,6 +216,24 @@ impl EventManager {
         }
     }
 
+    /// Read `QoS` metrics (`bytes_total`, `first_byte_latency`) for a meter without removing it.
+    /// Returns `(None, None)` when the meter is shared by multiple clients, because the
+    /// meter-wide totals would be incorrect for any individual session.
+    pub async fn read_meter_qos(&self, meter_uid: u32) -> (Option<u64>, Option<u64>) {
+        if meter_uid == 0 {
+            return (None, None);
+        }
+        let registry = self.meter_registry.read().await;
+        // Shared meters serve multiple clients — their totals are not per-session.
+        if registry.meter_to_clients.get(&meter_uid).is_some_and(|clients| clients.len() > 1) {
+            return (None, None);
+        }
+        match registry.meters.get(&meter_uid) {
+            Some(m) => (Some(m.bytes_total()), m.first_byte_latency_ms()),
+            None => (None, None),
+        }
+    }
+
     pub async fn unregister_meter_client(&self, client_uid: u32) {
         if client_uid == 0 {
             return;

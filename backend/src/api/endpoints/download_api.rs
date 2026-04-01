@@ -236,13 +236,16 @@ async fn download_file(
                                                                 if should_log_progress {
                                                                     match total_size {
                                                                         Some(total) if total > 0 => {
-                                                                            let percent =
-                                                                                ((downloaded as f64 / total as f64) * 100.0).round();
+                                                                            let percent = downloaded
+                                                                                .saturating_mul(100)
+                                                                                .checked_div(total)
+                                                                                .unwrap_or(0)
+                                                                                .min(100);
                                                                             debug!(
                                                                                 "Download progress for {file_path_str}: {}MB / {}MB ({}%)",
                                                                                 bytes_to_megabytes(downloaded),
                                                                                 bytes_to_megabytes(total),
-                                                                                percent as u32
+                                                                                percent
                                                                             );
                                                                         }
                                                                         _ => {
@@ -349,6 +352,7 @@ async fn requeue_active_download_for_retry(download_queue: &DownloadQueue) {
     let _ = download_queue.persist_to_disk().await;
 }
 
+#[allow(clippy::too_many_lines)]
 pub(in crate::api) async fn ensure_download_worker_running(
     cfg: &AppConfig,
     download_cfg: &VideoDownloadConfig,

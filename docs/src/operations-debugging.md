@@ -10,13 +10,14 @@ This chapter covers the Command Line Interface (CLI), Logging architecture, and 
 While Tuliprox is usually run via Docker, understanding the CLI flags is crucial for debugging and manual interventions.
 
 | Flag | Purpose & Technical Background |
-| :--- | :--- |
+| :--- | :-- |
 | `-s, --server` | Starts continuous Server Mode (API, Web UI, Background Workers). Without this flag, Tuliprox acts as a "One-Shot" playlist generator that downloads, processes, and immediately exits. |
 | `-H, --home <DIR>` | Sets the Home Directory. All relative paths in the configuration are resolved against this directory. If not set, resolves via `TULIPROX_HOME` env variable, or finally the binary's directory. |
 | `-c, -i, -a, -m, -T` | Overrides specific config paths (e.g., `-c /etc/tuliprox/config.yml`). Useful for testing experimental configurations without altering the production setup. |
 | `-t, --target <NAME>` | **Targeted Processing:** Forces processing of the specified target *only*. **Crucial:** This bypasses the `enabled: false` state in the config! Extremely useful to quickly re-render a broken list via cron/shell without blocking the entire system with other heavy targets. |
 | `--genpwd` | Interactively generates a secure `Argon2id` password hash for the `user.txt` file. Never store plaintext passwords! |
 | `--healthcheck` | Docker Support: Pings the API over localhost. Returns Exit Code `0` if the server responds with `{"status": "ok"}`. |
+| `--sh <QUERY>` | **Stream History Viewer:** Dumps and filters stream history records from binary archive files. Accepts inline JSON or `@file.json`. See [Stream History Viewer](#4-stream-history-viewer) below. |
 | `--scan-library` | Triggers an incremental scan of the local media directory (if configured). |
 | `--force-library-rescan` | Ignores modification timestamps and forces a full TMDB/PTT re-evaluation of all local media files. |
 
@@ -89,7 +90,77 @@ movie until `cooldown_until_ts` (e.g., 7 days in the future) to save API traffic
 
 ---
 
-## 4. Hot Reloading Caveats
+## 4. Stream History Viewer
+
+When stream history is enabled (`stream_history` in `reverse_proxy` config), Tuliprox persists connect/disconnect records to daily binary files.
+The `--sh` CLI flag lets you query and filter these records offline without starting the server.
+
+### Query Format
+
+The `--sh` flag accepts a JSON query, either inline or via `@file.json`:
+
+```bash
+# Inline query: all records from a single day
+./tuliprox --sh '{"from":"2026-03-22"}'
+
+# Date range with filter
+./tuliprox --sh '{"from":"2026-03-20","to":"2026-03-22","filter":{"api_username":"alice"}}'
+
+# Query from file
+./tuliprox --sh @query.json
+```
+
+### Query Fields
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `from` | `string` | Start date/datetime. Formats: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, `YYYY-MM-DD HH:MM:SS`. At least `from` or `to` is required. |
+| `to` | `string` | End date/datetime. Same formats as `from`. Date-only values expand to end of day (23:59:59). |
+| `path` | `string` | Stream history directory. Defaults to `data/stream_history`. |
+| `filter` | `object` | Key-value filters applied per record. See filter syntax below. |
+
+When only `from` or `to` is provided, the query expands to the full UTC day. All timestamps are interpreted as UTC.
+
+### Filter Syntax
+
+Filters are key-value pairs where the key is a record field name:
+
+| Syntax | Meaning | Example |
+| :--- | :--- | :--- |
+| `"field": "value"` | Exact match (case-insensitive) | `"api_username": "alice"` |
+| `"field": "~regex"` | Regex match (prefix with `~`) | `"provider_name": "~^acme.*"` |
+| `"session_id": "42"` | Numeric exact match | `"session_id": "42"` |
+
+**Filterable fields:** `event_type`, `api_username`, `provider_name`, `provider_username`, `item_type`, `title`, `group`,  
+`country`, `source_addr`, `disconnect_reason`, `session_id`.
+
+### Output
+
+Output is a streaming JSON array to stdout. Warnings and errors go to stderr.
+
+```json
+[
+  {"schema_version":1,"event_type":"connect","event_ts_utc":1742601600,...},
+  {"schema_version":1,"event_type":"disconnect","event_ts_utc":1742605200,...}
+]
+```
+
+### Examples
+
+```bash
+# All disconnects with provider errors on March 22
+./tuliprox --sh '{"from":"2026-03-22","filter":{"event_type":"disconnect","disconnect_reason":"provider_error"}}'
+
+# All activity for user "bob" in a date range, piped to jq
+./tuliprox --sh '{"from":"2026-03-20","to":"2026-03-25","filter":{"api_username":"bob"}}' | jq '.[] | {ts: .event_ts_utc, type: .event_type}'
+
+# Query with regex filter for provider names starting with "acme"
+./tuliprox --sh '{"from":"2026-03-22","filter":{"provider_name":"~^acme"}}'
+```
+
+---
+
+## 5. Hot Reloading Caveats
 
 Tuliprox supports hot-reloading for specific files (`mapping.yml`, `api-proxy.yml`) if `config_hot_reload: true` is set in `config.yml`.
 
