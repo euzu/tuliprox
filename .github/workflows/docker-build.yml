@@ -18,7 +18,10 @@ on:
         options: [none, major, minor, patch]
         default: none
   push:
-    branches: [develop, master]
+    branches: [develop]
+  pull_request:
+    types: [closed]
+    branches: [master]
 
 # Avoid multiple parallel builds for the same branch to prevent race conditions
 concurrency:
@@ -29,7 +32,16 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master') &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        github.ref == 'refs/heads/develop' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.action == 'closed' &&
+          github.event.pull_request.merged == true &&
+          startsWith(github.event.pull_request.head.ref, 'release/version-bump-v')
+        )
+      ) &&
       (github.event_name != 'push' || github.actor != 'github-actions[bot]')
 
     steps:
@@ -38,7 +50,7 @@ jobs:
         with:
           fetch-depth: 0
           # Ensure we always have the right branch context
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || (github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha) || github.ref }}
 
       - name: Install Rust Tools (Binaries)
         uses: taiki-e/install-action@v2
@@ -107,10 +119,11 @@ jobs:
           chmod +x ./bin/inc_version.sh
           if [[ "${{ github.event_name }}" == "push" ]]; then
             case "${{ github.ref_name }}" in
-              master) ./bin/inc_version.sh p ;;
               develop) ./bin/inc_version.sh ;;
               *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
             esac
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "Release PR already contains the committed version bump; skipping local increment."
           else
             case "${{ github.event.inputs.choice }}" in
               major) ./bin/inc_version.sh m ;;
@@ -120,6 +133,9 @@ jobs:
           fi
 
       - name: Commit version bump
+        if: >-
+          github.event_name != 'pull_request' &&
+          !(github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master')
         id: version_commit
         run: |
           git config user.name "github-actions[bot]"
@@ -139,7 +155,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           chmod +x ./bin/build_docker.sh
-          ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
+          ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || (github.event_name == 'pull_request' && 'master') || github.ref_name }}
 
       - name: Read project version
         id: version
@@ -187,7 +203,11 @@ jobs:
           if-no-files-found: error
 
       - name: Push version bump
-        if: success() && steps.version_commit.outputs.did_commit == 'true'
+        if: >-
+          success() &&
+          github.event_name != 'pull_request' &&
+          !(github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') &&
+          steps.version_commit.outputs.did_commit == 'true'
         run: |
           # Use origin HEAD to push to the correct remote branch
           git push origin HEAD
@@ -196,7 +216,12 @@ jobs:
         if: >-
           success() && (
             (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
-            (github.event_name == 'push' && github.ref == 'refs/heads/master')
+            (
+              github.event_name == 'pull_request' &&
+              github.event.action == 'closed' &&
+              github.event.pull_request.merged == true &&
+              startsWith(github.event.pull_request.head.ref, 'release/version-bump-v')
+            )
           )
         uses: softprops/action-gh-release@v2
         with:
