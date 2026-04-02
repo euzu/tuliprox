@@ -18,7 +18,7 @@ on:
         options: [none, major, minor, patch]
         default: none
   push:
-    branches: [develop]
+    branches: [develop, master]
 
 # Avoid multiple parallel builds for the same branch to prevent race conditions
 concurrency:
@@ -29,7 +29,7 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop') &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master') &&
       (github.event_name != 'push' || github.actor != 'github-actions[bot]')
 
     steps:
@@ -60,6 +60,49 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-targets: "true"
+
+      - name: Handle Version Bump
+        run: |
+          chmod +x ./bin/inc_version.sh
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            case "${{ github.ref_name }}" in
+              develop) ./bin/inc_version.sh ;;
+              master) echo "Master builds use the version already committed in the merged PR; skipping version bump." ;;
+              *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
+            esac
+          else
+            if [[ "${{ github.event.inputs.branch }}" == "master" ]]; then
+              echo "Manual master builds use the version already committed on master; skipping version bump."
+            else
+              case "${{ github.event.inputs.choice }}" in
+                major) ./bin/inc_version.sh m ;;
+                minor) ./bin/inc_version.sh p ;;
+                patch) ./bin/inc_version.sh ;;
+              esac
+            fi
+          fi
+
+      - name: Read project version
+        id: version
+        run: |
+          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml)
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce zero patch for master releases
+        if: >-
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/master')
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          IFS='.' read -r major minor patch <<< "${VERSION}"
+          if [[ -z "${major}" || -z "${minor}" || -z "${patch}" ]]; then
+            echo "🧨 Invalid semantic version: ${VERSION}" >&2
+            exit 1
+          fi
+          if [[ "${patch}" != "0" ]]; then
+            echo "🧨 Refusing master release for non-release version ${VERSION}. Patch component must be 0." >&2
+            exit 1
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -101,21 +144,10 @@ jobs:
               exit 1
             fi
           done
-
-      - name: Handle Version Bump
-        run: |
-          chmod +x ./bin/inc_version.sh
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            ./bin/inc_version.sh
-          else
-            case "${{ github.event.inputs.choice }}" in
-              major) ./bin/inc_version.sh m ;;
-              minor) ./bin/inc_version.sh p ;;
-              patch) ./bin/inc_version.sh ;;
-            esac
-          fi
-
       - name: Commit version bump
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
         id: version_commit
         run: |
           git config user.name "github-actions[bot]"
@@ -135,13 +167,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           chmod +x ./bin/build_docker.sh
-          ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || 'develop' }}
-
-      - name: Read project version
-        id: version
-        run: |
-          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml)
-          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+          ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
 
       - name: Verify static binary artifacts
         run: |
@@ -183,13 +209,23 @@ jobs:
           if-no-files-found: error
 
       - name: Push version bump
-        if: success() && steps.version_commit.outputs.did_commit == 'true'
+        if: >-
+          success() &&
+          (
+            (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
+          ) &&
+          steps.version_commit.outputs.did_commit == 'true'
         run: |
           # Use origin HEAD to push to the correct remote branch
           git push origin HEAD
 
       - name: Publish static binaries to GitHub Release
-        if: success() && github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master'
+        if: >-
+          success() && (
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
+            (github.event_name == 'push' && github.ref == 'refs/heads/master')
+          )
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.value }}

@@ -76,6 +76,14 @@ reverse_proxy:
     backoff_multiplier: 1.0
   stream:
     shared_burst_buffer_mb: 12 # default 12 MB
+  # stream_history:
+  #   stream_history_enabled: true
+  #   stream_history_batch_size: 128
+  #   stream_history_retention_days: 30
+  #   stream_history_directory: ${env:TULIPROX_HOME}/stream_history
+  # qos_aggregation:
+  #   enabled: true
+  #   interval_secs: 300
   rewrite_secret: ${env:TULIPROX_PROXY_REWRITE_SECRET} # use openssl rand -hex 16
 
 library:

@@ -206,7 +206,7 @@ pub fn ApiUserPlaylist() -> Html {
             <div class="tp__api-user-playlist__header tp__list-list__header">
                 <h1>{translate.t("TITLE.USER_BOUQUET_EDITOR") }</h1>
                 <div class="tp__userlist-list__header-toolbar">
-                    <TextButton class="primary" name="save"
+                    <TextButton class="secondary" name="save"
                             icon="Save"
                             title={ translate.t("LABEL.SAVE")}
                             onclick={on_save}></TextButton>

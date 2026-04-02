@@ -112,6 +112,15 @@ async fn playlist_categories(
                 .status(axum::http::StatusCode::OK)
                 .header("Content-Type", mime::APPLICATION_JSON.to_string())
                 .body(axum::body::Body::from_stream(json_stream)));
+        } else if app_state.app_config.get_user_credentials(&username).is_some() {
+            // User exists in api_proxy but their target is not yet loaded in sources
+            // (playlist not downloaded yet). Return empty categories instead of Forbidden.
+            const EMPTY_CLUSTER: &str = r#"{"live":[],"vod":[],"series":[]}"#;
+            let body = format!(r#"{{"xtream": {EMPTY_CLUSTER}, "m3u": {EMPTY_CLUSTER}}}"#);
+            return try_unwrap_body!(axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header("Content-Type", mime::APPLICATION_JSON.to_string())
+                .body(axum::body::Body::from(body)));
         }
     }
     axum::http::StatusCode::FORBIDDEN.into_response()

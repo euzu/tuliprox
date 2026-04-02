@@ -19,7 +19,7 @@ use crate::{
             create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns,
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue,
             EventManager, EventMessage, HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState,
-            SharedStreamManager, UpdateGuard,
+            SharedStreamManager, UpdateGuard, exec_qos_aggregation,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
         scheduler::{exec_interner_prune, exec_scheduler},
@@ -334,6 +334,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.hdhomerun.cancel();
     cancel_tokens.file_watch.cancel();
     cancel_tokens.provider_dns.cancel();
+    cancel_tokens.qos_aggregation.cancel();
     app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
@@ -527,6 +528,10 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Keep using the original `app_state` below, which is valid because `Arc::clone` borrows.
     let shared_data = Arc::clone(&app_state);
 
+    let cancel_token_qos_aggregation = {
+        let cancel_tokens = app_state.cancel_tokens.load();
+        cancel_tokens.qos_aggregation.clone()
+    };
     let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch, cancel_token_provider_dns) = {
         let cancel_tokens = app_state.cancel_tokens.load();
         (
@@ -554,6 +559,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     exec_interner_prune(&app_state);
     exec_config_watch(&app_state, &cancel_token_file_watch);
     exec_provider_dns(&app_state, &cancel_token_provider_dns);
+    exec_qos_aggregation(&app_state, &cancel_token_qos_aggregation);
 
     let web_auth_enabled = is_web_auth_enabled(&cfg, web_ui_enabled);
 

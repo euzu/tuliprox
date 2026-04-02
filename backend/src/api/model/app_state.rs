@@ -3,6 +3,7 @@ use crate::{
         config_watch::exec_config_watch,
         model::provider_dns_manager::exec_provider_dns,
         model::{
+            qos_aggregation_manager::exec_qos_aggregation,
             metadata_update_manager::MetadataUpdateManager, ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
             UpdateGuard,
@@ -71,7 +72,7 @@ struct TargetChanges {
     target: Arc<ConfigTarget>,
 }
 
-create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns, Metadata);
+create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns, Metadata, QosAggregation);
 
 pub(in crate::api) struct UpdateChanges {
     flags: UpdateChangesFlagsSet,
@@ -168,6 +169,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     } else {
         cancel_tokens.metadata.clone()
     };
+    let qos_aggregation = cancel_service!(qos_aggregation, UpdateChangesFlags::QosAggregation, changes, cancel_tokens);
 
     let tokens = CancelTokens {
         scheduler,
@@ -175,6 +177,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         file_watch,
         provider_dns,
         metadata,
+        qos_aggregation,
     };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
@@ -208,6 +211,9 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
 
     if changes.flags.contains(UpdateChangesFlags::ProviderDns) {
         exec_provider_dns(app_state, &app_state.cancel_tokens.load().provider_dns);
+    }
+    if changes.flags.contains(UpdateChangesFlags::QosAggregation) {
+        exec_qos_aggregation(app_state, &app_state.cancel_tokens.load().qos_aggregation);
     }
 }
 
@@ -315,6 +321,7 @@ pub struct CancelTokens {
     pub(crate) file_watch: CancellationToken,
     pub(crate) provider_dns: CancellationToken,
     pub(crate) metadata: CancellationToken,
+    pub(crate) qos_aggregation: CancellationToken,
 }
 impl Default for CancelTokens {
     fn default() -> Self {
@@ -324,6 +331,7 @@ impl Default for CancelTokens {
             file_watch: CancellationToken::new(),
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
+            qos_aggregation: CancellationToken::new(),
         }
     }
 }
@@ -475,6 +483,7 @@ impl AppState {
         let geoip_enabled = config.is_geoip_enabled();
         let geoip_enabled_old = old_config.is_geoip_enabled();
         let changed_storage_dir = old_config.storage_dir != config.storage_dir;
+        let changed_qos_aggregation = qos_aggregation_changed(&old_config, config);
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
         changes.set_flag_if(changed_schedules || changed_library_enabled || geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Scheduler);
@@ -482,6 +491,7 @@ impl AppState {
         changes.set_flag_if(changed_file_watch, UpdateChangesFlags::FileWatch);
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
         changes.set_flag_if(changed_storage_dir, UpdateChangesFlags::Metadata);
+        changes.set_flag_if(changed_qos_aggregation || changed_storage_dir, UpdateChangesFlags::QosAggregation);
         changes
     }
 
@@ -683,6 +693,33 @@ fn providers_changed(a: &[Arc<ConfigProvider>], b: &[Arc<ConfigProvider>]) -> bo
         }
     }
     false
+}
+
+fn qos_aggregation_changed(old_config: &Config, new_config: &Config) -> bool {
+    let old_reverse_proxy = old_config.reverse_proxy.as_ref();
+    let new_reverse_proxy = new_config.reverse_proxy.as_ref();
+
+    let old_stream_history = old_reverse_proxy.and_then(|rp| rp.stream_history.as_ref());
+    let new_stream_history = new_reverse_proxy.and_then(|rp| rp.stream_history.as_ref());
+    let old_qos = old_reverse_proxy.and_then(|rp| rp.qos_aggregation.as_ref());
+    let new_qos = new_reverse_proxy.and_then(|rp| rp.qos_aggregation.as_ref());
+
+    let stream_history_tuple = |cfg: Option<&crate::model::StreamHistoryConfig>| {
+        cfg.map(|history| {
+            (
+                history.stream_history_enabled,
+                history.stream_history_directory.clone(),
+                history.stream_history_retention_days,
+                history.stream_history_batch_size,
+            )
+        })
+    };
+    let qos_tuple = |cfg: Option<&crate::model::QosAggregationConfig>| {
+        cfg.map(|qos| (qos.enabled, qos.interval_secs))
+    };
+
+    stream_history_tuple(old_stream_history) != stream_history_tuple(new_stream_history)
+        || qos_tuple(old_qos) != qos_tuple(new_qos)
 }
 
 #[derive(Clone)]

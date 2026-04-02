@@ -34,6 +34,7 @@ mod favourites;
 mod geoip;
 mod library;
 mod panel_api;
+mod qos_aggregation;
 
 pub use api::*;
 pub use api_proxy::*;
@@ -69,3 +70,4 @@ pub use web_ui::*;
 pub use favourites::*;
 pub use library::*;
 pub use panel_api::*;
+pub use qos_aggregation::*;

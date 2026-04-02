@@ -39,6 +39,7 @@ mod favourites;
 mod geoip;
 mod library;
 mod proxy_user_status;
+mod qos_aggregation;
 
 pub use crate::apply_batch_aliases;
 pub use api::*;
@@ -66,6 +67,7 @@ pub use playlist_update_state::*;
 pub use proxy::*;
 pub use proxy_type::*;
 pub use proxy_user_status::*;
+pub use qos_aggregation::*;
 pub use rate_limit::*;
 pub use rename::*;
 pub use reverse_proxy::*;

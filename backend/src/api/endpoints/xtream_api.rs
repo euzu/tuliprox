@@ -7,7 +7,7 @@ use crate::{
             create_api_proxy_user, create_catchup_session_key, create_session_fingerprint, empty_json_response_as_array,
             empty_json_response_as_object, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request,
-            is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
+            admission_failure_response, is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
             separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found,
             try_unwrap_body, RedirectParams,
@@ -235,15 +235,6 @@ async fn xtream_player_api_stream(
 
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
-    if user.permission_denied(app_state) {
-        return create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserAccountExpired,
-        )
-        .into_response();
-    }
-
     let target_name = &target.name;
     if !target.has_output(TargetType::Xtream) {
         debug!("Target has no xtream codes playlist {target_name}");
@@ -278,6 +269,18 @@ async fn xtream_player_api_stream(
             pli.input_name, stream_req.context
         )
     );
+
+    if user.permission_denied(app_state) {
+        return admission_failure_response(
+            app_state,
+            fingerprint,
+            &user,
+            create_stream_channel_with_type(target.id, &pli, pli.item_type),
+            pli.input_name.as_ref(),
+            req_headers,
+            crate::repository::ConnectFailureReason::UserAccountExpired,
+        );
+    }
 
     if pli.item_type.is_local() {
         let connection_permission = user.connection_permission(app_state).await;
@@ -316,21 +319,27 @@ async fn xtream_player_api_stream(
 
     let session_url = if let Some(session) = &user_session {
         if session.permission == UserConnectionPermission::Exhausted {
-            return create_custom_video_stream_response(
+            return admission_failure_response(
                 app_state,
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response();
+                fingerprint,
+                &user,
+                create_stream_channel_with_type(target.id, &pli, item_type),
+                &session.provider,
+                req_headers,
+                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+            );
         }
 
         if app_state.active_provider.is_over_limit(&session.provider).await {
-            return create_custom_video_stream_response(
+            return admission_failure_response(
                 app_state,
-                &fingerprint.addr,
-                CustomVideoStreamType::ProviderConnectionsExhausted,
-            )
-            .into_response();
+                fingerprint,
+                &user,
+                create_stream_channel_with_type(target.id, &pli, item_type),
+                &session.provider,
+                req_headers,
+                crate::repository::ConnectFailureReason::ProviderConnectionsExhausted,
+            );
         }
 
         let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
@@ -366,12 +375,15 @@ async fn xtream_player_api_stream(
         session_url.as_ref(),
     );
     if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
-        return create_custom_video_stream_response(
+        return admission_failure_response(
             app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserConnectionsExhausted,
-        )
-        .into_response();
+            fingerprint,
+            &user,
+            create_stream_channel_with_type(target.id, &pli, item_type),
+            input.name.as_ref(),
+            req_headers,
+            crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+        );
     }
 
     let context = stream_req.context;

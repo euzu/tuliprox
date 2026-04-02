@@ -1,4 +1,4 @@
-use crate::app::components::chip::Chip;
+use crate::app::components::{chip::Chip, IconButton};
 use std::{collections::HashMap, rc::Rc};
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
@@ -76,29 +76,45 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
         })
     };
 
-    // add new entry on enter in value field
-    let on_keydown_value = {
+    let add_key_value = {
         let new_key = new_key.clone();
         let new_value = new_value.clone();
         let entry_state = entry_state.clone();
         let on_change = on_change.clone();
+        Callback::from(move |_| {
+            let key = (*new_key).trim().to_string();
+            let value = (*new_value).trim().to_string();
+            if !key.is_empty() && !value.is_empty() && !entry_state.iter().any(|kv| kv.key == key) {
+                let mut updated = (*entry_state).clone();
+                updated.push(Rc::new(KeyValue { key: key.clone(), value: value.clone() }));
+                // emit new HashMap
+                let map = updated.iter().map(|kv| (kv.key.clone(), kv.value.clone())).collect::<HashMap<_, _>>();
+                on_change.emit(map);
+                entry_state.set(updated);
+            }
+            new_key.set(String::new());
+            new_value.set(String::new());
+        })
+    };
+
+    // add new entry on enter in value field
+    let on_keydown_value = {
+        let add_key_value = add_key_value.clone();
         Callback::from(move |e: KeyboardEvent| {
             if e.key() == "Enter" {
                 e.prevent_default();
                 e.stop_propagation();
-                let key = (*new_key).trim().to_string();
-                let value = (*new_value).trim().to_string();
-                if !key.is_empty() && !value.is_empty() && !entry_state.iter().any(|kv| kv.key == key) {
-                    let mut updated = (*entry_state).clone();
-                    updated.push(Rc::new(KeyValue { key: key.clone(), value: value.clone() }));
-                    // emit new HashMap
-                    let map = updated.iter().map(|kv| (kv.key.clone(), kv.value.clone())).collect::<HashMap<_, _>>();
-                    on_change.emit(map);
-                    entry_state.set(updated);
-                }
-                new_key.set(String::new());
-                new_value.set(String::new());
+                add_key_value.emit(());
             }
+        })
+    };
+
+    let on_add_value = {
+        let add_key_value = add_key_value.clone();
+        Callback::from(move |(_name, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            add_key_value.emit(());
         })
     };
 
@@ -146,6 +162,11 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
                             />
                         </div>
                         </div>
+                        <IconButton
+                            name={"AddKeyValue"}
+                            icon="Add"
+                            onclick={on_add_value.clone()}
+                        />
                       </div>
                     }
                 }

@@ -1250,12 +1250,15 @@ mod tests {
             target_id: 1,
             virtual_id,
             provider_id: 1,
+            input_name: "input".intern(),
             item_type: PlaylistItemType::Live,
             cluster: XtreamCluster::Live,
             group: "group".intern(),
             title: "title".intern(),
             url: "http://localhost/stream.ts".intern(),
             shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             technical: None,
         }
     }

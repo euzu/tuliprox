@@ -8,6 +8,7 @@ use crate::{
         },
     },
     model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
+    repository::{ConnectFailureReason, FailureStage},
     utils::{
         debug_if_enabled,
         request::{
@@ -27,6 +28,7 @@ use reqwest::{
 };
 use shared::{
     create_bitset,
+    model::{PlaylistItemType, StreamChannel, StreamInfo},
     utils::{filter_request_header, is_sanitize_sensitive_info_enabled, sanitize_sensitive_info},
 };
 use std::{
@@ -40,7 +42,6 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use shared::model::PlaylistItemType;
 use shared::utils::DEFAULT_USER_AGENT;
 
 const RETRY_SECONDS: u64 = 5;
@@ -68,6 +69,11 @@ pub struct ProviderStreamFactoryOptions {
     range_bytes: Option<Arc<AtomicUsize>>,
     reconnect_flag: CancellationToken,
     provider: Option<Arc<ConfigProvider>>,
+    username: Option<String>,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+    stream_channel: Option<StreamChannel>,
+    connect_failure_stage: Option<FailureStage>,
 }
 
 pub(crate) struct ProviderStreamFactoryParams<'a> {
@@ -80,6 +86,10 @@ pub(crate) struct ProviderStreamFactoryParams<'a> {
     pub input_headers: Option<&'a HashMap<String, String>>,
     pub disabled_headers: Option<&'a ReverseProxyDisabledHeaderConfig>,
     pub default_user_agent: Option<&'a str>,
+    pub username: Option<&'a str>,
+    pub client_ip: Option<&'a str>,
+    pub stream_channel: Option<&'a StreamChannel>,
+    pub connect_failure_stage: Option<FailureStage>,
 }
 
 impl ProviderStreamFactoryOptions {
@@ -94,8 +104,16 @@ impl ProviderStreamFactoryOptions {
             input_headers,
             disabled_headers,
             default_user_agent,
+            username,
+            client_ip,
+            stream_channel,
+            connect_failure_stage,
         } = request;
         let buffer_size = if stream_options.buffer_enabled { stream_options.buffer_size } else { 0 };
+        let user_agent = req_headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string);
         let filter_header = get_header_filter_for_item_type(*item_type);
         let mut req_headers = get_headers_from_request(req_headers, &filter_header);
         let requested_range = get_request_range_start_bytes(&req_headers);
@@ -110,7 +128,6 @@ impl ProviderStreamFactoryOptions {
                 (!trimmed.is_empty()).then_some(trimmed)
             })
             .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
-
         let url = (*stream_url).clone();
         let range_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
             requested_range.map(|v| Arc::new(AtomicUsize::new(v)))
@@ -145,6 +162,11 @@ impl ProviderStreamFactoryOptions {
             default_user_agent,
             range_bytes,
             provider: None,
+            username: username.map(ToString::to_string),
+            client_ip: client_ip.map(ToString::to_string),
+            user_agent,
+            stream_channel: stream_channel.cloned(),
+            connect_failure_stage: *connect_failure_stage,
         }
     }
 
@@ -199,6 +221,117 @@ impl ProviderStreamFactoryOptions {
         }
 
         std::borrow::Cow::Owned(preview_request_target_for_logging(&self.url, self.provider.as_ref()))
+    }
+
+    fn build_connect_failed_stream_info(&self, provider_name: &str) -> Option<StreamInfo> {
+        let username = self.username.as_deref()?;
+        let client_ip = self.client_ip.as_deref()?;
+        let stream_channel = self.stream_channel.clone()?;
+        Some(StreamInfo::new(
+            0,
+            0,
+            username,
+            &self.addr,
+            client_ip,
+            provider_name,
+            stream_channel,
+            self.user_agent.clone().unwrap_or_default(),
+            None,
+            None,
+        ))
+    }
+
+    fn get_connect_failure_stage(&self) -> Option<FailureStage> { self.connect_failure_stage }
+
+    fn clear_connect_failure_stage(&mut self) { self.connect_failure_stage = None; }
+}
+
+fn record_provider_open_failure(
+    app_state: &Arc<AppState>,
+    stream_options: &ProviderStreamFactoryOptions,
+    reason: ConnectFailureReason,
+    provider_http_status: Option<StatusCode>,
+    provider_error_class: Option<&str>,
+) {
+    let Some(failure_stage) = stream_options.get_connect_failure_stage() else { return };
+    let provider_name = stream_options
+        .get_provider()
+        .map_or_else(|| "unknown".to_string(), |provider| provider.name.to_string());
+    let Some(info) = stream_options.build_connect_failed_stream_info(&provider_name) else { return };
+    app_state
+        .connection_manager
+        .record_connect_failed_with_provider_failure(
+            &info,
+            reason,
+            failure_stage,
+            provider_http_status.map(|status| status.as_u16()),
+            provider_error_class,
+        );
+}
+
+fn classify_provider_status_error(status: StatusCode) -> &'static str {
+    if status.is_client_error() {
+        "http_4xx"
+    } else if status.is_server_error() {
+        "http_5xx"
+    } else if status.is_redirection() {
+        "http_3xx"
+    } else {
+        "http_other"
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProviderStreamRequestFailure {
+    Status {
+        status: StatusCode,
+        provider_error_class: &'static str,
+        serve_channel_unavailable: bool,
+    },
+}
+
+impl ProviderStreamRequestFailure {
+    fn status(self) -> StatusCode {
+        match self {
+            Self::Status { status, .. } => status,
+        }
+    }
+
+    fn provider_error_class(self) -> &'static str {
+        match self {
+            Self::Status { provider_error_class, .. } => provider_error_class,
+        }
+    }
+
+    fn should_serve_channel_unavailable(self) -> bool {
+        match self {
+            Self::Status { serve_channel_unavailable, .. } => serve_channel_unavailable,
+        }
+    }
+}
+
+fn classify_provider_io_error(err: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+
+    match err.kind() {
+        ErrorKind::TimedOut => "timeout",
+        ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::NotConnected => {
+            "connect"
+        }
+        ErrorKind::AddrNotAvailable => "dns",
+        _ => {
+            let lowered = err.to_string().to_ascii_lowercase();
+            if lowered.contains("dns")
+                || lowered.contains("failed to lookup address information")
+                || lowered.contains("name or service not known")
+                || lowered.contains("no such host")
+                || lowered.contains("temporary failure in name resolution")
+            {
+                "dns"
+            } else {
+                "io"
+            }
+        }
     }
 }
 
@@ -405,7 +538,7 @@ async fn provider_stream_request(
     app_state: &Arc<AppState>,
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
-) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
+) -> Result<Option<ProviderStreamFactoryResponse>, ProviderStreamRequestFailure> {
     if log_enabled!(log::Level::Debug) {
         let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
         debug!(
@@ -473,9 +606,17 @@ async fn provider_stream_request(
                     | StatusCode::PROXY_AUTHENTICATION_REQUIRED
                     | StatusCode::METHOD_NOT_ALLOWED
                     | StatusCode::BAD_REQUEST => {
-                        handle_channel_unavailable_stream(app_state, stream_options, status).await
+                        Err(ProviderStreamRequestFailure::Status {
+                            status,
+                            provider_error_class: classify_provider_status_error(status),
+                            serve_channel_unavailable: true,
+                        })
                     }
-                    _ => Err(status),
+                    _ => Err(ProviderStreamRequestFailure::Status {
+                        status,
+                        provider_error_class: classify_provider_status_error(status),
+                        serve_channel_unavailable: false,
+                    }),
                 };
             }
             if status.is_server_error() {
@@ -485,12 +626,24 @@ async fn provider_stream_request(
                     | StatusCode::BAD_GATEWAY
                     | StatusCode::SERVICE_UNAVAILABLE
                     | StatusCode::GATEWAY_TIMEOUT => {
-                        handle_channel_unavailable_stream(app_state, stream_options, status).await
+                        Err(ProviderStreamRequestFailure::Status {
+                            status,
+                            provider_error_class: classify_provider_status_error(status),
+                            serve_channel_unavailable: true,
+                        })
                     }
-                    _ => Err(status),
+                    _ => Err(ProviderStreamRequestFailure::Status {
+                        status,
+                        provider_error_class: classify_provider_status_error(status),
+                        serve_channel_unavailable: false,
+                    }),
                 };
             }
-            Err(status)
+            Err(ProviderStreamRequestFailure::Status {
+                status,
+                provider_error_class: classify_provider_status_error(status),
+                serve_channel_unavailable: false,
+            })
         }
         Err(err) => {
             let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
@@ -499,30 +652,12 @@ async fn provider_stream_request(
                 sanitize_sensitive_info(err.to_string().as_str()),
                 sanitize_sensitive_info(&diagnostics)
             );
-            handle_channel_unavailable_stream(app_state, stream_options, StatusCode::SERVICE_UNAVAILABLE).await
+            Err(ProviderStreamRequestFailure::Status {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                provider_error_class: classify_provider_io_error(&err),
+                serve_channel_unavailable: true,
+            })
         }
-    }
-}
-
-async fn handle_channel_unavailable_stream(
-    app_state: &Arc<AppState>,
-    stream_options: &ProviderStreamFactoryOptions,
-    status: StatusCode,
-) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
-    app_state
-        .connection_manager
-        .update_stream_detail(&stream_options.addr, CustomVideoStreamType::ChannelUnavailable)
-        .await;
-    app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
-
-    if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
-        &app_state.app_config,
-        &get_response_headers(stream_options.get_headers()),
-        status,
-    ) {
-        Ok(Some((boxed_provider_stream, response_info)))
-    } else {
-        Err(status)
     }
 }
 
@@ -530,7 +665,7 @@ async fn get_provider_stream(
     app_state: &Arc<AppState>,
     client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
-) -> Result<Option<ProviderStreamFactoryResponse>, StatusCode> {
+) -> Result<Option<ProviderStreamFactoryResponse>, ProviderStreamRequestFailure> {
     let log_url = stream_options.get_log_url();
     debug_if_enabled!("stream provider {}", sanitize_sensitive_info(log_url.as_ref()));
     let start = Instant::now();
@@ -550,7 +685,11 @@ async fn get_provider_stream(
                     break;
                 }
             }
-            Err(status) => {
+            Err(failure) => {
+                if failure.should_serve_channel_unavailable() {
+                    return Err(failure);
+                }
+                let status = failure.status();
                 debug!("Provider stream response error status response : {status}");
                 if matches!(
                     status,
@@ -598,7 +737,11 @@ async fn get_provider_stream(
     );
     stream_options.cancel_reconnect();
     app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
-    Err(StatusCode::SERVICE_UNAVAILABLE)
+    Err(ProviderStreamRequestFailure::Status {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        provider_error_class: "service_unavailable",
+        serve_channel_unavailable: true,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -624,6 +767,19 @@ pub async fn create_provider_stream(
 
     match get_provider_stream(app_state, client, &stream_options).await {
         Ok(Some((init_stream, info))) => {
+            if let Some((_headers, _status, _response_url, Some(custom_video_type))) = &info {
+                let reason = match custom_video_type {
+                    CustomVideoStreamType::ChannelUnavailable => Some(ConnectFailureReason::ChannelUnavailable),
+                    CustomVideoStreamType::Provisioning => Some(ConnectFailureReason::Provisioning),
+                    CustomVideoStreamType::ProviderConnectionsExhausted => {
+                        Some(ConnectFailureReason::ProviderConnectionsExhausted)
+                    }
+                    _ => None,
+                };
+                if let Some(reason) = reason {
+                    record_provider_open_failure(app_state, &stream_options, reason, None, None);
+                }
+            }
             let is_media_stream_or_not_piped = if let Some((headers, _, _, _custom_video_type)) = &info {
                 // if it is piped or no video stream, then we don't reconnect
                 !stream_options.is_piped() && classify_content_type(headers) == MimeCategory::Video
@@ -635,7 +791,8 @@ pub async fn create_provider_stream(
             if is_media_stream_or_not_piped && stream_options.should_reconnect() {
                 let continue_client_signal = continue_signal.clone();
                 let continue_streaming_signal = continue_client_signal.clone();
-                let stream_options_provider = stream_options.clone();
+                let mut stream_options_provider = stream_options.clone();
+                stream_options_provider.clear_connect_failure_stage();
                 let app_state_clone = Arc::clone(app_state);
                 let client = client.clone();
                 let unfold: BoxedProviderStream = stream::unfold((), move |()| {
@@ -685,12 +842,13 @@ pub async fn create_provider_stream(
                                     }
                                     None
                                 }
-                                Err(status) => {
+                                Err(failure) => {
                                     app_state_clone
                                         .connection_manager
                                         .release_provider_connection(&stream_opts.addr)
                                         .await;
                                     continue_streaming.cancel();
+                                    let status = failure.status();
                                     if let (Some(boxed_provider_stream), _response_info) =
                                         create_channel_unavailable_stream(
                                             &app_state_clone.app_config,
@@ -730,8 +888,16 @@ pub async fn create_provider_stream(
             }
         }
         Ok(None) => None,
-        Err(status) => {
+        Err(failure) => {
+            let status = failure.status();
             app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
+            record_provider_open_failure(
+                app_state,
+                &stream_options,
+                ConnectFailureReason::ChannelUnavailable,
+                Some(status),
+                Some(failure.provider_error_class()),
+            );
             if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
                 &app_state.app_config,
                 &get_response_headers(stream_options.get_headers()),
@@ -748,7 +914,10 @@ pub async fn create_provider_stream(
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
-    use shared::model::PlaylistItemType;
+    use shared::{
+        model::{PlaylistItemType, StreamChannel, XtreamCluster},
+        utils::Internable,
+    };
 
     #[test]
     fn test_provider_stream_factory_options_range_logic() {
@@ -770,6 +939,10 @@ mod tests {
             input_headers: None,
             disabled_headers,
             default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
         });
         assert!(!options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), Some(0)); // Should track even if not requested
@@ -786,6 +959,10 @@ mod tests {
             input_headers: None,
             disabled_headers,
             default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
         });
         assert!(options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), Some(100));
@@ -802,6 +979,10 @@ mod tests {
             input_headers: None,
             disabled_headers,
             default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
         });
         assert!(!options.was_range_requested());
         assert_eq!(options.get_total_bytes_send(), None); // Should NOT track
@@ -819,6 +1000,10 @@ mod tests {
             input_headers: None,
             disabled_headers,
             default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
         });
         assert!(!options.was_range_requested()); // Stripped by filter
         assert_eq!(options.get_total_bytes_send(), None);
@@ -842,6 +1027,10 @@ mod tests {
             input_headers: None,
             disabled_headers: None,
             default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
         });
 
         let dash_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
@@ -854,6 +1043,10 @@ mod tests {
             input_headers: None,
             disabled_headers: None,
             default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
         });
 
         assert!(!hls_options.should_reconnect());
@@ -878,11 +1071,62 @@ mod tests {
             input_headers: None,
             disabled_headers: None,
             default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
         });
 
         assert!(
             !should_wrap_provider_stream_in_buffer(&shared_options),
             "shared streams must bypass provider-side BufferedStream"
         );
+    }
+
+    #[test]
+    fn test_provider_stream_factory_options_builds_connect_failed_stream_info_from_history_context() {
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let stream_url = Url::parse("http://example.com/stream").unwrap();
+        let req_headers = HeaderMap::new();
+        let stream_options =
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
+            addr,
+            item_type: PlaylistItemType::Live,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
+            disabled_headers: None,
+            default_user_agent: None,
+            username: Some("alice"),
+            client_ip: Some("203.0.113.9"),
+            stream_channel: Some(&StreamChannel {
+                target_id: 1,
+                virtual_id: 77,
+                provider_id: 3,
+                input_name: "input-a".intern(),
+                item_type: PlaylistItemType::Live,
+                cluster: XtreamCluster::Live,
+                group: "News".intern(),
+                title: "Example".intern(),
+                url: "http://provider.example/live/77".intern(),
+                shared: false,
+                shared_joined_existing: None,
+                shared_stream_id: None,
+                technical: None,
+            }),
+            connect_failure_stage: Some(FailureStage::ProviderOpen),
+        });
+
+        let info = options.build_connect_failed_stream_info("provider-a").expect("history context");
+
+        assert_eq!(info.username, "alice");
+        assert_eq!(info.client_ip, "203.0.113.9");
+        assert_eq!(info.provider, "provider-a");
+        assert_eq!(info.channel.input_name.as_ref(), "input-a");
+        assert_eq!(info.channel.virtual_id, 77);
     }
 }

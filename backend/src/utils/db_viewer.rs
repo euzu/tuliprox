@@ -1,5 +1,5 @@
 use crate::api::model::{MetadataRetryDbKey, MetadataRetryDbValue};
-use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery, VirtualIdRecord};
+use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery, QosSnapshotRecord, VirtualIdRecord};
 use env_logger::{Builder, Target};
 use log::{error, LevelFilter};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ pub struct DbViewerArgs<'a> {
     pub epg_filename: Option<&'a str>,
     pub tim_filename: Option<&'a str>,
     pub metadata_status_filename: Option<&'a str>,
+    pub qos_snapshot_filename: Option<&'a str>,
 }
 
 impl<'a> DbViewerArgs<'a> {
@@ -31,6 +32,7 @@ impl<'a> DbViewerArgs<'a> {
         epg_filename: Option<&'a str>,
         tim_filename: Option<&'a str>,
         metadata_status_filename: Option<&'a str>,
+        qos_snapshot_filename: Option<&'a str>,
     ) -> Self {
         Self {
             xtream_filename,
@@ -38,6 +40,7 @@ impl<'a> DbViewerArgs<'a> {
             epg_filename,
             tim_filename,
             metadata_status_filename,
+            qos_snapshot_filename,
         }
     }
 }
@@ -68,6 +71,11 @@ pub fn db_viewer(args: &DbViewerArgs<'_>) {
             filename: args.metadata_status_filename,
             label: "metadata_status",
             dump_fn: dump_metadata_status_db,
+        },
+        DumpRequest {
+            filename: args.qos_snapshot_filename,
+            label: "qos_snapshot",
+            dump_fn: dump_qos_snapshot_db,
         },
     ];
 
@@ -150,6 +158,8 @@ fn dump_metadata_status_db(path: &Path) -> bool {
     try_dump_typed_db::<MetadataRetryDbKey, MetadataRetryDbValue>(path)
 }
 
+fn dump_qos_snapshot_db(path: &Path) -> bool { try_dump_typed_db::<String, QosSnapshotRecord>(path) }
+
 fn dump_db(filename: &str, label: &str, dump_fn: DumpFn) -> bool {
     match PathBuf::from(filename).canonicalize() {
         Ok(path) => {
@@ -199,4 +209,46 @@ fn exit_app(code: i32) {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dump_qos_snapshot_db;
+    use tempfile::tempdir;
+
+    use crate::repository::{BPlusTree, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow};
+
+    #[test]
+    fn dump_qos_snapshot_db_reads_bplustree_records() {
+        let temp = tempdir().expect("tempdir should succeed");
+        let path = temp.path().join("qos_snapshot.db");
+
+        let mut tree = BPlusTree::<String, QosSnapshotRecord>::new();
+        let record = QosSnapshotRecord {
+            stream_identity_key: "stream-a".to_string(),
+            input_name: "input-a".to_string(),
+            target_id: 11,
+            provider_name: "provider-a".to_string(),
+            provider_id: 22,
+            virtual_id: 33,
+            item_type: "live".to_string(),
+            updated_at: 1_700_000_000,
+            last_event_at: 1_700_000_001,
+            window_24h: QosSnapshotWindow {
+                score: 87,
+                confidence: 70,
+                ..QosSnapshotWindow::default()
+            },
+            window_7d: QosSnapshotWindow::default(),
+            window_30d: QosSnapshotWindow::default(),
+            daily_buckets: std::collections::BTreeMap::from([(
+                "2026-04-02".to_string(),
+                QosSnapshotDailyBucket::default(),
+            )]),
+        };
+        tree.insert(record.stream_identity_key.clone(), record);
+        tree.store(&path).expect("tree should store");
+
+        assert!(dump_qos_snapshot_db(&path));
+    }
 }

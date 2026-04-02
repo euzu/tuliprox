@@ -1,7 +1,10 @@
 use crate::{
     error::{TuliproxError, TuliproxErrorKind},
     info_err_res,
-    model::{CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, StreamConfigDto, StreamHistoryConfigDto},
+    model::{
+        CacheConfigDto, GeoIpConfigDto, QosAggregationConfigDto, RateLimitConfigDto, StreamConfigDto,
+        StreamHistoryConfigDto,
+    },
     utils::{
         default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier,
         hex_to_u8_16, is_default_resource_retry_attempts, is_default_resource_retry_backoff_ms,
@@ -54,6 +57,8 @@ pub struct ReverseProxyConfigDto {
     pub geoip: Option<GeoIpConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_history: Option<StreamHistoryConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos_aggregation: Option<QosAggregationConfigDto>,
 }
 
 impl ReverseProxyConfigDto {
@@ -66,6 +71,8 @@ impl ReverseProxyConfigDto {
             && (self.rate_limit.is_none() || self.rate_limit.as_ref().is_some_and(|r| r.is_empty()))
             && (self.geoip.is_none() || self.geoip.as_ref().is_some_and(|g| g.is_empty()))
             && (self.stream_history.is_none() || self.stream_history.as_ref().is_some_and(|s| s.is_empty()))
+            && (self.qos_aggregation.is_none()
+                || self.qos_aggregation.as_ref().is_some_and(QosAggregationConfigDto::is_empty))
     }
 
     pub fn clean(&mut self) {
@@ -92,6 +99,9 @@ impl ReverseProxyConfigDto {
         }
         if self.stream_history.as_ref().is_some_and(StreamHistoryConfigDto::is_empty) {
             self.stream_history = None;
+        }
+        if self.qos_aggregation.as_ref().is_some_and(QosAggregationConfigDto::is_empty) {
+            self.qos_aggregation = None;
         }
     }
 
@@ -121,8 +131,13 @@ impl ReverseProxyConfigDto {
             }
         }
 
+        let mut stream_history_enabled = false;
         if let Some(stream_history) = self.stream_history.as_mut() {
             stream_history.prepare(storage_dir)?;
+            stream_history_enabled = stream_history.stream_history_enabled;
+        }
+        if let Some(qos_aggregation) = self.qos_aggregation.as_mut() {
+            qos_aggregation.prepare(stream_history_enabled)?;
         }
 
         if let Some(resource_retry) = self.resource_retry.as_mut() {
@@ -186,7 +201,7 @@ impl ResourceRetryConfigDto {
 #[cfg(test)]
 mod tests {
     use super::ReverseProxyConfigDto;
-    use crate::model::StreamHistoryConfigDto;
+    use crate::model::{QosAggregationConfigDto, StreamHistoryConfigDto};
 
     #[test]
     fn serializing_stream_history_under_reverse_proxy_uses_nested_yaml_shape() {
@@ -198,6 +213,7 @@ mod tests {
                 stream_history_retention_days: 14,
                 stream_history_directory: "/var/lib/tuliprox/history".to_string(),
             }),
+            qos_aggregation: None,
             ..Default::default()
         };
 
@@ -256,5 +272,48 @@ mod tests {
         let actual = Path::new(&stream_history.stream_history_directory);
         assert_eq!(actual.file_name(), expected.file_name());
         assert!(actual.ends_with("history"), "directory should end with 'history', got: {actual:?}");
+    }
+
+    #[test]
+    fn qos_aggregation_deserializes_under_reverse_proxy() {
+        let yaml = r#"
+rewrite_secret: 00112233445566778899aabbccddeeff
+stream_history:
+  stream_history_enabled: true
+qos_aggregation:
+  enabled: true
+  interval_secs: 300
+"#;
+
+        let cfg: ReverseProxyConfigDto = serde_saphyr::from_str(yaml).expect("reverse_proxy should deserialize");
+        let qos = cfg.qos_aggregation.expect("qos_aggregation should deserialize");
+        assert!(qos.enabled);
+        assert_eq!(qos.interval_secs, 300);
+    }
+
+    #[test]
+    fn prepare_disables_qos_aggregation_when_stream_history_is_disabled() {
+        let mut cfg = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 300 }),
+            ..Default::default()
+        };
+
+        cfg.prepare("storage").expect("prepare should succeed");
+        let qos = cfg.qos_aggregation.expect("qos_aggregation should remain present");
+        assert!(!qos.enabled, "qos_aggregation must disable itself when stream_history is disabled");
+    }
+
+    #[test]
+    fn prepare_rejects_zero_qos_aggregation_interval_when_enabled() {
+        let mut cfg = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            stream_history: Some(StreamHistoryConfigDto { stream_history_enabled: true, ..Default::default() }),
+            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 0 }),
+            ..Default::default()
+        };
+
+        let err = cfg.prepare("storage").expect_err("prepare must reject zero interval");
+        assert!(err.to_string().contains("interval_secs"), "unexpected error: {err}");
     }
 }

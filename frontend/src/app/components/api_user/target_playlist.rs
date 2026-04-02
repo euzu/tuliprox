@@ -1,12 +1,12 @@
 use crate::{
-    app::components::{AppIcon, Card, CollapsePanel, IconButton, RadioButtonGroup},
+    app::components::{AppIcon, Card, CollapsePanel, IconButton, RadioButtonGroup, Search},
     html_if,
     i18n::use_translation,
 };
 use shared::{
     error::TuliproxError,
     info_err_res,
-    model::{PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, XtreamCluster},
+    model::{PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, SearchRequest, XtreamCluster},
 };
 use std::{
     cell::RefCell,
@@ -107,6 +107,12 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
     let filter_state = use_state(HashMap::<XtreamCluster, FilterState>::new);
     let collapse_state = use_state(HashMap::<XtreamCluster, bool>::new);
     let force_update = use_state(|| 0);
+    let search_filter = use_state::<SearchRequest, _>(|| SearchRequest::Clear);
+
+    let handle_search = {
+        let search_filter = search_filter.clone();
+        Callback::from(move |req: SearchRequest| search_filter.set(req))
+    };
 
     {
         let bouquet_selection = bouquet_selection.clone();
@@ -208,17 +214,57 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
         })
     };
 
+    let render_cluster_stats = |selected_count: usize, visible_count: usize, total: usize| {
+        html! {
+          <span class="tp__api-user-target-playlist__cluster-stats">
+               <span class="tp__api-user-target-playlist__cluster-stats--label">{translate.t("LABEL.SELECTED")}</span>
+               <span class="tp__api-user-target-playlist__cluster-stats--selected">{selected_count}</span>
+               <span class="tp__api-user-target-playlist__cluster-stats--label">{translate.t("LABEL.FILTERED")}</span>
+               <span class="tp__api-user-target-playlist__cluster-stats--filtered">{visible_count}</span>
+               <span class="tp__api-user-target-playlist__cluster-stats--label">{translate.t("LABEL.TOTAL")}</span>
+               <span class="tp__api-user-target-playlist__cluster-stats--total">{total}</span>
+          </span>
+        }
+    };
+
     let render_category_cluster = |cluster: XtreamCluster,
                                    cats: Option<&Vec<String>>,
                                    selections: &HashMap<String, bool>| {
         if let Some(c) = cats {
-            let cats_clone = c.clone();
             let cluster_clone = cluster;
             let handler = handle_selection_change.clone();
             let current_filter = *filter_state.get(&cluster).unwrap_or(&FilterState::All);
 
+            let is_visible = |cat: &str| {
+                let selected = *selections.get(cat).unwrap_or(&false);
+                let filter_ok = match current_filter {
+                    FilterState::All => true,
+                    FilterState::Selected => selected,
+                    FilterState::Deselected => !selected,
+                };
+                let search_ok = match &*search_filter {
+                    SearchRequest::Clear => true,
+                    SearchRequest::Text(pattern, _) => {
+                        let lc = pattern.to_lowercase();
+                        cat.to_lowercase().contains(&lc)
+                    }
+                    SearchRequest::Regexp(pattern, _) => {
+                        shared::model::REGEX_CACHE.get_or_compile(pattern).is_ok_and(|re| re.is_match(cat))
+                    }
+                };
+                filter_ok && search_ok
+            };
+
+            // Only the items that are currently visible (FilterState + search) should be
+            // affected by Select All / Deselect All.
+            let visible_cats: Vec<String> = c.iter().filter(|cat| is_visible(cat)).cloned().collect();
+
+            let total = c.len();
+            let selected_count = c.iter().filter(|cat| *selections.get(*cat).unwrap_or(&false)).count();
+            let visible_count = visible_cats.len();
+
             let select_all = {
-                let cats = cats_clone.clone();
+                let cats = visible_cats.clone();
                 let handler = handler.clone();
                 Callback::from(move |(_, event): (String, MouseEvent)| {
                     event.stop_propagation();
@@ -227,7 +273,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
             };
 
             let deselect_all = {
-                let cats = cats_clone.clone();
+                let cats = visible_cats;
                 let handler = handler.clone();
                 Callback::from(move |(_, event): (String, MouseEvent)| {
                     event.stop_propagation();
@@ -248,6 +294,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                                 XtreamCluster::Series =>  "LABEL.SERIES"
                             })}
                     </div>
+                    { render_cluster_stats(selected_count, visible_count, total) }
                     <div class="tp__api-user-target-playlist__section-header__toolbar">
                         <RadioButtonGroup
                                 multi_select={false} none_allowed={false}
@@ -268,6 +315,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                 }
             } else {
                 html! {
+                    <>
                     <div class="tp__api-user-target-playlist__section-header__title">
                         {translate.t( match cluster {
                                 XtreamCluster::Live =>  "LABEL.LIVE",
@@ -275,6 +323,8 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                                 XtreamCluster::Series =>  "LABEL.SERIES"
                             })}
                     </div>
+                    { render_cluster_stats(selected_count, visible_count, total) }
+                    </>
                 }
             };
 
@@ -287,14 +337,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                        collapse_state.set(collapse_map);
                   })}>
                     <div class="tp__api-user-target-playlist__categories">
-                        { for c.iter().filter(|cat| {
-                            let selected = *selections.get(*cat).unwrap_or(&false);
-                            match current_filter {
-                                FilterState::All => true,
-                                FilterState::Selected => selected,
-                                FilterState::Deselected => !selected,
-                            }
-                        }).map(|cat| {
+                        { for c.iter().filter(|cat| is_visible(cat)).map(|cat| {
                             let selected = *selections.get(cat).unwrap_or(&false);
                             html! {
                             <div key={cat.clone()} data-cluster={cluster.to_string()} data-category={cat.clone()} class={classes!("tp__api-user-target-playlist__categories-category", if selected {"selected"} else {""})}
@@ -314,6 +357,9 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
     let selections = &*bouquet_selection.borrow();
     html! {
         <div class={"tp__api-user-target-playlist"}>
+            <div class="tp__api-user-target-playlist__toolbar">
+                <Search onsearch={Some(handle_search)} min_length={1} />
+            </div>
             <div class="tp__api-user-target-playlist__body">
                 { render_category_cluster(XtreamCluster::Live, playlist_categories.live.as_ref(), &selections.live) }
                 { render_category_cluster(XtreamCluster::Video, playlist_categories.vod.as_ref(), &selections.vod) }
