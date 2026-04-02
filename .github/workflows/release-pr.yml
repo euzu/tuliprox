@@ -1,0 +1,87 @@
+name: Prepare Release PR
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: release-pr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-release-pr:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Detect release-version changes in push
+        id: detect_release_merge
+        run: |
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+          if [[ -z "${BEFORE}" || "${BEFORE}" == "0000000000000000000000000000000000000000" ]]; then
+            BEFORE="${AFTER}^"
+          fi
+
+          CHANGED_FILES="$(git diff --name-only "${BEFORE}" "${AFTER}" || true)"
+          echo "Changed files:"
+          printf '%s\n' "${CHANGED_FILES}"
+
+          if printf '%s\n' "${CHANGED_FILES}" | grep -Eq '^(Cargo\.toml|Cargo\.lock|backend/Cargo\.toml|backend/Cargo\.lock|frontend/Cargo\.toml|shared/Cargo\.toml)$'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Detected version-file change on master push; assuming merged release PR."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust Tools
+        if: steps.detect_release_merge.outputs.skip != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Install Rust Toolchain
+        if: steps.detect_release_merge.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump minor version for release PR
+        if: steps.detect_release_merge.outputs.skip != 'true'
+        run: |
+          chmod +x ./bin/inc_version.sh
+          ./bin/inc_version.sh p
+
+      - name: Read bumped version
+        if: steps.detect_release_merge.outputs.skip != 'true'
+        id: version
+        run: |
+          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml)
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release PR
+        if: steps.detect_release_merge.outputs.skip != 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: release/version-bump-v${{ steps.version.outputs.value }}
+          base: master
+          title: "ci: bump version v${{ steps.version.outputs.value }}"
+          commit-message: "ci: bump version v${{ steps.version.outputs.value }}"
+          body: |
+            Automated release version bump for `master`.
+
+            This PR was created after a non-release push to `master` and prepares the next release version.
+
+            Version change:
+            - minor bump: `${{ steps.version.outputs.value }}`
+
+            After merging this PR, the release workflow will build and publish the release from `master`.
+          delete-branch: false
