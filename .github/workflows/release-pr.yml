@@ -5,78 +5,48 @@ permissions:
   pull-requests: write
 
 on:
-  push:
+  pull_request_target:
+    types: [closed]
     branches: [master]
 
 concurrency:
-  group: release-pr-${{ github.ref }}
+  group: release-pr-${{ github.event.pull_request.base.ref }}
   cancel-in-progress: false
 
 jobs:
   prepare-release-pr:
     runs-on: ubuntu-latest
-    if: github.actor != 'github-actions[bot]'
+    if: >-
+      github.event.pull_request.merged == true &&
+      !startsWith(github.event.pull_request.head.ref, 'release/version-bump-v')
 
     steps:
-      - name: Checkout code
+      - name: Checkout merged master
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: master
-
-      - name: Detect release-only merge
-        id: release_only
-        run: |
-          BEFORE="${{ github.event.before }}"
-          AFTER="${{ github.sha }}"
-          if [[ -z "${BEFORE}" || "${BEFORE}" == "0000000000000000000000000000000000000000" ]]; then
-            BEFORE="${AFTER}^"
-          fi
-
-          CHANGED_FILES="$(git diff --name-only "${BEFORE}" "${AFTER}" || true)"
-          echo "Changed files:"
-          printf '%s\n' "${CHANGED_FILES}"
-
-          VERSION_FILES_RE='^(Cargo\.toml|Cargo\.lock|backend/Cargo\.toml|backend/Cargo\.lock|frontend/Cargo\.toml|shared/Cargo\.toml)$'
-
-          if [[ -z "${CHANGED_FILES}" ]]; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          NON_VERSION_FILES="$(printf '%s\n' "${CHANGED_FILES}" | grep -Ev "${VERSION_FILES_RE}" || true)"
-          if [[ -z "${NON_VERSION_FILES}" ]]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Detected release-only merge on master; not opening another release PR."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Install Rust Tools
-        if: steps.release_only.outputs.skip != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-edit
 
       - name: Install Rust Toolchain
-        if: steps.release_only.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Bump minor version for release PR
-        if: steps.release_only.outputs.skip != 'true'
         run: |
           chmod +x ./bin/inc_version.sh
           ./bin/inc_version.sh p
 
       - name: Read bumped version
-        if: steps.release_only.outputs.skip != 'true'
         id: version
         run: |
           VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml)
           echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Create release PR
-        if: steps.release_only.outputs.skip != 'true'
         uses: peter-evans/create-pull-request@v7
         with:
           branch: release/version-bump-v${{ steps.version.outputs.value }}
@@ -86,10 +56,10 @@ jobs:
           body: |
             Automated release version bump for `master`.
 
-            This PR was created after a non-release push to `master` and prepares the next release version.
+            This PR was created after merging a non-release PR into `master`.
 
             Version change:
-            - minor bump: `${{ steps.version.outputs.value }}`
+            - minor bump to `${{ steps.version.outputs.value }}`
 
-            After merging this PR, the release workflow will build and publish the release from `master`.
+            Merge this PR to trigger the release build and publication workflow.
           delete-branch: false
