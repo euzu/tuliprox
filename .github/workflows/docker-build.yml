@@ -144,7 +144,6 @@ jobs:
               exit 1
             fi
           done
-
       - name: Commit version bump
         if: >-
           (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
