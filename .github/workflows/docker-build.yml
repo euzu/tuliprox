@@ -18,7 +18,7 @@ on:
         options: [none, major, minor, patch]
         default: none
   push:
-    branches: [develop]
+    branches: [develop, master]
 
 # Avoid multiple parallel builds for the same branch to prevent race conditions
 concurrency:
@@ -29,7 +29,7 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop') &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master') &&
       (github.event_name != 'push' || github.actor != 'github-actions[bot]')
 
     steps:
@@ -106,7 +106,11 @@ jobs:
         run: |
           chmod +x ./bin/inc_version.sh
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            ./bin/inc_version.sh
+            case "${{ github.ref_name }}" in
+              master) ./bin/inc_version.sh p ;;
+              develop) ./bin/inc_version.sh ;;
+              *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
+            esac
           else
             case "${{ github.event.inputs.choice }}" in
               major) ./bin/inc_version.sh m ;;
@@ -135,7 +139,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           chmod +x ./bin/build_docker.sh
-          ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || 'develop' }}
+          ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
 
       - name: Read project version
         id: version
@@ -189,7 +193,11 @@ jobs:
           git push origin HEAD
 
       - name: Publish static binaries to GitHub Release
-        if: success() && github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master'
+        if: >-
+          success() && (
+            (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
+            (github.event_name == 'push' && github.ref == 'refs/heads/master')
+          )
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.value }}
