@@ -38,6 +38,8 @@ pub struct StreamChannel {
     pub target_id: u16,
     pub virtual_id: u32,
     pub provider_id: u32,
+    #[serde(with = "arc_str_serde")]
+    pub input_name: Arc<str>,
     pub item_type: PlaylistItemType,
     pub cluster: XtreamCluster,
     #[serde(with = "arc_str_serde")]
@@ -47,6 +49,10 @@ pub struct StreamChannel {
     #[serde(with = "arc_str_serde")]
     pub url: Arc<str>,
     pub shared: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_joined_existing: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_stream_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub technical: Option<StreamTechnicalInfo>,
 }
@@ -69,12 +75,15 @@ impl XtreamPlaylistItem {
             target_id,
             virtual_id: self.virtual_id,
             provider_id: self.provider_id,
+            input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
             cluster: self.xtream_cluster,
             group: Arc::clone(&self.group),
             title,
             url: Arc::clone(&self.url),
             shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
         }
     }
@@ -87,12 +96,15 @@ impl M3uPlaylistItem {
             target_id,
             virtual_id: self.virtual_id,
             provider_id: self.get_provider_id().unwrap_or_default(),
+            input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
             cluster: XtreamCluster::try_from(self.item_type).unwrap_or(XtreamCluster::Live),
             group: Arc::clone(&self.group),
             title,
             url: Arc::clone(&self.url),
             shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
         }
     }
@@ -276,6 +288,8 @@ pub struct StreamInfo {
     pub session_token: Option<String>,
     #[serde(default)]
     pub preserved: bool,
+    #[serde(default)]
+    pub previous_session_id: Option<u64>,
 }
 
 impl StreamInfo {
@@ -305,6 +319,7 @@ impl StreamInfo {
             country_code,
             session_token: session_token.map(|token| token.to_string()),
             preserved: false,
+            previous_session_id: None,
         }
     }
 }
@@ -344,5 +359,33 @@ mod tests {
 
         assert_eq!(stream_channel.item_type, PlaylistItemType::Video);
         assert_eq!(stream_channel.cluster, XtreamCluster::Video);
+    }
+
+    #[test]
+    fn to_stream_channel_preserves_input_name() {
+        let playlist_item = XtreamPlaylistItem {
+            virtual_id: 93_995,
+            provider_id: 1,
+            name: "Example".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Movies".intern(),
+            title: "Example".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://provider.example/movie/93995.mkv".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 0,
+            input_name: "provider-input".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+        };
+
+        let stream_channel = playlist_item.to_stream_channel(1);
+
+        assert_eq!(stream_channel.input_name.as_ref(), "provider-input");
     }
 }

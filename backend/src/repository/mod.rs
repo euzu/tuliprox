@@ -18,6 +18,8 @@ mod sorted_index;
 mod alias_repository;
 mod playlist_stream;
 mod provider_dns_repository;
+mod stream_history;
+mod qos_snapshot_repository;
 
 pub use storage::*;
 pub use target_id_mapping::*;
@@ -38,6 +40,8 @@ pub use playlist_source::*;
 pub use library_repository::*;
 pub use playlist_stream::*;
 pub use provider_dns_repository::*;
+pub use stream_history::*;
+pub use qos_snapshot_repository::*;
 
 #[cfg(test)]
 mod bplustree_stress;

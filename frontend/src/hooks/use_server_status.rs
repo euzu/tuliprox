@@ -183,7 +183,10 @@ mod tests {
                 group: "group".intern(),
                 title: "title".intern(),
                 url: "http://localhost/live.m3u8".intern(),
+                input_name: "input".intern(),
                 shared: false,
+                shared_joined_existing: None,
+                shared_stream_id: None,
                 technical: None,
             },
             provider: "provider".to_string(),
@@ -194,6 +197,7 @@ mod tests {
             country_code: None,
             session_token: session_token.map(ToOwned::to_owned),
             preserved: false,
+            previous_session_id: None,
         }
     }
 

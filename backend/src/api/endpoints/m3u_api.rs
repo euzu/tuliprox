@@ -4,7 +4,7 @@ use crate::{
             create_catchup_session_key, create_session_fingerprint, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
             is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
-            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            admission_failure_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found,
             try_unwrap_body, RedirectParams,
         },
@@ -12,7 +12,7 @@ use crate::{
             hls_api::handle_hls_stream_request,
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
-        model::{create_custom_video_stream_response, AppState, CustomVideoStreamType, UserApiRequestQueryOrBody, UserApiRequest},
+        model::{AppState, UserApiRequestQueryOrBody, UserApiRequest},
     },
     auth::Fingerprint,
     repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const},
@@ -94,15 +94,6 @@ async fn m3u_api_stream(
 
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
-    if user.permission_denied(app_state) {
-        return create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserAccountExpired,
-        )
-        .into_response();
-    }
-
     let target_name = &target.name;
     if !target.has_output(TargetType::M3u) {
         debug!("Target has no m3u playlist {target_name}");
@@ -127,6 +118,18 @@ async fn m3u_api_stream(
         true,
         format!("Can't find input {} for target {target_name}, stream_id {virtual_id}", pli.input_name)
     );
+
+    if user.permission_denied(app_state) {
+        return admission_failure_response(
+            app_state,
+            fingerprint,
+            &user,
+            pli.to_stream_channel(target.id),
+            pli.input_name.as_ref(),
+            req_headers,
+            crate::repository::ConnectFailureReason::UserAccountExpired,
+        );
+    }
 
     if pli.item_type.is_local() {
         let connection_permission = user.connection_permission(app_state).await;
@@ -161,21 +164,27 @@ async fn m3u_api_stream(
 
     let session_url = if let Some(session) = &user_session {
         if session.permission == UserConnectionPermission::Exhausted {
-            return create_custom_video_stream_response(
+            return admission_failure_response(
                 app_state,
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response();
+                fingerprint,
+                &user,
+                pli.to_stream_channel(target.id),
+                &session.provider,
+                req_headers,
+                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+            );
         }
 
         if app_state.active_provider.is_over_limit(&session.provider).await {
-            return create_custom_video_stream_response(
+            return admission_failure_response(
                 app_state,
-                &fingerprint.addr,
-                CustomVideoStreamType::ProviderConnectionsExhausted,
-            )
-            .into_response();
+                fingerprint,
+                &user,
+                pli.to_stream_channel(target.id),
+                &session.provider,
+                req_headers,
+                crate::repository::ConnectFailureReason::ProviderConnectionsExhausted,
+            );
         }
         if session.virtual_id == virtual_id && is_seek_request(cluster, req_headers).await {
             // partial request means we are in reverse proxy mode, seek happened
@@ -207,12 +216,15 @@ async fn m3u_api_stream(
         session_url.as_ref(),
     );
     if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
-        return create_custom_video_stream_response(
+        return admission_failure_response(
             app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserConnectionsExhausted,
-        )
-        .into_response();
+            fingerprint,
+            &user,
+            pli.to_stream_channel(target.id),
+            input.name.as_ref(),
+            req_headers,
+            crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+        );
     }
 
     let context = ApiStreamContext::try_from(cluster).unwrap_or(ApiStreamContext::Live);

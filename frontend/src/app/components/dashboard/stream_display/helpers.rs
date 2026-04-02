@@ -1,4 +1,4 @@
-use crate::app::ConfigContext;
+use crate::{app::ConfigContext, utils::format_duration};
 use gloo_utils::window;
 use shared::{
     model::{PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo},
@@ -97,39 +97,6 @@ fn compute_adaptive_last_seen(
     }
 
     next
-}
-
-pub fn format_duration(seconds: u64) -> String {
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let seconds = seconds % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
-}
-
-pub fn format_bandwidth(rate_kbps: u32) -> String {
-    if rate_kbps == 0 {
-        return "-".to_string();
-    }
-    if rate_kbps >= 1_048_576 {
-        format!("{:.1} GB/s", f64::from(rate_kbps) / 1_048_576.0)
-    } else if rate_kbps >= 1024 {
-        format!("{:.1} MB/s", f64::from(rate_kbps) / 1024.0)
-    } else {
-        format!("{rate_kbps} KB/s")
-    }
-}
-
-pub fn format_transferred(total_kb: u32) -> String {
-    if total_kb == 0 {
-        return "-".to_string();
-    }
-    if total_kb >= 1_048_576 {
-        format!("{:.2} GB", f64::from(total_kb) / 1_048_576.0)
-    } else if total_kb >= 1024 {
-        format!("{:.1} MB", f64::from(total_kb) / 1024.0)
-    } else {
-        format!("{total_kb} KB")
-    }
 }
 
 fn adaptive_tech_label(item_type: PlaylistItemType) -> Option<&'static str> {
@@ -245,7 +212,10 @@ mod tests {
                 group: "Group".intern(),
                 title: "Title".intern(),
                 url: "http://example.com/stream.m3u8".intern(),
+                input_name: "input".intern(),
                 shared: false,
+                shared_joined_existing: None,
+                shared_stream_id: None,
                 technical: None,
             },
             provider: "provider".to_string(),
@@ -256,6 +226,7 @@ mod tests {
             country_code: None,
             session_token: has_session.then(|| "session".to_string()),
             preserved,
+            previous_session_id: None,
         })
     }
 

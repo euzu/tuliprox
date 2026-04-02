@@ -11,6 +11,7 @@ use crate::{
     },
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
+    repository::{ConnectFailureReason, FailureStage},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -33,7 +34,7 @@ use serde::Serialize;
 use shared::{
     concat_string,
     model::{
-        Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, TargetType,
+        Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
         UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
@@ -76,6 +77,77 @@ pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_ur
                 .map(|url| Cow::Owned(request::preview_request_target_for_logging(&url, provider.as_ref())))
         })
         .unwrap_or(Cow::Borrowed(stream_url))
+}
+
+pub(crate) struct ConnectFailedAttempt<'a> {
+    pub app_state: &'a Arc<AppState>,
+    pub fingerprint: &'a Fingerprint,
+    pub user: &'a ProxyUserCredentials,
+    pub stream_channel: StreamChannel,
+    pub provider_name: &'a str,
+    pub req_headers: &'a HeaderMap,
+    pub reason: ConnectFailureReason,
+    pub failure_stage: FailureStage,
+}
+
+pub(crate) fn record_connect_failed_attempt(attempt: ConnectFailedAttempt<'_>) {
+    let user_agent = attempt
+        .req_headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let info = StreamInfo::new(
+        0,
+        0,
+        &attempt.user.username,
+        &attempt.fingerprint.addr,
+        &attempt.fingerprint.client_ip,
+        attempt.provider_name,
+        attempt.stream_channel,
+        user_agent,
+        None,
+        None,
+    );
+    attempt
+        .app_state
+        .connection_manager
+        .record_connect_failed(&info, attempt.reason, attempt.failure_stage);
+}
+
+fn admission_failure_video_type(reason: ConnectFailureReason) -> Option<CustomVideoStreamType> {
+    match reason {
+        ConnectFailureReason::UserAccountExpired => Some(CustomVideoStreamType::UserAccountExpired),
+        ConnectFailureReason::UserConnectionsExhausted => Some(CustomVideoStreamType::UserConnectionsExhausted),
+        ConnectFailureReason::ProviderConnectionsExhausted => Some(CustomVideoStreamType::ProviderConnectionsExhausted),
+        _ => None,
+    }
+}
+
+pub(crate) fn admission_failure_response(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    user: &ProxyUserCredentials,
+    stream_channel: StreamChannel,
+    provider_name: &str,
+    req_headers: &HeaderMap,
+    reason: ConnectFailureReason,
+) -> axum::response::Response {
+    record_connect_failed_attempt(ConnectFailedAttempt {
+        app_state,
+        fingerprint,
+        user,
+        stream_channel,
+        provider_name,
+        req_headers,
+        reason,
+        failure_stage: FailureStage::Admission,
+    });
+    let Some(video_type) = admission_failure_video_type(reason) else {
+        error!("Unsupported admission failure reason: {reason:?}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    create_custom_video_stream_response(app_state, &fingerprint.addr, video_type).into_response()
 }
 
 #[macro_export]
@@ -557,9 +629,11 @@ async fn create_stream_response_details(
     app_state: &Arc<AppState>,
     stream_options: &StreamOptions,
     stream_url: &str,
+    username: &str,
     fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
     input: &Arc<ConfigInput>,
+    stream_channel: &StreamChannel,
     item_type: PlaylistItemType,
     share_stream: bool,
     connection_permission: UserConnectionPermission,
@@ -670,6 +744,10 @@ async fn create_stream_response_details(
                             input_headers: streaming_strategy.input_headers.as_ref(),
                             disabled_headers: disabled_headers.as_ref(),
                             default_user_agent: default_user_agent.as_deref(),
+                            username: Some(username),
+                            client_ip: Some(&fingerprint.client_ip),
+                            stream_channel: Some(stream_channel),
+                            connect_failure_stage: Some(FailureStage::ProviderOpen),
                         },
                     );
 
@@ -901,9 +979,11 @@ pub async fn force_provider_stream_response(
         app_state,
         &stream_options,
         &user_session.stream_url,
+        &ctx.user.username,
         fingerprint,
         ctx.req_headers,
         ctx.input,
+        &stream_channel,
         item_type,
         share_stream,
         connection_permission,
@@ -1069,6 +1149,16 @@ pub async fn stream_response(
     };
 
     if connection_permission == UserConnectionPermission::Exhausted {
+        record_connect_failed_attempt(ConnectFailedAttempt {
+            app_state,
+            fingerprint,
+            user,
+            stream_channel: stream_channel.clone(),
+            provider_name: input.name.as_ref(),
+            req_headers,
+            reason: ConnectFailureReason::UserConnectionsExhausted,
+            failure_stage: FailureStage::Admission,
+        });
         return create_custom_video_stream_response(
             app_state,
             &fingerprint.addr,
@@ -1082,9 +1172,11 @@ pub async fn stream_response(
         app_state,
         &stream_options,
         stream_url,
+        &user.username,
         fingerprint,
         req_headers,
         input,
+        &stream_channel,
         item_type,
         share_stream,
         connection_permission,
@@ -1154,6 +1246,13 @@ pub async fn stream_response(
         };
 
         stream_channel.shared = is_stream_shared;
+        if is_stream_shared {
+            stream_channel.shared_joined_existing = Some(false);
+            stream_channel.shared_stream_id = Some(u64::from(metering.meter_uid));
+        } else {
+            stream_channel.shared_joined_existing = None;
+            stream_channel.shared_stream_id = None;
+        }
         let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -1403,6 +1502,8 @@ async fn try_shared_stream_response_if_any(
 
             stream_details.provider_name = provider;
             stream_channel.shared = true;
+            stream_channel.shared_joined_existing = Some(true);
+            stream_channel.shared_stream_id = app_state.shared_stream_manager.get_meter_uid(stream_url).await.map(u64::from);
             let metering = StreamMeteringConfig {
                 meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
                 meter_stream: false,
@@ -1439,7 +1540,7 @@ pub async fn local_stream_response(
     app_state: &Arc<AppState>,
     pli: StreamChannel,
     req_headers: &HeaderMap,
-    _input: &ConfigInput,
+    input: &ConfigInput,
     _target: &ConfigTarget,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
@@ -1462,6 +1563,16 @@ pub async fn local_stream_response(
             false
         };
         if !allow_session_reopen {
+            record_connect_failed_attempt(ConnectFailedAttempt {
+                app_state,
+                fingerprint,
+                user,
+                stream_channel: pli.clone(),
+                provider_name: input.name.as_ref(),
+                req_headers,
+                reason: ConnectFailureReason::UserConnectionsExhausted,
+                failure_stage: FailureStage::Admission,
+            });
             return create_custom_video_stream_response(
                 app_state,
                 &fingerprint.addr,
@@ -2110,6 +2221,7 @@ mod tests {
     };
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::mpsc;
+    use crate::model::StreamHistoryConfig;
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -2264,13 +2376,14 @@ mod tests {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+        let history_config = Some(StreamHistoryConfig::default());
         active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
 
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
         let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
         let connection_manager =
-            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager));
+            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager, history_config.as_ref()));
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -2311,14 +2424,34 @@ mod tests {
             target_id: 1,
             virtual_id: 41,
             provider_id: 0,
+            input_name: "library".intern(),
             item_type: PlaylistItemType::LocalVideo,
             cluster: XtreamCluster::Video,
             group: "Local Movies".intern(),
             title: "Local Test".intern(),
             url: url.into(),
             shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             technical: None,
         }
+    }
+
+    #[test]
+    fn admission_failure_reason_maps_to_custom_video_type() {
+        assert!(matches!(
+            admission_failure_video_type(ConnectFailureReason::UserAccountExpired),
+            Some(CustomVideoStreamType::UserAccountExpired)
+        ));
+        assert!(matches!(
+            admission_failure_video_type(ConnectFailureReason::UserConnectionsExhausted),
+            Some(CustomVideoStreamType::UserConnectionsExhausted)
+        ));
+        assert!(matches!(
+            admission_failure_video_type(ConnectFailureReason::ProviderConnectionsExhausted),
+            Some(CustomVideoStreamType::ProviderConnectionsExhausted)
+        ));
+        assert!(admission_failure_video_type(ConnectFailureReason::ProviderError).is_none());
     }
 
     #[tokio::test]

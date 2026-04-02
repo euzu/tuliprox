@@ -1,12 +1,12 @@
 use super::{
-    helpers::{build_technical_chips, format_duration, render_cluster},
+    helpers::{build_technical_chips, render_cluster},
     meter::{MeterDisplayKind, StreamMeterBadge},
 };
 use crate::{
     app::components::{AppIcon, Chip, RevealContent, ToggleSwitch},
     hooks::use_service_context,
     i18n::use_translation,
-    utils::t_safe,
+    utils::{format_duration, t_safe},
 };
 use shared::{
     model::StreamInfo,

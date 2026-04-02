@@ -2,6 +2,7 @@ use crate::{
     api::model::{CustomVideoStreamType, EventManager, EventMessage},
     auth::Fingerprint,
     model::{Config, ProxyUserCredentials},
+    repository::utc_day_from_secs,
     utils::{debug_if_enabled, GeoIp},
 };
 use arc_swap::ArcSwapOption;
@@ -25,7 +26,8 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use crate::api::model::connection_manager::CleanupEvent;
 use tokio_util::sync::CancellationToken;
 
 const USER_GC_TTL: u64 = 900; // 15 Min
@@ -49,6 +51,10 @@ fn get_adaptive_session_ttl_secs(config: &Config) -> u64 {
         .as_ref()
         .and_then(|r| r.stream.as_ref())
         .map_or_else(default_hls_session_ttl_secs, |s| s.hls_session_ttl_secs)
+}
+
+fn stream_history_session_id(ts: u64, uid: u32) -> u64 {
+    (ts << 32) | u64::from(uid)
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +184,7 @@ pub struct ActiveUserManager {
     geo_ip: Arc<ArcSwapOption<GeoIp>>,
     last_logged_user_count: AtomicUsize,
     last_logged_user_connection_count: AtomicUsize,
+    cleanup_tx: tokio::sync::OnceCell<mpsc::Sender<CleanupEvent>>,
 }
 
 impl ActiveUserManager {
@@ -238,7 +245,20 @@ impl ActiveUserManager {
             event_manager: Arc::clone(event_manager),
             last_logged_user_count: AtomicUsize::new(0),
             last_logged_user_connection_count: AtomicUsize::new(0),
+            cleanup_tx: tokio::sync::OnceCell::new(),
         }
+    }
+
+    pub(crate) fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) {
+        let _ = self.cleanup_tx.set(tx);
+    }
+
+    /// Collect a snapshot of all currently active streams for shutdown history recording.
+    pub(crate) async fn get_all_active_streams(&self) -> Vec<shared::model::StreamInfo> {
+        let connections = self.connections.read().await;
+        connections.by_key.values()
+            .flat_map(|data| data.streams.iter().cloned())
+            .collect()
     }
 
     async fn log_active_user(&self) {
@@ -546,6 +566,9 @@ impl ActiveUserManager {
         if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
             for stream in &mut connection_data.streams {
                 if &stream.addr == addr {
+                    // IMPORTANT: `resolve_disconnect_reason` in connection_manager.rs parses
+                    // `channel.title` back via `CustomVideoStreamType::from_str` to determine QoS
+                    // disconnect reasons. If these values change, update that function too.
                     stream.provider = String::from("tuliprox");
                     stream.channel.title = video_type.to_string().into();
                     stream.channel.group = "".intern();
@@ -567,6 +590,7 @@ impl ActiveUserManager {
             .or_insert_with(SocketRegistration::anonymous);
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn update_connection(&self, update: ActiveUserConnectionParams<'_>) -> Option<StreamInfo> {
         let ActiveUserConnectionParams {
             uid,
@@ -618,6 +642,7 @@ impl ActiveUserManager {
                     let preserve_started_at = stream_info.session_token.is_some()
                         && (stream_info.channel.item_type.is_live_adaptive() || stream_channel.item_type.is_live_adaptive());
                     let was_preserved = stream_info.preserved;
+                    let old_session_id = stream_history_session_id(stream_info.ts, stream_info.uid);
                     stream_info.meter_uid = meter_uid;
                     stream_info.addr = fingerprint.addr;
                     stream_info.client_ip.clone_from(&client_ip);
@@ -625,7 +650,13 @@ impl ActiveUserManager {
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
-                    if !preserve_started_at {
+                    if preserve_started_at {
+                        let now = current_time_secs();
+                        if utc_day_from_secs(stream_info.ts) != utc_day_from_secs(now) {
+                            stream_info.ts = now;
+                            stream_info.previous_session_id = Some(old_session_id);
+                        }
+                    } else {
                         stream_info.ts = current_time_secs();
                     }
 
@@ -636,7 +667,9 @@ impl ActiveUserManager {
                         stream_info.preserved = false;
                         connection_data.connections = connection_data.connections.saturating_add(1);
                     }
-                    stream_info.clone()
+                    let result = stream_info.clone();
+                    stream_info.previous_session_id = None;
+                    result
                 });
 
             if let Some(stream_info) = existing_stream_info {
@@ -1083,6 +1116,8 @@ impl ActiveUserManager {
         }
 
         let mut removed_addrs: Vec<std::net::SocketAddr> = Vec::new();
+        let mut cleanup_events: Vec<(std::net::SocketAddr, Box<StreamInfo>)> = Vec::new();
+        let mut replacement_entries: Vec<AdaptiveExpiryEntry> = Vec::new();
         {
             let mut expiry_index = self.adaptive_expiry_index.lock().await;
             let mut user_connections = self.connections.write().await;
@@ -1119,18 +1154,20 @@ impl ActiveUserManager {
 
                         if should_remove {
                             let addr = connection_data.streams[stream_idx].addr;
+                            if self.cleanup_tx.get().is_some() {
+                                cleanup_events.push((addr, Box::new(connection_data.streams[stream_idx].clone())));
+                            } else {
+                                removed_addrs.push(addr);
+                            }
                             connection_data.streams.swap_remove(stream_idx);
                             expiry_index.remove(&key);
-                            removed_addrs.push(addr);
                         } else if let Some(replacement_entry) = self.build_preserved_stream_expiry(
                             &entry.username,
                             &connection_data.streams[stream_idx],
                             &connection_data.sessions,
                         ) {
                             if replacement_entry.expires_at != current_expires_at {
-                                expiry_index.insert(key.clone(), replacement_entry.expires_at);
-                                self.adaptive_expiry_queue.lock().await.push(Reverse(replacement_entry));
-                                self.adaptive_expiry_notify.notify_one();
+                                replacement_entries.push(replacement_entry);
                             }
                         }
                     }
@@ -1145,6 +1182,19 @@ impl ActiveUserManager {
                 }
             }
         } // locks released here
+
+        if let Some(tx) = self.cleanup_tx.get() {
+            for (addr, stream_info) in cleanup_events {
+                if tx.try_send(CleanupEvent::AdaptiveSessionExpired { stream_info }).is_err() {
+                    debug!("Cleanup channel unavailable, dropping adaptive session expiry");
+                    removed_addrs.push(addr);
+                }
+            }
+        }
+
+        for entry in replacement_entries {
+            self.enqueue_adaptive_expiry(entry).await;
+        }
 
         let had_removals = !removed_addrs.is_empty();
         for addr in removed_addrs {
@@ -1200,12 +1250,15 @@ mod tests {
             target_id: 1,
             virtual_id,
             provider_id: 1,
+            input_name: "input".intern(),
             item_type: PlaylistItemType::Live,
             cluster: XtreamCluster::Live,
             group: "group".intern(),
             title: "title".intern(),
             url: "http://localhost/stream.ts".intern(),
             shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             technical: None,
         }
     }
@@ -1810,6 +1863,169 @@ mod tests {
         };
         assert!(new_expires_at > old_expires_at);
         assert_eq!(manager.active_streams().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_due_adaptive_expiry_does_not_block_on_full_cleanup_channel() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55084".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-key-11".to_string(), "127.0.0.1".to_string(), addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-full-channel",
+                virtual_id: 8004,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 144,
+                meter_uid: 244,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveHls,
+                    ..test_channel(8004)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-full-channel"),
+            })
+            .await;
+        let released = manager.release_connection(&addr).await;
+        assert!(released.addr_removed);
+
+        {
+            let mut connections = manager.connections.write().await;
+            let session = connections
+                .by_key
+                .get_mut("user1")
+                .unwrap()
+                .sessions
+                .iter_mut()
+                .find(|session| session.token == "tok-full-channel")
+                .unwrap();
+            session.ts = session.ts.saturating_sub(default_hls_session_ttl_secs() + 1);
+        }
+
+        let (cleanup_tx, mut cleanup_rx) = mpsc::channel(1);
+        cleanup_tx
+            .send(CleanupEvent::ReleaseConnection { addr })
+            .await
+            .expect("prefill cleanup channel");
+        manager.set_cleanup_sender(cleanup_tx);
+
+        let process_result = tokio::time::timeout(
+            Duration::from_millis(100),
+            manager.process_due_adaptive_expiry_entries(current_time_secs().saturating_add(default_hls_session_ttl_secs() + 1)),
+        )
+        .await;
+
+        assert!(process_result.is_ok(), "adaptive expiry processing must not await while holding locks");
+
+        let queued_event = cleanup_rx.try_recv().expect("prefilled cleanup event should remain queued");
+        assert!(matches!(queued_event, CleanupEvent::ReleaseConnection { .. }));
+        assert!(manager.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_preserved_adaptive_stream_reconnect_across_day_sets_previous_session_id() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55085".parse().unwrap();
+        let next_addr: SocketAddr = "127.0.0.1:55086".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-rollover-a".to_string(), "127.0.0.1".to_string(), addr);
+        let next_fingerprint = Fingerprint::new("fp-rollover-b".to_string(), "127.0.0.1".to_string(), next_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-rollover",
+                virtual_id: 8005,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+            })
+            .await;
+        let first = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 145,
+                meter_uid: 245,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveHls,
+                    ..test_channel(8005)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-rollover"),
+            })
+            .await
+            .expect("initial adaptive session should register");
+
+        let released = manager.release_connection(&addr).await;
+        assert!(released.addr_removed);
+
+        let forced_old_ts = {
+            let mut connections = manager.connections.write().await;
+            let stream = connections
+                .by_key
+                .get_mut("user1")
+                .unwrap()
+                .streams
+                .iter_mut()
+                .find(|stream| stream.session_token.as_deref() == Some("tok-rollover"))
+                .unwrap();
+            stream.ts = stream.ts.saturating_sub(86_400);
+            stream.ts
+        };
+
+        manager.add_connection(&next_addr).await;
+        let second = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 146,
+                meter_uid: 246,
+                username: "user1",
+                max_connections: 1,
+                fingerprint: &next_fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveDash,
+                    ..test_channel(8005)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-rollover"),
+            })
+            .await
+            .expect("adaptive session should reconnect");
+
+        assert_eq!(second.previous_session_id, Some((forced_old_ts << 32) | u64::from(first.uid)));
+        assert!(second.ts > forced_old_ts);
+        assert_eq!(crate::repository::utc_day_from_secs(second.ts), crate::repository::utc_day_from_secs(current_time_secs()));
     }
 
     #[tokio::test]

@@ -1,9 +1,77 @@
 # Changelog
 
-## 3.3.0 (2026-04-02)
-
+## Unreleased
 
 ## ⚠️ Breaking Changes
+
+## 🌟 New Features
+
+- **QoS Aggregation Persistence**: Added a new persisted QoS snapshot repository (`qos_snapshot.db` + `qos_snapshot_meta.db`) in the storage directory.
+  These files are maintained automatically by the QoS aggregation worker and become part of the local persistent runtime state.
+- **Stream History QoS Foundation**: Stream history now captures structured QoS-relevant stream lifecycle data for later  
+  reliability analysis and failover preparation.
+  - Added `connect_failed` as a first-class event type for startup failures before a stable session exists.
+  - Added structured `failure_stage` classification (`admission`, `provider_open`, `first_byte`, `streaming`, `session_reconnect`).
+  - Added `connect_failure_reason` for startup/admission failures such as exhausted user/provider capacity.
+  - Added structured provider failure metadata via `provider_error_class` and `provider_http_status`.
+  - Added stable stream identity fields for cross-run QoS aggregation:
+    - `input_name`
+    - `stream_identity_key`
+    - `stream_url_hash`
+  - Added shared-stream QoS markers:
+    - `shared_joined_existing`
+    - `shared_stream_id`
+  - Stream disconnect history now stores meaningful `disconnect_reason` values:
+    - `provider_error`
+    - `provider_closed`
+    - `preempted`
+    - `session_expired`
+    - `client_closed`
+- **Connect Failure Recording**: Admission and provider-open failure paths now write `connect_failed` records into stream  
+  history instead of only surfacing fallback responses.
+  This includes exhausted user/provider capacity and provider-open/channel-unavailable style startup failures.
+- **QoS Snapshot Aggregator**: Added a periodic QoS aggregation worker that reads stream history partitions and persists  
+  compact QoS snapshots per stream identity.
+  - Uses a dedicated B+Tree snapshot repository.
+  - Maintains rolling `24h`, `7d`, and `30d` windows from daily buckets.
+  - Runs outside the streaming hotpath and processes history incrementally in the background.
+- **QoS Snapshot Tooling**:
+  - Added `--dbq` to inspect the QoS snapshot database from the CLI DB viewer.
+  - Added backend QoS snapshot read endpoints for summary/detail access.
+  - QoS snapshot API supports both JSON and CBOR responses depending on the request `Accept` header.
+  - The Web UI now shows QoS summary/detail data alongside stream history and requests QoS data via CBOR.
+- **QoS Configuration**: Added a dedicated `reverse_proxy.qos_aggregation` configuration block to control the periodic aggregator.
+- HLS session expiry now emits a disconnect history record with reason `session_expired`.
+- A minimal stdout logger is now initialized at the very start of the process so that
+  errors during path resolution and early startup are always visible in the console.
+- **Stream History Writer Block Bounds**: Stream-history block headers now use the real min/max event timestamps of the  
+  batch instead of assuming the first/last batch element is time-sorted.
+- **CLI Viewer Testability**: The stream-history viewer no longer calls `process::exit()` internally; exit handling now  
+  happens in `main`, making the path easier to test and reuse.
+- **Admission Failure Deduplication**: Repeated admission failure response logic in `hls_api`, `m3u_api`, and `xtream_api`  
+  has been centralized into shared helpers.
+- **QoS Aggregation Efficiency**:
+  - QoS snapshot listing does not rely on a full unbounded materialization path for filtered UI/API reads.
+  - Current-day QoS rebuilds are skipped when the history day is unchanged.
+  - Snapshot traversal APIs were reduced to a single repository traversal style to avoid duplicated code paths.
+
+## 🐛 Fixes
+
+- **Shutdown Diagnostics**: Stream-history shutdown now reports dead worker situations instead of silently swallowing them.
+- **Release Workflow Safety**:
+  - `master` releases now refuse to build non-release versions when the patch component is not `0`.
+  - The release-version validation now runs before expensive build steps for an early exit.
+
+## ⚙️ New Settings
+
+- **config.yml (`reverse_proxy`)**:
+  - Added `qos_aggregation` (optional) with:
+    - `enabled` (`bool`)
+    - `interval_secs` (`u64`)
+
+## 3.3.0 (2026-04-02)
+
+## ⚠️ Breaking Changes 3.3.0
 
 - `working_dir` in `config.yml` renamed to `storage_dir`.
 - **Global Input Definitions**: To align input definitions with the SourceEditor, inputs are now defined globally in the `inputs` section of the
@@ -110,7 +178,7 @@
          resolve_delay: 2  # Single delay for all resolution types
        ```
 
-## 🌟 New Features
+## 🌟 New Features 3.3.0
 
 - **Role-Based Access Control (RBAC)**: Replaced the binary admin/non-admin model with fine-grained, group-based permissions.
   - **14 permissions** across 7 domains (`config`, `source`, `user`, `playlist`, `library`, `system`, `epg`),
@@ -193,7 +261,7 @@ active URL of the specified provider.
   are streamed without timeout.
 - Added `reverse_proxy.stream.metrics_enabled` to enable per-stream bandwidth and transferred-bytes metrics in the Web UI streams view.
 
-## 🐛 Fixes
+## 🐛 Fixes 3.3.0
 
 - **Resolve Task Cooldown Persistence**: Resolve retry exhaustion is now persisted and consulted before enqueueing, so unresolved VOD/Series entries
   are no longer recreated on every playlist refresh only to be skipped later in the worker.
@@ -204,7 +272,7 @@ active URL of the specified provider.
 - **Anonymous Socket Cleanup**: Tracked anonymous incoming sockets are now pruned automatically after a TTL so stale UI/API keepalive registrations do
   not remain visible forever in active-socket statistics.
 
-## ⚙️ New Settings
+## ⚙️ New Settings 3.3.0
 
 - **config.yml (`web_ui.auth`)**:
   - Added `groupfile` (optional, default: `groups.txt` in same directory as `userfile`): path to the RBAC group definitions file.
@@ -254,13 +322,13 @@ active URL of the specified provider.
   - Added `probe_live_interval_hours`: Sets the frequency for re-probing Live TV streams.
   - Added `resolve_background`: Toggles background metadata resolution (default `true`). Set to `false` for blocking, immediate resolution.
 
-## 🛠 Optimizations
+## 🛠 Optimizations 3.3.0
 
 - **Quality Tagging**: Generates enhanced filename tags (e.g., `[2160p 4K HEVC HDR TrueHD 7.1]`) for STRM files based on analysis results.
 - **Flat Grouping**: When `flat: true` option for STRM output is active, multiple versions (e.g., 4K and 1080p) of the same movie are now safely
   merged over all categories into a single folder based on TMDB ID, compatible with Jellyfin/Emby "Multi-Version" features.
 
-## ⚙️ Engine & Storage Optimizations
+## ⚙️ Engine & Storage Optimizations 3.3.0
 
 - **Slotted Page Architecture**: Improved space utilization and support for variable-length keys.
 - **Adaptive LZ4 Compression**: Optimized disk footprint for stored values.
@@ -281,7 +349,7 @@ active URL of the specified provider.
 - **Optimized Key Lookups**: `XtreamRepository` and `M3uRepository` now use zero-copy queries for `u32` keys, enhancing performance for high-traffic
   endpoints.
 
-## 🔍 Mapping & Filtering Enhancements
+## 🔍 Mapping & Filtering Enhancements 3.3.0
 
 - **Accent-Independent Matching**: Integrated `match_as_ascii` flag for robust text matching (e.g., "Cinema" matches "Cinéma").
 - **Deunicoding Support**: `ValueProvider` and `ValueAccessor` now support on-the-fly deunicoding.
@@ -289,7 +357,7 @@ active URL of the specified provider.
 - **Mapper Loop enhancement**: Updated `for_each` syntax to `variable.for_each((key, value) => { ... })`. Added support for `_` ignored variables in
   loop.
 
-## 💻 WebUI & API
+## 💻 WebUI & API 3.3.0
 
 - **Source Editor Integration**: Redesigned UI for global input management and hot-reloading.
 - **Messaging Config View**: New UI for configuring Discord and enhanced REST settings.
@@ -307,7 +375,7 @@ active URL of the specified provider.
 - **Local Library Episode Backgrounds**: Local series episode `movie_image` values are now kept as direct TMDB image URLs in series info documents and
   rendered directly in Playlist Explorer.
 
-## 🚀 Performance & Stability
+## 🚀 Performance & Stability 3.3.0
 
 - **Deadlock Resolution**: Fixed a potential deadlock in `ProviderLineupManager::reconcile_connections` by refactoring `DashMap` iterations to use
   snapshots, preventing internal shard locks from being held during async lock acquisition.
@@ -348,7 +416,7 @@ active URL of the specified provider.
 - **EPG**: Fixed XMLTV timeshift to correctly apply user-defined timezone offsets in the generated XML output.
 - **407 Proxy Authentication Required** fix.
 
-## ⚙️ Messaging Refactoring
+## ⚙️ Messaging Refactoring 3.3.0
 
 - **Structured Messaging**: Transitioned from JSON-string-based notifications to a strictly typed messaging pipeline.
 - **Backend Model Migration**: Moved complex messaging models (`WatchChanges`, `ProcessingStats`) from the shared crate to the backend to reduce

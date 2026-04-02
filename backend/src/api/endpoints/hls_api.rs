@@ -3,11 +3,11 @@ use crate::{
         api_utils::{
             create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
             get_hls_session_ttl_secs,
-            get_stream_alternative_url, is_seek_request, local_stream_response, try_option_bad_request,
+            admission_failure_response, get_stream_alternative_url, is_seek_request, local_stream_response, try_option_bad_request,
             try_unwrap_body, HeaderFilter,
         },
         model::{
-            create_custom_video_stream_response, AppState, CustomVideoStreamType, ProviderAllocation, UserSession,
+            AppState, CustomVideoStreamType, ProviderAllocation, UserSession,
         },
     },
     auth::Fingerprint,
@@ -288,25 +288,29 @@ async fn get_stream_channel(
 async fn resolve_stream_channel(
     app_state: &Arc<AppState>,
     target: &Arc<ConfigTarget>,
+    input: &Arc<ConfigInput>,
     virtual_id: u32,
-    hls_url: &Arc<str>,
+    hls_url: &str,
 ) -> StreamChannel {
     let unknown = "Unknown".intern();
     let mut channel = match get_stream_channel(app_state, target, virtual_id).await {
         Some(mut channel) => {
-            channel.url = hls_url.clone();
+            channel.url = Arc::from(hls_url);
             channel
         }
         None => StreamChannel {
             target_id: target.id,
             virtual_id,
             provider_id: 0,
+            input_name: Arc::clone(&input.name),
             item_type: PlaylistItemType::LiveHls,
             cluster: XtreamCluster::Live,
             group: unknown.clone(),
             title: unknown,
-            url: hls_url.clone(),
+            url: Arc::from(hls_url),
             shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             technical: None,
         },
     };
@@ -327,15 +331,6 @@ async fn hls_api_stream(
         false,
         format!("Could not find any user for hls stream {}", params.username)
     );
-    if user.permission_denied(&app_state) {
-        return create_custom_video_stream_response(
-            &app_state,
-            &fingerprint.addr,
-            CustomVideoStreamType::UserAccountExpired,
-        )
-        .into_response();
-    }
-
     let target_name = &target.name;
     let virtual_id = params.stream_id;
     let input = try_option_bad_request!(
@@ -343,6 +338,26 @@ async fn hls_api_stream(
         true,
         format!("Can't find input {} for target {target_name}, stream_id {virtual_id}, hls", params.input_id)
     );
+
+    if user.permission_denied(&app_state) {
+        let denied_channel = resolve_stream_channel(
+            &app_state,
+            &target,
+            &input,
+            virtual_id,
+            &Arc::from(String::new()),
+        )
+        .await;
+        return admission_failure_response(
+            &app_state,
+            &fingerprint,
+            &user,
+            denied_channel,
+            input.name.as_ref(),
+            &req_headers,
+            crate::repository::ConnectFailureReason::UserAccountExpired,
+        );
+    }
 
     debug_if_enabled!("ID chain for hls endpoint: request_stream_id={} -> virtual_id={virtual_id}", params.stream_id);
     let encrypt_secret = app_state.get_encrypt_secret();
@@ -360,21 +375,29 @@ async fn hls_api_stream(
 
     if let Some(session) = &mut user_session {
         if session.permission == UserConnectionPermission::Exhausted {
-            return create_custom_video_stream_response(
+            let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &decoded_hls_token.1).await;
+            return admission_failure_response(
                 &app_state,
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response();
+                &fingerprint,
+                &user,
+                stream_channel,
+                &session.provider,
+                &req_headers,
+                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+            );
         }
 
         if app_state.active_provider.is_over_limit(&session.provider).await {
-            return create_custom_video_stream_response(
+            let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &decoded_hls_token.1).await;
+            return admission_failure_response(
                 &app_state,
-                &fingerprint.addr,
-                CustomVideoStreamType::ProviderConnectionsExhausted,
-            )
-            .into_response();
+                &fingerprint,
+                &user,
+                stream_channel,
+                &session.provider,
+                &req_headers,
+                crate::repository::ConnectFailureReason::ProviderConnectionsExhausted,
+            );
         }
 
         let hls_url = match decoded_hls_token {
@@ -389,7 +412,7 @@ async fn hls_api_stream(
                 .connection_manager
                 .touch_http_activity(&user.username, &session.token, &fingerprint.addr)
                 .await;
-            let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
+            let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &hls_url).await;
             if is_seek_request(stream_channel.cluster, &req_headers).await {
                 // partial request means we are in reverse proxy mode, seek happened
                 return force_provider_stream_response(
@@ -420,12 +443,16 @@ async fn hls_api_stream(
             UserConnectionPermission::Allowed
         };
         if connection_permission == UserConnectionPermission::Exhausted {
-            return create_custom_video_stream_response(
+            let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &session.stream_url).await;
+            return admission_failure_response(
                 &app_state,
-                &fingerprint.addr,
-                CustomVideoStreamType::UserConnectionsExhausted,
-            )
-            .into_response();
+                &fingerprint,
+                &user,
+                stream_channel,
+                input.name.as_ref(),
+                &req_headers,
+                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+            );
         }
 
         if is_hls_url(&session.stream_url) {
@@ -445,7 +472,7 @@ async fn hls_api_stream(
         }
 
         if is_file_url(&session.stream_url) {
-            let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
+            let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &hls_url).await;
             return local_stream_response(
                 &fingerprint,
                 &app_state,
@@ -462,7 +489,7 @@ async fn hls_api_stream(
             .into_response();
         }
 
-        let stream_channel = resolve_stream_channel(&app_state, &target, virtual_id, &hls_url).await;
+        let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &hls_url).await;
         force_provider_stream_response(
             &fingerprint,
             &app_state,

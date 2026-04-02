@@ -584,4 +584,69 @@ mod tests {
         let cfg: ConfigDto = serde_json::from_value(raw).expect("missing storage_dir should deserialize");
         assert!(cfg.storage_dir.is_none());
     }
+
+    #[test]
+    fn stream_history_defaults_to_disabled_and_safe() {
+        let cfg = ConfigDto::default();
+
+        assert!(cfg.reverse_proxy.is_none());
+    }
+
+    #[test]
+    fn stream_history_deserializes_under_reverse_proxy() {
+        let raw = r#"
+api:
+  host: 127.0.0.1
+  port: 8901
+  web_root: ./web
+reverse_proxy:
+  rewrite_secret: 00112233445566778899aabbccddeeff
+  stream_history:
+    stream_history_enabled: true
+    stream_history_batch_size: 64
+    stream_history_retention_days: 14
+    stream_history_directory: /var/lib/tuliprox/history
+"#;
+
+        let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config should deserialize");
+        let reverse_proxy = cfg.reverse_proxy.expect("reverse_proxy should deserialize");
+        let stream_history = reverse_proxy.stream_history.expect("stream_history should deserialize");
+
+        assert!(stream_history.stream_history_enabled);
+        assert_eq!(stream_history.stream_history_batch_size, 64);
+        assert_eq!(stream_history.stream_history_retention_days, 14);
+        assert_eq!(stream_history.stream_history_directory, "/var/lib/tuliprox/history");
+    }
+
+    #[test]
+    fn stream_history_missing_values_keep_disabled_without_reverse_proxy() {
+        let raw = r#"
+api:
+  host: 127.0.0.1
+  port: 8901
+  web_root: ./web
+"#;
+
+        let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config should deserialize");
+
+        assert!(cfg.reverse_proxy.is_none());
+    }
+
+    #[test]
+    fn stream_history_defaults_to_none_when_reverse_proxy_present_but_stream_history_omitted() {
+        let raw = r#"
+api:
+  host: 127.0.0.1
+  port: 8901
+  web_root: ./web
+reverse_proxy:
+  resource_rewrite_disabled: false
+  rewrite_secret: "00112233445566778899aabbccddeeff"
+"#;
+
+        let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config should deserialize");
+
+        assert!(cfg.reverse_proxy.is_some());
+        assert!(cfg.reverse_proxy.as_ref().and_then(|rp| rp.stream_history.as_ref()).is_none());
+    }
 }
