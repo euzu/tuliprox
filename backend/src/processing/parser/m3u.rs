@@ -208,7 +208,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                             }
                             M3uToken::TvgChno => plih.chno = stack[val_off..].parse::<u32>().unwrap_or(0),
                             M3uToken::GroupTitle => plih.group = stack[val_off..].intern(),
-                            M3uToken::TvgId => plih.epg_channel_id = if stack.len() == val_off { None } else { Some(stack[val_off..].intern()) },
+                            M3uToken::TvgId => plih.epg_channel_id = if stack.len() == val_off { None } else { Some(stack[val_off..].to_lowercase().intern()) },
                             M3uToken::TvgName => plih.name = stack[val_off..].intern(),
                             M3uToken::TvgLogo => plih.logo = stack[val_off..].intern(),
                             M3uToken::TvgLogoSmall => plih.logo_small = stack[val_off..].intern(),

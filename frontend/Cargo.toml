@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-shared = { version = "3.2.178", path = "../shared" }
+shared = { version = "3.3.0", path = "../shared" }
 chrono.workspace = true
 yew = "0.22.1"
 yew-router = "0.19.0"
