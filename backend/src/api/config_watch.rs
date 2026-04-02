@@ -142,7 +142,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
                 timer_active = false;
                 if !pending_configs.is_empty() {
                     for (config_file, path) in pending_configs.drain() {
-                        if let Err(err) = config_file.reload(&path, &watcher_app_state).await {
+                        if let Err(err) = Box::pin(config_file.reload(&path, &watcher_app_state)).await {
                            handle_error(err, &path);
                         }
                     }

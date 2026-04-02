@@ -12,7 +12,7 @@ use crate::{
 use shared::{
     error::{info_err_res, TuliproxError},
     model::{
-        PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
+        Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
         SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::format_float_localized,
@@ -112,6 +112,18 @@ fn build_download_filename(title: &str, url: &str) -> String {
 
 fn default_record_start_value() -> String { chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string() }
 
+fn parse_record_start_value(start_value: &str) -> Option<i64> {
+    use chrono::TimeZone;
+
+    let naive = chrono::NaiveDateTime::parse_from_str(start_value.trim(), "%Y-%m-%dT%H:%M").ok()?;
+    chrono::Local.from_local_datetime(&naive).single().map(|dt| dt.timestamp())
+}
+
+fn parse_record_duration_minutes(duration_value: &str) -> Option<u64> {
+    let minutes = duration_value.trim().parse::<u64>().ok()?;
+    (minutes > 0).then_some(minutes)
+}
+
 fn build_record_filename(title: &str, start_at: &str) -> String {
     let sanitized = title
         .chars()
@@ -127,6 +139,14 @@ fn build_record_filename(title: &str, start_at: &str) -> String {
     format!("{base}_{time_part}.ts")
 }
 
+fn parse_optional_priority_input(priority_value: Option<String>) -> Option<i8> {
+    priority_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<i8>().ok())
+}
+
 enum ExplorerLevel {
     Categories,
     Group(Rc<UiPlaylistGroup>),
@@ -139,6 +159,7 @@ pub fn PlaylistExplorer() -> Html {
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();
     let service_ctx = use_service_context();
+    let can_write_downloads = service_ctx.auth.has_permission(Permission::DownloadWrite);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
     let selected_channel = use_state(|| None::<ChannelSelection>);
@@ -375,6 +396,7 @@ pub fn PlaylistExplorer() -> Html {
                     }
                     ExplorerAction::Download => {
                         if let Some(dto) = &*selected_channel {
+                            let dialog = dialog.clone();
                             let services = services.clone();
                             let translate_clone = translate_clone.clone();
                             let playlist_request = (*playlist_ctx.playlist_request).clone();
@@ -416,9 +438,87 @@ pub fn PlaylistExplorer() -> Html {
                                     return;
                                 }
 
-                                let filename = build_download_filename(&selected.title, &resolved_url);
+                                let filename_ref = NodeRef::default();
+                                let priority_ref = NodeRef::default();
+                                let default_filename = build_download_filename(&selected.title, &resolved_url);
+                                let actions = DialogActions {
+                                    left: Some(vec![DialogAction::new(
+                                        "cancel",
+                                        "LABEL.CANCEL",
+                                        DialogResult::Cancel,
+                                        Some("Close".to_owned()),
+                                        None,
+                                    )]),
+                                    right: vec![DialogAction::new_focused(
+                                        "download",
+                                        "LABEL.DOWNLOAD",
+                                        DialogResult::Ok,
+                                        Some("Download".to_owned()),
+                                        Some("primary".to_string()),
+                                    )],
+                                };
+                                let result = dialog
+                                    .content(
+                                        html! {
+                                            <div class="tp__record-dialog">
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.FILENAME")}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            ref={filename_ref.clone()}
+                                                            type="text"
+                                                            value={default_filename.clone()}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            ref={priority_ref.clone()}
+                                                            type="number"
+                                                            min="-127"
+                                                            max="127"
+                                                            step="1"
+                                                            placeholder="config default"
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div class="tp__field-explanation">
+                                                    {selected.title.clone()}
+                                                </div>
+                                            </div>
+                                        },
+                                        Some(actions),
+                                        false,
+                                    )
+                                    .await;
+
+                                if result != DialogResult::Ok {
+                                    return;
+                                }
+
+                                let filename = filename_ref
+                                    .cast::<HtmlInputElement>()
+                                    .map(|input| input.value())
+                                    .unwrap_or(default_filename)
+                                    .trim()
+                                    .to_string();
+                                let priority = parse_optional_priority_input(
+                                    priority_ref.cast::<HtmlInputElement>().map(|input| input.value()),
+                                );
+
+                                if filename.is_empty() {
+                                    services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
+                                    return;
+                                }
+
                                 let input_name = Some(selected.input_name.to_string());
-                                match services.downloads.queue_download(resolved_url, filename, input_name).await {
+                                match services
+                                    .downloads
+                                    .queue_download(resolved_url, filename, input_name, priority)
+                                    .await
+                                {
                                     Ok(_) => {
                                         services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"))
                                     }
@@ -513,15 +613,12 @@ pub fn PlaylistExplorer() -> Html {
                                         .unwrap_or_else(|| "90".to_string());
                                     let priority_value =
                                         priority_ref.cast::<HtmlInputElement>().map(|input| input.value());
-                                    let start_ts =
-                                        chrono::NaiveDateTime::parse_from_str(&start_value, "%Y-%m-%dT%H:%M")
-                                            .ok()
-                                            .map(|dt| dt.and_utc().timestamp());
-                                    let duration_mins = duration_value.parse::<u64>().ok();
-                                    let priority = priority_value.as_deref().and_then(|s| s.parse::<i8>().ok());
+                                    let start_ts = parse_record_start_value(&start_value);
+                                    let duration_mins = parse_record_duration_minutes(&duration_value);
+                                    let priority = parse_optional_priority_input(priority_value);
 
                                     match (start_ts, duration_mins) {
-                                        (Some(start_at), Some(minutes)) if minutes > 0 => {
+                                        (Some(start_at), Some(minutes)) => {
                                             let filename = build_record_filename(&selected.title, &start_value);
                                             let input_name = Some(selected.input_name.to_string());
                                             match services
@@ -546,7 +643,12 @@ pub fn PlaylistExplorer() -> Html {
                                                 }
                                             }
                                         }
-                                        _ => services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL")),
+                                        (None, _) => services
+                                            .toastr
+                                            .error(translate_clone.t("MESSAGES.DOWNLOAD.INVALID_RECORD_START")),
+                                        (_, None) => services
+                                            .toastr
+                                            .error(translate_clone.t("MESSAGES.DOWNLOAD.INVALID_RECORD_DURATION")),
                                     }
                                 }
                             });
@@ -927,10 +1029,14 @@ pub fn PlaylistExplorer() -> Html {
              })
             }
             <MenuItem icon="Clipboard" name={ExplorerAction::CopyLinkProviderUrl.to_string()} label={translate.t("LABEL.COPY_LINK_PROVIDER_URL")} onclick={&handle_menu_click}></MenuItem>
-            { html_if!(selected_channel.as_ref().is_some_and(|item| item.cluster == XtreamCluster::Live), {
+            { html_if!(
+                can_write_downloads && selected_channel.as_ref().is_some_and(|item| item.cluster == XtreamCluster::Live),
+                {
                 <MenuItem icon="Record" name={ExplorerAction::Record.to_string()} label={translate.t("LABEL.RECORD")} onclick={&handle_menu_click}></MenuItem>
             })}
-            { html_if!(selected_channel.as_ref().is_some_and(|item| item.cluster != XtreamCluster::Live), {
+            { html_if!(
+                can_write_downloads && selected_channel.as_ref().is_some_and(|item| item.cluster != XtreamCluster::Live),
+                {
                 <MenuItem icon="Download" name={ExplorerAction::Download.to_string()} label={translate.t("LABEL.DOWNLOAD")} onclick={&handle_menu_click}></MenuItem>
             })}
         </PopupMenu>
@@ -940,7 +1046,37 @@ pub fn PlaylistExplorer() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::build_download_filename;
+    use super::{
+        build_download_filename, parse_optional_priority_input, parse_record_duration_minutes, parse_record_start_value,
+    };
+
+    #[test]
+    fn parse_optional_priority_input_treats_blank_as_none() {
+        assert_eq!(parse_optional_priority_input(None), None);
+        assert_eq!(parse_optional_priority_input(Some(String::new())), None);
+        assert_eq!(parse_optional_priority_input(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn parse_optional_priority_input_parses_valid_i8_values() {
+        assert_eq!(parse_optional_priority_input(Some("-1".to_string())), Some(-1));
+        assert_eq!(parse_optional_priority_input(Some("12".to_string())), Some(12));
+        assert_eq!(parse_optional_priority_input(Some(" 0 ".to_string())), Some(0));
+    }
+
+    #[test]
+    fn parse_record_duration_minutes_rejects_zero_and_invalid_values() {
+        assert_eq!(parse_record_duration_minutes("0"), None);
+        assert_eq!(parse_record_duration_minutes("abc"), None);
+        assert_eq!(parse_record_duration_minutes("15"), Some(15));
+    }
+
+    #[test]
+    fn parse_record_start_value_accepts_default_format() {
+        let default_value = super::default_record_start_value();
+        assert!(parse_record_start_value(&default_value).is_some());
+        assert!(parse_record_start_value("not-a-date").is_none());
+    }
 
     #[test]
     fn build_download_filename_keeps_url_extension() {

@@ -387,7 +387,7 @@ impl ConfigFile {
                 app_state.event_manager.send_event(EventMessage::ConfigChange(event_type));
             }
             ConfigFile::Config => {
-                ConfigFile::load_config(app_state).await?;
+                Box::pin(ConfigFile::load_config(app_state)).await?;
                 app_state.event_manager.send_event(EventMessage::ConfigChange(ConfigType::Config));
             }
             ConfigFile::SourceFile => {

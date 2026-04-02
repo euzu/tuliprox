@@ -1,15 +1,17 @@
 use crate::model::VideoDownloadConfig;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use shared::model::FileDownloadDto;
+use shared::model::{FileDownloadDto, TaskKindDto, TaskPriorityDto, TransferStatusDto};
 use shared::utils::{deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
 use std::{
     collections::VecDeque,
     ffi::OsStr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{atomic::{AtomicU64, Ordering}, Arc},
 };
 use tokio::{fs, sync::{Mutex, Notify, RwLock}};
+
+const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
 
 /// File-Download information.
 #[derive(Clone, Debug)]
@@ -46,6 +48,10 @@ pub struct FileDownload {
     pub input_name: Option<Arc<str>>,
     /// Priority for provider connection preemption (lower = higher priority).
     pub priority: i8,
+    /// Consecutive retry attempts for transient failures.
+    pub retry_attempts: u8,
+    /// Unix timestamp of the next retry attempt while waiting.
+    pub next_retry_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -75,6 +81,10 @@ struct PersistedFileDownload {
     input_name: Option<String>,
     #[serde(default)]
     priority: i8,
+    #[serde(default)]
+    retry_attempts: u8,
+    #[serde(default)]
+    next_retry_at: Option<i64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -90,6 +100,8 @@ pub enum DownloadState {
     #[default]
     Queued,
     Scheduled,
+    WaitingForCapacity,
+    RetryWaiting,
     Downloading,
     Paused,
     Completed,
@@ -188,6 +200,8 @@ impl FileDownload {
                     kind: DownloadKind::Download,
                     input_name,
                     priority,
+                    retry_attempts: 0,
+                    next_retry_at: None,
                 })
             }
             Err(_) => None,
@@ -224,26 +238,33 @@ impl FileDownload {
 impl From<&FileDownload> for FileDownloadDto {
     fn from(value: &FileDownload) -> Self {
         Self {
-            uuid: value.uuid.clone(),
-            filename: value.filename.clone(),
+            id: value.uuid.clone(),
+            title: value.filename.clone(),
             kind: match value.kind {
-                DownloadKind::Download => "Download".to_string(),
-                DownloadKind::Recording => "Recording".to_string(),
+                DownloadKind::Download => TaskKindDto::Download,
+                DownloadKind::Recording => TaskKindDto::Recording,
             },
-            filesize: value.size,
-            total_size: value.total_size,
-            finished: value.finished,
-            paused: value.paused,
-            state: match value.state {
-                DownloadState::Queued => "Queued".to_string(),
-                DownloadState::Scheduled => "Scheduled".to_string(),
-                DownloadState::Downloading => "Downloading".to_string(),
-                DownloadState::Paused => "Paused".to_string(),
-                DownloadState::Completed => "Completed".to_string(),
-                DownloadState::Failed => "Failed".to_string(),
-                DownloadState::Cancelled => "Cancelled".to_string(),
+            priority: match value.priority.cmp(&0) {
+                std::cmp::Ordering::Less => TaskPriorityDto::High,
+                std::cmp::Ordering::Equal => TaskPriorityDto::Normal,
+                std::cmp::Ordering::Greater => TaskPriorityDto::Background,
             },
-            start_at: value.start_at,
+            status: match value.state {
+                DownloadState::Queued => TransferStatusDto::Queued,
+                DownloadState::Scheduled => TransferStatusDto::Scheduled,
+                DownloadState::WaitingForCapacity => TransferStatusDto::WaitingForCapacity,
+                DownloadState::RetryWaiting => TransferStatusDto::RetryWaiting,
+                DownloadState::Downloading => TransferStatusDto::Running,
+                DownloadState::Paused => TransferStatusDto::Paused,
+                DownloadState::Completed => TransferStatusDto::Completed,
+                DownloadState::Failed => TransferStatusDto::Failed,
+                DownloadState::Cancelled => TransferStatusDto::Cancelled,
+            },
+            downloaded_bytes: value.size,
+            retry_attempts: value.retry_attempts,
+            total_bytes: value.total_size,
+            next_retry_at: value.next_retry_at,
+            scheduled_start_at: value.start_at,
             duration_secs: value.duration_secs,
             error: value.error.clone(),
         }
@@ -257,32 +278,106 @@ impl From<FileDownload> for FileDownloadDto {
 /// Priority-aware wait queue for download connection slots.
 /// When the provider is at capacity, download tasks register here and are
 /// woken one-at-a-time in descending priority order (lowest i8 = highest priority).
-type DownloadWaiter = (i8, Arc<Notify>);
+struct DownloadWaiter {
+    id: u64,
+    input_name: Option<Arc<str>>,
+    priority: i8,
+    notify: Arc<Notify>,
+}
+
 type DownloadWaiters = Arc<Mutex<Vec<DownloadWaiter>>>;
+
+#[derive(Clone)]
+pub struct DownloadWaiterSnapshot {
+    pub id: u64,
+    pub input_name: Option<Arc<str>>,
+    pub priority: i8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadWaitOutcome {
+    Signalled,
+    Paused,
+    Cancelled,
+}
 
 pub struct DownloadSlotWaitQueue {
     waiters: DownloadWaiters,
+    next_waiter_id: AtomicU64,
 }
 
 impl DownloadSlotWaitQueue {
     pub fn new() -> Self {
-        Self { waiters: Arc::new(Mutex::new(Vec::new())) }
+        Self {
+            waiters: Arc::new(Mutex::new(Vec::new())),
+            next_waiter_id: AtomicU64::new(1),
+        }
     }
 
-    /// Register and block until this task is signalled by `signal_next`.
-    pub async fn wait(&self, priority: i8) {
+    async fn remove_waiter(&self, waiter_id: u64) {
+        self.waiters.lock().await.retain(|waiter| waiter.id != waiter_id);
+    }
+
+    /// Register and block until this task is signalled or control flow requests pause/cancel.
+    pub async fn wait(
+        &self,
+        input_name: Option<Arc<str>>,
+        priority: i8,
+        control_signal: &RwLock<DownloadControl>,
+        control_notify: &Notify,
+    ) -> DownloadWaitOutcome {
+        let waiter_id = self.next_waiter_id.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
-        self.waiters.lock().await.push((priority, Arc::clone(&notify)));
-        notify.notified().await;
+        self.waiters.lock().await.push(DownloadWaiter {
+            id: waiter_id,
+            input_name,
+            priority,
+            notify: Arc::clone(&notify),
+        });
+
+        loop {
+            tokio::select! {
+                () = notify.notified() => return DownloadWaitOutcome::Signalled,
+                () = control_notify.notified() => {
+                    match *control_signal.read().await {
+                        DownloadControl::Pause => {
+                            self.remove_waiter(waiter_id).await;
+                            return DownloadWaitOutcome::Paused;
+                        }
+                        DownloadControl::Cancel => {
+                            self.remove_waiter(waiter_id).await;
+                            return DownloadWaitOutcome::Cancelled;
+                        }
+                        DownloadControl::None => {}
+                    }
+                }
+            }
+        }
     }
 
-    /// Wake only the waiter with the highest priority (lowest i8).
-    /// No-op when no waiters are registered.
-    pub async fn signal_next(&self) {
+    pub async fn snapshots(&self) -> Vec<DownloadWaiterSnapshot> {
+        self.waiters
+            .lock()
+            .await
+            .iter()
+            .map(|waiter| DownloadWaiterSnapshot {
+                id: waiter.id,
+                input_name: waiter.input_name.clone(),
+                priority: waiter.priority,
+            })
+            .collect()
+    }
+
+    /// Wake a specific waiter by id.
+    pub async fn signal_waiter(&self, waiter_id: u64) -> bool {
         let mut waiters = self.waiters.lock().await;
-        if let Some(idx) = waiters.iter().enumerate().min_by_key(|(_, (p, _))| *p).map(|(i, _)| i) {
-            let (_, notify) = waiters.remove(idx);
+        if let Some(idx) = waiters.iter().position(|waiter| waiter.id == waiter_id) {
+            let notify = Arc::clone(&waiters[idx].notify);
+            waiters.remove(idx);
             notify.notify_one();
+            true
+        } else {
+            false
         }
     }
 }
@@ -293,6 +388,7 @@ pub struct DownloadQueue {
     pub active: Arc<RwLock<Option<FileDownload>>>,
     pub finished: Arc<RwLock<Vec<FileDownload>>>,
     pub control_signal: Arc<RwLock<DownloadControl>>,
+    pub control_notify: Arc<Notify>,
     pub worker_running: Arc<RwLock<bool>>,
     pub state_file: Option<PathBuf>,
     /// Priority-aware waiter queue for provider connection slots.
@@ -304,6 +400,22 @@ impl Default for DownloadQueue {
 }
 
 impl DownloadQueue {
+    fn finalize_missed_recording(mut download: FileDownload) -> FileDownload {
+        download.finished = true;
+        download.paused = false;
+        download.state = DownloadState::Failed;
+        download.error = Some(RECORDING_WINDOW_EXPIRED_ERR.to_string());
+        download
+    }
+
+    fn recording_start_missed_window(download: &FileDownload, now_ts: i64) -> bool {
+        download.kind == DownloadKind::Recording
+            && download
+                .start_at
+                .zip(download.duration_secs)
+                .is_some_and(|(start_at, duration_secs)| now_ts >= start_at.saturating_add(i64::try_from(duration_secs).unwrap_or(i64::MAX)))
+    }
+
     pub fn new() -> Self {
         Self::new_with_state_file(None)
     }
@@ -315,6 +427,7 @@ impl DownloadQueue {
             active: Arc::from(RwLock::new(None)),
             finished: Arc::from(RwLock::new(Vec::new())),
             control_signal: Arc::from(RwLock::new(DownloadControl::None)),
+            control_notify: Arc::new(Notify::new()),
             worker_running: Arc::from(RwLock::new(false)),
             state_file,
             slot_waiters: Arc::new(DownloadSlotWaitQueue::new()),
@@ -339,6 +452,8 @@ impl DownloadQueue {
             kind: download.kind.clone(),
             input_name: download.input_name.as_ref().map(std::string::ToString::to_string),
             priority: download.priority,
+            retry_attempts: download.retry_attempts,
+            next_retry_at: download.next_retry_at,
         }
     }
 
@@ -360,6 +475,8 @@ impl DownloadQueue {
             kind: download.kind,
             input_name: download.input_name.map(|s| Arc::from(s.as_str())),
             priority: download.priority,
+            retry_attempts: download.retry_attempts,
+            next_retry_at: download.next_retry_at,
         })
     }
 
@@ -401,15 +518,20 @@ impl DownloadQueue {
             .filter_map(Self::from_persisted)
             .map(Self::recover_loaded_download)
             .collect::<VecDeque<_>>();
-        let scheduled = persisted
+        let now_ts = Utc::now().timestamp();
+        let scheduled_loaded = persisted
             .scheduled
             .into_iter()
             .filter_map(Self::from_persisted)
             .map(Self::recover_loaded_download)
             .collect::<Vec<_>>();
+        let (scheduled, missed_scheduled): (Vec<_>, Vec<_>) = scheduled_loaded
+            .into_iter()
+            .partition(|download| !Self::recording_start_missed_window(download, now_ts));
         let active = persisted.active.and_then(Self::from_persisted).map(Self::recover_loaded_download);
-        let finished =
+        let mut finished =
             persisted.finished.into_iter().filter_map(Self::from_persisted).collect::<Vec<_>>();
+        finished.extend(missed_scheduled.into_iter().map(Self::finalize_missed_recording));
 
         *self.queue.lock().await = queue;
         *self.scheduled.write().await = scheduled;
@@ -448,33 +570,41 @@ impl DownloadQueue {
             download.paused = false;
             download.state = DownloadState::Queued;
             download.error = None;
+            download.retry_attempts = 0;
+            download.next_retry_at = None;
         }
         download
     }
 
     pub async fn pause_active(&self) {
         *self.control_signal.write().await = DownloadControl::Pause;
+        self.control_notify.notify_waiters();
         if let Some(download) = self.active.write().await.as_mut() {
             download.paused = true;
             download.state = DownloadState::Paused;
+            download.next_retry_at = None;
         }
         let _ = self.persist_to_disk().await;
     }
 
     pub async fn resume_active(&self) {
         *self.control_signal.write().await = DownloadControl::None;
+        self.control_notify.notify_waiters();
         if let Some(download) = self.active.write().await.as_mut() {
             download.paused = false;
             download.state = DownloadState::Downloading;
+            download.next_retry_at = None;
         }
         let _ = self.persist_to_disk().await;
     }
 
     pub async fn cancel_active(&self) {
         *self.control_signal.write().await = DownloadControl::Cancel;
+        self.control_notify.notify_waiters();
         if let Some(download) = self.active.write().await.as_mut() {
             download.state = DownloadState::Cancelled;
             download.error = Some("Cancelled by user".to_string());
+            download.next_retry_at = None;
         }
         let _ = self.persist_to_disk().await;
     }
@@ -523,6 +653,8 @@ impl DownloadQueue {
             download.paused = false;
             download.error = None;
             download.state = DownloadState::Queued;
+            download.retry_attempts = 0;
+            download.next_retry_at = None;
             drop(finished);
             self.queue.lock().await.push_back(download);
             let _ = self.persist_to_disk().await;
@@ -539,7 +671,13 @@ impl DownloadQueue {
         }
 
         let mut due_downloads = Vec::new();
+        let mut missed_recordings = Vec::new();
         scheduled.retain(|download| {
+            let is_missed = Self::recording_start_missed_window(download, now_ts);
+            if is_missed {
+                missed_recordings.push(Self::finalize_missed_recording(download.clone()));
+                return false;
+            }
             let is_due = download.start_at.is_some_and(|start_at| start_at <= now_ts);
             if is_due {
                 let mut queued = download.clone();
@@ -549,13 +687,23 @@ impl DownloadQueue {
                 queued.error = None;
                 queued.size = 0;
                 queued.total_size = None;
+                queued.retry_attempts = 0;
+                queued.next_retry_at = None;
                 due_downloads.push(queued);
             }
             !is_due
         });
         drop(scheduled);
 
+        let had_missed_recordings = !missed_recordings.is_empty();
+        if had_missed_recordings {
+            self.finished.write().await.extend(missed_recordings);
+        }
+
         if due_downloads.is_empty() {
+            if had_missed_recordings {
+                let _ = self.persist_to_disk().await;
+            }
             return 0;
         }
 
@@ -597,6 +745,7 @@ pub struct FileRecordingRequest {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::{timeout, Duration};
 
     fn temp_state_file(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -626,6 +775,8 @@ mod tests {
             kind: DownloadKind::Download,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
 
         *queue.active.write().await = Some(active);
@@ -664,6 +815,8 @@ mod tests {
             kind: DownloadKind::Download,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
 
         *queue.active.write().await = Some(active);
@@ -697,6 +850,8 @@ mod tests {
             kind: DownloadKind::Download,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
         let active = FileDownload {
             uuid: "active".to_string(),
@@ -715,6 +870,8 @@ mod tests {
             kind: DownloadKind::Download,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
         let paused = FileDownload {
             uuid: "paused".to_string(),
@@ -733,6 +890,8 @@ mod tests {
             kind: DownloadKind::Download,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
 
         queue.queue.lock().await.push_back(queued);
@@ -761,6 +920,7 @@ mod tests {
     async fn persisted_scheduled_recordings_round_trip_without_becoming_active() {
         let state_file = temp_state_file("record_state");
         let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        let future_start = Utc::now().timestamp().saturating_add(3_600);
         let scheduled = FileDownload {
             uuid: "recording".to_string(),
             file_dir: PathBuf::from("/tmp"),
@@ -773,11 +933,13 @@ mod tests {
             paused: false,
             error: None,
             state: DownloadState::Scheduled,
-            start_at: Some(1_700_000_000),
+            start_at: Some(future_start),
             duration_secs: Some(5400),
             kind: DownloadKind::Recording,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
 
         queue.scheduled.write().await.push(scheduled.clone());
@@ -792,10 +954,111 @@ mod tests {
         assert_eq!(restored_scheduled.len(), 1);
         assert_eq!(restored_scheduled[0].uuid, scheduled.uuid);
         assert_eq!(restored_scheduled[0].state, DownloadState::Scheduled);
+        assert_eq!(restored_scheduled[0].start_at, Some(future_start));
         assert_eq!(restored_scheduled[0].duration_secs, Some(5400));
         assert_eq!(restored_scheduled[0].kind, DownloadKind::Recording);
 
         let _ = std::fs::remove_file(state_file);
+    }
+
+    #[test]
+    fn recover_loaded_download_requeues_waiting_states() {
+        let waiting_for_capacity = FileDownload {
+            uuid: "capacity".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/capacity.ts"),
+            filename: "capacity.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/capacity.ts").expect("valid url"),
+            finished: false,
+            size: 77,
+            total_size: Some(99),
+            paused: false,
+            error: Some("old error".to_string()),
+            state: DownloadState::WaitingForCapacity,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        };
+        let retry_waiting = FileDownload {
+            state: DownloadState::RetryWaiting,
+            ..waiting_for_capacity.clone()
+        };
+
+        let restored_waiting_for_capacity = DownloadQueue::recover_loaded_download(waiting_for_capacity);
+        let restored_retry_waiting = DownloadQueue::recover_loaded_download(retry_waiting);
+
+        assert_eq!(restored_waiting_for_capacity.state, DownloadState::Queued);
+        assert!(!restored_waiting_for_capacity.paused);
+        assert!(restored_waiting_for_capacity.error.is_none());
+
+        assert_eq!(restored_retry_waiting.state, DownloadState::Queued);
+        assert!(!restored_retry_waiting.paused);
+        assert!(restored_retry_waiting.error.is_none());
+    }
+
+    #[test]
+    fn recover_loaded_download_clears_pending_retry_timestamp() {
+        let retry_waiting = FileDownload {
+            uuid: "retry".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/retry.ts"),
+            filename: "retry.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/retry.ts").expect("valid url"),
+            finished: false,
+            size: 12,
+            total_size: Some(20),
+            paused: false,
+            error: Some("retrying".to_string()),
+            state: DownloadState::RetryWaiting,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 2,
+            next_retry_at: Some(1_700_000_000),
+        };
+
+        let restored = DownloadQueue::recover_loaded_download(retry_waiting);
+        assert_eq!(restored.state, DownloadState::Queued);
+        assert_eq!(restored.retry_attempts, 0);
+        assert!(restored.next_retry_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_finished_clears_retry_metadata() {
+        let queue = DownloadQueue::new();
+        queue.finished.write().await.push(FileDownload {
+            uuid: "done".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/done.ts"),
+            filename: "done.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/done.ts").expect("valid url"),
+            finished: true,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: Some("Retry limit reached".to_string()),
+            state: DownloadState::Failed,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 5,
+            next_retry_at: Some(1_700_000_000),
+        });
+
+        assert!(queue.retry_finished("done").await);
+        let queued = queue.queue.lock().await.front().cloned().expect("queued download");
+        assert_eq!(queued.state, DownloadState::Queued);
+        assert_eq!(queued.retry_attempts, 0);
+        assert!(queued.next_retry_at.is_none());
+        assert!(queued.error.is_none());
     }
 
     #[tokio::test]
@@ -818,6 +1081,8 @@ mod tests {
             kind: DownloadKind::Recording,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
         let future = FileDownload {
             uuid: "future".to_string(),
@@ -836,6 +1101,8 @@ mod tests {
             kind: DownloadKind::Recording,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         };
 
         queue.scheduled.write().await.extend([due, future]);
@@ -854,6 +1121,84 @@ mod tests {
         assert_eq!(scheduled_items[0].uuid, "future");
     }
 
+    #[tokio::test]
+    async fn promote_due_scheduled_marks_expired_recordings_failed() {
+        let queue = DownloadQueue::new();
+        let expired = FileDownload {
+            uuid: "expired".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/expired.ts"),
+            filename: "expired.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/expired").expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Scheduled,
+            start_at: Some(100),
+            duration_secs: Some(60),
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        };
+
+        queue.scheduled.write().await.push(expired);
+        let promoted = queue.promote_due_scheduled(200).await;
+
+        assert_eq!(promoted, 0);
+        assert!(queue.queue.lock().await.is_empty());
+        let finished = queue.finished.read().await.clone();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].uuid, "expired");
+        assert_eq!(finished[0].state, DownloadState::Failed);
+        assert!(finished[0].finished);
+        assert_eq!(finished[0].error.as_deref(), Some("Recording window already expired"));
+    }
+
+    #[tokio::test]
+    async fn load_from_disk_moves_expired_scheduled_recordings_to_finished() {
+        let state_file = temp_state_file("expired_record_state");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        let expired = FileDownload {
+            uuid: "expired".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/expired.ts"),
+            filename: "expired.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/expired").expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Scheduled,
+            start_at: Some(100),
+            duration_secs: Some(60),
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        };
+
+        queue.scheduled.write().await.push(expired);
+        queue.persist_to_disk().await.expect("persist state");
+
+        let restored = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        restored.load_from_disk().await.expect("load state");
+
+        assert!(restored.scheduled.read().await.is_empty());
+        let finished = restored.finished.read().await.clone();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].uuid, "expired");
+        assert_eq!(finished[0].state, DownloadState::Failed);
+        assert_eq!(finished[0].error.as_deref(), Some("Recording window already expired"));
+
+        let _ = std::fs::remove_file(state_file);
+    }
+
     #[test]
     fn recording_uuid_differs_for_same_url_with_different_start_times() {
         let download_cfg = VideoDownloadConfig {
@@ -863,6 +1208,13 @@ mod tests {
             headers: std::collections::HashMap::new(),
             download_priority: 0,
             recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_step_1_secs: 3,
+            retry_backoff_step_2_secs: 10,
+            retry_backoff_step_3_secs: 30,
+            retry_backoff_jitter_percent: 0,
+            retry_max_attempts: 5,
         };
 
         let first = FileDownload::new_recording(
@@ -887,5 +1239,65 @@ mod tests {
         .expect("second recording");
 
         assert_ne!(first.uuid, second.uuid);
+    }
+
+    #[tokio::test]
+    async fn download_slot_wait_queue_signals_matching_waiter_by_id() {
+        let queue = Arc::new(DownloadSlotWaitQueue::new());
+        let control_signal = Arc::new(RwLock::new(DownloadControl::None));
+        let control_notify = Arc::new(Notify::new());
+
+        let queue_for_a = Arc::clone(&queue);
+        let control_signal_for_a = Arc::clone(&control_signal);
+        let control_notify_for_a = Arc::clone(&control_notify);
+        let waiter_a = tokio::spawn(async move {
+            queue_for_a
+                .wait(
+                    Some(Arc::from("input-a")),
+                    1,
+                    control_signal_for_a.as_ref(),
+                    control_notify_for_a.as_ref(),
+                )
+                .await
+        });
+
+        let queue_for_b = Arc::clone(&queue);
+        let control_signal_for_b = Arc::clone(&control_signal);
+        let control_notify_for_b = Arc::clone(&control_notify);
+        let waiter_b = tokio::spawn(async move {
+            queue_for_b
+                .wait(
+                    Some(Arc::from("input-b")),
+                    0,
+                    control_signal_for_b.as_ref(),
+                    control_notify_for_b.as_ref(),
+                )
+                .await
+        });
+
+        let waiter_b_id = loop {
+            let snapshots = queue.snapshots().await;
+            if snapshots.len() == 2 {
+                break snapshots
+                    .into_iter()
+                    .find(|waiter| waiter.input_name.as_deref() == Some("input-b"))
+                    .map(|waiter| waiter.id)
+                    .expect("waiter id for input-b");
+            }
+            tokio::task::yield_now().await;
+        };
+
+        assert!(queue.signal_waiter(waiter_b_id).await);
+        assert_eq!(
+            timeout(Duration::from_millis(100), waiter_b).await.expect("waiter_b finished").expect("join ok"),
+            DownloadWaitOutcome::Signalled
+        );
+
+        *control_signal.write().await = DownloadControl::Cancel;
+        control_notify.notify_waiters();
+        assert_eq!(
+            timeout(Duration::from_millis(100), waiter_a).await.expect("waiter_a finished").expect("join ok"),
+            DownloadWaitOutcome::Cancelled
+        );
     }
 }

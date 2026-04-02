@@ -11,6 +11,7 @@ mod provider_config;
 mod provider_dns_manager;
 mod provider_lineup_manager;
 mod qos_aggregation_manager;
+mod recording_worker;
 mod request;
 mod stream;
 mod stream_error;
@@ -25,7 +26,7 @@ pub use self::{
 };
 pub(in crate::api) use self::{
     active_user_manager::*, download::*, model_utils::*, provider_config::*, qos_aggregation_manager::*,
-    request::*, stream_error::*, xtream::*,
+    recording_worker::*, request::*, stream_error::*, xtream::*,
 };
 mod batch_result_collector;
 pub use self::batch_result_collector::*;

@@ -54,8 +54,9 @@ impl DownloadsService {
         url: String,
         filename: String,
         input_name: Option<String>,
+        priority: Option<i8>,
     ) -> Result<FileDownloadDto, Error> {
-        let request = QueueDownloadRequest { url, filename, input_name, priority: None };
+        let request = QueueDownloadRequest { url, filename, input_name, priority };
         request_post::<&QueueDownloadRequest, FileDownloadDto>(
             &self.downloads_api_path,
             &request,

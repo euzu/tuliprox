@@ -68,6 +68,15 @@ video:
     directory: ${env:TULIPROX_HOME}/downloads
     organize_into_directories: false
     episode_pattern: .*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*
+    download_priority: 1
+    recording_priority: 0
+    reserve_slots_for_users: 1
+    max_background_per_provider: 1
+    retry_backoff_step_1_secs: 3
+    retry_backoff_step_2_secs: 10
+    retry_backoff_step_3_secs: 30
+    retry_backoff_jitter_percent: 20
+    retry_max_attempts: 5
 
 reverse_proxy:
   resource_retry:

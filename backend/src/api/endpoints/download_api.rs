@@ -1,7 +1,9 @@
 use crate::{
     api::model::{
-        AppState, ActiveProviderManager, ConnectionManager, DownloadControl, DownloadQueue, DownloadState,
-        EventManager, EventMessage, FileDownload, FileDownloadRequest, FileRecordingRequest,
+        AppState, ActiveProviderManager, ConnectionManager, DownloadControl, DownloadKind, DownloadQueue,
+        DownloadState, DownloadWaitOutcome, EventManager, EventMessage, FileDownload, FileDownloadRequest,
+        FileRecordingRequest,
+        RecordingExecutionResult, run_recording,
     },
     model::{AppConfig, VideoDownloadConfig},
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
@@ -10,20 +12,114 @@ use axum::response::IntoResponse;
 use futures::stream::TryStreamExt;
 use log::{debug, info, warn};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use shared::{error::to_io_error, model::DownloadsResponse, utils::bytes_to_megabytes};
-use std::{ops::Deref, sync::Arc};
+use std::{collections::HashMap, ops::Deref, sync::Arc};
 use tokio::{fs, io::AsyncWriteExt, sync::RwLock, time::{self, Duration, Instant}};
+use tokio_util::sync::CancellationToken;
 
 const DOWNLOAD_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PROGRESS_LOG_BYTES: u64 = 16 * 1024 * 1024;
+type ProviderCapacities = Vec<(Arc<str>, usize, usize)>;
 
 enum DownloadExecutionResult {
     Completed,
     Paused,
     Cancelled,
+    Preempted,
     Retryable(String),
     Failed(String),
+}
+
+enum ProviderAcquireResult {
+    Acquired(Option<crate::api::model::ProviderHandle>),
+    Paused,
+    Cancelled,
+}
+
+fn classify_download_open_error(url: &reqwest::Url, err: &reqwest::Error) -> DownloadExecutionResult {
+    if is_retryable_download_error(err) {
+        DownloadExecutionResult::Retryable(format!("Error while opening url: {url} {err}"))
+    } else {
+        DownloadExecutionResult::Failed(format!("Error while opening url: {url} {err}"))
+    }
+}
+
+fn classify_download_stream_io_error(file_path_str: &str, err: &std::io::Error) -> DownloadExecutionResult {
+    if retryable_transport_error_message(&err.to_string()) {
+        DownloadExecutionResult::Retryable(format!("Error while downloading file: {file_path_str} {err}"))
+    } else {
+        DownloadExecutionResult::Failed(format!("Error while downloading file: {file_path_str} {err}"))
+    }
+}
+
+fn apply_download_retry_jitter(base_secs: u64, jitter_percent: u8) -> u64 {
+    let jitter_percent = i64::from(jitter_percent.min(95));
+    if jitter_percent == 0 {
+        return base_secs.max(1);
+    }
+    let jitter_percent = fastrand::i64(-jitter_percent..=jitter_percent);
+    let base_i64 = i64::try_from(base_secs.max(1)).unwrap_or(i64::MAX);
+    let jitter_delta = base_i64.saturating_mul(jitter_percent).saturating_div(100);
+    let jittered = base_i64.saturating_add(jitter_delta);
+    u64::try_from(jittered.max(1)).unwrap_or(1)
+}
+
+fn compute_download_retry_backoff_secs(attempts: u8, download_cfg: &VideoDownloadConfig) -> u64 {
+    let base_secs = match attempts {
+        1 => download_cfg.retry_backoff_step_1_secs,
+        2 => download_cfg.retry_backoff_step_2_secs,
+        _ => download_cfg.retry_backoff_step_3_secs,
+    };
+    apply_download_retry_jitter(base_secs, download_cfg.retry_backoff_jitter_percent)
+}
+
+fn is_retryable_download_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+fn is_retryable_download_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || retryable_transport_error_message(&err.to_string())
+}
+
+fn retryable_transport_error_message(message: &str) -> bool {
+    let msg = message.to_ascii_lowercase();
+    msg.contains("timed out")
+        || msg.contains("connection reset")
+        || msg.contains("connection refused")
+        || msg.contains("temporary failure")
+        || msg.contains("temporarily unavailable")
+        || msg.contains("network is unreachable")
+        || msg.contains("dns")
+        || msg.contains("name or service not known")
+        || msg.contains("connection closed before message completed")
+        || msg.contains("unexpected eof")
+}
+
+fn background_download_should_wait(
+    priority: i8,
+    capacities: &[(Arc<str>, usize, usize)],
+    download_cfg: &VideoDownloadConfig,
+) -> bool {
+    if priority <= 0 || capacities.is_empty() {
+        return false;
+    }
+
+    let background_limit = usize::from(download_cfg.max_background_per_provider);
+    let reserve_slots = usize::from(download_cfg.reserve_slots_for_users);
+
+    let blocked_by_background_limit =
+        background_limit > 0 && capacities.iter().all(|(_, current, _)| *current >= background_limit);
+    let blocked_by_reserved_slots = reserve_slots > 0
+        && capacities
+            .iter()
+            .all(|(_, current, max)| *max > 0 && current.saturating_add(reserve_slots) >= *max);
+
+    blocked_by_background_limit || blocked_by_reserved_slots
+}
+
+fn capacities_have_free_slot(capacities: &[(Arc<str>, usize, usize)]) -> bool {
+    capacities.iter().any(|(_, current, max)| *max == 0 || current < max)
 }
 
 fn recording_deadline_reached(download: &FileDownload, now_ts: i64) -> bool {
@@ -53,7 +149,7 @@ pub async fn download_queue_snapshot(download_queue: &DownloadQueue) -> Download
             .iter()
             .map(shared::model::FileDownloadDto::from),
     );
-    let downloads = download_queue
+    let finished = download_queue
         .finished
         .read()
         .await
@@ -65,12 +161,13 @@ pub async fn download_queue_snapshot(download_queue: &DownloadQueue) -> Download
         .read()
         .await
         .as_ref()
-        .map(shared::model::FileDownloadDto::from);
+        .map(shared::model::FileDownloadDto::from)
+        .into_iter()
+        .collect();
 
     DownloadsResponse {
-        completed: active.is_none(),
         queue,
-        downloads,
+        finished,
         active,
     }
 }
@@ -85,6 +182,7 @@ async fn download_file(
     active: Arc<RwLock<Option<FileDownload>>>,
     client: &reqwest::Client,
     control_signal: Arc<RwLock<DownloadControl>>,
+    provider_cancel_token: Option<CancellationToken>,
     event_manager: Option<&Arc<EventManager>>,
     download_queue: Option<&Arc<DownloadQueue>>,
 ) -> DownloadExecutionResult {
@@ -105,10 +203,25 @@ async fn download_file(
             request_builder = request_builder.header("Range", format!("bytes={existing_size}-"));
         }
 
-        match request_builder.send().await {
+        let response_result = if let Some(cancel_token) = provider_cancel_token.as_ref() {
+            tokio::select! {
+                biased;
+                () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
+                response = request_builder.send() => response,
+            }
+        } else {
+            request_builder.send().await
+        };
+
+        match response_result {
             Ok(response) => {
                 let status = response.status();
                 if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+                    if is_retryable_download_status(status) {
+                        return DownloadExecutionResult::Retryable(format!(
+                            "Download request failed for {url} with transient HTTP {status}"
+                        ));
+                    }
                     return DownloadExecutionResult::Failed(format!("Download request failed for {url} with HTTP {status}"));
                 }
                 let is_resume = status == reqwest::StatusCode::PARTIAL_CONTENT;
@@ -213,7 +326,17 @@ async fn download_file(
                                             return DownloadExecutionResult::Completed;
                                         }
 
-                                        match stream.try_next().await {
+                                        let next_item = if let Some(cancel_token) = provider_cancel_token.as_ref() {
+                                            tokio::select! {
+                                                biased;
+                                                () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
+                                                item = stream.try_next() => item,
+                                            }
+                                        } else {
+                                            stream.try_next().await
+                                        };
+
+                                        match next_item {
                                             Ok(item) => {
                                                 if let Some(chunk) = item {
                                                     match buf_writer.write_all(&chunk).await {
@@ -313,11 +436,7 @@ async fn download_file(
                                                     return DownloadExecutionResult::Completed;
                                                 }
                                             }
-                                            Err(err) => {
-                                                return DownloadExecutionResult::Retryable(format!(
-                                                    "Error while downloading file: {file_path_str} {err}"
-                                                ))
-                                            }
+                                            Err(err) => return classify_download_stream_io_error(file_path_str, &err),
                                         }
                                     }
                                 }
@@ -334,10 +453,28 @@ async fn download_file(
                     )),
                 }
             }
-            Err(err) => DownloadExecutionResult::Retryable(format!("Error while opening url: {} {}", &url, err)),
+            Err(err) => classify_download_open_error(&url, &err),
         }
     } else {
         DownloadExecutionResult::Failed("No active file download".to_string())
+    }
+}
+
+async fn set_active_download_state(
+    download_queue: &DownloadQueue,
+    state: DownloadState,
+    error: Option<String>,
+    paused: bool,
+) -> bool {
+    let mut active = download_queue.active.write().await;
+    if let Some(download) = active.as_mut() {
+        download.state = state;
+        download.error = error;
+        download.paused = paused;
+        download.finished = false;
+        true
+    } else {
+        false
     }
 }
 
@@ -347,6 +484,19 @@ async fn requeue_active_download_for_retry(download_queue: &DownloadQueue) {
         download.paused = false;
         download.error = None;
         download.state = DownloadState::Queued;
+        download.next_retry_at = None;
+        download_queue.queue.lock().await.push_front(download);
+    }
+    let _ = download_queue.persist_to_disk().await;
+}
+
+async fn requeue_active_download_for_capacity_wait(download_queue: &DownloadQueue, reason: &str) {
+    if let Some(mut download) = download_queue.active.write().await.take() {
+        download.finished = false;
+        download.paused = false;
+        download.error = Some(reason.to_string());
+        download.state = DownloadState::WaitingForCapacity;
+        download.next_retry_at = None;
         download_queue.queue.lock().await.push_front(download);
     }
     let _ = download_queue.persist_to_disk().await;
@@ -389,9 +539,11 @@ pub(in crate::api) async fn ensure_download_worker_running(
         );
         let dq = Arc::clone(download_queue);
         let control_signal = Arc::clone(&dq.control_signal);
+        let control_notify = Arc::clone(&dq.control_notify);
         let event_manager = Arc::clone(event_manager);
         let active_provider = Arc::clone(active_provider);
         let connection_manager = Arc::clone(connection_manager);
+        let download_cfg = download_cfg.clone();
 
         match create_client(cfg).default_headers(headers).build() {
             Ok(client) => {
@@ -414,46 +566,139 @@ pub(in crate::api) async fn ensure_download_worker_running(
                             // Acquire a provider connection slot for this download.
                             // If the provider is at capacity, wait in the priority queue until signalled.
                             // Never proceeds without a slot when input_name is set — account bans otherwise.
-                            let provider_handle = {
+                            let provider_acquire_result = {
                                 let (input_name, priority) = {
                                     let active = dq.active.read().await;
                                     active.as_ref().map_or((None, 0i8), |dl| (dl.input_name.clone(), dl.priority))
                                 };
                                 if let Some(input_name) = input_name {
                                     loop {
-                                        if let Some(handle) = active_provider.acquire_connection_for_probe(&input_name, priority).await {
-                                            break Some(handle);
+                                        let capacities = active_provider.provider_capacities_for_input(&input_name).await;
+                                        if background_download_should_wait(priority, &capacities, &download_cfg) {
+                                            if set_active_download_state(&dq, DownloadState::WaitingForCapacity, None, false).await {
+                                                let _ = dq.persist_to_disk().await;
+                                                broadcast_download_queue_update(&event_manager, &dq).await;
+                                            }
+                                            match dq
+                                                .slot_waiters
+                                                .wait(
+                                                    Some(Arc::clone(&input_name)),
+                                                    priority,
+                                                    control_signal.as_ref(),
+                                                    control_notify.as_ref(),
+                                                )
+                                                .await
+                                            {
+                                                DownloadWaitOutcome::Signalled => {}
+                                                DownloadWaitOutcome::Paused => break ProviderAcquireResult::Paused,
+                                                DownloadWaitOutcome::Cancelled => break ProviderAcquireResult::Cancelled,
+                                            }
+                                            continue;
+                                        }
+                                        if let Some(handle) = active_provider.acquire_connection_for_download(&input_name, priority).await {
+                                            let _ = set_active_download_state(&dq, DownloadState::Downloading, None, false).await;
+                                            let _ = dq.persist_to_disk().await;
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                            break ProviderAcquireResult::Acquired(Some(handle));
                                         }
                                         if *control_signal.read().await == DownloadControl::Cancel {
-                                            break None;
+                                            break ProviderAcquireResult::Cancelled;
+                                        }
+                                        if *control_signal.read().await == DownloadControl::Pause {
+                                            break ProviderAcquireResult::Paused;
+                                        }
+                                        if set_active_download_state(&dq, DownloadState::WaitingForCapacity, None, false).await {
+                                            let _ = dq.persist_to_disk().await;
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
                                         }
                                         // Wait for highest-priority signal — no sleep, no polling.
-                                        dq.slot_waiters.wait(priority).await;
-                                        if *control_signal.read().await == DownloadControl::Cancel {
-                                            break None;
+                                        match dq
+                                            .slot_waiters
+                                            .wait(
+                                                Some(Arc::clone(&input_name)),
+                                                priority,
+                                                control_signal.as_ref(),
+                                                control_notify.as_ref(),
+                                            )
+                                            .await
+                                        {
+                                            DownloadWaitOutcome::Signalled => {}
+                                            DownloadWaitOutcome::Paused => break ProviderAcquireResult::Paused,
+                                            DownloadWaitOutcome::Cancelled => break ProviderAcquireResult::Cancelled,
                                         }
                                     }
                                 } else {
-                                    None
+                                    ProviderAcquireResult::Acquired(None)
                                 }
                             };
 
-                            *control_signal.write().await = DownloadControl::None;
+                            let provider_handle = match provider_acquire_result {
+                                ProviderAcquireResult::Acquired(handle) => {
+                                    *control_signal.write().await = DownloadControl::None;
+                                    handle
+                                }
+                                ProviderAcquireResult::Paused => {
+                                    let _ = dq.persist_to_disk().await;
+                                    broadcast_download_queue_update(&event_manager, &dq).await;
+                                    break;
+                                }
+                                ProviderAcquireResult::Cancelled => {
+                                    if let Some(fd) = dq.active.write().await.take() {
+                                        let mut fd = fd;
+                                        fd.next_retry_at = None;
+                                        dq.finished.write().await.push(fd);
+                                    }
+                                    *dq.control_signal.write().await = DownloadControl::None;
+                                    let _ = dq.persist_to_disk().await;
+                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
+                                    let _ = dq.persist_to_disk().await;
+                                    broadcast_download_queue_update(&event_manager, &dq).await;
+                                    continue;
+                                }
+                            };
 
-                            match download_file(
-                                Arc::clone(&dq.active),
-                                &client,
-                                Arc::clone(&control_signal),
-                                Some(&event_manager),
-                                Some(&dq),
-                            )
-                            .await
+                            let execution_result = {
+                                let active = dq.active.read().await;
+                                let Some(download) = active.as_ref().cloned() else {
+                                    break;
+                                };
+                                drop(active);
+                                match download.kind {
+                                    DownloadKind::Download => download_file(
+                                        Arc::clone(&dq.active),
+                                        &client,
+                                        Arc::clone(&control_signal),
+                                        provider_handle.as_ref().and_then(|handle| handle.cancel_token.clone()),
+                                        Some(&event_manager),
+                                        Some(&dq),
+                                    )
+                                    .await,
+                                    DownloadKind::Recording => match run_recording(
+                                        &download,
+                                        &control_signal,
+                                        &control_notify,
+                                        provider_handle.as_ref().and_then(|handle| handle.cancel_token.as_ref()),
+                                    )
+                                    .await
+                                    {
+                                        RecordingExecutionResult::Completed => DownloadExecutionResult::Completed,
+                                        RecordingExecutionResult::Paused => DownloadExecutionResult::Paused,
+                                        RecordingExecutionResult::Cancelled => DownloadExecutionResult::Cancelled,
+                                        RecordingExecutionResult::Preempted => DownloadExecutionResult::Preempted,
+                                        RecordingExecutionResult::Retryable(err) => DownloadExecutionResult::Retryable(err),
+                                        RecordingExecutionResult::Failed(err) => DownloadExecutionResult::Failed(err),
+                                    },
+                                }
+                            };
+
+                            match execution_result
                             {
                                 DownloadExecutionResult::Completed => {
                                     connection_manager.release_provider_handle(provider_handle).await;
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         fd.finished = true;
                                         fd.state = DownloadState::Completed;
+                                        fd.next_retry_at = None;
                                         dq.finished.write().await.push(fd.clone());
                                     }
                                     let _ = dq.persist_to_disk().await;
@@ -470,6 +715,8 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 DownloadExecutionResult::Cancelled => {
                                     connection_manager.release_provider_handle(provider_handle).await;
                                     if let Some(fd) = dq.active.write().await.take() {
+                                        let mut fd = fd;
+                                        fd.next_retry_at = None;
                                         dq.finished.write().await.push(fd);
                                     }
                                     *dq.control_signal.write().await = DownloadControl::None;
@@ -478,14 +725,130 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     let _ = dq.persist_to_disk().await;
                                     broadcast_download_queue_update(&event_manager, &dq).await;
                                 }
-                                DownloadExecutionResult::Retryable(_err) => {
+                                DownloadExecutionResult::Preempted => {
                                     connection_manager.release_provider_handle(provider_handle).await;
-                                    warn!("Retrying active download after transient failure");
-                                    requeue_active_download_for_retry(&dq).await;
-                                    time::sleep(Duration::from_secs(1)).await;
+                                    warn!("Active transfer was preempted by a higher-priority stream");
+                                    *dq.control_signal.write().await = DownloadControl::None;
+                                    requeue_active_download_for_capacity_wait(
+                                        &dq,
+                                        "Preempted by higher-priority stream",
+                                    )
+                                    .await;
                                     *dq.active.write().await = dq.queue.lock().await.pop_front();
                                     let _ = dq.persist_to_disk().await;
                                     broadcast_download_queue_update(&event_manager, &dq).await;
+                                }
+                                DownloadExecutionResult::Retryable(_err) => {
+                                    connection_manager.release_provider_handle(provider_handle).await;
+                                    warn!("Retrying active download after transient failure");
+                                    let retry_plan = {
+                                        let mut active = dq.active.write().await;
+                                        if let Some(download) = active.as_mut() {
+                                            download.retry_attempts = download.retry_attempts.saturating_add(1);
+                                            if download.retry_attempts > download_cfg.retry_max_attempts {
+                                                None
+                                            } else {
+                                                let retry_delay_secs =
+                                                    compute_download_retry_backoff_secs(download.retry_attempts, &download_cfg);
+                                                let next_retry_at = chrono::Utc::now()
+                                                    .timestamp()
+                                                    .saturating_add(i64::try_from(retry_delay_secs).unwrap_or(i64::MAX));
+                                                download.next_retry_at = Some(next_retry_at);
+                                                Some((retry_delay_secs, next_retry_at, download.retry_attempts))
+                                            }
+                                        } else {
+                                            let retry_delay_secs = compute_download_retry_backoff_secs(1, &download_cfg);
+                                            let next_retry_at = chrono::Utc::now()
+                                                .timestamp()
+                                                .saturating_add(i64::try_from(retry_delay_secs).unwrap_or(i64::MAX));
+                                            Some((retry_delay_secs, next_retry_at, 1))
+                                        }
+                                    };
+                                    let Some((retry_delay_secs, _next_retry_at, retry_attempts)) = retry_plan else {
+                                        if let Some(fd) = &mut *dq.active.write().await {
+                                            fd.finished = true;
+                                            fd.paused = false;
+                                            fd.next_retry_at = None;
+                                            fd.state = DownloadState::Failed;
+                                            fd.error = Some(format!(
+                                                "Retry limit reached after {} attempts",
+                                                download_cfg.retry_max_attempts
+                                            ));
+                                            dq.finished.write().await.push(fd.clone());
+                                        }
+                                        let _ = dq.persist_to_disk().await;
+                                        *dq.active.write().await = dq.queue.lock().await.pop_front();
+                                        let _ = dq.persist_to_disk().await;
+                                        broadcast_download_queue_update(&event_manager, &dq).await;
+                                        if dq.active.read().await.is_some() {
+                                            continue;
+                                        }
+                                        break;
+                                    };
+                                    if set_active_download_state(
+                                        &dq,
+                                        DownloadState::RetryWaiting,
+                                        Some(format!(
+                                            "Retrying after transient failure in {retry_delay_secs}s (attempt {retry_attempts}/{})",
+                                            download_cfg.retry_max_attempts
+                                        )),
+                                        false,
+                                    )
+                                    .await
+                                    {
+                                        let _ = dq.persist_to_disk().await;
+                                        broadcast_download_queue_update(&event_manager, &dq).await;
+                                    }
+                                    let mut retry_sleep = Box::pin(time::sleep(Duration::from_secs(retry_delay_secs)));
+                                    let retry_wait_outcome = loop {
+                                        tokio::select! {
+                                            () = &mut retry_sleep => break DownloadExecutionResult::Retryable(String::new()),
+                                            () = control_notify.notified() => {
+                                                match *control_signal.read().await {
+                                                    DownloadControl::Pause => break DownloadExecutionResult::Paused,
+                                                    DownloadControl::Cancel => break DownloadExecutionResult::Cancelled,
+                                                    DownloadControl::None => {}
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                    match retry_wait_outcome {
+                                        DownloadExecutionResult::Retryable(_) => {
+                                            *dq.control_signal.write().await = DownloadControl::None;
+                                            requeue_active_download_for_retry(&dq).await;
+                                            *dq.active.write().await = dq.queue.lock().await.pop_front();
+                                            let _ = dq.persist_to_disk().await;
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                        }
+                                        DownloadExecutionResult::Paused => {
+                                            if let Some(download) = dq.active.write().await.as_mut() {
+                                                download.paused = true;
+                                                download.state = DownloadState::Paused;
+                                                download.next_retry_at = None;
+                                            }
+                                            let _ = dq.persist_to_disk().await;
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                            break;
+                                        }
+                                        DownloadExecutionResult::Cancelled => {
+                                            if let Some(fd) = dq.active.write().await.take() {
+                                                let mut fd = fd;
+                                                fd.next_retry_at = None;
+                                                fd.error.get_or_insert_with(|| "Cancelled by user".to_string());
+                                                fd.state = DownloadState::Cancelled;
+                                                dq.finished.write().await.push(fd);
+                                            }
+                                            *dq.control_signal.write().await = DownloadControl::None;
+                                            let _ = dq.persist_to_disk().await;
+                                            *dq.active.write().await = dq.queue.lock().await.pop_front();
+                                            let _ = dq.persist_to_disk().await;
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                        }
+                                        DownloadExecutionResult::Completed
+                                        | DownloadExecutionResult::Preempted
+                                        | DownloadExecutionResult::Failed(_) => {}
+                                    }
                                 }
                                 DownloadExecutionResult::Failed(err) => {
                                     connection_manager.release_provider_handle(provider_handle).await;
@@ -493,6 +856,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         fd.finished = true;
                                         fd.paused = false;
+                                        fd.next_retry_at = None;
                                         fd.error = Some(err);
                                         fd.state = DownloadState::Failed;
                                         dq.finished.write().await.push(fd.clone());
@@ -528,10 +892,48 @@ pub(in crate::api) fn start_download_scheduler(
     // from racing ahead of higher-priority ones.
     let capacity_notify = connection_manager.capacity_notified();
     let slot_waiters = Arc::clone(&download_queue.slot_waiters);
+    let bridge_app_config = Arc::clone(&app_config);
+    let bridge_active_provider = Arc::clone(&active_provider);
     tokio::spawn(async move {
         loop {
             capacity_notify.notified().await;
-            slot_waiters.signal_next().await;
+            let config = bridge_app_config.config.load();
+            let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) else {
+                continue;
+            };
+
+            let mut capacities_by_input: HashMap<Arc<str>, ProviderCapacities> = HashMap::new();
+            let mut ready_waiter = None;
+
+            let mut waiters = slot_waiters.snapshots().await;
+            waiters.sort_by_key(|waiter| waiter.priority);
+
+            for waiter in waiters {
+                let Some(input_name) = waiter.input_name.as_ref() else {
+                    ready_waiter = Some(waiter.id);
+                    break;
+                };
+                let capacities = if let Some(capacities) = capacities_by_input.get(input_name) {
+                    capacities.clone()
+                } else {
+                    let capacities = bridge_active_provider.provider_capacities_for_input(input_name).await;
+                    capacities_by_input.insert(Arc::clone(input_name), capacities.clone());
+                    capacities
+                };
+
+                if !capacities_have_free_slot(&capacities) {
+                    continue;
+                }
+                if background_download_should_wait(waiter.priority, &capacities, download_cfg) {
+                    continue;
+                }
+                ready_waiter = Some(waiter.id);
+                break;
+            }
+
+            if let Some(waiter_id) = ready_waiter {
+                let _ = slot_waiters.signal_waiter(waiter_id).await;
+            }
         }
     });
 
@@ -554,16 +956,6 @@ pub(in crate::api) fn start_download_scheduler(
             let _ = ensure_download_worker_running(&app_config, download_cfg, &download_queue, &event_manager, &active_provider, &connection_manager).await;
         }
     });
-}
-
-macro_rules! download_info {
-    ($file_download:expr) => {
-       json!({"uuid": $file_download.uuid, "filename":  $file_download.filename,
-       "kind": $file_download.kind,
-       "filesize": $file_download.size, "total_size": $file_download.total_size, "finished": $file_download.finished,
-       "paused": $file_download.paused, "state": $file_download.state, "start_at": $file_download.start_at,
-       "duration_secs": $file_download.duration_secs, "error": $file_download.error})
-    }
 }
 
 pub async fn queue_download_file(
@@ -614,7 +1006,7 @@ pub async fn queue_download_file(
                         }
                     }
                     broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-                    axum::Json(download_info!(&file_download)).into_response()
+                    axum::Json(shared::model::FileDownloadDto::from(&file_download)).into_response()
                 }
                 None => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"})))
                     .into_response(),
@@ -635,23 +1027,7 @@ pub async fn queue_download_file(
 pub async fn download_file_info(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
-    let mut queue_list: Vec<Value> = app_state.downloads.queue.lock().await.iter().map(|fd| download_info!(fd)).collect();
-    queue_list.extend(app_state.downloads.scheduled.read().await.iter().map(|fd| download_info!(fd)));
-    let finished_list: Vec<Value> =
-        app_state.downloads.finished.read().await.iter().map(|fd| download_info!(fd)).collect();
-
-    (*app_state.downloads.active.read().await).as_ref().map_or_else(
-        || {
-            axum::Json(json!({
-                "completed": true, "queue": queue_list, "downloads": finished_list
-            }))
-        },
-        |file_download| {
-            axum::Json(json!({
-                "completed": false, "queue": queue_list, "downloads": finished_list, "active": download_info!(file_download)
-            }))
-        },
-    )
+    axum::Json(download_queue_snapshot(&app_state.downloads).await)
 }
 
 pub async fn queue_recording_file(
@@ -678,7 +1054,7 @@ pub async fn queue_recording_file(
                     app_state.downloads.scheduled.write().await.push(recording.clone());
                     let _ = app_state.downloads.persist_to_disk().await;
                     broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-                    axum::Json(download_info!(&recording)).into_response()
+                    axum::Json(shared::model::FileDownloadDto::from(&recording)).into_response()
                 }
                 None => (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"})))
                     .into_response(),
@@ -705,7 +1081,6 @@ pub async fn pause_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    // Check if it's the active download
     if let Some(active) = app_state.downloads.active.read().await.as_ref() {
         if active.uuid == req.uuid {
             app_state.downloads.pause_active().await;
@@ -713,12 +1088,7 @@ pub async fn pause_download(
             return axum::Json(json!({"success": true})).into_response();
         }
     }
-    // Check queue
-    let found = app_state.downloads.remove_from_queue(&req.uuid).await;
-    if found {
-        broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-    }
-    axum::Json(json!({"success": found})).into_response()
+    axum::Json(json!({"success": false})).into_response()
 }
 
 pub async fn resume_download(
@@ -812,7 +1182,10 @@ pub async fn retry_download(
 
 #[cfg(test)]
 mod tests {
-    use super::{active_download_snapshot, recording_deadline_reached, requeue_active_download_for_retry};
+    use super::{
+        active_download_snapshot, recording_deadline_reached, requeue_active_download_for_capacity_wait,
+        requeue_active_download_for_retry, retryable_transport_error_message, set_active_download_state,
+    };
     use crate::api::model::{DownloadKind, DownloadQueue, DownloadState, FileDownload};
     use std::{path::PathBuf, sync::Arc, time::Duration};
     use tokio::sync::RwLock;
@@ -835,6 +1208,8 @@ mod tests {
             kind,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         }
     }
 
@@ -868,6 +1243,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preempted_active_download_requeues_to_capacity_wait_with_partial_progress() {
+        let queue = DownloadQueue::new();
+        let mut active = make_download(DownloadKind::Download, DownloadState::Downloading, None, None);
+        active.size = 512;
+        active.total_size = Some(2048);
+        *queue.active.write().await = Some(active);
+
+        requeue_active_download_for_capacity_wait(&queue, "Preempted by higher-priority stream").await;
+
+        assert!(queue.active.read().await.is_none());
+        let queued_items = queue.queue.lock().await.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(queued_items.len(), 1);
+        assert_eq!(queued_items[0].state, DownloadState::WaitingForCapacity);
+        assert_eq!(queued_items[0].size, 512);
+        assert_eq!(queued_items[0].total_size, Some(2048));
+        assert_eq!(queued_items[0].error.as_deref(), Some("Preempted by higher-priority stream"));
+    }
+
+    #[tokio::test]
+    async fn set_active_download_state_updates_snapshot_state() {
+        let queue = DownloadQueue::new();
+        let active = make_download(DownloadKind::Download, DownloadState::Downloading, None, None);
+        *queue.active.write().await = Some(active);
+
+        let changed = set_active_download_state(
+            &queue,
+            DownloadState::WaitingForCapacity,
+            Some("waiting".to_string()),
+            false,
+        )
+        .await;
+
+        assert!(changed);
+        let active = queue.active.read().await.clone().expect("active download");
+        assert_eq!(active.state, DownloadState::WaitingForCapacity);
+        assert_eq!(active.error.as_deref(), Some("waiting"));
+        assert!(!active.paused);
+    }
+
+    #[test]
+    fn compute_download_retry_backoff_uses_progressive_steps() {
+        let download_cfg = crate::model::VideoDownloadConfig {
+            headers: std::collections::HashMap::new(),
+            directory: "/tmp".to_string(),
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_step_1_secs: 3,
+            retry_backoff_step_2_secs: 10,
+            retry_backoff_step_3_secs: 30,
+            retry_backoff_jitter_percent: 0,
+            retry_max_attempts: 5,
+        };
+
+        assert_eq!(super::compute_download_retry_backoff_secs(1, &download_cfg), 3);
+        assert_eq!(super::compute_download_retry_backoff_secs(2, &download_cfg), 10);
+        assert_eq!(super::compute_download_retry_backoff_secs(3, &download_cfg), 30);
+        assert_eq!(super::compute_download_retry_backoff_secs(8, &download_cfg), 30);
+    }
+
+    #[test]
+    fn background_download_waits_when_all_candidates_hit_background_limit() {
+        let download_cfg = crate::model::VideoDownloadConfig {
+            headers: std::collections::HashMap::new(),
+            directory: "/tmp".to_string(),
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 2,
+            retry_backoff_step_1_secs: 3,
+            retry_backoff_step_2_secs: 10,
+            retry_backoff_step_3_secs: 30,
+            retry_backoff_jitter_percent: 0,
+            retry_max_attempts: 5,
+        };
+
+        let capacities = vec![(Arc::<str>::from("a"), 2, 5), (Arc::<str>::from("b"), 3, 5)];
+        assert!(super::background_download_should_wait(1, &capacities, &download_cfg));
+        assert!(!super::background_download_should_wait(0, &capacities, &download_cfg));
+    }
+
+    #[test]
+    fn background_download_waits_when_reserved_user_slots_would_be_consumed() {
+        let download_cfg = crate::model::VideoDownloadConfig {
+            headers: std::collections::HashMap::new(),
+            directory: "/tmp".to_string(),
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 1,
+            max_background_per_provider: 0,
+            retry_backoff_step_1_secs: 3,
+            retry_backoff_step_2_secs: 10,
+            retry_backoff_step_3_secs: 30,
+            retry_backoff_jitter_percent: 0,
+            retry_max_attempts: 5,
+        };
+
+        let blocked = vec![(Arc::<str>::from("a"), 4, 5), (Arc::<str>::from("b"), 4, 5)];
+        let allowed = vec![(Arc::<str>::from("a"), 3, 5), (Arc::<str>::from("b"), 4, 6)];
+        assert!(super::background_download_should_wait(1, &blocked, &download_cfg));
+        assert!(!super::background_download_should_wait(1, &allowed, &download_cfg));
+    }
+
+    #[test]
+    fn retryable_transport_error_message_detects_common_transient_failures() {
+        assert!(retryable_transport_error_message("dns lookup failed"));
+        assert!(retryable_transport_error_message("connection reset by peer"));
+        assert!(retryable_transport_error_message("operation timed out"));
+        assert!(!retryable_transport_error_message("invalid URL"));
+    }
+
+    #[tokio::test]
     async fn active_download_snapshot_releases_read_lock_before_followup_write() {
         let active = Arc::new(RwLock::new(Some(FileDownload {
             uuid: "id".to_string(),
@@ -886,6 +1380,8 @@ mod tests {
             kind: DownloadKind::Download,
             input_name: None,
             priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
         })));
         let snapshot = active_download_snapshot(&active).await;
         assert!(snapshot.is_some());

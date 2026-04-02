@@ -9,6 +9,18 @@ use crate::{
 };
 use std::{borrow::BorrowMut, collections::HashMap};
 
+const fn default_retry_backoff_step_1_secs() -> u64 { 3 }
+const fn default_retry_backoff_step_2_secs() -> u64 { 10 }
+const fn default_retry_backoff_step_3_secs() -> u64 { 30 }
+const fn default_retry_backoff_jitter_percent() -> u8 { 20 }
+const fn default_retry_max_attempts() -> u8 { 5 }
+fn is_default_retry_backoff_step_1_secs(value: &u64) -> bool { *value == default_retry_backoff_step_1_secs() }
+fn is_default_retry_backoff_step_2_secs(value: &u64) -> bool { *value == default_retry_backoff_step_2_secs() }
+fn is_default_retry_backoff_step_3_secs(value: &u64) -> bool { *value == default_retry_backoff_step_3_secs() }
+fn is_default_retry_backoff_jitter_percent(value: &u8) -> bool { *value == default_retry_backoff_jitter_percent() }
+fn is_default_retry_max_attempts(value: &u8) -> bool { *value == default_retry_max_attempts() }
+fn is_zero_u8(value: &u8) -> bool { *value == 0 }
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VideoDownloadConfigDto {
@@ -24,6 +36,32 @@ pub struct VideoDownloadConfigDto {
     pub download_priority: i8,
     #[serde(default)]
     pub recording_priority: i8,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub reserve_slots_for_users: u8,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub max_background_per_provider: u8,
+    #[serde(
+        default = "default_retry_backoff_step_1_secs",
+        skip_serializing_if = "is_default_retry_backoff_step_1_secs"
+    )]
+    pub retry_backoff_step_1_secs: u64,
+    #[serde(
+        default = "default_retry_backoff_step_2_secs",
+        skip_serializing_if = "is_default_retry_backoff_step_2_secs"
+    )]
+    pub retry_backoff_step_2_secs: u64,
+    #[serde(
+        default = "default_retry_backoff_step_3_secs",
+        skip_serializing_if = "is_default_retry_backoff_step_3_secs"
+    )]
+    pub retry_backoff_step_3_secs: u64,
+    #[serde(
+        default = "default_retry_backoff_jitter_percent",
+        skip_serializing_if = "is_default_retry_backoff_jitter_percent"
+    )]
+    pub retry_backoff_jitter_percent: u8,
+    #[serde(default = "default_retry_max_attempts", skip_serializing_if = "is_default_retry_max_attempts")]
+    pub retry_max_attempts: u8,
 }
 
 impl VideoDownloadConfigDto {
@@ -32,6 +70,13 @@ impl VideoDownloadConfigDto {
             && self.headers.is_empty()
             && is_blank_or_default_download_dir(&self.directory)
             && is_blank_or_default_episode_pattern(&self.episode_pattern)
+            && self.reserve_slots_for_users == 0
+            && self.max_background_per_provider == 0
+            && is_default_retry_backoff_step_1_secs(&self.retry_backoff_step_1_secs)
+            && is_default_retry_backoff_step_2_secs(&self.retry_backoff_step_2_secs)
+            && is_default_retry_backoff_step_3_secs(&self.retry_backoff_step_3_secs)
+            && is_default_retry_backoff_jitter_percent(&self.retry_backoff_jitter_percent)
+            && is_default_retry_max_attempts(&self.retry_max_attempts)
     }
 }
 
@@ -94,6 +139,12 @@ impl VideoConfigDto {
                         return info_err_res!("can't parse regex: {episode_pattern} {err}");
                     }
                 }
+
+                downl.retry_backoff_step_1_secs = downl.retry_backoff_step_1_secs.max(1);
+                downl.retry_backoff_step_2_secs = downl.retry_backoff_step_2_secs.max(1);
+                downl.retry_backoff_step_3_secs = downl.retry_backoff_step_3_secs.max(1);
+                downl.retry_backoff_jitter_percent = downl.retry_backoff_jitter_percent.min(95);
+                downl.retry_max_attempts = downl.retry_max_attempts.max(1);
             }
         }
         Ok(())
@@ -116,6 +167,13 @@ mod tests {
                 episode_pattern: None,
                 download_priority: 0,
                 recording_priority: 0,
+                reserve_slots_for_users: 0,
+                max_background_per_provider: 0,
+                retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
+                retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
+                retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+                retry_max_attempts: default_retry_max_attempts(),
             }),
             web_search: None,
         };
@@ -135,6 +193,13 @@ mod tests {
                 episode_pattern: None,
                 download_priority: 0,
                 recording_priority: 0,
+                reserve_slots_for_users: 0,
+                max_background_per_provider: 0,
+                retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
+                retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
+                retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+                retry_max_attempts: default_retry_max_attempts(),
             }),
             web_search: None,
         };
@@ -154,6 +219,13 @@ mod tests {
                 episode_pattern: None,
                 download_priority: 0,
                 recording_priority: 0,
+                reserve_slots_for_users: 0,
+                max_background_per_provider: 0,
+                retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
+                retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
+                retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+                retry_max_attempts: default_retry_max_attempts(),
             }),
             web_search: None,
         };
@@ -171,6 +243,13 @@ mod tests {
             episode_pattern: None,
             download_priority: 0,
             recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
+            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
+            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+            retry_max_attempts: default_retry_max_attempts(),
         };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(
@@ -188,6 +267,13 @@ mod tests {
             episode_pattern: None,
             download_priority: 0,
             recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
+            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
+            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+            retry_max_attempts: default_retry_max_attempts(),
         };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(serialized.contains("\"directory\""), "expected directory field for custom value, got: {serialized}");
@@ -202,11 +288,98 @@ mod tests {
             episode_pattern: default_episode_pattern(),
             download_priority: 0,
             recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
+            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
+            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+            retry_max_attempts: default_retry_max_attempts(),
         };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(
             !serialized.contains("\"episode_pattern\""),
             "expected no episode_pattern field for default value, got: {serialized}"
         );
+    }
+
+    #[test]
+    fn prepare_preserves_download_retry_backoff_settings() {
+        let mut video = VideoConfigDto {
+            extensions: Vec::new(),
+            download: Some(VideoDownloadConfigDto {
+                headers: HashMap::new(),
+                directory: None,
+                organize_into_directories: false,
+                episode_pattern: None,
+                download_priority: 0,
+                recording_priority: 0,
+                reserve_slots_for_users: 0,
+                max_background_per_provider: 0,
+                retry_backoff_step_1_secs: 3,
+                retry_backoff_step_2_secs: 12,
+                retry_backoff_step_3_secs: 45,
+                retry_backoff_jitter_percent: 0,
+                retry_max_attempts: 7,
+            }),
+            web_search: None,
+        };
+
+        video.prepare().expect("prepare should succeed");
+        let download = video.download.expect("download should exist");
+        assert_eq!(download.retry_backoff_step_1_secs, 3);
+        assert_eq!(download.retry_backoff_step_2_secs, 12);
+        assert_eq!(download.retry_backoff_step_3_secs, 45);
+        assert_eq!(download.retry_backoff_jitter_percent, 0);
+        assert_eq!(download.retry_max_attempts, 7);
+    }
+
+    #[test]
+    fn serializing_keeps_custom_download_retry_backoff_settings() {
+        let download = VideoDownloadConfigDto {
+            headers: HashMap::new(),
+            directory: None,
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_step_1_secs: 4,
+            retry_backoff_step_2_secs: 15,
+            retry_backoff_step_3_secs: 60,
+            retry_backoff_jitter_percent: 10,
+            retry_max_attempts: 6,
+        };
+
+        let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
+        assert!(serialized.contains("\"retry_backoff_step_1_secs\":4"));
+        assert!(serialized.contains("\"retry_backoff_step_2_secs\":15"));
+        assert!(serialized.contains("\"retry_backoff_step_3_secs\":60"));
+        assert!(serialized.contains("\"retry_backoff_jitter_percent\":10"));
+        assert!(serialized.contains("\"retry_max_attempts\":6"));
+    }
+
+    #[test]
+    fn serializing_keeps_scheduler_policy_settings() {
+        let download = VideoDownloadConfigDto {
+            headers: HashMap::new(),
+            directory: None,
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 1,
+            max_background_per_provider: 2,
+            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
+            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
+            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+            retry_max_attempts: default_retry_max_attempts(),
+        };
+
+        let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
+        assert!(serialized.contains("\"reserve_slots_for_users\":1"));
+        assert!(serialized.contains("\"max_background_per_provider\":2"));
     }
 }

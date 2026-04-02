@@ -62,8 +62,16 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
     !auth_required || mem.permissions.contains(Permission::SystemRead)
 }
 
-fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory) -> bool {
-    mem.permissions.contains(Permission::SystemRead)
+#[inline]
+fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
+    !auth_required || mem.permissions.contains(Permission::DownloadRead)
+}
+
+fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
+    match event {
+        EventMessage::DownloadsUpdate(_) => mem.permissions.contains(Permission::DownloadRead),
+        _ => mem.permissions.contains(Permission::SystemRead),
+    }
 }
 
 fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
@@ -124,10 +132,6 @@ async fn handle_protocol_message(
                     return Some(ProtocolMessage::Unauthorized);
                 };
 
-                if !token_data.claims.permissions.contains(Permission::SystemRead) {
-                    return Some(ProtocolMessage::Unauthorized);
-                }
-
                 set_websocket_auth(mem, auth_token, &token_data.claims);
                 Some(ProtocolMessage::Authorized)
             }
@@ -163,7 +167,7 @@ async fn handle_protocol_message(
                 }
             }
             Ok(ProtocolMessage::DownloadsRequest) => {
-                if websocket_requires_system_read(auth_required, mem) && (!auth_required || mem.token.is_some()) {
+                if websocket_requires_download_read(auth_required, mem) && (!auth_required || mem.token.is_some()) {
                     Some(ProtocolMessage::DownloadsResponse(download_queue_snapshot(&app_state.downloads).await))
                 } else {
                     Some(ProtocolMessage::Unauthorized)
@@ -285,7 +289,7 @@ async fn handle_event_message(
     match handler {
         ProtocolHandler::Version(_) => {}
         ProtocolHandler::Default(mem) => {
-            if websocket_can_receive_runtime_events(mem) {
+            if websocket_can_receive_runtime_events(mem, &event) {
                 match event {
                     EventMessage::ServerError(error) => {
                         if supports_server_error_messages(mem.peer_version) {
@@ -449,7 +453,8 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 #[cfg(test)]
 mod tests {
     use super::websocket_can_receive_runtime_events;
-    use shared::model::{Permission, ProtocolHandlerMemory, UserRole};
+    use crate::api::model::EventMessage;
+    use shared::model::{DownloadsResponse, Permission, ProtocolHandlerMemory, UserRole};
 
     #[test]
     fn test_websocket_runtime_events_allowed_for_admin() {
@@ -459,7 +464,10 @@ mod tests {
         };
         mem.role = UserRole::Admin;
 
-        assert!(websocket_can_receive_runtime_events(&mem));
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
     }
 
     #[test]
@@ -470,7 +478,10 @@ mod tests {
         };
         mem.role = UserRole::User;
 
-        assert!(websocket_can_receive_runtime_events(&mem));
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
     }
 
     #[test]
@@ -481,7 +492,10 @@ mod tests {
         };
         mem.role = UserRole::User;
 
-        assert!(!websocket_can_receive_runtime_events(&mem));
+        assert!(!websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
     }
 
     #[test]
@@ -489,6 +503,45 @@ mod tests {
         let mut mem = ProtocolHandlerMemory::default();
         mem.role = UserRole::User;
 
-        assert!(!websocket_can_receive_runtime_events(&mem));
+        assert!(!websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_websocket_download_updates_allowed_for_download_read_user() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::DownloadRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::DownloadsUpdate(DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: Vec::new(),
+            })
+        ));
+    }
+
+    #[test]
+    fn test_websocket_download_updates_denied_without_download_read() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::SystemRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(!websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::DownloadsUpdate(DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: Vec::new(),
+            })
+        ));
     }
 }

@@ -6,6 +6,30 @@
 
 ## 🌟 New Features
 
+- **Download And Recording Manager**: The Web UI download feature has been expanded into a provider-aware download/recording manager.
+  - VOD, series and episode downloads now use typed transfer snapshots across REST and websocket updates.
+  - Download state in the Web UI is websocket-driven after the initial snapshot instead of relying on repeated REST polling.
+  - Live entries can be scheduled as recordings through an `ffmpeg`-based recording worker.
+  - Download and recording tasks now respect provider capacity and join the normal priority/preemption model instead of bypassing provider limits.
+  - Download snapshots and actions are integrated into RBAC through the dedicated `download.read` and `download.write` permissions.
+  - Background fairness controls were added under `video.download`:
+    - `reserve_slots_for_users`
+    - `max_background_per_provider`
+    - `download_priority`
+    - `recording_priority`
+  - Transient retries now use staged backoff with jitter and an explicit retry ceiling via:
+    - `retry_backoff_step_1_secs`
+    - `retry_backoff_step_2_secs`
+    - `retry_backoff_step_3_secs`
+    - `retry_backoff_jitter_percent`
+    - `retry_max_attempts`
+  - Transfer snapshots now expose `WaitingForCapacity`, `RetryWaiting`, `retry_attempts` and `next_retry_at`.
+  - Waiting transfers stay cancel-/pauseable while they are blocked on provider capacity or retry backoff.
+  - The Playlist Explorer now supports:
+    - optional priority override for VOD/series/episode downloads
+    - start time, duration and optional priority override for live recordings
+  - Missed scheduled recordings are now terminalized during recovery/promotion instead of being replayed late.
+  - Preempted or retried live recordings continue with the remaining recording window instead of restarting with the full original duration.
 - **QoS Aggregation Persistence**: Added a new persisted QoS snapshot repository (`qos_snapshot.db` + `qos_snapshot_meta.db`) in the storage directory.
   These files are maintained automatically by the QoS aggregation worker and become part of the local persistent runtime state.
 - **Stream History QoS Foundation**: Stream history now captures structured QoS-relevant stream lifecycle data for later  

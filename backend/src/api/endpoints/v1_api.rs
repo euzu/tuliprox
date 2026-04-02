@@ -123,7 +123,6 @@ pub fn v1_api_register(
     let system_read = axum::routing::Router::new()
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
-        .route("/file/download/info", axum::routing::get(download_api::download_file_info))
         .route("/ipinfo", axum::routing::get(ipinfo))
         .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_query))
         .route("/stream-history/summary", axum::routing::get(super::stream_history_api::stream_history_summary_query))

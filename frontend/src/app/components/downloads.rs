@@ -5,7 +5,7 @@ use crate::{
     utils::format_bytes,
 };
 use shared::{
-    model::{DownloadsResponse, FileDownloadDto, ProtocolMessage, SortOrder},
+    model::{DownloadsResponse, FileDownloadDto, ProtocolMessage, SortOrder, TaskKindDto, TransferStatusDto},
     utils::unix_ts_to_str,
 };
 use std::{cmp::Ordering, rc::Rc};
@@ -33,10 +33,10 @@ fn normalize_download_tab(
     current: &DownloadTab,
     queue: &[FileDownloadDto],
     finished: &[FileDownloadDto],
-    active: Option<&FileDownloadDto>,
+    active: &[Rc<FileDownloadDto>],
 ) -> DownloadTab {
     match current {
-        DownloadTab::Finished if finished.is_empty() && (active.is_some() || !queue.is_empty()) => DownloadTab::Queue,
+        DownloadTab::Finished if finished.is_empty() && (!active.is_empty() || !queue.is_empty()) => DownloadTab::Queue,
         _ => current.clone(),
     }
 }
@@ -45,11 +45,10 @@ fn collect_downloads_for_tab(
     tab: &DownloadTab,
     queue: &Rc<Vec<FileDownloadDto>>,
     finished: &Rc<Vec<FileDownloadDto>>,
-    active: &Option<Rc<FileDownloadDto>>,
+    active: &Rc<Vec<Rc<FileDownloadDto>>>,
 ) -> Vec<Rc<FileDownloadDto>> {
     match tab {
         DownloadTab::Queue => {
-            // Active download always first, then the rest of the queue
             let mut items: Vec<Rc<FileDownloadDto>> = active.iter().cloned().collect();
             items.extend(queue.iter().cloned().map(Rc::new));
             items
@@ -58,39 +57,39 @@ fn collect_downloads_for_tab(
     }
 }
 
-fn format_download_kind(translate: &crate::i18n::YewI18n, kind: &str) -> String {
+fn format_download_kind(translate: &crate::i18n::YewI18n, kind: &TaskKindDto) -> String {
     match kind {
-        "Recording" => translate.t("LABEL.RECORD"),
-        "Download" | "" => translate.t("LABEL.DOWNLOAD"),
-        _ => kind.to_string(),
+        TaskKindDto::Recording => translate.t("LABEL.RECORD"),
+        TaskKindDto::Download => translate.t("LABEL.DOWNLOAD"),
     }
 }
 
-fn format_download_state(translate: &crate::i18n::YewI18n, state: &str) -> String {
+fn format_download_state(translate: &crate::i18n::YewI18n, state: &TransferStatusDto) -> String {
     match state {
-        "Queued" => translate.t("LABEL.DOWNLOAD_STATE_QUEUED"),
-        "Scheduled" => translate.t("LABEL.DOWNLOAD_STATE_SCHEDULED"),
-        "Downloading" => translate.t("LABEL.DOWNLOAD_STATE_DOWNLOADING"),
-        "Paused" => translate.t("LABEL.DOWNLOAD_STATE_PAUSED"),
-        "Completed" => translate.t("LABEL.DOWNLOAD_STATE_COMPLETED"),
-        "Failed" => translate.t("LABEL.DOWNLOAD_STATE_FAILED"),
-        "Cancelled" => translate.t("LABEL.DOWNLOAD_CANCEL"),
-        _ => state.to_string(),
+        TransferStatusDto::Queued => translate.t("LABEL.DOWNLOAD_STATE_QUEUED"),
+        TransferStatusDto::Scheduled => translate.t("LABEL.DOWNLOAD_STATE_SCHEDULED"),
+        TransferStatusDto::Running => translate.t("LABEL.DOWNLOAD_STATE_DOWNLOADING"),
+        TransferStatusDto::Paused => translate.t("LABEL.DOWNLOAD_STATE_PAUSED"),
+        TransferStatusDto::Completed => translate.t("LABEL.DOWNLOAD_STATE_COMPLETED"),
+        TransferStatusDto::Failed => translate.t("LABEL.DOWNLOAD_STATE_FAILED"),
+        TransferStatusDto::Cancelled => translate.t("LABEL.DOWNLOAD_CANCEL"),
+        TransferStatusDto::WaitingForCapacity => translate.t("LABEL.DOWNLOAD_STATE_WAITING_FOR_CAPACITY"),
+        TransferStatusDto::RetryWaiting => translate.t("LABEL.DOWNLOAD_STATE_RETRY_WAITING"),
     }
 }
 
 fn format_download_progress(download: &FileDownloadDto) -> String {
-    if let Some(total) = download.total_size {
+    if let Some(total) = download.total_bytes {
         if total > 0 {
-            let percent = ((download.filesize as f64 / total as f64) * 100.0).round() as u32;
-            return format!("{} / {} ({}%)", format_bytes(download.filesize), format_bytes(total), percent);
+            let percent = ((download.downloaded_bytes as f64 / total as f64) * 100.0).round() as u32;
+            return format!("{} / {} ({}%)", format_bytes(download.downloaded_bytes), format_bytes(total), percent);
         }
     }
-    format_bytes(download.filesize)
+    format_bytes(download.downloaded_bytes)
 }
 
 fn format_download_start(download: &FileDownloadDto) -> String {
-    download.start_at.and_then(unix_ts_to_str).unwrap_or_default()
+    download.scheduled_start_at.and_then(unix_ts_to_str).unwrap_or_default()
 }
 
 fn format_download_duration(download: &FileDownloadDto) -> String {
@@ -108,14 +107,28 @@ fn format_download_duration(download: &FileDownloadDto) -> String {
         .unwrap_or_default()
 }
 
+fn format_download_error(download: &FileDownloadDto) -> String {
+    let mut parts = Vec::new();
+    if let Some(error) = download.error.as_ref().filter(|error| !error.is_empty()) {
+        parts.push(error.clone());
+    }
+    if download.retry_attempts > 0 {
+        parts.push(format!("attempt {}", download.retry_attempts));
+    }
+    if let Some(next_retry_at) = download.next_retry_at.and_then(unix_ts_to_str) {
+        parts.push(format!("next retry {next_retry_at}"));
+    }
+    parts.join(" | ")
+}
+
 fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Ordering {
     match col {
-        1 => a.filename.cmp(&b.filename),
+        1 => a.title.cmp(&b.title),
         2 => a.kind.cmp(&b.kind),
-        3 => a.state.cmp(&b.state),
-        4 => a.filesize.cmp(&b.filesize),
-        5 => a.total_size.unwrap_or(a.filesize).cmp(&b.total_size.unwrap_or(b.filesize)),
-        6 => a.start_at.unwrap_or_default().cmp(&b.start_at.unwrap_or_default()),
+        3 => a.status.cmp(&b.status),
+        4 => a.downloaded_bytes.cmp(&b.downloaded_bytes),
+        5 => a.total_bytes.unwrap_or(a.downloaded_bytes).cmp(&b.total_bytes.unwrap_or(b.downloaded_bytes)),
+        6 => a.scheduled_start_at.unwrap_or_default().cmp(&b.scheduled_start_at.unwrap_or_default()),
         7 => a.duration_secs.unwrap_or_default().cmp(&b.duration_secs.unwrap_or_default()),
         8 => a.error.as_deref().unwrap_or_default().cmp(b.error.as_deref().unwrap_or_default()),
         _ => Ordering::Equal,
@@ -128,11 +141,11 @@ fn apply_download_snapshot(
     response: &DownloadsResponse,
     queue_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
     finished_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
-    active_download: &UseStateHandle<Option<Rc<FileDownloadDto>>>,
+    active_download: &UseStateHandle<Rc<Vec<Rc<FileDownloadDto>>>>,
 ) {
     queue_state.set(Rc::new(response.queue.clone()));
-    finished_state.set(Rc::new(response.downloads.clone()));
-    active_download.set(response.active.clone().map(Rc::new));
+    finished_state.set(Rc::new(response.finished.clone()));
+    active_download.set(Rc::new(response.active.iter().cloned().map(Rc::new).collect()));
 }
 
 #[function_component(DownloadsView)]
@@ -143,7 +156,7 @@ pub fn downloads_view() -> Html {
     let active_tab = use_state(|| DownloadTab::Queue);
     let queue_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
     let finished_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
-    let active_download = use_state(|| None::<Rc<FileDownloadDto>>);
+    let active_download = use_state(|| Rc::new(Vec::<Rc<FileDownloadDto>>::new()));
     let table_items = use_state(|| None::<Rc<Vec<Rc<FileDownloadDto>>>>);
 
     let request_downloads = {
@@ -185,7 +198,7 @@ pub fn downloads_view() -> Html {
             ((*active_tab).clone(), (*queue_state).clone(), (*finished_state).clone(), (*active_download).clone()),
             move |(tab, queue, finished, active)| {
                 let normalized_tab =
-                    normalize_download_tab(tab, queue.as_slice(), finished.as_slice(), active.as_deref());
+                    normalize_download_tab(tab, queue.as_slice(), finished.as_slice(), active.as_ref());
                 if normalized_tab != *tab {
                     active_tab_set.set(normalized_tab.clone());
                 }
@@ -300,17 +313,31 @@ pub fn downloads_view() -> Html {
         Callback::<(usize, usize, Rc<FileDownloadDto>), Html>::from(
             move |(_row, col, dto): (usize, usize, Rc<FileDownloadDto>)| match col {
                 0 => {
-                    let can_pause = dto.state == "Downloading";
-                    let can_resume = dto.state == "Paused";
-                    let can_cancel = dto.state == "Downloading" || dto.state == "Queued" || dto.state == "Scheduled";
-                    let can_remove =
-                        dto.finished || dto.state == "Failed" || dto.state == "Completed" || dto.state == "Cancelled";
-                    let can_retry = dto.state == "Failed";
-                    let pause_uuid = dto.uuid.clone();
-                    let resume_uuid = dto.uuid.clone();
-                    let cancel_uuid = dto.uuid.clone();
-                    let retry_uuid = dto.uuid.clone();
-                    let remove_uuid = dto.uuid.clone();
+                    let can_pause = matches!(
+                        dto.status,
+                        TransferStatusDto::Running
+                            | TransferStatusDto::WaitingForCapacity
+                            | TransferStatusDto::RetryWaiting
+                    );
+                    let can_resume = dto.status == TransferStatusDto::Paused;
+                    let can_cancel = matches!(
+                        dto.status,
+                        TransferStatusDto::Running
+                            | TransferStatusDto::Queued
+                            | TransferStatusDto::Scheduled
+                            | TransferStatusDto::WaitingForCapacity
+                            | TransferStatusDto::RetryWaiting
+                    );
+                    let can_remove = matches!(
+                        dto.status,
+                        TransferStatusDto::Failed | TransferStatusDto::Completed | TransferStatusDto::Cancelled
+                    );
+                    let can_retry = dto.status == TransferStatusDto::Failed;
+                    let pause_uuid = dto.id.clone();
+                    let resume_uuid = dto.id.clone();
+                    let cancel_uuid = dto.id.clone();
+                    let retry_uuid = dto.id.clone();
+                    let remove_uuid = dto.id.clone();
                     let pause_handle = handle_pause.clone();
                     let resume_handle = handle_resume.clone();
                     let cancel_handle = handle_cancel.clone();
@@ -336,16 +363,16 @@ pub fn downloads_view() -> Html {
                         </div>
                     }
                 }
-                1 => html! { <span class="tp__table__nowrap">{dto.filename.clone()}</span> },
+                1 => html! { <span class="tp__table__nowrap">{dto.title.clone()}</span> },
                 2 => html! { format_download_kind(&translate, &dto.kind) },
-                3 => html! { format_download_state(&translate, &dto.state) },
+                3 => html! { format_download_state(&translate, &dto.status) },
                 4 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
                 5 => {
-                    html! { <span class="tp__table__nowrap">{dto.total_size.map_or_else(String::new, format_bytes)}</span> }
+                    html! { <span class="tp__table__nowrap">{dto.total_bytes.map_or_else(String::new, format_bytes)}</span> }
                 }
                 6 => html! { <span class="tp__table__nowrap">{format_download_start(&dto)}</span> },
                 7 => html! { format_download_duration(&dto) },
-                8 => html! { dto.error.clone().unwrap_or_default() },
+                8 => html! { format_download_error(&dto) },
                 _ => html! {},
             },
         )
@@ -418,20 +445,21 @@ pub fn downloads_view() -> Html {
 #[cfg(test)]
 mod tests {
     use super::{collect_downloads_for_tab, normalize_download_tab, DownloadTab};
-    use shared::model::FileDownloadDto;
+    use shared::model::{FileDownloadDto, TaskKindDto, TransferStatusDto};
     use std::rc::Rc;
 
-    fn download(uuid: &str, state: &str) -> FileDownloadDto {
+    fn download(id: &str, status: TransferStatusDto) -> FileDownloadDto {
         FileDownloadDto {
-            uuid: uuid.to_string(),
-            filename: format!("{uuid}.mp4"),
-            kind: "Download".to_string(),
-            filesize: 0,
-            total_size: None,
-            finished: false,
-            paused: false,
-            state: state.to_string(),
-            start_at: None,
+            id: id.to_string(),
+            title: format!("{id}.mp4"),
+            kind: TaskKindDto::Download,
+            priority: shared::model::TaskPriorityDto::Background,
+            status,
+            retry_attempts: 0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            next_retry_at: None,
+            scheduled_start_at: None,
             duration_secs: None,
             error: None,
         }
@@ -439,35 +467,35 @@ mod tests {
 
     #[test]
     fn queue_tab_shows_active_download_first_then_queue() {
-        let queue = Rc::new(vec![download("q1", "Queued"), download("q2", "Queued")]);
+        let queue = Rc::new(vec![download("q1", TransferStatusDto::Queued), download("q2", TransferStatusDto::Queued)]);
         let finished = Rc::new(vec![]);
-        let active = Some(Rc::new(download("active", "Downloading")));
+        let active = Rc::new(vec![Rc::new(download("active", TransferStatusDto::Running))]);
 
         let items = collect_downloads_for_tab(&DownloadTab::Queue, &queue, &finished, &active);
 
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0].uuid, "active");
-        assert_eq!(items[1].uuid, "q1");
-        assert_eq!(items[2].uuid, "q2");
+        assert_eq!(items[0].id, "active");
+        assert_eq!(items[1].id, "q1");
+        assert_eq!(items[2].id, "q2");
     }
 
     #[test]
     fn queue_tab_works_without_active_download() {
-        let queue = Rc::new(vec![download("q1", "Queued")]);
+        let queue = Rc::new(vec![download("q1", TransferStatusDto::Queued)]);
         let finished = Rc::new(vec![]);
-        let active = None;
+        let active = Rc::new(Vec::new());
 
         let items = collect_downloads_for_tab(&DownloadTab::Queue, &queue, &finished, &active);
 
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].uuid, "q1");
+        assert_eq!(items[0].id, "q1");
     }
 
     #[test]
     fn finished_tab_stays_when_has_items() {
         let queue = vec![];
-        let finished = vec![download("done", "Completed")];
-        let active = None;
+        let finished = vec![download("done", TransferStatusDto::Completed)];
+        let active: Rc<Vec<Rc<FileDownloadDto>>> = Rc::new(Vec::new());
 
         assert_eq!(
             normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
@@ -477,9 +505,9 @@ mod tests {
 
     #[test]
     fn finished_tab_falls_back_to_queue_when_empty() {
-        let queue = vec![download("q1", "Queued")];
+        let queue = vec![download("q1", TransferStatusDto::Queued)];
         let finished = vec![];
-        let active = None;
+        let active: Rc<Vec<Rc<FileDownloadDto>>> = Rc::new(Vec::new());
 
         assert_eq!(
             normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),

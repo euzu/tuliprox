@@ -13,6 +13,13 @@ pub struct VideoDownloadConfig {
     pub episode_pattern: Option<Arc<Regex>>,
     pub download_priority: i8,
     pub recording_priority: i8,
+    pub reserve_slots_for_users: u8,
+    pub max_background_per_provider: u8,
+    pub retry_backoff_step_1_secs: u64,
+    pub retry_backoff_step_2_secs: u64,
+    pub retry_backoff_step_3_secs: u64,
+    pub retry_backoff_jitter_percent: u8,
+    pub retry_max_attempts: u8,
 }
 
 macros::from_impl!(VideoDownloadConfig);
@@ -27,6 +34,13 @@ impl From<&VideoDownloadConfigDto> for VideoDownloadConfig {
                 .ok()),
             download_priority: dto.download_priority,
             recording_priority: dto.recording_priority,
+            reserve_slots_for_users: dto.reserve_slots_for_users,
+            max_background_per_provider: dto.max_background_per_provider,
+            retry_backoff_step_1_secs: dto.retry_backoff_step_1_secs.max(1),
+            retry_backoff_step_2_secs: dto.retry_backoff_step_2_secs.max(1),
+            retry_backoff_step_3_secs: dto.retry_backoff_step_3_secs.max(1),
+            retry_backoff_jitter_percent: dto.retry_backoff_jitter_percent.min(95),
+            retry_max_attempts: dto.retry_max_attempts.max(1),
         }
     }
 }
@@ -40,6 +54,13 @@ impl From<&VideoDownloadConfig> for VideoDownloadConfigDto {
             episode_pattern: instance.episode_pattern.as_ref().map(std::string::ToString::to_string),
             download_priority: instance.download_priority,
             recording_priority: instance.recording_priority,
+            reserve_slots_for_users: instance.reserve_slots_for_users,
+            max_background_per_provider: instance.max_background_per_provider,
+            retry_backoff_step_1_secs: instance.retry_backoff_step_1_secs,
+            retry_backoff_step_2_secs: instance.retry_backoff_step_2_secs,
+            retry_backoff_step_3_secs: instance.retry_backoff_step_3_secs,
+            retry_backoff_jitter_percent: instance.retry_backoff_jitter_percent,
+            retry_max_attempts: instance.retry_max_attempts,
         }
     }
 }

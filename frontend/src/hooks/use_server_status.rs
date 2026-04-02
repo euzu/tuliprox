@@ -1,5 +1,4 @@
 use crate::{hooks::use_service_context, model::EventMessage};
-use gloo_timers::callback::Interval;
 use shared::model::{ActiveUserConnectionChange, StatusCheck, StreamInfo, SystemInfo};
 use std::{
     cell::RefCell,
@@ -80,9 +79,19 @@ pub fn use_server_status(
 
         use_effect_with(enabled, move |enabled| {
             let mut subid: Option<usize> = None;
-            let mut interval: Option<Interval> = None;
 
             if *enabled {
+                let fetch_status: Rc<dyn Fn()> = Rc::new({
+                    let services_clone = services_ctx.clone();
+                    move || {
+                        let services_clone = services_clone.clone();
+                        spawn_local(async move {
+                            services_clone.websocket.get_server_status().await;
+                        });
+                    }
+                });
+                let fetch_status_on_ws = Rc::clone(&fetch_status);
+
                 subid = Some(services_ctx.event.subscribe(move |msg| match msg {
                     EventMessage::ServerStatus(server_status) => {
                         let mut server_status = (*server_status).clone();
@@ -129,28 +138,17 @@ pub fn use_server_status(
                         *system_info_holder_signal.borrow_mut() = Some(Rc::clone(&info));
                         system_info_signal.set(Some(info));
                     }
+                    EventMessage::WebSocketStatus(true) => {
+                        fetch_status_on_ws();
+                    }
                     _ => {}
                 }));
 
-                let fetch_status = {
-                    let services_clone = services_ctx.clone();
-                    move || {
-                        let services_clone = services_clone.clone();
-                        spawn_local(async move {
-                            services_clone.websocket.get_server_status().await;
-                        });
-                    }
-                };
-
                 fetch_status();
-                interval = Some(Interval::new(60 * 1000, move || {
-                    fetch_status();
-                }));
             }
 
             let services_clone = services_ctx.clone();
             move || {
-                drop(interval);
                 if let Some(subid) = subid {
                     services_clone.event.unsubscribe(subid);
                 }

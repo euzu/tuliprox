@@ -931,6 +931,13 @@ impl ProviderLineupManager {
         count
     }
 
+    pub async fn provider_capacity(&self, provider_name: &Arc<str>) -> Option<(usize, usize)> {
+        let snapshot = self.snapshot.load_full();
+        let (_, cfg) = Self::get_provider_config_by_name(provider_name, &snapshot.providers)?;
+        let current = cfg.get_current_connections().await;
+        Some((current, cfg.max_connections()))
+    }
+
     pub async fn is_over_limit(&self, provider_name: &Arc<str>) -> bool {
         let snapshot = self.snapshot.load_full();
         if let Some((_, config)) = Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
