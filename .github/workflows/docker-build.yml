@@ -61,6 +61,49 @@ jobs:
         with:
           cache-targets: "true"
 
+      - name: Handle Version Bump
+        run: |
+          chmod +x ./bin/inc_version.sh
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            case "${{ github.ref_name }}" in
+              develop) ./bin/inc_version.sh ;;
+              master) echo "Master builds use the version already committed in the merged PR; skipping version bump." ;;
+              *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
+            esac
+          else
+            if [[ "${{ github.event.inputs.branch }}" == "master" ]]; then
+              echo "Manual master builds use the version already committed on master; skipping version bump."
+            else
+              case "${{ github.event.inputs.choice }}" in
+                major) ./bin/inc_version.sh m ;;
+                minor) ./bin/inc_version.sh p ;;
+                patch) ./bin/inc_version.sh ;;
+              esac
+            fi
+          fi
+
+      - name: Read project version
+        id: version
+        run: |
+          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml)
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce zero patch for master releases
+        if: >-
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/master')
+        run: |
+          VERSION="${{ steps.version.outputs.value }}"
+          IFS='.' read -r major minor patch <<< "${VERSION}"
+          if [[ -z "${major}" || -z "${minor}" || -z "${patch}" ]]; then
+            echo "🧨 Invalid semantic version: ${VERSION}" >&2
+            exit 1
+          fi
+          if [[ "${patch}" != "0" ]]; then
+            echo "🧨 Refusing master release for non-release version ${VERSION}. Patch component must be 0." >&2
+            exit 1
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -102,27 +145,6 @@ jobs:
             fi
           done
 
-      - name: Handle Version Bump
-        run: |
-          chmod +x ./bin/inc_version.sh
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            case "${{ github.ref_name }}" in
-              develop) ./bin/inc_version.sh ;;
-              master) echo "Master builds use the version already committed in the merged PR; skipping version bump." ;;
-              *) echo "Unsupported push branch: ${{ github.ref_name }}" >&2; exit 1 ;;
-            esac
-          else
-            if [[ "${{ github.event.inputs.branch }}" == "master" ]]; then
-              echo "Manual master builds use the version already committed on master; skipping version bump."
-            else
-              case "${{ github.event.inputs.choice }}" in
-                major) ./bin/inc_version.sh m ;;
-                minor) ./bin/inc_version.sh p ;;
-                patch) ./bin/inc_version.sh ;;
-              esac
-            fi
-          fi
-
       - name: Commit version bump
         if: >-
           (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
@@ -147,28 +169,6 @@ jobs:
         run: |
           chmod +x ./bin/build_docker.sh
           ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
-
-      - name: Read project version
-        id: version
-        run: |
-          VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml)
-          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Enforce zero patch for master releases
-        if: >-
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
-          (github.event_name == 'push' && github.ref == 'refs/heads/master')
-        run: |
-          VERSION="${{ steps.version.outputs.value }}"
-          IFS='.' read -r major minor patch <<< "${VERSION}"
-          if [[ -z "${major}" || -z "${minor}" || -z "${patch}" ]]; then
-            echo "🧨 Invalid semantic version: ${VERSION}" >&2
-            exit 1
-          fi
-          if [[ "${patch}" != "0" ]]; then
-            echo "🧨 Refusing master release for non-release version ${VERSION}. Patch component must be 0." >&2
-            exit 1
-          fi
 
       - name: Verify static binary artifacts
         run: |
