@@ -62,6 +62,29 @@ write_checksum() {
     fi
 }
 
+create_release_bundle() {
+    local architecture="$1"
+    local binary_path="$2"
+    local bundle_root
+    local bundle_name
+    local bundle_path
+
+    bundle_root="$(mktemp -d)"
+    mkdir -p "${bundle_root}/tuliprox"
+
+    cp "${binary_path}" "${bundle_root}/tuliprox/tuliprox"
+    chmod +x "${bundle_root}/tuliprox/tuliprox"
+    cp -r "${FRONTEND_BUILD_DIR}" "${bundle_root}/tuliprox/web"
+    cp -r "${WORKING_DIR}/resources" "${bundle_root}/tuliprox/resources"
+
+    bundle_name="tuliprox-v${VERSION}-${architecture}.tar.gz"
+    bundle_path="${ARTIFACT_DIR}/${bundle_name}"
+    tar -C "${bundle_root}" -czf "${bundle_path}" tuliprox
+    write_checksum "${bundle_path}"
+
+    rm -rf "${bundle_root}"
+}
+
 # -----------------------------------------
 # 1. Documentation + Frontend Build
 # -----------------------------------------
@@ -86,13 +109,10 @@ for PLATFORM in "${!ARCHITECTURES[@]}"; do
     SOURCE_BIN_PATH="target/${ARCHITECTURE}/release/tuliprox"
     cp "${SOURCE_BIN_PATH}" "${DOCKER_DIR}/binaries/tuliprox-${ARCHITECTURE}"
 
-    VERSIONED_ARTIFACT_PATH="${ARTIFACT_DIR}/tuliprox-v${VERSION}-${ARCHITECTURE}"
-    cp "${SOURCE_BIN_PATH}" "${VERSIONED_ARTIFACT_PATH}"
-    chmod +x "${VERSIONED_ARTIFACT_PATH}"
-    write_checksum "${VERSIONED_ARTIFACT_PATH}"
+    create_release_bundle "${ARCHITECTURE}" "${SOURCE_BIN_PATH}"
 done
 
-echo "📦 Static binaries prepared in ${ARTIFACT_DIR}"
+echo "📦 Release bundles prepared in ${ARTIFACT_DIR}"
 
 # -----------------------------------------
 # 3. Docker Build & Push (Optimized Caching)
