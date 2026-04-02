@@ -121,7 +121,9 @@ impl StreamHistoryWriter {
         let Some(tx) = &self.tx else { return };
         let (resp_tx, resp_rx) = oneshot::channel();
         let _ = tx.send(WriterCommand::Shutdown(resp_tx)).await;
-        let _ = resp_rx.await;
+        if resp_rx.await.is_err() {
+            warn!("Stream history shutdown: worker channel closed");
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -258,8 +260,12 @@ impl WriterState {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "pending file not open"));
         };
 
-        let first_ts = self.batch.first().map_or(0, |r| r.event_ts_utc);
-        let last_ts = self.batch.last().map_or(0, |r| r.event_ts_utc);
+        let (first_ts, last_ts) = self
+            .batch
+            .iter()
+            .fold((u64::MAX, 0u64), |(min_ts, max_ts), record| {
+                (min_ts.min(record.event_ts_utc), max_ts.max(record.event_ts_utc))
+            });
         let record_count = u32::try_from(self.batch.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "record count too large"))?;
 
@@ -421,6 +427,8 @@ pub fn extract_day_from_filename(name: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::repository::stream_history::{EventType};
+    use crate::repository::{BlockHeaderBody, FileHeaderBody, read_and_verify_block_magic, read_and_verify_file_magic, read_framed};
+    use std::io::BufReader;
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
@@ -444,6 +452,7 @@ mod tests {
             api_username: Some("user1".to_string()),
             provider_name: Some("acme".to_string()),
             provider_username: None,
+            input_name: Some("input".to_string()),
             virtual_id: Some(1),
             item_type: Some("live".to_string()),
             title: Some("Test Channel".to_string()),
@@ -451,18 +460,28 @@ mod tests {
             country: None,
             user_agent: None,
             shared: None,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             provider_id: None,
             cluster: None,
             container: None,
+            stream_url_hash: None,
+            stream_identity_key: None,
             video_codec: None,
             audio_codec: None,
+            audio_channels: None,
             resolution: None,
+            fps: None,
             connect_ts_utc: None,
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
             first_byte_latency_ms: None,
             provider_reconnect_count: None,
+            failure_stage: None,
+            provider_http_status: None,
+            provider_error_class: None,
+            connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
             target_id: None,
@@ -571,6 +590,42 @@ mod tests {
         let pending = tmp.path().join(format!("stream-history-{day}.pending"));
         let metadata = std::fs::metadata(&pending).unwrap();
         assert!(metadata.len() > 100, "partial batch must be flushed to file (size={})", metadata.len());
+    }
+
+    #[tokio::test]
+    async fn stream_history_writer_block_header_uses_min_max_event_ts_even_when_batch_unsorted() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path().to_str().unwrap(), 100);
+        let writer = StreamHistoryWriter::new(&config);
+
+        let mut late = make_record(1, EventType::Connect);
+        late.event_ts_utc = 3_000;
+        late.partition_day_utc = "1970-01-01".to_string();
+
+        let mut early = make_record(2, EventType::Connect);
+        early.event_ts_utc = 1_000;
+        early.partition_day_utc = "1970-01-01".to_string();
+
+        let mut middle = make_record(3, EventType::Connect);
+        middle.event_ts_utc = 2_000;
+        middle.partition_day_utc = "1970-01-01".to_string();
+
+        writer.send_record(late);
+        writer.send_record(early);
+        writer.send_record(middle);
+        writer.flush().await.expect("explicit flush ok");
+        writer.shutdown().await;
+
+        let pending = tmp.path().join("stream-history-1970-01-01.pending");
+        let file = std::fs::File::open(&pending).unwrap();
+        let mut reader = BufReader::new(file);
+        read_and_verify_file_magic(&mut reader).unwrap();
+        let _: FileHeaderBody = read_framed(&mut reader).unwrap();
+        read_and_verify_block_magic(&mut reader).unwrap();
+        let block: BlockHeaderBody = read_framed(&mut reader).unwrap();
+
+        assert_eq!(block.first_event_ts_utc, 1_000);
+        assert_eq!(block.last_event_ts_utc, 3_000);
     }
 
     #[test]

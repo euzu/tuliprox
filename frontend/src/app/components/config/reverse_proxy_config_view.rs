@@ -19,8 +19,9 @@ use crate::{
 };
 use shared::{
     model::{
-        CacheConfigDto, GeoIpConfigDto, RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
-        ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
+        CacheConfigDto, GeoIpConfigDto, QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto,
+        ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto, StreamConfigDto,
+        StreamHistoryConfigDto,
     },
     utils::{default_secret, format_float_localized},
 };
@@ -74,6 +75,9 @@ const LABEL_STREAM_HISTORY: &str = "LABEL.STREAM_HISTORY";
 const LABEL_STREAM_HISTORY_ENABLED: &str = "LABEL.STREAM_HISTORY_ENABLED";
 const LABEL_STREAM_HISTORY_BATCH_SIZE: &str = "LABEL.STREAM_HISTORY_BATCH_SIZE";
 const LABEL_STREAM_HISTORY_RETENTION_DAYS: &str = "LABEL.STREAM_HISTORY_RETENTION_DAYS";
+const LABEL_QOS_AGGREGATION: &str = "LABEL.QOS_AGGREGATION";
+const LABEL_QOS_AGGREGATION_ENABLED: &str = "LABEL.QOS_AGGREGATION_ENABLED";
+const LABEL_INTERVAL_SECS: &str = "LABEL.INTERVAL_SECS";
 
 generate_form_reducer!(
     state: CacheConfigFormState { form: CacheConfigDto },
@@ -170,6 +174,15 @@ generate_form_reducer!(
 );
 
 generate_form_reducer!(
+    state: QosAggregationConfigFormState { form: QosAggregationConfigDto },
+    action_name: QosAggregationConfigFormAction,
+    fields {
+        Enabled => enabled: bool,
+        IntervalSecs => interval_secs: u64,
+    }
+);
+
+generate_form_reducer!(
     state: ReverseProxyConfigFormState { form: ReverseProxyConfigDto },
     action_name: ReverseProxyConfigFormAction,
     fields {
@@ -224,6 +237,8 @@ pub fn ReverseProxyConfigView() -> Html {
         use_reducer(|| FailoverPatternsFormState { form: FailoverPatternsDto::default(), modified: false });
     let stream_history_state: UseReducerHandle<StreamHistoryConfigFormState> =
         use_reducer(|| StreamHistoryConfigFormState { form: StreamHistoryConfigDto::default(), modified: false });
+    let qos_aggregation_state: UseReducerHandle<QosAggregationConfigFormState> =
+        use_reducer(|| QosAggregationConfigFormState { form: QosAggregationConfigDto::default(), modified: false });
     let last_emitted_form = use_mut_ref(|| None::<ConfigForm>);
 
     {
@@ -237,6 +252,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let stream_buffer_state = stream_buffer_state.clone();
         let failover_patterns_state = failover_patterns_state.clone();
         let stream_history_state = stream_history_state.clone();
+        let qos_aggregation_state = qos_aggregation_state.clone();
         let last_emitted_form = last_emitted_form.clone();
 
         use_emit_mapped_option(
@@ -252,6 +268,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     stream_buffer_state.form.clone(),
                     failover_patterns_state.form.clone(),
                     stream_history_state.form.clone(),
+                    qos_aggregation_state.form.clone(),
                 ),
                 (
                     reverse_proxy_state.modified,
@@ -264,6 +281,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     stream_buffer_state.modified,
                     failover_patterns_state.modified,
                     stream_history_state.modified,
+                    qos_aggregation_state.modified,
                 ),
             ),
             config_view_ctx.on_form_change.clone(),
@@ -279,6 +297,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     stream_buffer,
                     failover_patterns,
                     stream_history,
+                    qos_aggregation,
                 ),
                 (
                     rp_modified,
@@ -291,6 +310,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     stream_buffer_modified,
                     failover_patterns_modified,
                     stream_history_modified,
+                    qos_aggregation_modified,
                 ),
             )| {
                 let mut form = rp.clone();
@@ -307,6 +327,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 form.geoip = Some(geoip.clone());
                 form.disabled_header = if disabled_header.is_empty() { None } else { Some(disabled_header.clone()) };
                 form.stream_history = if stream_history.is_empty() { None } else { Some(stream_history.clone()) };
+                form.qos_aggregation = if qos_aggregation.is_empty() { None } else { Some(qos_aggregation.clone()) };
 
                 let modified = rp_modified
                     || disabled_header_modified
@@ -317,7 +338,8 @@ pub fn ReverseProxyConfigView() -> Html {
                     || geoip_modified
                     || stream_buffer_modified
                     || failover_patterns_modified
-                    || stream_history_modified;
+                    || stream_history_modified
+                    || qos_aggregation_modified;
                 let next_form = ConfigForm::ReverseProxy(modified, form);
                 let mut last_form = last_emitted_form.borrow_mut();
                 if last_form.as_ref() != Some(&next_form) {
@@ -341,6 +363,7 @@ pub fn ReverseProxyConfigView() -> Html {
         let stream_buffer_state = stream_buffer_state.clone();
         let failover_patterns_state = failover_patterns_state.clone();
         let stream_history_state = stream_history_state.clone();
+        let qos_aggregation_state = qos_aggregation_state.clone();
 
         let reverse_proxy_cfg = config_ctx.config.as_ref().and_then(|c| c.config.reverse_proxy.clone());
         use_effect_with((reverse_proxy_cfg, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
@@ -406,6 +429,12 @@ pub fn ReverseProxyConfigView() -> Html {
                 if stream_history_state.form != target_stream_history {
                     stream_history_state.dispatch(StreamHistoryConfigFormAction::SetAll(target_stream_history));
                 }
+
+                let target_qos_aggregation =
+                    rp.qos_aggregation.as_ref().map_or_else(QosAggregationConfigDto::default, |q| q.clone());
+                if qos_aggregation_state.form != target_qos_aggregation {
+                    qos_aggregation_state.dispatch(QosAggregationConfigFormAction::SetAll(target_qos_aggregation));
+                }
             } else {
                 let target_reverse_proxy = ReverseProxyConfigDto::default();
                 if reverse_proxy_state.form != target_reverse_proxy {
@@ -456,6 +485,11 @@ pub fn ReverseProxyConfigView() -> Html {
                 let target_stream_history = StreamHistoryConfigDto::default();
                 if stream_history_state.form != target_stream_history {
                     stream_history_state.dispatch(StreamHistoryConfigFormAction::SetAll(target_stream_history));
+                }
+
+                let target_qos_aggregation = QosAggregationConfigDto::default();
+                if qos_aggregation_state.form != target_qos_aggregation {
+                    qos_aggregation_state.dispatch(QosAggregationConfigFormAction::SetAll(target_qos_aggregation));
                 }
             }
             || ()
@@ -696,6 +730,16 @@ pub fn ReverseProxyConfigView() -> Html {
         }
     };
 
+    let render_qos_aggregation = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_QOS_AGGREGATION)}</h1>
+                { config_field_bool!(qos_aggregation_state.form, translate.t(LABEL_QOS_AGGREGATION_ENABLED), enabled) }
+                { config_field!(qos_aggregation_state.form, translate.t(LABEL_INTERVAL_SECS), interval_secs) }
+            </Card>
+        }
+    };
+
     let render_stream_history_edit = || {
         html! {
             <Card class="tp__config-view__card">
@@ -704,6 +748,16 @@ pub fn ReverseProxyConfigView() -> Html {
                 { edit_field_number_usize!(stream_history_state, translate.t(LABEL_STREAM_HISTORY_BATCH_SIZE), stream_history_batch_size, StreamHistoryConfigFormAction::BatchSize) }
                 { edit_field_number_u16!(stream_history_state, translate.t(LABEL_STREAM_HISTORY_RETENTION_DAYS), stream_history_retention_days, StreamHistoryConfigFormAction::RetentionDays) }
                 { edit_field_text!(stream_history_state, translate.t(LABEL_DIRECTORY), stream_history_directory, StreamHistoryConfigFormAction::Directory) }
+            </Card>
+        }
+    };
+
+    let render_qos_aggregation_edit = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_QOS_AGGREGATION)}</h1>
+                { edit_field_bool!(qos_aggregation_state, translate.t(LABEL_QOS_AGGREGATION_ENABLED), enabled, QosAggregationConfigFormAction::Enabled) }
+                { edit_field_number_u64!(qos_aggregation_state, translate.t(LABEL_INTERVAL_SECS), interval_secs, QosAggregationConfigFormAction::IntervalSecs) }
             </Card>
         }
     };
@@ -720,6 +774,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { render_stream() }
                 { render_stream_buffer() }
                 { render_stream_history() }
+                { render_qos_aggregation() }
             </div>
         }
     };
@@ -736,6 +791,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { render_stream_edit() }
                 { render_stream_buffer_edit() }
                 { render_stream_history_edit() }
+                { render_qos_aggregation_edit() }
             </div>
         }
     };

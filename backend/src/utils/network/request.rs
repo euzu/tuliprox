@@ -1879,6 +1879,7 @@ mod tests {
             rate_limit: None,
             geoip: None,
             stream_history: None,
+            qos_aggregation: None,
         });
         let app_config = make_test_app_config(cfg);
         let client = reqwest::Client::builder()

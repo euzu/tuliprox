@@ -3,6 +3,7 @@ use shared::error::to_io_error;
 use std::io::{self, Read, Write};
 use shared::model::StreamInfo;
 use crate::repository::{now_utc_secs, utc_day_from_secs};
+use crate::utils::encode_base64_hash;
 
 pub const FILE_MAGIC: [u8; 8] = *b"STRHIST\x01";
 pub const BLOCK_MAGIC: [u8; 4] = *b"BLK\x01";
@@ -31,7 +32,32 @@ pub enum RecordEncodingKind {
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     Connect,
+    ConnectFailed,
     Disconnect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectFailureReason {
+    UserAccountExpired,
+    UserConnectionsExhausted,
+    ProviderConnectionsExhausted,
+    ProviderError,
+    ProviderClosed,
+    ChannelUnavailable,
+    Preempted,
+    SessionExpired,
+    Provisioning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureStage {
+    Admission,
+    ProviderOpen,
+    FirstByte,
+    Streaming,
+    SessionReconnect,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +148,7 @@ pub struct StreamHistoryRecord {
     /// Provider-side username (e.g. Xtream account). Always `None` until `StreamInfo`
     /// carries the provider credential — at which point populate from there.
     pub provider_username: Option<String>,
+    pub input_name: Option<String>,
     // Stream metadata
     pub virtual_id: Option<u32>,
     pub item_type: Option<String>,
@@ -131,12 +158,18 @@ pub struct StreamHistoryRecord {
     // QoS metadata
     pub user_agent: Option<String>,
     pub shared: Option<bool>,
+    pub shared_joined_existing: Option<bool>,
+    pub shared_stream_id: Option<u64>,
     pub provider_id: Option<u32>,
     pub cluster: Option<String>,
     pub container: Option<String>,
+    pub stream_url_hash: Option<String>,
+    pub stream_identity_key: Option<String>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
+    pub audio_channels: Option<String>,
     pub resolution: Option<String>,
+    pub fps: Option<String>,
     // Session summary — populated on disconnect.
     // bytes_sent and first_byte_latency_ms are None for shared streams (meter serves
     // multiple clients; per-session totals are not meaningful in that case).
@@ -146,6 +179,10 @@ pub struct StreamHistoryRecord {
     pub bytes_sent: Option<u64>,
     pub first_byte_latency_ms: Option<u64>,
     pub provider_reconnect_count: Option<u8>,
+    pub failure_stage: Option<FailureStage>,
+    pub provider_http_status: Option<u16>,
+    pub provider_error_class: Option<String>,
+    pub connect_failure_reason: Option<ConnectFailureReason>,
     pub disconnect_reason: Option<DisconnectReason>,
     /// Set when this connect event continues a session that was split by a `DayRollover`.
     /// Always `None` until the `DayRollover` mechanism is implemented.
@@ -163,6 +200,23 @@ pub struct DisconnectQos {
 }
 
 impl StreamHistoryRecord {
+    fn build_stream_identity_key(info: &StreamInfo) -> Option<String> {
+        if info.channel.input_name.is_empty() {
+            return None;
+        }
+        let mut raw = String::with_capacity(info.channel.input_name.len() + 32);
+        raw.push_str(info.channel.input_name.as_ref());
+        raw.push('|');
+        raw.push_str(&info.channel.target_id.to_string());
+        raw.push('|');
+        raw.push_str(&info.channel.provider_id.to_string());
+        raw.push('|');
+        raw.push_str(&info.channel.virtual_id.to_string());
+        raw.push('|');
+        raw.push_str(&info.channel.item_type.to_string());
+        Some(encode_base64_hash(&raw))
+    }
+
     /// Build a common base from a `StreamInfo`, leaving event-specific fields to the caller.
     /// `event_ts` is the authoritative timestamp — `partition_day_utc` is derived from it
     /// so both fields are always consistent.
@@ -180,6 +234,11 @@ impl StreamHistoryRecord {
             api_username: Some(info.username.clone()),
             provider_name: Some(info.provider.clone()),
             provider_username: None,
+            input_name: if info.channel.input_name.is_empty() {
+                None
+            } else {
+                Some(info.channel.input_name.to_string())
+            },
             virtual_id: Some(info.channel.virtual_id),
             item_type: Some(info.channel.item_type.to_string()),
             title: Some(info.channel.title.to_string()),
@@ -187,18 +246,32 @@ impl StreamHistoryRecord {
             country: info.country_code.clone(),
             user_agent: if info.user_agent.is_empty() { None } else { Some(info.user_agent.clone()) },
             shared: Some(info.channel.shared),
+            shared_joined_existing: info.channel.shared_joined_existing,
+            shared_stream_id: info.channel.shared_stream_id,
             provider_id: Some(info.channel.provider_id),
             cluster: Some(info.channel.cluster.to_string()),
             container: info.channel.technical.as_ref().and_then(|t| if t.container.is_empty() { None } else { Some(t.container.clone()) }),
+            stream_url_hash: if info.channel.url.is_empty() {
+                None
+            } else {
+                Some(encode_base64_hash(info.channel.url.as_ref()))
+            },
+            stream_identity_key: Self::build_stream_identity_key(info),
             video_codec: info.channel.technical.as_ref().and_then(|t| if t.video_codec.is_empty() { None } else { Some(t.video_codec.clone()) }),
             audio_codec: info.channel.technical.as_ref().and_then(|t| if t.audio_codec.is_empty() { None } else { Some(t.audio_codec.clone()) }),
+            audio_channels: info.channel.technical.as_ref().and_then(|t| if t.audio_channels.is_empty() { None } else { Some(t.audio_channels.clone()) }),
             resolution: info.channel.technical.as_ref().and_then(|t| if t.resolution.is_empty() { None } else { Some(t.resolution.clone()) }),
+            fps: info.channel.technical.as_ref().and_then(|t| if t.fps.is_empty() { None } else { Some(t.fps.clone()) }),
             connect_ts_utc: None,
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
             first_byte_latency_ms: None,
             provider_reconnect_count: None,
+            failure_stage: None,
+            provider_http_status: None,
+            provider_error_class: None,
+            connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
             target_id: Some(info.channel.target_id),
@@ -213,8 +286,34 @@ impl StreamHistoryRecord {
         record
     }
 
+    pub fn from_connect_failed(
+        info: &StreamInfo,
+        reason: ConnectFailureReason,
+        attempt_uid: u32,
+        failure_stage: FailureStage,
+    ) -> Self {
+        let event_ts = now_utc_secs();
+        let mut record = Self::base(info, event_ts);
+        record.event_type = EventType::ConnectFailed;
+        record.session_id = (event_ts << 32) | u64::from(attempt_uid);
+        record.failure_stage = Some(failure_stage);
+        record.connect_failure_reason = Some(reason);
+        record
+    }
+
+    pub fn with_provider_failure(mut self, provider_http_status: Option<u16>, provider_error_class: Option<&str>) -> Self {
+        self.provider_http_status = provider_http_status;
+        self.provider_error_class = provider_error_class.map(ToString::to_string);
+        self
+    }
+
     /// Extra `QoS` fields carried as a struct to keep the signature stable.
-    pub fn from_disconnect(info: &StreamInfo, reason: DisconnectReason, qos: &DisconnectQos) -> Self {
+    pub fn from_disconnect(
+        info: &StreamInfo,
+        reason: DisconnectReason,
+        qos: &DisconnectQos,
+        failure_stage: Option<FailureStage>,
+    ) -> Self {
         let now_secs = now_utc_secs();
         let connect_secs = info.ts;
         let mut record = Self::base(info, now_secs);
@@ -225,6 +324,7 @@ impl StreamHistoryRecord {
         record.bytes_sent = qos.bytes_sent;
         record.first_byte_latency_ms = qos.first_byte_latency_ms;
         record.provider_reconnect_count = qos.provider_reconnect_count;
+        record.failure_stage = failure_stage;
         record.disconnect_reason = Some(reason);
         record
     }
@@ -326,7 +426,7 @@ pub fn read_and_verify_block_magic<R: Read>(reader: &mut R) -> io::Result<()> {
 mod tests {
     use super::*;
     use shared::{
-        model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+        model::{PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo, XtreamCluster},
         utils::Internable,
     };
     use std::net::SocketAddr;
@@ -375,6 +475,7 @@ mod tests {
             api_username: Some("alice".to_string()),
             provider_name: Some("acme-tv".to_string()),
             provider_username: Some("acme_user".to_string()),
+            input_name: Some("provider-input".to_string()),
             virtual_id: Some(1234),
             item_type: Some("live".to_string()),
             title: Some("News Channel".to_string()),
@@ -382,18 +483,28 @@ mod tests {
             country: Some("DE".to_string()),
             user_agent: Some("VLC/3.0".to_string()),
             shared: Some(false),
+            shared_joined_existing: None,
+            shared_stream_id: None,
             provider_id: Some(1),
             cluster: Some("live".to_string()),
             container: Some("mpegts".to_string()),
+            stream_url_hash: Some("abc123".to_string()),
+            stream_identity_key: Some("identity123".to_string()),
             video_codec: Some("H.264".to_string()),
             audio_codec: Some("AAC".to_string()),
+            audio_channels: Some("STEREO".to_string()),
             resolution: Some("1920x1080".to_string()),
+            fps: Some("50".to_string()),
             connect_ts_utc: Some(1_742_600_001),
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
             first_byte_latency_ms: None,
             provider_reconnect_count: None,
+            failure_stage: None,
+            provider_http_status: None,
+            provider_error_class: None,
+            connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
             target_id: Some(1),
@@ -411,6 +522,7 @@ mod tests {
             api_username: Some("alice".to_string()),
             provider_name: Some("acme-tv".to_string()),
             provider_username: Some("acme_user".to_string()),
+            input_name: Some("provider-input".to_string()),
             virtual_id: Some(1234),
             item_type: Some("live".to_string()),
             title: Some("News Channel".to_string()),
@@ -418,18 +530,28 @@ mod tests {
             country: Some("DE".to_string()),
             user_agent: Some("VLC/3.0".to_string()),
             shared: Some(false),
+            shared_joined_existing: None,
+            shared_stream_id: None,
             provider_id: Some(1),
             cluster: Some("live".to_string()),
             container: Some("mpegts".to_string()),
+            stream_url_hash: Some("abc123".to_string()),
+            stream_identity_key: Some("identity123".to_string()),
             video_codec: Some("H.264".to_string()),
             audio_codec: Some("AAC".to_string()),
+            audio_channels: Some("STEREO".to_string()),
             resolution: Some("1920x1080".to_string()),
+            fps: Some("50".to_string()),
             connect_ts_utc: Some(1_742_600_001),
             disconnect_ts_utc: Some(1_742_603_601),
             session_duration: Some(3600),
             bytes_sent: Some(1_234_567_890),
             first_byte_latency_ms: Some(150),
             provider_reconnect_count: Some(0),
+            failure_stage: None,
+            provider_http_status: None,
+            provider_error_class: None,
+            connect_failure_reason: None,
             disconnect_reason: Some(DisconnectReason::ClientClosed),
             previous_session_id: None,
             target_id: Some(1),
@@ -449,13 +571,23 @@ mod tests {
                 target_id: 1,
                 virtual_id: 1234,
                 provider_id: 1,
+                input_name: "provider-input".intern(),
                 item_type: PlaylistItemType::Live,
                 cluster: XtreamCluster::Live,
                 group: "News".intern(),
                 title: "News Channel".intern(),
                 url: "http://localhost/stream.ts".intern(),
                 shared: false,
-                technical: None,
+                shared_joined_existing: None,
+                shared_stream_id: None,
+                technical: Some(StreamTechnicalInfo {
+                    container: "mpegts".to_string(),
+                    resolution: "1920x1080".to_string(),
+                    fps: "50".to_string(),
+                    video_codec: "H.264".to_string(),
+                    audio_codec: "AAC".to_string(),
+                    audio_channels: "STEREO".to_string(),
+                }),
             },
             String::from("VLC/3.0"),
             Some(String::from("DE")),
@@ -531,6 +663,113 @@ mod tests {
         let record = StreamHistoryRecord::from_connect(&info);
 
         assert_eq!(record.previous_session_id, Some(123_456));
+    }
+
+    #[test]
+    fn stream_history_from_connect_captures_low_cost_qos_identity_fields() {
+        let info = sample_stream_info();
+
+        let record = StreamHistoryRecord::from_connect(&info);
+
+        assert_eq!(record.input_name.as_deref(), Some("provider-input"));
+        assert_eq!(
+            record.stream_url_hash.as_deref(),
+            Some(encode_base64_hash("http://localhost/stream.ts").as_str())
+        );
+        assert_eq!(
+            record.stream_identity_key.as_deref(),
+            Some(encode_base64_hash("provider-input|1|1|1234|live").as_str())
+        );
+        assert_eq!(record.container.as_deref(), Some("mpegts"));
+        assert_eq!(record.video_codec.as_deref(), Some("H.264"));
+        assert_eq!(record.audio_codec.as_deref(), Some("AAC"));
+        assert_eq!(record.audio_channels.as_deref(), Some("STEREO"));
+        assert_eq!(record.resolution.as_deref(), Some("1920x1080"));
+        assert_eq!(record.fps.as_deref(), Some("50"));
+    }
+
+    #[test]
+    fn stream_history_from_connect_failed_captures_reason_and_identity() {
+        let info = sample_stream_info();
+
+        let record = StreamHistoryRecord::from_connect_failed(
+            &info,
+            ConnectFailureReason::ProviderConnectionsExhausted,
+            77,
+            FailureStage::Admission,
+        );
+
+        assert_eq!(record.event_type, EventType::ConnectFailed);
+        assert_eq!(
+            record.connect_failure_reason,
+            Some(ConnectFailureReason::ProviderConnectionsExhausted)
+        );
+        assert_eq!(record.input_name.as_deref(), Some("provider-input"));
+        assert_eq!(
+            record.stream_identity_key.as_deref(),
+            Some(encode_base64_hash("provider-input|1|1|1234|live").as_str())
+        );
+        assert!(record.connect_ts_utc.is_none());
+        assert!(record.disconnect_ts_utc.is_none());
+        assert!(record.session_duration.is_none());
+    }
+
+    #[test]
+    fn stream_history_from_connect_failed_captures_failure_stage() {
+        let info = sample_stream_info();
+
+        let record = StreamHistoryRecord::from_connect_failed(
+            &info,
+            ConnectFailureReason::ProviderConnectionsExhausted,
+            77,
+            FailureStage::Admission,
+        );
+
+        assert_eq!(record.failure_stage, Some(FailureStage::Admission));
+    }
+
+    #[test]
+    fn stream_history_from_connect_failed_can_store_provider_failure_metadata() {
+        let info = sample_stream_info();
+
+        let record = StreamHistoryRecord::from_connect_failed(
+            &info,
+            ConnectFailureReason::ChannelUnavailable,
+            77,
+            FailureStage::ProviderOpen,
+        )
+        .with_provider_failure(Some(503), Some("http_5xx"));
+
+        assert_eq!(record.provider_http_status, Some(503));
+        assert_eq!(record.provider_error_class.as_deref(), Some("http_5xx"));
+    }
+
+    #[test]
+    fn stream_history_from_connect_captures_shared_stream_markers() {
+        let mut info = sample_stream_info();
+        info.channel.shared = true;
+        info.channel.shared_joined_existing = Some(true);
+        info.channel.shared_stream_id = Some(77);
+
+        let record = StreamHistoryRecord::from_connect(&info);
+
+        assert_eq!(record.shared, Some(true));
+        assert_eq!(record.shared_joined_existing, Some(true));
+        assert_eq!(record.shared_stream_id, Some(77));
+    }
+
+    #[test]
+    fn stream_history_from_disconnect_can_store_failure_stage() {
+        let info = sample_stream_info();
+
+        let record = StreamHistoryRecord::from_disconnect(
+            &info,
+            DisconnectReason::ProviderError,
+            &DisconnectQos::default(),
+            Some(FailureStage::Streaming),
+        );
+
+        assert_eq!(record.failure_stage, Some(FailureStage::Streaming));
     }
 
     #[test]

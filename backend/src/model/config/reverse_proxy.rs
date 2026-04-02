@@ -1,5 +1,5 @@
 use crate::model::config::cache::CacheConfig;
-use crate::model::{macros, GeoIpConfig, RateLimitConfig, StreamConfig};
+use crate::model::{macros, GeoIpConfig, QosAggregationConfig, RateLimitConfig, StreamConfig};
 use regex::Regex;
 use shared::model::{ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, REGEX_CACHE};
 use shared::utils::{default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier, hex_to_u8_16, u8_16_to_hex};
@@ -136,6 +136,7 @@ pub struct ReverseProxyConfig {
     pub rate_limit: Option<RateLimitConfig>,
     pub geoip: Option<GeoIpConfig>,
     pub stream_history: Option<crate::model::StreamHistoryConfig>,
+    pub qos_aggregation: Option<QosAggregationConfig>,
 }
 
 macros::from_impl!(ReverseProxyConfig);
@@ -160,6 +161,7 @@ impl From<&ReverseProxyConfigDto> for ReverseProxyConfig {
             rate_limit: dto.rate_limit.as_ref().map(Into::into),
             geoip: dto.geoip.as_ref().map(Into::into),
             stream_history: dto.stream_history.as_ref().map(Into::into),
+            qos_aggregation: dto.qos_aggregation.as_ref().map(Into::into),
         }
     }
 }
@@ -181,6 +183,7 @@ impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
             rate_limit: instance.rate_limit.as_ref().map(Into::into),
             geoip: instance.geoip.as_ref().map(Into::into),
             stream_history: instance.stream_history.as_ref().map(Into::into),
+            qos_aggregation: instance.qos_aggregation.as_ref().map(Into::into),
         }
     }
 }
@@ -188,7 +191,7 @@ impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
 #[cfg(test)]
 mod tests {
     use super::ReverseProxyConfig;
-    use shared::model::{ReverseProxyConfigDto, StreamHistoryConfigDto};
+    use shared::model::{QosAggregationConfigDto, ReverseProxyConfigDto, StreamHistoryConfigDto};
 
     #[test]
     fn reverse_proxy_config_preserves_nested_stream_history() {
@@ -200,6 +203,7 @@ mod tests {
                 stream_history_retention_days: 14,
                 stream_history_directory: "/var/lib/tuliprox/history".to_string(),
             }),
+            qos_aggregation: None,
             ..Default::default()
         };
 
@@ -209,5 +213,26 @@ mod tests {
         assert_eq!(stream_history.stream_history_batch_size, 64);
         assert_eq!(stream_history.stream_history_retention_days, 14);
         assert_eq!(stream_history.stream_history_directory, "/var/lib/tuliprox/history");
+    }
+
+    #[test]
+    fn reverse_proxy_config_preserves_nested_qos_aggregation() {
+        let dto = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            stream_history: Some(StreamHistoryConfigDto {
+                stream_history_enabled: true,
+                ..Default::default()
+            }),
+            qos_aggregation: Some(QosAggregationConfigDto {
+                enabled: true,
+                interval_secs: 300,
+            }),
+            ..Default::default()
+        };
+
+        let config = ReverseProxyConfig::from(&dto);
+        let qos = config.qos_aggregation.expect("qos_aggregation should exist");
+        assert!(qos.enabled);
+        assert_eq!(qos.interval_secs, 300);
     }
 }

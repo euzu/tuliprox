@@ -7,6 +7,11 @@ to clients (Reverse Proxy Mode), rather than just redirecting them.
 It manages how Tuliprox establishes upstream connections, buffers video frames, handles sudden client disconnects,
 and caches static resources like EPG images and channel logos.
 
+It also contains the optional telemetry pipeline for stream reliability analysis:
+
+* `stream_history` stores raw stream lifecycle events on disk.
+* `qos_aggregation` periodically condenses those raw events into compact QoS snapshots.
+
 ## Top-level entries
 
 ```yaml
@@ -19,6 +24,8 @@ reverse_proxy:
   disabled_header:
   resource_retry:
   geoip:
+  stream_history:
+  qos_aggregation:
 ```
 
 > **Note:** Reverse Proxy mode can be activated for each user individually.
@@ -29,6 +36,8 @@ reverse_proxy:
 | :--- | :--- | :--- | :--- |
 | `resource_rewrite_disabled` | Bool | `false` | Normally, Tuliprox rewrites all image URLs in playlists to point to itself (e.g., `http://tuliprox:8901/resource/...`). If set to `true`, original URLs are kept (clients load images directly from the provider). **Warning:** Local caching will stop working if this is enabled! |
 | `rewrite_secret` | String | `""` | A 32-character Hex string (16 bytes). Tuliprox encrypts/signs the original image URLs during the rewrite process. To prevent image URLs from becoming invalid after a server restart, you MUST enter a static secret here. |
+| `stream_history` | Block | `null` | Optional stream telemetry block that persists raw connect/disconnect/startup-failure events to daily history files. |
+| `qos_aggregation` | Block | `null` | Optional background worker that aggregates stream history into compact per-stream QoS snapshots. |
 
 > **Note:** You can generate a random secret using:
 
@@ -287,6 +296,91 @@ reverse_proxy:
 
 The CSV file must have exactly 3 columns: `range_start,range_end,country_code`.
 (The DB is periodically updated via the `schedules` block using the `GeoIpUpdate` task type).
+
+---
+
+## 7. Stream History (`stream_history`)
+
+This block enables persistent stream lifecycle telemetry. Tuliprox writes daily binary history files containing
+successful connects, startup failures, disconnect reasons, provider-open failures, reconnect counts, latency
+signals, and stable stream identity fields.
+
+**User impact:**
+
+* Gives you a reliable answer to questions like "Which stream failed?", "Was this a provider abort or a capacity problem?",  
+  and "How often does this stream reconnect?"
+* Builds the raw data foundation for later QoS analysis and failover optimization.
+* Adds asynchronous background disk writes, but does not put synchronous work into the live streaming hotpath.
+
+```yaml
+reverse_proxy:
+  stream_history:
+    stream_history_enabled: true
+    stream_history_batch_size: 128
+    stream_history_retention_days: 30
+    stream_history_directory: ./stream_history
+```
+
+### Stream History Parameters
+
+| Parameter | Type | Default | Technical Impact |
+| :--- | :--- | :--- | :--- |
+| `stream_history_enabled` | Bool | `false` | Master switch for stream telemetry. If disabled, no stream history files are written. |
+| `stream_history_batch_size` | Int | `128` | Number of records buffered before the writer flushes a block to disk. Higher values reduce write frequency; lower values make new records visible sooner. |
+| `stream_history_retention_days` | Int | `14` | Number of UTC day partitions retained before old history files are deleted. |
+| `stream_history_directory` | String | `stream_history` under `storage_dir` | Directory for daily stream history files. Relative paths are resolved against `storage_dir`. |
+
+### Technical Background
+
+* Stream history records are written asynchronously in append-friendly daily files.
+* Recorded event types include:
+  * successful connect
+  * startup failure (`connect_failed`)
+  * disconnect
+* Recorded QoS metadata includes:
+  * disconnect reason
+  * startup failure reason
+  * failure stage
+  * provider error class / HTTP status
+  * reconnect counts
+  * first-byte latency
+  * stream identity fields for later aggregation
+
+---
+
+## 8. QoS Aggregation (`qos_aggregation`)
+
+This block enables the periodic QoS aggregation worker. It reads stream history in the background and builds
+compact per-stream QoS snapshots that summarize recent reliability.
+
+**User impact:**
+
+* Lets you see a condensed reliability view without manually scanning raw history files.
+* Prepares the data that the later failover feature can use to prioritize the most reliable stream/provider candidates.
+* Keeps heavy analysis work out of request handling and out of the streaming hotpath.
+
+```yaml
+reverse_proxy:
+  stream_history:
+    stream_history_enabled: true
+  qos_aggregation:
+    enabled: true
+    interval_secs: 300
+```
+
+### QoS Aggregation Parameters
+
+| Parameter | Type | Default | Technical Impact |
+| :--- | :--- | :--- | :--- |
+| `enabled` | Bool | `false` | Enables the background QoS worker. Only effective if `stream_history.stream_history_enabled` is also `true`. |
+| `interval_secs` | Int | `300` | Polling interval for the aggregation loop. Lower values update snapshots faster but increase background disk and CPU work. |
+
+### Technical Background
+
+* The worker reads raw stream history by UTC day and stores snapshots in dedicated B+Tree databases.
+* Snapshots are keyed by stable stream identity and contain rolling `24h`, `7d`, and `30d` windows.
+* QoS data is persisted locally, so it survives restarts and can later be consumed by the failover feature without rescanning all history every time.
+* If stream history is disabled, QoS aggregation is automatically disabled during config preparation.
 
 ---
 

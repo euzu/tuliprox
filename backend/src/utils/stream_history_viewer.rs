@@ -8,7 +8,10 @@ use chrono;
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::repository::{StreamHistoryRecord, EventType, DisconnectReason, StreamHistoryFileReader, FileHeaderBody, read_and_verify_file_magic, read_framed, extract_day_from_filename};
+use crate::repository::{
+    ConnectFailureReason, DisconnectReason, EventType, FailureStage, FileHeaderBody, StreamHistoryFileReader,
+    StreamHistoryRecord, extract_day_from_filename, read_and_verify_file_magic, read_framed,
+};
 
 #[derive(Deserialize)]
 pub(crate) struct StreamHistoryQuery {
@@ -91,24 +94,40 @@ pub(crate) fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange
     }
 }
 
-const NUMERIC_FIELDS: &[&str] = &["session_id", "virtual_id", "provider_id", "target_id"];
+const NUMERIC_FIELDS: &[&str] = &[
+    "session_id",
+    "virtual_id",
+    "provider_id",
+    "target_id",
+    "provider_http_status",
+    "shared_stream_id",
+];
 const STRING_FIELDS: &[&str] = &[
     "event_type",
     "api_username",
     "provider_name",
     "provider_username",
+    "input_name",
     "item_type",
     "title",
     "group",
     "country",
     "source_addr",
     "disconnect_reason",
+    "connect_failure_reason",
+    "failure_stage",
+    "shared_joined_existing",
+    "provider_error_class",
     "user_agent",
     "cluster",
     "container",
+    "stream_url_hash",
+    "stream_identity_key",
     "video_codec",
     "audio_codec",
+    "audio_channels",
     "resolution",
+    "fps",
     "shared",
 ];
 
@@ -175,6 +194,7 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "event_type" => {
             let s = match record.event_type {
                 EventType::Connect => "connect",
+                EventType::ConnectFailed => "connect_failed",
                 EventType::Disconnect => "disconnect",
             };
             RecordFieldValue::String(Some(s))
@@ -182,12 +202,18 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "api_username" => RecordFieldValue::String(record.api_username.as_deref()),
         "provider_name" => RecordFieldValue::String(record.provider_name.as_deref()),
         "provider_username" => RecordFieldValue::String(record.provider_username.as_deref()),
+        "input_name" => RecordFieldValue::String(record.input_name.as_deref()),
         "item_type" => RecordFieldValue::String(record.item_type.as_deref()),
         "title" => RecordFieldValue::String(record.title.as_deref()),
         "group" => RecordFieldValue::String(record.group.as_deref()),
         "country" => RecordFieldValue::String(record.country.as_deref()),
         "source_addr" => RecordFieldValue::String(record.source_addr.as_deref()),
         "shared" => RecordFieldValue::String(record.shared.map(|shared| if shared { "true" } else { "false" })),
+        "shared_joined_existing" => RecordFieldValue::String(
+            record
+                .shared_joined_existing
+                .map(|shared| if shared { "true" } else { "false" }),
+        ),
         "disconnect_reason" => {
             // Match against serde rename_all = "snake_case" names
             RecordFieldValue::String(record.disconnect_reason.as_ref().map(|r| match r {
@@ -205,16 +231,45 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
                 DisconnectReason::ProviderConnectionsExhausted => "provider_connections_exhausted",
             }))
         }
+        "connect_failure_reason" => {
+            RecordFieldValue::String(record.connect_failure_reason.as_ref().map(|r| match r {
+                ConnectFailureReason::UserAccountExpired => "user_account_expired",
+                ConnectFailureReason::UserConnectionsExhausted => "user_connections_exhausted",
+                ConnectFailureReason::ProviderConnectionsExhausted => "provider_connections_exhausted",
+                ConnectFailureReason::ProviderError => "provider_error",
+                ConnectFailureReason::ProviderClosed => "provider_closed",
+                ConnectFailureReason::ChannelUnavailable => "channel_unavailable",
+                ConnectFailureReason::Preempted => "preempted",
+                ConnectFailureReason::SessionExpired => "session_expired",
+                ConnectFailureReason::Provisioning => "provisioning",
+            }))
+        }
+        "failure_stage" => {
+            RecordFieldValue::String(record.failure_stage.as_ref().map(|stage| match stage {
+                FailureStage::Admission => "admission",
+                FailureStage::ProviderOpen => "provider_open",
+                FailureStage::FirstByte => "first_byte",
+                FailureStage::Streaming => "streaming",
+                FailureStage::SessionReconnect => "session_reconnect",
+            }))
+        }
+        "provider_error_class" => RecordFieldValue::String(record.provider_error_class.as_deref()),
         "user_agent" => RecordFieldValue::String(record.user_agent.as_deref()),
         "cluster" => RecordFieldValue::String(record.cluster.as_deref()),
         "container" => RecordFieldValue::String(record.container.as_deref()),
+        "stream_url_hash" => RecordFieldValue::String(record.stream_url_hash.as_deref()),
+        "stream_identity_key" => RecordFieldValue::String(record.stream_identity_key.as_deref()),
         "video_codec" => RecordFieldValue::String(record.video_codec.as_deref()),
         "audio_codec" => RecordFieldValue::String(record.audio_codec.as_deref()),
+        "audio_channels" => RecordFieldValue::String(record.audio_channels.as_deref()),
         "resolution" => RecordFieldValue::String(record.resolution.as_deref()),
+        "fps" => RecordFieldValue::String(record.fps.as_deref()),
         "session_id" => RecordFieldValue::U64(record.session_id),
         "virtual_id" => RecordFieldValue::U64(u64::from(record.virtual_id.unwrap_or(0))),
         "provider_id" => RecordFieldValue::U64(u64::from(record.provider_id.unwrap_or(0))),
         "target_id" => RecordFieldValue::U64(u64::from(record.target_id.unwrap_or(0))),
+        "provider_http_status" => RecordFieldValue::U64(u64::from(record.provider_http_status.unwrap_or(0))),
+        "shared_stream_id" => RecordFieldValue::U64(record.shared_stream_id.unwrap_or(0)),
         _ => RecordFieldValue::String(None), // Unknown field: no match
     }
 }
@@ -335,7 +390,9 @@ fn stream_output(
     filters: &CompiledFilter,
 ) {
     let (range_start, range_end) = *time_range;
-    println!("[");
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let _ = writeln!(out, "[");
     let mut first = true;
 
     for file in files {
@@ -368,10 +425,12 @@ fn stream_output(
                         continue;
                     }
                     if !first {
-                        println!(",");
+                        let _ = writeln!(out, ",");
                     }
                     match serde_json::to_string(&record) {
-                        Ok(json) => print!("  {json}"),
+                        Ok(json) => {
+                            let _ = write!(out, "  {json}");
+                        }
                         Err(e) => {
                             eprintln!("Warning: failed to serialize record: {e}");
                             continue;
@@ -385,61 +444,40 @@ fn stream_output(
     }
 
     if !first {
-        println!();
+        let _ = writeln!(out);
     }
-    println!("]");
+    let _ = writeln!(out, "]");
 }
 
-fn exit_viewer(code: i32) -> ! {
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    std::process::exit(code);
-}
-
-pub fn stream_history_viewer(input: &str) {
+fn run_stream_history_viewer(input: &str) -> Result<(), String> {
     eprintln!("[INFO] All timestamps interpreted as UTC");
 
-    let query = match load_query(input) {
-        Ok(q) => q,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            exit_viewer(1);
-        }
-    };
-
-    let time_range = match resolve_time_range(&query) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            exit_viewer(1);
-        }
-    };
-
+    let query = load_query(input)?;
+    let time_range = resolve_time_range(&query)?;
     let filters = match query.filter.as_ref() {
-        Some(raw) => match CompiledFilter::compile(raw) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                exit_viewer(1);
-            }
-        },
+        Some(raw) => CompiledFilter::compile(raw)?,
         None => CompiledFilter { fields: Vec::new() },
     };
 
     let dir = query.path.as_deref().unwrap_or("data/stream_history");
     let dir_path = Path::new(dir);
 
-    let files = match discover_files(dir_path, &time_range) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            exit_viewer(1);
-        }
-    };
+    let files = discover_files(dir_path, &time_range).map_err(|e| e.to_string())?;
 
     stream_output(files.as_slice(), &time_range, &filters);
+    Ok(())
+}
 
-    exit_viewer(0);
+pub fn stream_history_viewer(input: &str) -> i32 {
+    match run_stream_history_viewer(input) {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            let _ = io::stdout().flush();
+            let _ = io::stderr().flush();
+            1
+        }
+    }
 }
 
 #[cfg(test)]
@@ -595,7 +633,57 @@ mod tests {
         raw.insert("user_agent".to_string(), "VLC/3.0".to_string());
         raw.insert("cluster".to_string(), "live".to_string());
         raw.insert("video_codec".to_string(), "H.264".to_string());
+        raw.insert("failure_stage".to_string(), "streaming".to_string());
         assert!(CompiledFilter::compile(&raw).is_ok());
+    }
+
+    #[test]
+    fn test_filter_failure_stage() {
+        let mut raw = HashMap::new();
+        raw.insert("failure_stage".to_string(), "admission".to_string());
+        let filter = CompiledFilter::compile(&raw).unwrap();
+
+        let mut record = make_empty_record();
+        record.failure_stage = Some(FailureStage::Admission);
+        assert!(filter.matches(&record));
+
+        record.failure_stage = Some(FailureStage::Streaming);
+        assert!(!filter.matches(&record));
+
+        record.failure_stage = None;
+        assert!(!filter.matches(&record));
+    }
+
+    #[test]
+    fn test_filter_provider_error_metadata() {
+        let mut raw = HashMap::new();
+        raw.insert("provider_http_status".to_string(), "503".to_string());
+        raw.insert("provider_error_class".to_string(), "http_5xx".to_string());
+        let filter = CompiledFilter::compile(&raw).unwrap();
+
+        let mut record = make_empty_record();
+        record.provider_http_status = Some(503);
+        record.provider_error_class = Some("http_5xx".to_string());
+        assert!(filter.matches(&record));
+
+        record.provider_http_status = Some(404);
+        assert!(!filter.matches(&record));
+    }
+
+    #[test]
+    fn test_filter_shared_stream_markers() {
+        let mut raw = HashMap::new();
+        raw.insert("shared_joined_existing".to_string(), "true".to_string());
+        raw.insert("shared_stream_id".to_string(), "77".to_string());
+        let filter = CompiledFilter::compile(&raw).unwrap();
+
+        let mut record = make_empty_record();
+        record.shared_joined_existing = Some(true);
+        record.shared_stream_id = Some(77);
+        assert!(filter.matches(&record));
+
+        record.shared_joined_existing = Some(false);
+        assert!(!filter.matches(&record));
     }
 
     #[test]
@@ -613,6 +701,12 @@ mod tests {
         let query = load_query(&input).unwrap();
         assert_eq!(query.from.as_deref(), Some("2026-03-22"));
         assert_eq!(query.to.as_deref(), Some("2026-03-24"));
+    }
+
+    #[test]
+    fn test_run_stream_history_viewer_returns_error_instead_of_exiting_on_invalid_query() {
+        let result = run_stream_history_viewer("{not-json");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -643,6 +737,7 @@ mod tests {
             api_username: None,
             provider_name: None,
             provider_username: None,
+            input_name: None,
             virtual_id: None,
             item_type: None,
             title: None,
@@ -650,18 +745,28 @@ mod tests {
             country: None,
             user_agent: None,
             shared: None,
+            shared_joined_existing: None,
+            shared_stream_id: None,
             provider_id: None,
             cluster: None,
             container: None,
+            stream_url_hash: None,
+            stream_identity_key: None,
             video_codec: None,
             audio_codec: None,
+            audio_channels: None,
             resolution: None,
+            fps: None,
             connect_ts_utc: None,
             disconnect_ts_utc: None,
             session_duration: None,
             bytes_sent: None,
             first_byte_latency_ms: None,
             provider_reconnect_count: None,
+            failure_stage: None,
+            provider_http_status: None,
+            provider_error_class: None,
+            connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
             target_id: None,
