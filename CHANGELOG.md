@@ -1,8 +1,7 @@
 # Changelog
 
-## Unreleased
+## 3.3.0 (2026-04-02)
 
-- Added `reverse_proxy.stream.metrics_enabled` to enable per-stream bandwidth and transferred-bytes metrics in the Web UI streams view.
 
 ## ⚠️ Breaking Changes
 
@@ -192,6 +191,7 @@ active URL of the specified provider.
 - **Custom Stream Response Timeout**: Added support to limit how long custom fallback stream responses are served.
   Set `config.custom_stream_response_timeout_secs` to a value `> 0` to auto-stop these streams after N seconds. If unset or `0`, custom responses
   are streamed without timeout.
+- Added `reverse_proxy.stream.metrics_enabled` to enable per-stream bandwidth and transferred-bytes metrics in the Web UI streams view.
 
 ## 🐛 Fixes
 
