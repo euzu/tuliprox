@@ -84,17 +84,80 @@ pub(crate) enum CleanupEvent {
 }
 
 async fn handle_release_connection(deps: &CleanupWorkerDeps, addr: SocketAddr) {
-    let removed = deps.user_manager.release_connection(&addr).await;
+    release_connection_with_reason_from_deps(deps, &addr, &DisconnectReason::Cleanup, true).await;
+}
+
+async fn release_connection_with_reason(
+    connection_manager: &ConnectionManager,
+    addr: &SocketAddr,
+    reason: &DisconnectReason,
+    send_shared_stop_signal: bool,
+) {
+    release_connection_parts(
+        &connection_manager.user_manager,
+        &connection_manager.provider_manager,
+        &connection_manager.shared_stream_manager,
+        &connection_manager.event_manager,
+        &connection_manager.capacity_notify,
+        &connection_manager.history_writer,
+        addr,
+        reason,
+        send_shared_stop_signal,
+    )
+    .await;
+}
+
+async fn release_connection_with_reason_from_deps(
+    deps: &CleanupWorkerDeps,
+    addr: &SocketAddr,
+    reason: &DisconnectReason,
+    send_shared_stop_signal: bool,
+) {
+    release_connection_parts(
+        &deps.user_manager,
+        &deps.provider_manager,
+        &deps.shared_stream_manager,
+        &deps.event_manager,
+        &deps.capacity_notify,
+        &deps.history_writer,
+        addr,
+        reason,
+        send_shared_stop_signal,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn release_connection_parts(
+    user_manager: &Arc<ActiveUserManager>,
+    provider_manager: &Arc<ActiveProviderManager>,
+    shared_stream_manager: &Arc<SharedStreamManager>,
+    event_manager: &Arc<EventManager>,
+    capacity_notify: &Arc<Notify>,
+    history_writer: &Arc<ArcSwapOption<StreamHistoryWriter>>,
+    addr: &SocketAddr,
+    reason: &DisconnectReason,
+    send_shared_stop_signal: bool,
+) {
+    let removed = user_manager.release_connection(addr).await;
     for stream_info in &removed.removed_streams {
-        deps.event_manager.unregister_meter_client(stream_info.uid).await;
+        let (bytes_sent, first_byte_latency_ms) = event_manager.read_meter_qos(stream_info.meter_uid).await;
+        event_manager.unregister_meter_client(stream_info.uid).await;
+        emit_disconnect_record(
+            history_writer,
+            stream_info,
+            reason,
+            &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
+            None,
+            None,
+        );
     }
-    deps.provider_manager.release_connection(&addr).await;
-    deps.shared_stream_manager.release_connection(&addr, true).await;
+    provider_manager.release_connection(addr).await;
+    shared_stream_manager.release_connection(addr, send_shared_stop_signal).await;
     if removed.addr_removed && !removed.removed_streams.is_empty() {
-        deps.event_manager
-            .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(addr)));
+        event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
     }
-    notify_capacity(deps.capacity_notify.as_ref());
+    notify_capacity(capacity_notify.as_ref());
 }
 
 async fn handle_release_stream(
@@ -243,12 +306,17 @@ struct SocketExpiryEntry {
 #[derive(Clone, Copy, Debug)]
 enum SocketActivityEvent { Track(SocketAddr) }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum CloseConnectionSignal {
+    WithReason(SocketAddr, DisconnectReason),
+}
+
 pub struct ConnectionManager {
     pub user_manager: Arc<ActiveUserManager>,
     pub provider_manager: Arc<ActiveProviderManager>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
     event_manager: Arc<EventManager>,
-    close_socket_signal_tx: tokio::sync::broadcast::Sender<SocketAddr>,
+    close_socket_signal_tx: tokio::sync::broadcast::Sender<CloseConnectionSignal>,
     cleanup_tx: mpsc::Sender<CleanupEvent>,
     socket_activity_tx: mpsc::Sender<SocketActivityEvent>,
     capacity_notify: Arc<Notify>,
@@ -260,6 +328,10 @@ pub struct ConnectionParams<'a> {
     pub meter_uid: u32,
     pub username: &'a str,
     pub max_connections: u32,
+    pub soft_connections: u16,
+    pub connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
+    pub priority: i8,
+    pub soft_priority: i8,
     pub fingerprint: &'a Fingerprint,
     pub provider: &'a str,
     pub stream_channel: &'a StreamChannel,
@@ -279,6 +351,7 @@ impl ConnectionManager {
         let (close_socket_signal_tx, _) = tokio::sync::broadcast::channel(256);
         let (cleanup_tx, cleanup_rx) = mpsc::channel(CLEANUP_QUEUE_CAPACITY);
         user_manager.set_cleanup_sender(cleanup_tx.clone());
+        user_manager.set_provider_manager(Arc::clone(provider_manager));
         let (socket_activity_tx, socket_activity_rx) = mpsc::channel(SOCKET_ACTIVITY_QUEUE_CAPACITY);
         let socket_cleanup_tx = cleanup_tx.clone();
         let capacity_notify = Arc::new(Notify::new());
@@ -543,9 +616,7 @@ impl ConnectionManager {
         }
     }
 
-    pub fn get_close_connection_channel(&self) -> tokio::sync::broadcast::Receiver<SocketAddr> {
-        self.close_socket_signal_tx.subscribe()
-    }
+    pub fn get_close_connection_channel(&self) -> tokio::sync::broadcast::Receiver<CloseConnectionSignal> { self.close_socket_signal_tx.subscribe() }
 
     pub async fn kick_connection(&self, addr: &SocketAddr, virtual_id: VirtualId, block_secs: u64) -> bool {
         debug_if_enabled!(
@@ -553,10 +624,39 @@ impl ConnectionManager {
             self.user_manager.get_username_for_addr(addr).await.unwrap_or_default(),
             sanitize_sensitive_info(&addr.to_string())
         );
+        self.close_connection_with_reason_and_block(addr, virtual_id, block_secs, DisconnectReason::ClientKicked)
+            .await
+    }
+
+    pub async fn close_connection_with_reason_and_block(
+        &self,
+        addr: &SocketAddr,
+        virtual_id: VirtualId,
+        block_secs: u64,
+        reason: DisconnectReason,
+    ) -> bool {
         if block_secs > 0 {
             self.user_manager.block_user_for_stream(addr, virtual_id, block_secs).await;
         }
-        if let Err(e) = self.close_socket_signal_tx.send(*addr) {
+        if let Err(e) = self
+            .close_socket_signal_tx
+            .send(CloseConnectionSignal::WithReason(*addr, reason))
+        {
+            debug_if_enabled!(
+                "No active receivers for close signal ({}): {e:?}",
+                sanitize_sensitive_info(&addr.to_string())
+            );
+            return false;
+        }
+        true
+    }
+
+    pub fn close_connection_signal(&self, addr: &SocketAddr) -> bool {
+        self.close_connection_with_reason(addr, DisconnectReason::ClientClosed)
+    }
+
+    pub fn close_connection_with_reason(&self, addr: &SocketAddr, reason: DisconnectReason) -> bool {
+        if let Err(e) = self.close_socket_signal_tx.send(CloseConnectionSignal::WithReason(*addr, reason)) {
             debug_if_enabled!(
                 "No active receivers for close signal ({}): {e:?}",
                 sanitize_sensitive_info(&addr.to_string())
@@ -567,25 +667,15 @@ impl ConnectionManager {
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) {
-        let removed = self.user_manager.release_connection(addr).await;
-        for stream_info in &removed.removed_streams {
-            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
-            self.event_manager.unregister_meter_client(stream_info.uid).await;
-            emit_disconnect_record(
-                &self.history_writer,
-                stream_info,
-                &DisconnectReason::ClientClosed,
-                &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
-                None,
-                None,
-            );
-        }
-        self.provider_manager.release_connection(addr).await;
-        self.shared_stream_manager.release_connection(addr, true).await;
-        if removed.addr_removed && !removed.removed_streams.is_empty() {
-            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
-        }
-        notify_capacity(self.capacity_notify.as_ref());
+        release_connection_with_reason(self, addr, &DisconnectReason::ClientClosed, true).await;
+    }
+
+    pub async fn release_connection_with_reason(&self, addr: &SocketAddr, reason: &DisconnectReason) {
+        release_connection_with_reason(self, addr, reason, true).await;
+    }
+
+    pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) {
+        release_connection_with_reason(self, addr, &DisconnectReason::ClientKicked, true).await;
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {
@@ -699,6 +789,10 @@ impl ConnectionManager {
                 meter_uid: update.meter_uid,
                 username,
                 max_connections: update.max_connections,
+                soft_connections: update.soft_connections,
+                connection_kind: update.connection_kind,
+                priority: update.priority,
+                soft_priority: update.soft_priority,
                 fingerprint,
                 provider: update.provider,
                 stream_channel: update.stream_channel,
@@ -714,7 +808,7 @@ impl ConnectionManager {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         } else {
             warn!("Failed to register connection for user {username} at {}; disconnecting client", fingerprint.addr);
-            let _ = self.kick_connection(&fingerprint.addr, 0, 0).await;
+            let _ = self.close_connection_signal(&fingerprint.addr);
         }
     }
 
@@ -821,9 +915,16 @@ fn resolve_disconnect_failure_stage(info: &StreamInfo, reason: &DisconnectReason
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::model::{ActiveProviderManager, ActiveUserManager, EventManager, SharedStreamManager};
+    use crate::model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, SourcesConfig};
+    use crate::utils::{FileLockManager, GeoIp};
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::model::{ConfigPaths, InputFetchMethod, InputType};
     use shared::model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster};
     use shared::utils::Internable;
+    use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::sync::Arc;
 
     fn make_stream_info(provider: &str, title: &str) -> StreamInfo {
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
@@ -845,11 +946,142 @@ mod tests {
         StreamInfo::new(0, 0, "test", &addr, "127.0.0.1", provider, channel, String::new(), None, None)
     }
 
+    fn create_test_app_config() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        }
+    }
+
+    fn create_test_connection_manager() -> Arc<ConnectionManager> {
+        let app_cfg = create_test_app_config();
+        let event_manager = Arc::new(EventManager::new());
+        let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_manager = Arc::new(SharedStreamManager::new(Arc::clone(&provider_manager)));
+        provider_manager.set_shared_stream_manager(Arc::clone(&shared_manager));
+
+        let geo_ip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let config = app_cfg.config.load();
+        let user_manager = Arc::new(ActiveUserManager::new(&config, &geo_ip, &event_manager));
+
+        Arc::new(ConnectionManager::new(
+            &user_manager,
+            &provider_manager,
+            &shared_manager,
+            &event_manager,
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn kick_connection_sends_kick_close_signal() {
+        let manager = create_test_connection_manager();
+        let mut rx = manager.get_close_connection_channel();
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+
+        assert!(manager.kick_connection(&addr, 1, 0).await);
+        assert_eq!(
+            rx.recv().await.ok(),
+            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked))
+        );
+    }
+
+    #[tokio::test]
+    async fn close_connection_signal_sends_generic_close_signal() {
+        let manager = create_test_connection_manager();
+        let mut rx = manager.get_close_connection_channel();
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+
+        assert!(manager.close_connection_signal(&addr));
+        assert_eq!(
+            rx.recv().await.ok(),
+            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientClosed))
+        );
+    }
+
+    #[tokio::test]
+    async fn provisioning_close_connection_sends_provisioning_signal() {
+        let manager = create_test_connection_manager();
+        let mut rx = manager.get_close_connection_channel();
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
+
+        assert!(
+            manager
+                .close_connection_with_reason_and_block(&addr, 7, 0, DisconnectReason::Provisioning)
+                .await
+        );
+        assert_eq!(
+            rx.recv().await.ok(),
+            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::Provisioning))
+        );
+    }
+
     #[test]
     fn test_client_closed_when_no_provider_end() {
         let info = make_stream_info("some_provider", "Some Channel");
         let reason = resolve_disconnect_reason(PROVIDER_END_NOT_SET, &info);
         assert_eq!(reason, DisconnectReason::ClientClosed);
+    }
+
+    #[test]
+    fn test_client_kicked_disconnect_has_no_failure_stage() {
+        assert_eq!(
+            resolve_disconnect_failure_stage(
+                &make_stream_info("some_provider", "Some Channel"),
+                &DisconnectReason::ClientKicked,
+                &DisconnectQos::default(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_provisioning_disconnect_has_no_failure_stage() {
+        assert_eq!(
+            resolve_disconnect_failure_stage(
+                &make_stream_info("some_provider", "Some Channel"),
+                &DisconnectReason::Provisioning,
+                &DisconnectQos::default(),
+            ),
+            None
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::{
     api::{
         api_utils::{
-            create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
+            connection_priority_for_kind, create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
             get_hls_session_ttl_secs,
             admission_failure_response, get_stream_alternative_url, is_seek_request, local_stream_response, try_option_bad_request,
             try_unwrap_body, HeaderFilter,
@@ -88,6 +88,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     input: &ConfigInput,
     req_headers: &HeaderMap,
     connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
 ) -> impl IntoResponse + Send {
     if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
@@ -112,7 +113,15 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 &input.name,
                 &fingerprint.addr,
                 false,
-                user.priority,
+                connection_priority_for_kind(
+                    user,
+                    session
+                        .connection_kind
+                        .unwrap_or(connection_kind),
+                ),
+                session
+                    .connection_kind
+                    .unwrap_or(connection_kind),
                 Some(session.token.as_str()),
             )
             .await
@@ -124,7 +133,23 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 sanitize_sensitive_info(&session.provider),
                 sanitize_sensitive_info(&fingerprint.addr.to_string())
             );
-            app_state.active_provider.acquire_connection_with_grace(&input.name, &fingerprint.addr, false, user.priority).await
+            app_state
+                .active_provider
+                .acquire_connection_with_grace(
+                    &input.name,
+                    &fingerprint.addr,
+                    false,
+                    connection_priority_for_kind(
+                        user,
+                        session
+                            .connection_kind
+                            .unwrap_or(connection_kind),
+                    ),
+                    session
+                        .connection_kind
+                        .unwrap_or(connection_kind),
+                )
+                .await
         };
 
         match provider_handle.as_ref().map(|handle| &handle.allocation) {
@@ -141,6 +166,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         stream_url: &stream_url,
                         addr: &fingerprint.addr,
                         connection_permission,
+                        connection_kind: session.connection_kind,
                     })
                     .await;
                 app_state
@@ -159,7 +185,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 &input.name,
                 &fingerprint.addr,
                 false,
-                user.priority,
+                connection_priority_for_kind(user, connection_kind),
+                connection_kind,
                 Some(&user_session_token),
             )
             .await
@@ -183,6 +210,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                             stream_url: &stream_url,
                             addr: &fingerprint.addr,
                             connection_permission,
+                            connection_kind: Some(connection_kind),
                         })
                         .await;
                     app_state
@@ -434,14 +462,28 @@ async fn hls_api_stream(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
 
-        let connection_permission = if user.max_connections > 0 && app_state.app_config.config.load().user_access_control {
+        let connection_admission = if (user.max_connections > 0 || user.soft_connections > 0)
+            && app_state.app_config.config.load().user_access_control
+        {
             app_state
-                .active_users
-                .connection_permission_for_session(&user.username, user.max_connections, &session.token)
+                .get_connection_admission_for_session(
+                    &user.username,
+                    user.max_connections,
+                    user.soft_connections,
+                    &session.token,
+                )
                 .await
         } else {
-            UserConnectionPermission::Allowed
+            crate::api::model::ConnectionAdmission {
+                permission: UserConnectionPermission::Allowed,
+                kind: session.connection_kind,
+            }
         };
+        let connection_permission = connection_admission.permission;
+        let connection_kind = connection_admission
+            .kind
+            .or(session.connection_kind)
+            .unwrap_or(crate::api::model::ConnectionKind::Normal);
         if connection_permission == UserConnectionPermission::Exhausted {
             let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &session.stream_url).await;
             return admission_failure_response(
@@ -466,6 +508,7 @@ async fn hls_api_stream(
                 &input,
                 &req_headers,
                 connection_permission,
+                connection_kind,
             )
             .await
             .into_response();
@@ -482,6 +525,7 @@ async fn hls_api_stream(
                 &target,
                 &user,
                 connection_permission,
+                connection_kind,
                 Some(&session.token),
                 false,
             )

@@ -1,4 +1,4 @@
-use crate::api::model::ConnectionManager;
+use crate::api::model::{CloseConnectionSignal, ConnectionManager};
 use axum::{body::Body, extract::Request, response::Response};
 use futures::FutureExt;
 use hyper::body::Incoming;
@@ -158,12 +158,17 @@ async fn handle_connection<M, S>(
                     debug!("Connection gracefully closed: {remote_addr}");
                     conn.as_mut().graceful_shutdown();
                 }
-                Ok(msg) = addr_close_rx.recv() => {
-                    if msg == addr {
-                        connection_manager_clone.release_connection(&addr).await;
-                        debug!("Forced client disconnect {msg}");
-                        conn.as_mut().graceful_shutdown();
-                        break;
+                Ok(signal) = addr_close_rx.recv() => {
+                    match signal {
+                        CloseConnectionSignal::WithReason(msg, reason) if msg == addr => {
+                            connection_manager_clone.release_connection_with_reason(&addr, &reason).await;
+                            debug!("Forced client close {msg} reason={reason:?}");
+                            conn.as_mut().graceful_shutdown();
+                            break;
+                        }
+                        CloseConnectionSignal::WithReason(..) => {
+                            trace!("Ignored CloseConnectionSignal for a different connection");
+                        }
                     }
                 }
             }

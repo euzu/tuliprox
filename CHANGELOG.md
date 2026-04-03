@@ -6,6 +6,13 @@
 
 ## 🌟 New Features
 
+- **Soft Connections And Soft Priority**: API users can now be configured with `soft_connections` and `soft_priority`.
+  - Soft connections allow a user to consume additional preemptible provider slots above `max_connections`.
+  - `soft_priority` is only applied while a connection is using a soft slot; once a regular slot becomes available again, the running connection  
+    is promoted back to `Normal` and uses the user's normal `priority`.
+  - The soft-vs-normal classification is now preserved through provider-backed stream creation, HLS session handling, and shared live-stream reuse.
+  - The Web UI user editor now exposes both soft connection count and soft priority.
+  - The user DB schema is upgraded accordingly to persist the new fields.
 - **Download And Recording Manager**: The Web UI download feature has been expanded into a provider-aware download/recording manager.
   - VOD, series and episode downloads now use typed transfer snapshots across REST and websocket updates.
   - Download state in the Web UI is websocket-driven after the initial snapshot instead of relying on repeated REST polling.

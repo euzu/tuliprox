@@ -234,7 +234,7 @@ pub fn EpgView() -> Html {
             <div class="tp__epg__body" ref={container_ref}>
                 {
                     if epg.is_none() {
-                        html! { <NoContent /> }
+                        html! { <NoContent text={translate.t("MESSAGES.EPG.SELECT_AN_EPG_TO_VIEW_CONTENT")}/> }
                    } else {
                         let tv = epg.as_ref().unwrap();
                         let start_window_secs = (tv.start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);

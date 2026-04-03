@@ -3486,6 +3486,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
     if stop_signal.is_cancelled() {
         return Ok(());
     }
+    let provisioning_kick_secs = 0;
 
     let Some(panel_cfg) = input.panel_api.as_ref() else {
         debug_if_enabled!(
@@ -3493,7 +3494,15 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.cancel();
-        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
+        let _ = app_state
+            .connection_manager
+            .close_connection_with_reason_and_block(
+                &addr,
+                virtual_id,
+                provisioning_kick_secs,
+                crate::repository::DisconnectReason::Provisioning,
+            )
+            .await;
         return Ok(());
     };
     if !panel_cfg.enabled {
@@ -3502,7 +3511,15 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.cancel();
-        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
+        let _ = app_state
+            .connection_manager
+            .close_connection_with_reason_and_block(
+                &addr,
+                virtual_id,
+                provisioning_kick_secs,
+                crate::repository::DisconnectReason::Provisioning,
+            )
+            .await;
         return Ok(());
     }
     if panel_cfg.url.trim().is_empty() {
@@ -3511,7 +3528,15 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.cancel();
-        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
+        let _ = app_state
+            .connection_manager
+            .close_connection_with_reason_and_block(
+                &addr,
+                virtual_id,
+                provisioning_kick_secs,
+                crate::repository::DisconnectReason::Provisioning,
+            )
+            .await;
         return Ok(());
     }
 
@@ -3564,7 +3589,15 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name),
             sanitize_sensitive_info(addr.to_string().as_str())
         );
-        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
+        let _ = app_state
+            .connection_manager
+            .close_connection_with_reason_and_block(
+                &addr,
+                virtual_id,
+                provisioning_kick_secs,
+                crate::repository::DisconnectReason::Provisioning,
+            )
+            .await;
         return Ok(());
     };
 
@@ -3582,7 +3615,15 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             sanitize_sensitive_info(&input.name)
         );
         stop_signal.cancel();
-        let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
+        let _ = app_state
+            .connection_manager
+            .close_connection_with_reason_and_block(
+                &addr,
+                virtual_id,
+                provisioning_kick_secs,
+                crate::repository::DisconnectReason::Provisioning,
+            )
+            .await;
         return Ok(());
     };
 
@@ -3657,7 +3698,15 @@ pub(crate) async fn run_panel_api_provisioning_probe(
         sanitize_sensitive_info(&input.name),
         sanitize_sensitive_info(addr.to_string().as_str())
     );
-    let _ = app_state.connection_manager.kick_connection(&addr, virtual_id, 0).await;
+    let _ = app_state
+        .connection_manager
+        .close_connection_with_reason_and_block(
+            &addr,
+            virtual_id,
+            provisioning_kick_secs,
+            crate::repository::DisconnectReason::Provisioning,
+        )
+        .await;
     Ok(())
 }
 

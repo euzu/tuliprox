@@ -137,6 +137,7 @@
         pointer-events: none;
         height: 1.2rem;
         width: 1.2rem;
+        object-fit: contain;
       }
 
       &:hover {
@@ -171,6 +172,7 @@
       svg, img {
         height: 2rem;
         width: 2rem;
+        object-fit: contain;
       }
     }
   }

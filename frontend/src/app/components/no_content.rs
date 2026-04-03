@@ -5,6 +5,8 @@ use yew::prelude::*;
 pub struct NoContentProps {
     #[prop_or_default]
     pub class: String,
+    #[prop_or_default]
+    pub text: String,
 }
 
 #[component]
@@ -14,6 +16,7 @@ pub fn NoContent(props: &NoContentProps) -> Html {
             <div class="tp__no_content__indicator">
                <AppIcon name="Clear" />
             </div>
+            <p>{&props.text}</p>
         </div>
     }
 }

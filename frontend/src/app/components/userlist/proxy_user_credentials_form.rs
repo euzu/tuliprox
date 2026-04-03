@@ -7,7 +7,7 @@ use crate::{
         TargetUser,
     },
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_number_i8,
-    edit_field_text, edit_field_text_option, generate_form_reducer,
+    edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer,
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
@@ -37,7 +37,9 @@ generate_form_reducer!(
         Server => server: Option<String>,
         Status => status: Option<ProxyUserStatus>,
         MaxConnections => max_connections: u32,
+        SoftConnections => soft_connections: u16,
         Priority => priority: i8,
+        SoftPriority => soft_priority: i8,
         ExpDate => exp_date: Option<i64>,
         UiEnabled => ui_enabled: bool,
         EpgTimeshift => epg_timeshift: Option<String>,
@@ -255,9 +257,11 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     options={server_list.clone()}
                 />
             }})}
-            { edit_field_number!(form_state,  translate.t("LABEL.MAX_CONNECTIONS"), max_connections, UserFormAction::MaxConnections) }
-            { edit_field_number_i8!(form_state, translate.t("LABEL.PRIORITY"), priority, UserFormAction::Priority) }
             { edit_field_date!(form_state,  translate.t("LABEL.EXP_DATE"), exp_date, UserFormAction::ExpDate) }
+            { edit_field_number!(form_state,  translate.t("LABEL.MAX_CONNECTIONS"), max_connections, UserFormAction::MaxConnections) }
+            { edit_field_number_u16!(form_state,  translate.t("LABEL.SOFT_CONNECTIONS"), soft_connections, UserFormAction::SoftConnections) }
+            { edit_field_number_i8!(form_state, translate.t("LABEL.PRIORITY"), priority, UserFormAction::Priority) }
+            { edit_field_number_i8!(form_state, translate.t("LABEL.SOFT_PRIORITY"), soft_priority, UserFormAction::SoftPriority) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_TIMESHIFT"), epg_timeshift, UserFormAction::EpgTimeshift) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_REQUEST_TIMESHIFT"), epg_request_timeshift, UserFormAction::EpgRequestTimeshift) }
             { edit_field_bool!(form_state,  translate.t("LABEL.USER_UI_ENABLED"), ui_enabled, UserFormAction::UiEnabled) }

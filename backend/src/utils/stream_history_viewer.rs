@@ -217,7 +217,10 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "disconnect_reason" => {
             // Match against serde rename_all = "snake_case" names
             RecordFieldValue::String(record.disconnect_reason.as_ref().map(|r| match r {
+                DisconnectReason::Cleanup => "cleanup",
                 DisconnectReason::ClientClosed => "client_closed",
+                DisconnectReason::ClientKicked => "client_kicked",
+                DisconnectReason::Provisioning => "provisioning",
                 DisconnectReason::ServerError => "server_error",
                 DisconnectReason::Timeout => "timeout",
                 DisconnectReason::DayRollover => "day_rollover",
@@ -723,6 +726,34 @@ mod tests {
         assert!(!filter.matches(&record));
 
         record.disconnect_reason = None;
+        assert!(!filter.matches(&record));
+    }
+
+    #[test]
+    fn test_filter_client_kicked_disconnect_reason() {
+        let mut raw = HashMap::new();
+        raw.insert("disconnect_reason".to_string(), "client_kicked".to_string());
+        let filter = CompiledFilter::compile(&raw).unwrap();
+
+        let mut record = make_empty_record();
+        record.disconnect_reason = Some(DisconnectReason::ClientKicked);
+        assert!(filter.matches(&record));
+
+        record.disconnect_reason = Some(DisconnectReason::ClientClosed);
+        assert!(!filter.matches(&record));
+    }
+
+    #[test]
+    fn test_filter_provisioning_disconnect_reason() {
+        let mut raw = HashMap::new();
+        raw.insert("disconnect_reason".to_string(), "provisioning".to_string());
+        let filter = CompiledFilter::compile(&raw).unwrap();
+
+        let mut record = make_empty_record();
+        record.disconnect_reason = Some(DisconnectReason::Provisioning);
+        assert!(filter.matches(&record));
+
+        record.disconnect_reason = Some(DisconnectReason::ClientKicked);
         assert!(!filter.matches(&record));
     }
 

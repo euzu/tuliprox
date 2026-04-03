@@ -10,6 +10,7 @@ use crate::{
             UpdateGuard,
         },
         scheduler::exec_scheduler,
+        model::active_user_manager::ConnectionAdmission,
     },
     model::{
         AppConfig, Config, ConfigProvider, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig,
@@ -504,8 +505,34 @@ impl AppState {
         self.active_users.user_connections(username).await
     }
 
-    pub async fn get_connection_permission(&self, username: &str, max_connections: u32) -> UserConnectionPermission {
-        self.active_users.connection_permission(username, max_connections).await
+    pub(crate) async fn get_connection_admission(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+    ) -> ConnectionAdmission {
+        self.active_users.connection_admission(username, max_connections, soft_connections).await
+    }
+
+    pub(crate) async fn get_connection_admission_for_session(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+        session_token: &str,
+    ) -> ConnectionAdmission {
+        self.active_users
+            .connection_admission_for_session(username, max_connections, soft_connections, session_token)
+            .await
+    }
+
+    pub async fn get_connection_permission(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+    ) -> UserConnectionPermission {
+        self.active_users.connection_permission(username, max_connections, soft_connections).await
     }
 
     fn detect_changes_for_config(&self, config: &Config) -> UpdateChanges {

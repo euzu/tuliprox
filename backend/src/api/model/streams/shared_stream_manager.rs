@@ -672,6 +672,7 @@ impl SharedStreamManager {
         buffer_size: usize,
         provider_handle: Option<ProviderHandle>,
         user_priority: i8,
+        connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)>
     where
         S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
@@ -696,7 +697,7 @@ impl SharedStreamManager {
         ));
         app_state.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
         app_state.active_provider.make_shared_connection(addr, stream_url).await;
-        let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr, user_priority).await;
+        let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr, user_priority, connection_kind).await;
         debug_if_enabled!(
             "Shared stream startup register+subscribe completed for {} in {} ms",
             sanitize_sensitive_info(stream_url),
@@ -722,10 +723,20 @@ impl SharedStreamManager {
         stream_url: &str,
         addr: &SocketAddr,
         user_priority: i8,
+        connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)> {
         let manager = Arc::clone(&app_state.shared_stream_manager);
         if let Some(result) = app_state.shared_stream_manager.subscribe_stream(stream_url, addr, manager).await {
-            match app_state.active_provider.add_shared_connection(addr, stream_url, user_priority).await {
+            match app_state
+                .active_provider
+                .add_shared_connection(
+                    addr,
+                    stream_url,
+                    user_priority,
+                    connection_kind,
+                )
+                .await
+            {
                 Ok(()) => Some(result),
                 Err(err) => {
                     warn!(

@@ -52,6 +52,7 @@
            flex-flow: row;
            gap: var(--gap-small);
            align-items: center;
+          justify-content: center;
            cursor: pointer;
             svg,
            .svg-icon {
@@ -90,9 +91,13 @@
   }
 
   &__cell--center {
+    display: block;
+    width: 100%;
     text-align: center;
   }
   &__number-cell {
+    display: block;
+    width: 100%;
     text-align: right;
   }
 }

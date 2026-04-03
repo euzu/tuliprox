@@ -43,6 +43,10 @@ pub struct ProxyUserCredentialsDto {
     pub comment: Option<String>,
     #[serde(default = "default_user_priority", skip_serializing_if = "is_default_user_priority")]
     pub priority: i8,
+    #[serde(default)]
+    pub soft_connections: u16,
+    #[serde(default = "default_user_priority", skip_serializing_if = "is_default_user_priority")]
+    pub soft_priority: i8,
 }
 
 impl ProxyUserCredentialsDto {

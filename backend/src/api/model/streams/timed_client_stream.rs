@@ -83,7 +83,14 @@ impl Stream for TimedClientStream {
                     sanitize_sensitive_info(&addr.to_string())
                 );
                 tokio::spawn(async move {
-                    connection_manager.kick_connection(&addr, virtual_id, kick_secs).await;
+                    let _ = connection_manager
+                        .close_connection_with_reason_and_block(
+                            &addr,
+                            virtual_id,
+                            kick_secs,
+                            crate::repository::DisconnectReason::Timeout,
+                        )
+                        .await;
                 });
             }
             return Poll::Ready(None);

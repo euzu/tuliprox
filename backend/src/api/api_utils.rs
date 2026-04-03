@@ -401,7 +401,15 @@ struct StreamingAcquireOptions<'a> {
     force_provider: Option<&'a Arc<str>>,
     allow_provider_grace: bool,
     user_priority: i8,
+    connection_kind: crate::api::model::ConnectionKind,
     session_owner: Option<&'a str>,
+}
+
+pub(crate) fn connection_priority_for_kind(user: &ProxyUserCredentials, kind: crate::api::model::ConnectionKind) -> i8 {
+    match kind {
+        crate::api::model::ConnectionKind::Normal => user.priority,
+        crate::api::model::ConnectionKind::Soft => user.soft_priority,
+    }
 }
 
 pub struct ForceStreamRequestContext<'a> {
@@ -518,6 +526,7 @@ async fn resolve_streaming_strategy(
                     &fingerprint.addr,
                     options.allow_provider_grace,
                     options.user_priority,
+                    options.connection_kind,
                     options.session_owner,
                 )
                 .await
@@ -537,6 +546,7 @@ async fn resolve_streaming_strategy(
                         &fingerprint.addr,
                         options.allow_provider_grace,
                         options.user_priority,
+                        options.connection_kind,
                         options.session_owner,
                     )
                     .await
@@ -550,6 +560,7 @@ async fn resolve_streaming_strategy(
                     &fingerprint.addr,
                     options.allow_provider_grace,
                     options.user_priority,
+                    options.connection_kind,
                     options.session_owner,
                 )
                 .await
@@ -641,6 +652,7 @@ async fn create_stream_response_details(
     allow_provider_grace: bool,
     virtual_id: VirtualId,
     user_priority: i8,
+    connection_kind: crate::api::model::ConnectionKind,
     session_owner: Option<&str>,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy = resolve_streaming_strategy(
@@ -652,6 +664,7 @@ async fn create_stream_response_details(
             force_provider,
             allow_provider_grace,
             user_priority,
+            connection_kind,
             session_owner,
         },
     )
@@ -974,6 +987,9 @@ pub async fn force_provider_stream_response(
     // Never allow provider-side grace for forced seek/session reacquire.
     // Over-allocation here would break provider-side one-connection limits.
     let allow_provider_grace = false;
+    let connection_kind = user_session
+        .connection_kind
+        .unwrap_or(crate::api::model::ConnectionKind::Normal);
 
     let stream_details = match create_stream_response_details(
         app_state,
@@ -990,7 +1006,8 @@ pub async fn force_provider_stream_response(
         preferred_provider,
         allow_provider_grace,
         stream_channel.virtual_id,
-        ctx.user.priority,
+        connection_priority_for_kind(ctx.user, connection_kind),
+        connection_kind,
         Some(user_session.token.as_str()),
     )
     .await
@@ -1033,6 +1050,9 @@ pub async fn force_provider_stream_response(
             app_state,
             user: ctx.user,
             connection_permission,
+            connection_kind: user_session
+                .connection_kind
+                .unwrap_or(crate::api::model::ConnectionKind::Normal),
             fingerprint,
             stream_channel,
             session_token: Some(&user_session.token),
@@ -1090,6 +1110,7 @@ pub async fn stream_response(
     target: &Arc<ConfigTarget>,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
     allow_exhausted_shared_reconnect: bool,
 ) -> impl IntoResponse + Send {
     let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
@@ -1112,6 +1133,7 @@ pub async fn stream_response(
                 fingerprint,
                 user,
                 connection_permission,
+                connection_kind,
                 stream_channel.clone(),
                 session_token,
                 req_headers,
@@ -1132,6 +1154,7 @@ pub async fn stream_response(
                 fingerprint,
                 user,
                 connection_permission,
+                connection_kind,
                 stream_channel.clone(),
                 session_token,
                 req_headers,
@@ -1183,7 +1206,8 @@ pub async fn stream_response(
         None,
         true,
         stream_channel.virtual_id,
-        user.priority,
+        connection_priority_for_kind(user, connection_kind),
+        connection_kind,
         Some(session_token),
     )
     .await
@@ -1258,6 +1282,7 @@ pub async fn stream_response(
             app_state,
             user,
             connection_permission,
+            connection_kind,
             fingerprint,
             stream_channel,
             session_token: Some(session_token),
@@ -1281,7 +1306,8 @@ pub async fn stream_response(
                 shared_headers,
                 stream_options.buffer_size,
                 provider_handle,
-                user.priority,
+                connection_priority_for_kind(user, connection_kind),
+                connection_kind,
             )
             .await
             {
@@ -1364,6 +1390,7 @@ pub async fn stream_response(
                             stream_url: &session_url,
                             addr: &fingerprint.addr,
                             connection_permission,
+                            connection_kind: Some(connection_kind),
                         })
                         .await;
                     let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
@@ -1480,6 +1507,7 @@ async fn try_shared_stream_response_if_any(
     fingerprint: &Fingerprint,
     user: &ProxyUserCredentials,
     connect_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
     mut stream_channel: StreamChannel,
     session_token: &str,
     req_headers: &HeaderMap,
@@ -1488,8 +1516,14 @@ async fn try_shared_stream_response_if_any(
         return None;
     }
 
-    if let Some((stream, provider)) =
-        SharedStreamManager::subscribe_shared_stream(app_state, stream_url, &fingerprint.addr, user.priority).await
+    if let Some((stream, provider)) = SharedStreamManager::subscribe_shared_stream(
+        app_state,
+        stream_url,
+        &fingerprint.addr,
+        connection_priority_for_kind(user, connection_kind),
+        connection_kind,
+    )
+    .await
     {
         debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
         if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
@@ -1501,6 +1535,21 @@ async fn try_shared_stream_response_if_any(
             let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
 
             stream_details.provider_name = provider;
+            if let Some(provider_name) = stream_details.provider_name.as_deref() {
+                let _ = app_state
+                    .active_users
+                    .create_user_session(crate::api::model::CreateUserSessionParams {
+                        user,
+                        session_token,
+                        virtual_id: stream_channel.virtual_id,
+                        provider: provider_name,
+                        stream_url,
+                        addr: &fingerprint.addr,
+                        connection_permission: connect_permission,
+                        connection_kind: Some(connection_kind),
+                    })
+                    .await;
+            }
             stream_channel.shared = true;
             stream_channel.shared_joined_existing = Some(true);
             stream_channel.shared_stream_id = app_state.shared_stream_manager.get_meter_uid(stream_url).await.map(u64::from);
@@ -1513,6 +1562,7 @@ async fn try_shared_stream_response_if_any(
                 app_state,
                 user,
                 connection_permission: connect_permission,
+                connection_kind,
                 fingerprint,
                 stream_channel,
                 session_token: Some(session_token),
@@ -1544,6 +1594,7 @@ pub async fn local_stream_response(
     _target: &ConfigTarget,
     user: &ProxyUserCredentials,
     connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
     playback_session_token: Option<&str>,
     check_path: bool,
 ) -> impl IntoResponse + Send {
@@ -1556,7 +1607,12 @@ pub async fn local_stream_response(
             user.max_connections > 0
                 && app_state
                     .active_users
-                    .connection_permission_for_session(&user.username, user.max_connections, session_token)
+                    .connection_permission_for_session(
+                        &user.username,
+                        user.max_connections,
+                        user.soft_connections,
+                        session_token,
+                    )
                     .await
                     != UserConnectionPermission::Exhausted
         } else {
@@ -1669,11 +1725,37 @@ pub async fn local_stream_response(
     if connection_permission != UserConnectionPermission::GracePeriod {
         grace_period_options.period_millis = 0;
     }
+    let resolved_connection_kind = if let Some(session_token) = playback_session_token {
+        app_state
+            .active_users
+            .get_and_update_user_session(&user.username, session_token)
+            .await
+            .and_then(|session| session.connection_kind)
+            .unwrap_or(connection_kind)
+    } else {
+        connection_kind
+    };
+    if let Some(session_token) = playback_session_token {
+        let _ = app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user,
+                session_token,
+                virtual_id: pli.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: &pli.url,
+                addr: &fingerprint.addr,
+                connection_permission,
+                connection_kind: Some(resolved_connection_kind),
+            })
+            .await;
+    }
     let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
         stream_details: StreamDetails::from_stream(stream, grace_period_options),
         app_state,
         user,
         connection_permission,
+        connection_kind: resolved_connection_kind,
         fingerprint,
         stream_channel: pli.clone(),
         session_token: playback_session_token,
@@ -2181,6 +2263,8 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         ui_enabled: false,
         comment: None,
         priority: 0,
+        soft_connections: 0,
+        soft_priority: 0,
         t_is_api_user: true,
     }
 }
@@ -2202,7 +2286,7 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{HeaderMap, Response};
+    use axum::http::{HeaderMap, Response, StatusCode};
     use crate::{
         api::model::{
             AppState, CancelTokens, ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, MetadataUpdateManager,
@@ -2214,12 +2298,13 @@ mod tests {
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use bytes::Bytes;
+    use futures::stream;
     use shared::{
         foundation::Filter,
-        model::{ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder, StreamChannel, XtreamCluster},
+        model::{ConfigPaths, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder, StreamChannel, XtreamCluster},
         utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
     };
-    use std::{collections::HashMap, sync::Arc};
+    use std::{borrow::Cow, collections::HashMap, sync::Arc};
     use tokio::sync::mpsc;
     use crate::model::StreamHistoryConfig;
 
@@ -2294,6 +2379,7 @@ mod tests {
     #[test]
     fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session() {
         let session = UserSession {
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
             token: "tok".to_string(),
             virtual_id: 282,
             provider: Arc::<str>::from("provider"),
@@ -2371,8 +2457,59 @@ mod tests {
         }
     }
 
+    fn create_test_provider_app_config() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        }
+    }
+
     fn create_test_app_state() -> Arc<AppState> {
-        let app_cfg = Arc::new(create_test_app_config());
+        create_test_app_state_for_config(Arc::new(create_test_app_config()))
+    }
+
+    fn create_test_provider_app_state() -> Arc<AppState> {
+        create_test_app_state_for_config(Arc::new(create_test_provider_app_config()))
+    }
+
+    fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
         let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
@@ -2437,6 +2574,46 @@ mod tests {
         }
     }
 
+    fn create_test_live_channel(url: &str) -> StreamChannel {
+        StreamChannel {
+            target_id: 1,
+            virtual_id: 42,
+            provider_id: 1,
+            input_name: "provider_1".intern(),
+            item_type: PlaylistItemType::Live,
+            cluster: XtreamCluster::Live,
+            group: "Live".intern(),
+            title: "Shared Live".intern(),
+            url: url.into(),
+            shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
+            technical: None,
+        }
+    }
+
+    fn create_test_shared_target() -> ConfigTarget {
+        ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "shared".to_string(),
+            options: Some(ConfigTargetOptions {
+                share_live_streams: true,
+                ..ConfigTargetOptions::default()
+            }),
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        }
+    }
+
     #[test]
     fn admission_failure_reason_maps_to_custom_video_type() {
         assert!(matches!(
@@ -2492,6 +2669,7 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
             None,
             false,
         )
@@ -2501,6 +2679,102 @@ mod tests {
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "local file streaming should register an active stream");
         assert_eq!(active_streams[0].channel.item_type, PlaylistItemType::LocalVideo);
+    }
+
+    #[tokio::test]
+    async fn stream_response_preserves_soft_kind_for_shared_reuse() {
+        let app_state = create_test_provider_app_state();
+        let stream_url = "http://provider-1.example/live/shared.ts";
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .get_input_by_name(&input_name)
+            .expect("provider input should exist");
+        let target = Arc::new(create_test_shared_target());
+
+        let owner_addr = "127.0.0.1:55140".parse().unwrap_or_else(|_| unreachable!());
+        let owner_handle = app_state
+            .active_provider
+            .acquire_connection(&input.name, &owner_addr, 0, crate::api::model::ConnectionKind::Normal)
+            .await
+            .expect("owner allocation should exist");
+        let shared_stream = stream::pending::<Result<Bytes, std::io::Error>>();
+        let registered = SharedStreamManager::register_shared_stream(
+            app_state.as_ref(),
+            stream_url,
+            shared_stream,
+            &owner_addr,
+            Vec::new(),
+            1,
+            Some(owner_handle),
+            0,
+            crate::api::model::ConnectionKind::Normal,
+        )
+        .await;
+        assert!(registered.is_some(), "shared stream should register");
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "soft-user".to_string();
+        user.max_connections = 1;
+        user.soft_connections = 1;
+        user.priority = 0;
+        user.soft_priority = 9;
+
+        let normal_addr = "127.0.0.1:55141".parse().unwrap_or_else(|_| unreachable!());
+        let normal_fingerprint = create_test_fingerprint(normal_addr);
+        let normal_channel = create_test_live_channel("http://provider-1.example/live/normal.ts");
+        app_state.active_users.add_connection(&normal_addr).await;
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 1001,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: user.priority,
+                soft_priority: user.soft_priority,
+                fingerprint: &normal_fingerprint,
+                provider: input.name.as_ref(),
+                stream_channel: &normal_channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("normal-session"),
+            })
+            .await
+            .expect("normal stream should register");
+
+        let admission = app_state
+            .get_connection_admission(&user.username, user.max_connections, user.soft_connections)
+            .await;
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+
+        let soft_addr = "127.0.0.1:55142".parse().unwrap_or_else(|_| unreachable!());
+        let soft_fingerprint = create_test_fingerprint(soft_addr);
+        let response = stream_response(
+            &soft_fingerprint,
+            &app_state,
+            "soft-session",
+            create_test_live_channel(stream_url),
+            stream_url,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            admission.permission,
+            admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
+            false,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let session_admission = app_state
+            .active_users
+            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, "soft-session")
+            .await;
+        assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
     }
 
     #[tokio::test]
@@ -2541,6 +2815,7 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
             None,
             false,
         )
@@ -2590,6 +2865,7 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
             false,
         )
@@ -2605,6 +2881,7 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
             false,
         )
@@ -2659,6 +2936,7 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
             false,
         )
@@ -2674,6 +2952,7 @@ mod tests {
             &target,
             &user,
             UserConnectionPermission::Exhausted,
+            crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
             false,
         )
@@ -2686,5 +2965,80 @@ mod tests {
         assert_eq!(active_streams.len(), 1);
         assert_eq!(active_streams[0].session_token.as_deref(), Some(playback_session_token));
         assert_eq!(active_streams[0].addr, second_fingerprint.addr);
+    }
+
+    #[tokio::test]
+    async fn local_stream_response_preserves_soft_kind_across_reopens() {
+        let app_state = create_test_app_state();
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("local-soft-test.mkv");
+        tokio::fs::write(&file_path, Bytes::from_static(b"local-stream")).await.expect("write local file");
+
+        let channel = create_test_local_channel(&format!("file://{}", file_path.display()));
+        let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
+        let mut user = ProxyUserCredentials::default();
+        user.username = "soft-local-user".to_string();
+        user.max_connections = 1;
+        user.soft_connections = 1;
+        let target = ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "test".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        };
+        let playback_session_token = "local-soft-playback-token";
+
+        let first_fingerprint = create_test_fingerprint("127.0.0.1:55129".parse().unwrap_or_else(|_| unreachable!()));
+        let second_fingerprint = create_test_fingerprint("127.0.0.1:55130".parse().unwrap_or_else(|_| unreachable!()));
+
+        let _first_response = local_stream_response(
+            &first_fingerprint,
+            &app_state,
+            channel.clone(),
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Soft,
+            Some(playback_session_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        let second_response = local_stream_response(
+            &second_fingerprint,
+            &app_state,
+            channel,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Exhausted,
+            crate::api::model::ConnectionKind::Normal,
+            Some(playback_session_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let session_admission = app_state
+            .active_users
+            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, playback_session_token)
+            .await;
+        assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
     }
 }

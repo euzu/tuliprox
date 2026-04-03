@@ -63,7 +63,10 @@ pub enum FailureStage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisconnectReason {
+    Cleanup,
     ClientClosed,
+    ClientKicked,
+    Provisioning,
     ServerError,
     Timeout,
     /// Reserved for future day-split logic: emitted at midnight for sessions that span

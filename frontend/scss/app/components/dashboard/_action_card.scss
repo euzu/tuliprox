@@ -16,6 +16,7 @@
     img {
       width: var(--dashboard-card-icon-width);
       max-width: var(--dashboard-card-icon-width);
+      object-fit: contain;
     }
     .svg-icon {
       width: var(--dashboard-card-icon-width);
