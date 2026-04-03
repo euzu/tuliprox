@@ -4,7 +4,7 @@ use crate::{
         config_watch::exec_config_watch,
         endpoints::{
             custom_video_stream_api::cvs_api_register,
-            download_api::resume_download_worker_if_needed,
+            download_api::{resume_download_worker_if_needed, spawn_download_services},
             hdhomerun_api::hdhr_api_register,
             hls_api::hls_api_register,
             m3u_api::m3u_api_register,
@@ -100,6 +100,19 @@ async fn recover_persisted_downloads_state(downloads: &DownloadQueue) -> Result<
             shared::error::TuliproxErrorKind::Info,
             format!("Failed to load persisted downloads: {err}"),
         )),
+    }
+}
+
+async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue) {
+    if let Err(err) = recover_persisted_downloads_state(downloads).await {
+        error!("Failed to recover persisted downloads state during startup; continuing with downloads paused: {err}");
+    }
+}
+
+async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::VideoDownloadConfig) {
+    spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
+    if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
+        error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
     }
 }
 
@@ -313,17 +326,7 @@ async fn create_shared_data(
             manual_update_sender,
         };
 
-    recover_persisted_downloads_state(&app_state.downloads).await?;
-
-    if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
-        crate::api::endpoints::download_api::spawn_download_services(&app_state, &app_state.cancel_tokens.load().downloads);
-        resume_download_worker_if_needed(&app_state, download_cfg).await.map_err(|err| {
-            TuliproxError::new(
-                shared::error::TuliproxErrorKind::Info,
-                format!("Failed to resume persisted downloads: {err}"),
-            )
-        })?;
-    }
+    recover_persisted_downloads_state_for_startup(&app_state.downloads).await;
 
     Ok((app_state, manual_update_rx))
 }
@@ -365,6 +368,28 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
     app_state.metadata_manager.shutdown();
     app_state.connection_manager.shutdown().await;
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut quit = signal(SignalKind::quit())?;
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            res?;
+            Ok("Ctrl+C")
+        },
+        _ = terminate.recv() => Ok("SIGTERM"),
+        _ = quit.recv() => Ok("SIGQUIT")
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
+    tokio::signal::ctrl_c().await?;
+    Ok("Ctrl+C")
 }
 
 #[cfg(test)]
@@ -704,18 +729,22 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         .await
         .map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
 
+    if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
+        resume_downloads_after_bind(&app_state, download_cfg).await;
+    }
+
     let server_cancel_token = CancellationToken::new();
     let server_cancel_token_signal = server_cancel_token.clone();
     let app_state_signal = Arc::clone(&app_state);
     tokio::spawn(async move {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => {
-                info!("Received shutdown signal (Ctrl+C), cancelling all background services");
+        match wait_for_shutdown_signal().await {
+            Ok(signal_name) => {
+                info!("Received shutdown signal ({signal_name}), cancelling all background services");
                 server_cancel_token_signal.cancel();
                 cancel_all_service_tokens(&app_state_signal).await;
             }
             Err(err) => {
-                error!("Failed to listen for Ctrl+C: {err}");
+                error!("Failed to listen for shutdown signal: {err}");
             }
         }
     });

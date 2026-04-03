@@ -7,7 +7,8 @@ use crate::{
 };
 use shared::{
     model::{
-        DownloadsDelta, DownloadsResponse, FileDownloadDto, ProtocolMessage, SortOrder, TaskKindDto, TransferStatusDto,
+        DownloadsDelta, DownloadsResponse, FileDownloadDto, Permission, ProtocolMessage, SortOrder, TaskKindDto,
+        TransferStatusDto,
     },
     utils::unix_ts_to_str,
 };
@@ -30,6 +31,15 @@ const HEADERS: [&str; 9] = [
 enum DownloadTab {
     Queue,
     Finished,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct DownloadActionAvailability {
+    pause: bool,
+    resume: bool,
+    cancel: bool,
+    remove: bool,
+    retry: bool,
 }
 
 fn normalize_download_tab(
@@ -58,6 +68,28 @@ fn collect_downloads_for_tab(
         }
         DownloadTab::Finished => finished.iter().cloned().map(Rc::new).collect(),
     }
+}
+
+fn sort_download_items(items: &mut [Rc<FileDownloadDto>], sort: Option<(usize, SortOrder)>) {
+    if let Some((col, order)) = sort {
+        items.sort_by(|a, b| match order {
+            SortOrder::Asc => compare_downloads(a, b, col),
+            SortOrder::Desc => compare_downloads(b, a, col),
+            SortOrder::None => Ordering::Equal,
+        });
+    }
+}
+
+fn collect_sorted_downloads_for_tab(
+    tab: &DownloadTab,
+    queue: &Rc<Vec<FileDownloadDto>>,
+    finished: &Rc<Vec<FileDownloadDto>>,
+    active: &Rc<Vec<Rc<FileDownloadDto>>>,
+    sort: Option<(usize, SortOrder)>,
+) -> Vec<Rc<FileDownloadDto>> {
+    let mut items = collect_downloads_for_tab(tab, queue, finished, active);
+    sort_download_items(&mut items, sort);
+    items
 }
 
 fn format_download_kind(translate: &crate::i18n::YewI18n, kind: &TaskKindDto) -> String {
@@ -110,18 +142,22 @@ fn format_download_duration(download: &FileDownloadDto) -> String {
         .unwrap_or_default()
 }
 
-fn format_download_error(download: &FileDownloadDto) -> String {
+fn format_download_error_parts(download: &FileDownloadDto, attempt_label: &str, next_retry_label: &str) -> String {
     let mut parts = Vec::new();
     if let Some(error) = download.error.as_ref().filter(|error| !error.is_empty()) {
         parts.push(error.clone());
     }
     if download.retry_attempts > 0 {
-        parts.push(format!("attempt {}", download.retry_attempts));
+        parts.push(format!("{attempt_label} {}", download.retry_attempts));
     }
     if let Some(next_retry_at) = download.next_retry_at.and_then(unix_ts_to_str) {
-        parts.push(format!("next retry {next_retry_at}"));
+        parts.push(format!("{next_retry_label} {next_retry_at}"));
     }
     parts.join(" | ")
+}
+
+fn format_download_error(translate: &crate::i18n::YewI18n, download: &FileDownloadDto) -> String {
+    format_download_error_parts(download, &translate.t("LABEL.ATTEMPT"), &translate.t("LABEL.NEXT_RETRY"))
 }
 
 fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Ordering {
@@ -139,6 +175,34 @@ fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Or
 }
 
 fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
+
+fn download_action_availability(can_write: bool, dto: &FileDownloadDto) -> DownloadActionAvailability {
+    if !can_write {
+        return DownloadActionAvailability::default();
+    }
+
+    DownloadActionAvailability {
+        pause: matches!(
+            dto.status,
+            TransferStatusDto::Running | TransferStatusDto::WaitingForCapacity | TransferStatusDto::RetryWaiting
+        ),
+        resume: dto.status == TransferStatusDto::Paused,
+        cancel: matches!(
+            dto.status,
+            TransferStatusDto::Running
+                | TransferStatusDto::Queued
+                | TransferStatusDto::Scheduled
+                | TransferStatusDto::WaitingForCapacity
+                | TransferStatusDto::RetryWaiting
+        ),
+        remove: matches!(
+            dto.status,
+            TransferStatusDto::Failed | TransferStatusDto::Completed | TransferStatusDto::Cancelled
+        ),
+        retry: dto.kind == TaskKindDto::Download
+            && matches!(dto.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled),
+    }
+}
 
 fn optimistic_active_delta(
     active: &Rc<Vec<Rc<FileDownloadDto>>>,
@@ -220,11 +284,13 @@ fn apply_download_delta(
 pub fn downloads_view() -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let has_download_write = services.auth.has_permission(Permission::DownloadWrite);
     let active_tab = use_state(|| DownloadTab::Queue);
     let queue_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
     let finished_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
     let active_download = use_state(|| Rc::new(Vec::<Rc<FileDownloadDto>>::new()));
     let table_items = use_state(|| None::<Rc<Vec<Rc<FileDownloadDto>>>>);
+    let sort_state = use_state(|| None::<(usize, SortOrder)>);
 
     let request_downloads = {
         let services = services.clone();
@@ -264,15 +330,22 @@ pub fn downloads_view() -> Html {
         let active_download = active_download.clone();
         let active_tab_set = active_tab.clone();
         let table_items = table_items.clone();
+        let sort_state = sort_state.clone();
         use_effect_with(
-            ((*active_tab).clone(), (*queue_state).clone(), (*finished_state).clone(), (*active_download).clone()),
-            move |(tab, queue, finished, active)| {
+            (
+                (*active_tab).clone(),
+                (*queue_state).clone(),
+                (*finished_state).clone(),
+                (*active_download).clone(),
+                *sort_state,
+            ),
+            move |(tab, queue, finished, active, sort)| {
                 let normalized_tab =
                     normalize_download_tab(tab, queue.as_slice(), finished.as_slice(), active.as_ref());
                 if normalized_tab != *tab {
                     active_tab_set.set(normalized_tab.clone());
                 }
-                let items = collect_downloads_for_tab(&normalized_tab, queue, finished, active);
+                let items = collect_sorted_downloads_for_tab(&normalized_tab, queue, finished, active, *sort);
                 table_items.set((!items.is_empty()).then(|| Rc::new(items)));
                 || ()
             },
@@ -417,27 +490,7 @@ pub fn downloads_view() -> Html {
         Callback::<(usize, usize, Rc<FileDownloadDto>), Html>::from(
             move |(_row, col, dto): (usize, usize, Rc<FileDownloadDto>)| match col {
                 0 => {
-                    let can_pause = matches!(
-                        dto.status,
-                        TransferStatusDto::Running
-                            | TransferStatusDto::WaitingForCapacity
-                            | TransferStatusDto::RetryWaiting
-                    );
-                    let can_resume = dto.status == TransferStatusDto::Paused;
-                    let can_cancel = matches!(
-                        dto.status,
-                        TransferStatusDto::Running
-                            | TransferStatusDto::Queued
-                            | TransferStatusDto::Scheduled
-                            | TransferStatusDto::WaitingForCapacity
-                            | TransferStatusDto::RetryWaiting
-                    );
-                    let can_remove = matches!(
-                        dto.status,
-                        TransferStatusDto::Failed | TransferStatusDto::Completed | TransferStatusDto::Cancelled
-                    );
-                    let can_retry = dto.kind == TaskKindDto::Download
-                        && matches!(dto.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled);
+                    let actions = download_action_availability(has_download_write, &dto);
                     let retry_label = if dto.status == TransferStatusDto::Cancelled { "Resume" } else { "Retry" };
                     let retry_icon = if dto.status == TransferStatusDto::Cancelled { "Play" } else { "Refresh" };
                     let pause_uuid = dto.id.clone();
@@ -452,19 +505,19 @@ pub fn downloads_view() -> Html {
                     let remove_handle = handle_remove.clone();
                     html! {
                         <div class="tp__downloads-table__actions">
-                            if can_pause {
+                            if actions.pause {
                                 <IconButton name="Pause" icon="Pause" onclick={Callback::from(move |_| pause_handle.emit(pause_uuid.clone()))} />
                             }
-                            if can_resume {
+                            if actions.resume {
                                 <IconButton name="Resume" icon="Play" onclick={Callback::from(move |_| resume_handle.emit(resume_uuid.clone()))} />
                             }
-                            if can_cancel {
+                            if actions.cancel {
                                 <IconButton name="Cancel" icon="Stop" onclick={Callback::from(move |_| cancel_handle.emit(cancel_uuid.clone()))} />
                             }
-                            if can_retry {
+                            if actions.retry {
                                 <IconButton name={retry_label} icon={retry_icon} onclick={Callback::from(move |_| retry_handle.emit(retry_uuid.clone()))} />
                             }
-                            if can_remove {
+                            if actions.remove {
                                 <IconButton name="Remove" icon="Delete" onclick={Callback::from(move |_| remove_handle.emit(remove_uuid.clone()))} />
                             }
                         </div>
@@ -479,7 +532,7 @@ pub fn downloads_view() -> Html {
                 }
                 6 => html! { <span class="tp__table__nowrap">{format_download_start(&dto)}</span> },
                 7 => html! { format_download_duration(&dto) },
-                8 => html! { format_download_error(&dto) },
+                8 => html! { format_download_error(&translate, &dto) },
                 _ => html! {},
             },
         )
@@ -491,15 +544,11 @@ pub fn downloads_view() -> Html {
         let finished_state = finished_state.clone();
         let active_download = active_download.clone();
         let table_items = table_items.clone();
+        let sort_state = sort_state.clone();
         Callback::<Option<(usize, SortOrder)>, ()>::from(move |args| {
-            let mut items = collect_downloads_for_tab(&active_tab, &queue_state, &finished_state, &active_download);
-            if let Some((col, order)) = args {
-                items.sort_by(|a, b| match order {
-                    SortOrder::Asc => compare_downloads(a, b, col),
-                    SortOrder::Desc => compare_downloads(b, a, col),
-                    SortOrder::None => Ordering::Equal,
-                });
-            }
+            sort_state.set(args);
+            let items =
+                collect_sorted_downloads_for_tab(&active_tab, &queue_state, &finished_state, &active_download, args);
             table_items.set((!items.is_empty()).then(|| Rc::new(items)));
         })
     };
@@ -550,8 +599,11 @@ pub fn downloads_view() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_downloads_for_tab, is_sortable, normalize_download_tab, optimistic_active_delta, DownloadTab};
-    use shared::model::{DownloadsDelta, FileDownloadDto, TaskKindDto, TransferStatusDto};
+    use super::{
+        collect_downloads_for_tab, collect_sorted_downloads_for_tab, download_action_availability,
+        format_download_error_parts, is_sortable, normalize_download_tab, optimistic_active_delta, DownloadTab,
+    };
+    use shared::model::{DownloadsDelta, FileDownloadDto, SortOrder, TaskKindDto, TransferStatusDto};
     use std::rc::Rc;
 
     fn download(id: &str, status: TransferStatusDto) -> FileDownloadDto {
@@ -692,6 +744,51 @@ mod tests {
     }
 
     #[test]
+    fn format_download_error_uses_supplied_labels_for_retry_metadata() {
+        let mut dto = download("task", TransferStatusDto::RetryWaiting);
+        dto.error = Some("provider timeout".to_string());
+        dto.retry_attempts = 3;
+        dto.next_retry_at = Some(1_775_354_400);
+
+        let formatted = format_download_error_parts(&dto, "Versuch", "Naechster Versuch");
+
+        assert!(formatted.contains("provider timeout"));
+        assert!(formatted.contains("Versuch 3"));
+        assert!(formatted.contains("Naechster Versuch"));
+    }
+
+    #[test]
+    fn collect_sorted_downloads_for_tab_preserves_selected_sort_on_refresh() {
+        let queue = Rc::new(vec![download("b", TransferStatusDto::Queued), download("a", TransferStatusDto::Queued)]);
+        let finished = Rc::new(vec![]);
+        let active = Rc::new(Vec::new());
+
+        let items = collect_sorted_downloads_for_tab(
+            &DownloadTab::Queue,
+            &queue,
+            &finished,
+            &active,
+            Some((1, SortOrder::Asc)),
+        );
+
+        assert_eq!(items[0].id, "a");
+        assert_eq!(items[1].id, "b");
+    }
+
+    #[test]
+    fn download_actions_require_write_permission() {
+        let dto = download("active", TransferStatusDto::Running);
+
+        let actions = download_action_availability(false, &dto);
+
+        assert!(!actions.pause);
+        assert!(!actions.resume);
+        assert!(!actions.cancel);
+        assert!(!actions.remove);
+        assert!(!actions.retry);
+    }
+
+    #[test]
     fn cancelled_recordings_do_not_offer_retry_semantics() {
         let dto = FileDownloadDto {
             id: "rec".to_string(),
@@ -712,5 +809,28 @@ mod tests {
             && matches!(dto.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled);
 
         assert!(!can_retry);
+    }
+
+    #[test]
+    fn download_actions_hide_retry_for_cancelled_recordings() {
+        let dto = FileDownloadDto {
+            id: "rec".to_string(),
+            title: "rec.ts".to_string(),
+            kind: TaskKindDto::Recording,
+            priority: shared::model::TaskPriorityDto::Background,
+            status: TransferStatusDto::Cancelled,
+            retry_attempts: 0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            next_retry_at: None,
+            scheduled_start_at: None,
+            duration_secs: Some(60),
+            error: Some("Cancelled by user".to_string()),
+        };
+
+        let actions = download_action_availability(true, &dto);
+
+        assert!(!actions.retry);
+        assert!(actions.remove);
     }
 }

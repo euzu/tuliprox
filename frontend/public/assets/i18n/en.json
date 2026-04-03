@@ -906,6 +906,8 @@
     "DOWNLOAD_FILE_SIZE": "File size",
     "DOWNLOAD_FINISHED": "Finished",
     "DOWNLOAD_QUEUE": "Queue",
+    "ATTEMPT": "Attempt",
+    "NEXT_RETRY": "Next retry",
     "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "Download retry jitter (%)",
     "DOWNLOAD_RETRY_MAX_ATTEMPTS": "Download retry max attempts",
     "DOWNLOAD_RETRY_BACKOFF_INITIAL": "Download retry initial backoff (secs)",

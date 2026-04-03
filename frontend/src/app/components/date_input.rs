@@ -8,6 +8,26 @@ pub(crate) fn format_date_input_value(value: Option<i64>) -> String {
         .map_or_else(String::new, |date| date.format("%Y-%m-%d").to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateInputChange {
+    Clear,
+    Set(i64),
+    IgnoreInvalid,
+}
+
+fn parse_date_input_change(value: &str) -> DateInputChange {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        DateInputChange::Clear
+    } else {
+        chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+            .ok()
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .map(|dt| DateInputChange::Set(dt.and_utc().timestamp()))
+            .unwrap_or(DateInputChange::IgnoreInvalid)
+    }
+}
+
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct DateInputProps {
     #[prop_or_default]
@@ -63,17 +83,12 @@ pub(crate) fn DateInputBase(props: &DateInputBaseProps) -> Html {
         let onchange_cb = props.on_change.clone();
         Callback::from(move |event: yew::events::Event| {
             if let Some(input) = event.target_dyn_into::<HtmlInputElement>() {
-                let value = input.value();
-                let ts = if value.is_empty() {
-                    None
-                } else {
-                    chrono::NaiveDate::parse_from_str(&value, "%Y-%m-%d")
-                        .ok()
-                        .and_then(|date| date.and_hms_opt(0, 0, 0))
-                        .map(|dt| dt.and_utc().timestamp())
-                };
                 if let Some(cb) = onchange_cb.as_ref() {
-                    cb.emit(ts);
+                    match parse_date_input_change(&input.value()) {
+                        DateInputChange::Clear => cb.emit(None),
+                        DateInputChange::Set(ts) => cb.emit(Some(ts)),
+                        DateInputChange::IgnoreInvalid => {}
+                    }
                 }
             }
         })
@@ -119,5 +134,34 @@ pub fn DateInput(props: &DateInputProps) -> Html {
             value={props.value}
             on_change={props.on_change.clone()}
         />
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_date_input_value, parse_date_input_change, DateInputChange};
+
+    #[test]
+    fn empty_date_input_clears_value() {
+        assert_eq!(parse_date_input_change(""), DateInputChange::Clear);
+        assert_eq!(parse_date_input_change("   "), DateInputChange::Clear);
+    }
+
+    #[test]
+    fn valid_iso_date_input_sets_start_of_day_timestamp() {
+        assert_eq!(parse_date_input_change("2026-03-01"), DateInputChange::Set(1_772_323_200));
+    }
+
+    #[test]
+    fn partial_or_locale_formatted_input_is_ignored_until_valid() {
+        assert_eq!(parse_date_input_change("2026-03-"), DateInputChange::IgnoreInvalid);
+        assert_eq!(parse_date_input_change("tt.03.jjjj"), DateInputChange::IgnoreInvalid);
+        assert_eq!(parse_date_input_change("01.04.2026"), DateInputChange::IgnoreInvalid);
+    }
+
+    #[test]
+    fn formatter_keeps_iso_input_value() {
+        assert_eq!(format_date_input_value(Some(1_775_001_600)), "2026-04-01");
+        assert_eq!(format_date_input_value(None), "");
     }
 }

@@ -220,6 +220,17 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
     if changes.flags.contains(UpdateChangesFlags::QosAggregation) {
         exec_qos_aggregation(app_state, &app_state.cancel_tokens.load().qos_aggregation);
+        let history_cfg = app_state
+            .app_config
+            .config
+            .load()
+            .reverse_proxy
+            .as_ref()
+            .and_then(|rp| rp.stream_history.clone());
+        let connection_manager = Arc::clone(&app_state.connection_manager);
+        tokio::spawn(async move {
+            connection_manager.reload_history_writer(history_cfg.as_ref()).await;
+        });
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
         spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
@@ -767,9 +778,12 @@ pub struct HdHomerunAppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{schedules_changed, should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars, video_download_changed};
-    use crate::model::{ScheduleConfig, VideoDownloadConfig};
-    use shared::model::ScheduleTaskType;
+    use super::{
+        qos_aggregation_changed, schedules_changed, should_use_manual_redirect_for_proxy,
+        should_use_manual_redirects_for_env_vars, video_download_changed,
+    };
+    use crate::model::{Config, ScheduleConfig, VideoDownloadConfig};
+    use shared::model::{QosAggregationConfigDto, ReverseProxyConfigDto, ScheduleTaskType, StreamHistoryConfigDto};
     use std::{collections::HashMap, sync::Arc};
 
     #[test]
@@ -896,5 +910,29 @@ mod tests {
         };
 
         assert!(!video_download_changed(&base, &base.clone()));
+    }
+
+    #[test]
+    fn qos_aggregation_changed_detects_stream_history_batch_size_changes() {
+        let mut old_config = Config::default();
+        old_config.reverse_proxy = Some(crate::model::ReverseProxyConfig::from(&ReverseProxyConfigDto {
+            stream_history: Some(StreamHistoryConfigDto {
+                stream_history_enabled: true,
+                stream_history_batch_size: 64,
+                stream_history_retention_days: 7,
+                stream_history_directory: "/tmp/history".to_string(),
+            }),
+            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 60 }),
+            ..Default::default()
+        }));
+
+        let mut new_config = old_config.clone();
+        if let Some(reverse_proxy) = new_config.reverse_proxy.as_mut() {
+            if let Some(history) = reverse_proxy.stream_history.as_mut() {
+                history.stream_history_batch_size = 128;
+            }
+        }
+
+        assert!(qos_aggregation_changed(&old_config, &new_config));
     }
 }

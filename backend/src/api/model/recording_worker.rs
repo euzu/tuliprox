@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(
             result,
             RecordingExecutionResult::Failed(
-                "Recording retry/resume is not supported yet because ffmpeg segment stitching is not implemented"
+                "Recording resume is not supported"
                     .to_string(),
             )
         );

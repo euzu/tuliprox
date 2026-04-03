@@ -33,6 +33,7 @@ const RECORD_ITEM: &str = "record_item";
 struct ChannelSelection {
     virtual_id: VirtualId,
     cluster: XtreamCluster,
+    downloadable: bool,
     url: String,
     title: String,
     input_name: String,
@@ -119,7 +120,7 @@ fn parse_record_start_value(start_value: &str) -> Option<i64> {
     let naive = ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"]
         .into_iter()
         .find_map(|format| chrono::NaiveDateTime::parse_from_str(start_value, format).ok())?;
-    chrono::Local.from_local_datetime(&naive).single().map(|dt| dt.timestamp())
+    chrono::Local.from_local_datetime(&naive).earliest().map(|dt| dt.timestamp())
 }
 
 fn parse_record_duration_minutes(duration_value: &str) -> Option<u64> {
@@ -156,7 +157,7 @@ fn normalize_input_name(input_name: &str) -> Option<String> {
 }
 
 fn can_show_download_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
-    can_write_downloads && selected_channel.is_some_and(|item| item.cluster != XtreamCluster::Live)
+    can_write_downloads && selected_channel.is_some_and(|item| item.cluster != XtreamCluster::Live && item.downloadable)
 }
 
 fn can_show_record_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
@@ -224,6 +225,7 @@ pub fn PlaylistExplorer() -> Html {
                 set_selected_channel.set(Some(ChannelSelection {
                     virtual_id: dto.virtual_id,
                     cluster: dto.xtream_cluster,
+                    downloadable: dto.xtream_cluster == XtreamCluster::Video,
                     url: dto.url.to_string(),
                     title: dto.title.to_string(),
                     input_name: dto.input_name.to_string(),
@@ -913,6 +915,7 @@ pub fn PlaylistExplorer() -> Html {
         let channel_select = ChannelSelection {
             virtual_id: chan.id,
             cluster: XtreamCluster::Series,
+            downloadable: true,
             url: String::new(), // TODO provider url
             title: chan.title.to_string(),
             input_name: String::new(),
@@ -1139,6 +1142,7 @@ mod tests {
         let live = ChannelSelection {
             virtual_id: VirtualId::default(),
             cluster: XtreamCluster::Live,
+            downloadable: false,
             url: String::new(),
             title: "Live".to_string(),
             input_name: String::new(),
@@ -1146,8 +1150,25 @@ mod tests {
         let vod = ChannelSelection {
             virtual_id: VirtualId::default(),
             cluster: XtreamCluster::Video,
+            downloadable: true,
             url: String::new(),
             title: "VOD".to_string(),
+            input_name: String::new(),
+        };
+        let series_container = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Series,
+            downloadable: false,
+            url: String::new(),
+            title: "Series".to_string(),
+            input_name: String::new(),
+        };
+        let episode = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Series,
+            downloadable: true,
+            url: String::new(),
+            title: "Episode".to_string(),
             input_name: String::new(),
         };
 
@@ -1156,6 +1177,8 @@ mod tests {
         assert!(can_show_record_action(true, Some(&live)));
         assert!(can_show_download_action(true, Some(&vod)));
         assert!(!can_show_download_action(true, Some(&live)));
+        assert!(!can_show_download_action(true, Some(&series_container)));
+        assert!(can_show_download_action(true, Some(&episode)));
         assert!(!can_show_record_action(true, Some(&vod)));
     }
 
