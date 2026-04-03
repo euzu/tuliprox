@@ -15,6 +15,12 @@ enum DateInputChange {
     IgnoreInvalid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DateInputAction {
+    Emit(Option<i64>),
+    ResetDisplay(String),
+}
+
 fn parse_date_input_change(value: &str) -> DateInputChange {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -25,6 +31,14 @@ fn parse_date_input_change(value: &str) -> DateInputChange {
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .map(|dt| DateInputChange::Set(dt.and_utc().timestamp()))
             .unwrap_or(DateInputChange::IgnoreInvalid)
+    }
+}
+
+fn resolve_date_input_action(raw_value: &str, current_value: Option<i64>) -> DateInputAction {
+    match parse_date_input_change(raw_value) {
+        DateInputChange::Clear => DateInputAction::Emit(None),
+        DateInputChange::Set(ts) => DateInputAction::Emit(Some(ts)),
+        DateInputChange::IgnoreInvalid => DateInputAction::ResetDisplay(format_date_input_value(current_value)),
     }
 }
 
@@ -81,14 +95,16 @@ pub(crate) fn DateInputBase(props: &DateInputBaseProps) -> Html {
 
     let handle_change = {
         let onchange_cb = props.on_change.clone();
+        let current_value = props.value;
         Callback::from(move |event: yew::events::Event| {
             if let Some(input) = event.target_dyn_into::<HtmlInputElement>() {
-                if let Some(cb) = onchange_cb.as_ref() {
-                    match parse_date_input_change(&input.value()) {
-                        DateInputChange::Clear => cb.emit(None),
-                        DateInputChange::Set(ts) => cb.emit(Some(ts)),
-                        DateInputChange::IgnoreInvalid => {}
+                match resolve_date_input_action(&input.value(), current_value) {
+                    DateInputAction::Emit(value) => {
+                        if let Some(cb) = onchange_cb.as_ref() {
+                            cb.emit(value);
+                        }
                     }
+                    DateInputAction::ResetDisplay(value) => input.set_value(&value),
                 }
             }
         })
@@ -139,7 +155,9 @@ pub fn DateInput(props: &DateInputProps) -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_date_input_value, parse_date_input_change, DateInputChange};
+    use super::{
+        format_date_input_value, parse_date_input_change, resolve_date_input_action, DateInputAction, DateInputChange,
+    };
 
     #[test]
     fn empty_date_input_clears_value() {
@@ -157,6 +175,14 @@ mod tests {
         assert_eq!(parse_date_input_change("2026-03-"), DateInputChange::IgnoreInvalid);
         assert_eq!(parse_date_input_change("tt.03.jjjj"), DateInputChange::IgnoreInvalid);
         assert_eq!(parse_date_input_change("01.04.2026"), DateInputChange::IgnoreInvalid);
+    }
+
+    #[test]
+    fn invalid_input_resets_display_to_last_valid_value() {
+        assert_eq!(
+            resolve_date_input_action("tt.03.jjjj", Some(1_775_001_600)),
+            DateInputAction::ResetDisplay("2026-04-01".to_string())
+        );
     }
 
     #[test]

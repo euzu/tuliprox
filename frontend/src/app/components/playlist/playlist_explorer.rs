@@ -143,12 +143,15 @@ fn build_record_filename(title: &str, start_at: &str) -> String {
     format!("{base}_{time_part}.ts")
 }
 
-fn parse_optional_priority_input(priority_value: Option<String>) -> Option<i8> {
-    priority_value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<i8>().ok())
+fn parse_optional_priority_input(priority_value: Option<String>) -> Result<Option<i8>, String> {
+    let Some(raw) = priority_value.as_deref() else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed.parse::<i8>().map(Some).map_err(|_| "Priority must be a whole number between -128 and 127".to_string())
 }
 
 fn normalize_input_name(input_name: &str) -> Option<String> {
@@ -183,13 +186,13 @@ pub fn PlaylistExplorer() -> Html {
         .as_ref()
         .and_then(|cfg| cfg.config.video.as_ref())
         .and_then(|video| video.download.as_ref())
-        .map_or(0, |download| download.download_priority);
+        .map(|download| download.download_priority);
     let default_recording_priority = config_ctx
         .config
         .as_ref()
         .and_then(|cfg| cfg.config.video.as_ref())
         .and_then(|video| video.download.as_ref())
-        .map_or(0, |download| download.recording_priority);
+        .map(|download| download.recording_priority);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
     let selected_channel = use_state(|| None::<ChannelSelection>);
@@ -477,7 +480,9 @@ pub fn PlaylistExplorer() -> Html {
 
                                 let default_filename = build_download_filename(&selected.title, &resolved_url);
                                 let filename_value = Rc::new(RefCell::new(default_filename.clone()));
-                                let priority_value = Rc::new(RefCell::new(default_download_priority.to_string()));
+                                let default_download_priority_value =
+                                    default_download_priority.map_or_else(String::new, |priority| priority.to_string());
+                                let priority_value = Rc::new(RefCell::new(default_download_priority_value.clone()));
                                 let actions = DialogActions {
                                     left: Some(vec![DialogAction::new(
                                         "cancel",
@@ -521,7 +526,7 @@ pub fn PlaylistExplorer() -> Html {
                                                             min="-127"
                                                             max="127"
                                                             step="1"
-                                                            value={default_download_priority.to_string()}
+                                                            value={default_download_priority_value.clone()}
                                                             oninput={Callback::from(move |event: InputEvent| {
                                                                 let input: HtmlInputElement = event.target_unchecked_into();
                                                                 *priority_value_input.borrow_mut() = input.value();
@@ -544,7 +549,14 @@ pub fn PlaylistExplorer() -> Html {
                                 }
 
                                 let filename = filename_value.borrow().clone().trim().to_string();
-                                let priority = parse_optional_priority_input(Some(priority_value.borrow().clone()));
+                                let priority =
+                                    match parse_optional_priority_input(Some(priority_value.borrow().clone())) {
+                                        Ok(priority) => priority,
+                                        Err(err) => {
+                                            services.toastr.error(err);
+                                            return;
+                                        }
+                                    };
 
                                 if filename.is_empty() {
                                     services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
@@ -581,7 +593,10 @@ pub fn PlaylistExplorer() -> Html {
                                 let default_start_value = default_record_start_value();
                                 let start_value = Rc::new(RefCell::new(default_start_value.clone()));
                                 let duration_value = Rc::new(RefCell::new("90".to_string()));
-                                let priority_value = Rc::new(RefCell::new(default_recording_priority.to_string()));
+                                let priority_value = Rc::new(RefCell::new(
+                                    default_recording_priority
+                                        .map_or_else(String::new, |priority| priority.to_string()),
+                                ));
                                 let actions = DialogActions {
                                     left: Some(vec![DialogAction::new(
                                         "cancel",
@@ -601,6 +616,8 @@ pub fn PlaylistExplorer() -> Html {
                                 let start_value_input = Rc::clone(&start_value);
                                 let duration_value_input = Rc::clone(&duration_value);
                                 let priority_value_input = Rc::clone(&priority_value);
+                                let default_recording_priority_value = default_recording_priority
+                                    .map_or_else(String::new, |priority| priority.to_string());
                                 let result = dialog
                                     .content(
                                         html! {
@@ -641,7 +658,7 @@ pub fn PlaylistExplorer() -> Html {
                                                             min="-127"
                                                             max="127"
                                                             step="1"
-                                                            value={default_recording_priority.to_string()}
+                                                            value={default_recording_priority_value.clone()}
                                                             oninput={Callback::from(move |event: InputEvent| {
                                                                 let input: HtmlInputElement = event.target_unchecked_into();
                                                                 *priority_value_input.borrow_mut() = input.value();
@@ -662,7 +679,14 @@ pub fn PlaylistExplorer() -> Html {
                                 if result == DialogResult::Ok {
                                     let start_value = start_value.borrow().clone();
                                     let duration_value = duration_value.borrow().clone();
-                                    let priority = parse_optional_priority_input(Some(priority_value.borrow().clone()));
+                                    let priority =
+                                        match parse_optional_priority_input(Some(priority_value.borrow().clone())) {
+                                            Ok(priority) => priority,
+                                            Err(err) => {
+                                                services.toastr.error(err);
+                                                return;
+                                            }
+                                        };
                                     let start_ts = parse_record_start_value(&start_value);
                                     let duration_mins = parse_record_duration_minutes(&duration_value);
 
@@ -1118,16 +1142,21 @@ mod tests {
 
     #[test]
     fn parse_optional_priority_input_treats_blank_as_none() {
-        assert_eq!(parse_optional_priority_input(None), None);
-        assert_eq!(parse_optional_priority_input(Some(String::new())), None);
-        assert_eq!(parse_optional_priority_input(Some("   ".to_string())), None);
+        assert_eq!(parse_optional_priority_input(None), Ok(None));
+        assert_eq!(parse_optional_priority_input(Some(String::new())), Ok(None));
+        assert_eq!(parse_optional_priority_input(Some("   ".to_string())), Ok(None));
     }
 
     #[test]
     fn parse_optional_priority_input_parses_valid_i8_values() {
-        assert_eq!(parse_optional_priority_input(Some("-1".to_string())), Some(-1));
-        assert_eq!(parse_optional_priority_input(Some("12".to_string())), Some(12));
-        assert_eq!(parse_optional_priority_input(Some(" 0 ".to_string())), Some(0));
+        assert_eq!(parse_optional_priority_input(Some("-1".to_string())), Ok(Some(-1)));
+        assert_eq!(parse_optional_priority_input(Some("12".to_string())), Ok(Some(12)));
+        assert_eq!(parse_optional_priority_input(Some(" 0 ".to_string())), Ok(Some(0)));
+    }
+
+    #[test]
+    fn parse_optional_priority_input_rejects_invalid_non_empty_values() {
+        assert!(parse_optional_priority_input(Some("abc".to_string())).is_err());
     }
 
     #[test]

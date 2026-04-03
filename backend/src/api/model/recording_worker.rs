@@ -58,7 +58,6 @@ fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
         || msg.contains("504 gateway timeout")
         || msg.contains("500 internal server error")
         || msg.contains("tls handshake")
-        || msg.contains("tls handshake timeout")
         || msg.contains("tls timeout")
         || msg.contains("tls: handshake")
         || msg.contains("i/o error")
@@ -110,10 +109,6 @@ pub fn build_recording_args(download: &FileDownload, effective_duration_secs: u6
 }
 
 async fn recording_resume_or_retry_is_unsupported(download: &FileDownload) -> bool {
-    if download.retry_attempts > 0 {
-        return true;
-    }
-
     tokio::fs::metadata(&download.file_path)
         .await
         .is_ok_and(|metadata| metadata.len() > 0)
@@ -207,11 +202,13 @@ pub async fn run_recording(
 #[cfg(test)]
 mod tests {
     use super::{
-        RecordingExecutionResult, build_recording_args, classify_ffmpeg_failure, recording_start_missed_window,
-        remaining_recording_duration_secs, run_recording_with_binary,
+        RecordingExecutionResult, build_recording_args, classify_ffmpeg_failure, recording_resume_or_retry_is_unsupported,
+        recording_start_missed_window, remaining_recording_duration_secs, run_recording_with_binary,
     };
     use crate::api::model::{DownloadControl, DownloadKind, DownloadState, FileDownload};
-    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+    use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tokio::sync::{Notify, RwLock};
     use tokio_util::sync::CancellationToken;
 
@@ -341,10 +338,23 @@ mod tests {
         fs::create_dir_all(&dir).expect("create temp dir");
         let script_path = dir.join("ffmpeg");
         fs::write(&script_path, body).expect("write fake ffmpeg");
+        #[cfg(unix)]
+        {
         let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).expect("chmod");
+        }
         script_path
+    }
+
+    #[tokio::test]
+    async fn recording_retry_attempts_without_partial_output_do_not_block_retry() {
+        let mut recording = make_recording(chrono::Utc::now().timestamp(), 30);
+        recording.retry_attempts = 2;
+
+        let unsupported = recording_resume_or_retry_is_unsupported(&recording).await;
+
+        assert!(!unsupported);
     }
 
     #[tokio::test]
