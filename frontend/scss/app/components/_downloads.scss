@@ -1,0 +1,45 @@
+.tp__downloads-list {
+  &__header-toolbar {
+    display: flex;
+    flex-flow: row wrap;
+    box-sizing: border-box;
+    justify-content: flex-end;
+  }
+
+  &__body {
+    overflow: hidden;
+  }
+}
+
+.tp__downloads-table {
+  &__actions {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: center;
+    gap: var(--gap-small);
+    svg {
+      transform: scale(1.3);
+    }
+  }
+}
+
+.tp__record-dialog {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-large);
+  min-width: 18rem;
+}
+
+@media (max-width: 900px) {
+  .tp__downloads-list {
+    &__header {
+      align-items: flex-start;
+      flex-flow: column;
+    }
+
+    &__header-toolbar {
+      width: 100%;
+      justify-content: flex-start;
+    }
+  }
+}

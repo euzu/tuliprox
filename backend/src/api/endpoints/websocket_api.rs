@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        endpoints::v1_api::create_status_check,
+        endpoints::{download_api::download_queue_snapshot, v1_api::create_status_check},
         model::{AppState, EventMessage},
     },
     auth::verify_token,
@@ -13,7 +13,7 @@ use log::{error, trace};
 use shared::{
     model::{
         Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
-        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION, supports_server_error_messages, supports_stream_meter_messages,
+        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION,
     },
     utils::{concat_path_leading_slash, default_kick_secs},
 };
@@ -62,8 +62,18 @@ fn websocket_requires_system_read(auth_required: bool, mem: &ProtocolHandlerMemo
     !auth_required || mem.permissions.contains(Permission::SystemRead)
 }
 
-fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory) -> bool {
-    mem.permissions.contains(Permission::SystemRead)
+#[inline]
+fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMemory) -> bool {
+    !auth_required || mem.permissions.contains(Permission::DownloadRead)
+}
+
+fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
+    match event {
+        EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
+            mem.permissions.contains(Permission::DownloadRead)
+        }
+        _ => mem.permissions.contains(Permission::SystemRead),
+    }
 }
 
 fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
@@ -124,10 +134,6 @@ async fn handle_protocol_message(
                     return Some(ProtocolMessage::Unauthorized);
                 };
 
-                if !token_data.claims.permissions.contains(Permission::SystemRead) {
-                    return Some(ProtocolMessage::Unauthorized);
-                }
-
                 set_websocket_auth(mem, auth_token, &token_data.claims);
                 Some(ProtocolMessage::Authorized)
             }
@@ -162,6 +168,13 @@ async fn handle_protocol_message(
                     Some(ProtocolMessage::UserActionResponse(false))
                 }
             }
+            Ok(ProtocolMessage::DownloadsRequest) => {
+                if websocket_requires_download_read(auth_required, mem) && (!auth_required || mem.token.is_some()) {
+                    Some(ProtocolMessage::DownloadsResponse(download_queue_snapshot(&app_state.downloads).await))
+                } else {
+                    Some(ProtocolMessage::Unauthorized)
+                }
+            }
             Ok(ProtocolMessage::StreamMeterSubscribe) => {
                 handle_stream_meter_subscribe(mem, app_state, auth_required);
                 None
@@ -188,11 +201,7 @@ async fn handle_protocol_message(
 }
 
 fn handle_stream_meter_subscribe(mem: &mut ProtocolHandlerMemory, app_state: &Arc<AppState>, auth_required: bool) {
-    if supports_stream_meter_messages(mem.peer_version)
-        && websocket_requires_system_read(auth_required, mem)
-        && (!auth_required || mem.token.is_some())
-        && !mem.stream_meter_subscribed
-    {
+    if websocket_requires_system_read(auth_required, mem) && (!auth_required || mem.token.is_some()) && !mem.stream_meter_subscribed {
         mem.stream_meter_subscribed = true;
         app_state.event_manager.stream_meter_subscriber_connected();
     }
@@ -248,10 +257,12 @@ async fn handle_incoming_message(
     match handler {
         ProtocolHandler::Version(version) => {
             handle_handshake(msg, socket, *version).await?;
-            *handler = ProtocolHandler::Default(ProtocolHandlerMemory {
-                peer_version: *version,
-                ..ProtocolHandlerMemory::default()
-            });
+            let mut mem = ProtocolHandlerMemory::default();
+            if !auth_required {
+                mem.permissions = PERM_ALL;
+                mem.role = UserRole::Admin;
+            }
+            *handler = ProtocolHandler::Default(mem);
             Ok(())
         }
         ProtocolHandler::Default(mem) => {
@@ -278,13 +289,11 @@ async fn handle_event_message(
     match handler {
         ProtocolHandler::Version(_) => {}
         ProtocolHandler::Default(mem) => {
-            if websocket_can_receive_runtime_events(mem) {
+            if websocket_can_receive_runtime_events(mem, &event) {
                 match event {
                     EventMessage::ServerError(error) => {
-                        if supports_server_error_messages(mem.peer_version) {
-                            let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
-                            socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
-                        }
+                        let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
+                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
                     }
                     EventMessage::ActiveUser(event) => {
                         let msg = ProtocolMessage::ActiveUserResponse(event).to_bytes().map_err(|e| e.to_string())?;
@@ -337,6 +346,17 @@ async fn handle_event_message(
                             .send(Message::Binary(msg))
                             .await
                             .map_err(|e| format!("Library scan progress event: {e} "))?;
+                    }
+                    EventMessage::DownloadsUpdate(downloads) => {
+                        let msg = ProtocolMessage::DownloadsResponse(downloads).to_bytes().map_err(|e| e.to_string())?;
+                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Downloads event: {e} "))?;
+                    }
+                    EventMessage::DownloadsDeltaUpdate(delta) => {
+                        let msg = ProtocolMessage::DownloadsDeltaResponse(delta).to_bytes().map_err(|e| e.to_string())?;
+                        socket
+                            .send(Message::Binary(msg))
+                            .await
+                            .map_err(|e| format!("Downloads delta event: {e} "))?;
                     }
                     EventMessage::InputMetadataUpdatesCompleted(_)
                     | EventMessage::InputMetadataUpdatesStarted(_) => {
@@ -438,7 +458,8 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 #[cfg(test)]
 mod tests {
     use super::websocket_can_receive_runtime_events;
-    use shared::model::{Permission, ProtocolHandlerMemory, UserRole};
+    use crate::api::model::EventMessage;
+    use shared::model::{DownloadsDelta, DownloadsResponse, FileDownloadDto, Permission, ProtocolHandlerMemory, TaskKindDto, TaskPriorityDto, TransferStatusDto, UserRole};
 
     #[test]
     fn test_websocket_runtime_events_allowed_for_admin() {
@@ -448,7 +469,10 @@ mod tests {
         };
         mem.role = UserRole::Admin;
 
-        assert!(websocket_can_receive_runtime_events(&mem));
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
     }
 
     #[test]
@@ -459,7 +483,10 @@ mod tests {
         };
         mem.role = UserRole::User;
 
-        assert!(websocket_can_receive_runtime_events(&mem));
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
     }
 
     #[test]
@@ -470,7 +497,10 @@ mod tests {
         };
         mem.role = UserRole::User;
 
-        assert!(!websocket_can_receive_runtime_events(&mem));
+        assert!(!websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
     }
 
     #[test]
@@ -478,6 +508,72 @@ mod tests {
         let mut mem = ProtocolHandlerMemory::default();
         mem.role = UserRole::User;
 
-        assert!(!websocket_can_receive_runtime_events(&mem));
+        assert!(!websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::ServerError("err".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_websocket_download_updates_allowed_for_download_read_user() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::DownloadRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::DownloadsUpdate(DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: Vec::new(),
+            })
+        ));
+    }
+
+    #[test]
+    fn test_websocket_download_updates_denied_without_download_read() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::SystemRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(!websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::DownloadsUpdate(DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: Vec::new(),
+            })
+        ));
+    }
+
+    #[test]
+    fn test_websocket_download_delta_updates_allowed_for_download_read_user() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::DownloadRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActivePatched(FileDownloadDto {
+                id: "id".to_string(),
+                title: "file.ts".to_string(),
+                kind: TaskKindDto::Download,
+                priority: TaskPriorityDto::Background,
+                status: TransferStatusDto::Running,
+                retry_attempts: 0,
+                downloaded_bytes: 1,
+                total_bytes: Some(2),
+                next_retry_at: None,
+                scheduled_start_at: None,
+                duration_secs: None,
+                error: None,
+            }))
+        ));
     }
 }

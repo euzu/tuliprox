@@ -78,6 +78,9 @@ Generate a UI password hash:
 cargo run --bin tuliprox -- --genpwd
 ```
 
+For copy-paste Web UI REST API examples with `curl` and `jq`, see the
+[REST API Cookbook](rest-api-cookbook.md).
+
 ## CLI arguments
 
 ```text

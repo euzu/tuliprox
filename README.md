@@ -7,7 +7,7 @@ Jellyfin, Emby, Kodi and similar clients.
 
 ![tuliprox logo](https://github.com/user-attachments/assets/8ef9ea79-62ff-4298-978f-22326c5c3d02)
 
-## 🏆 Core Selling Points
+## 🏆 Key Features
 
 ### 1. Written in Rust — Maximum Performance, Minimal Footprint
 
@@ -53,6 +53,8 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Grace Period**: Configurable transition window during connection handovers — no abrupt drops
 - **Bandwidth Throttling**: With flexible units (KB/s, MB/s, kbps, mbps)
 - **Per-Stream Metrics**: Bandwidth and transferred bytes per stream in the Web UI (opt-in)
+- **Stream History**: Optional persisted stream lifecycle telemetry for connects, disconnects, preemptions, and startup failures
+- **QoS Aggregation**: Optional background reliability snapshots built from stream history for long-term stream quality analysis
 - **Custom Fallback Videos**: User-defined video files for channel unavailable, connections exhausted, account expired,
   etc.
 - **HLS Session Management**: Short-lived provider reservations for HLS/Catchup without blocking real slots
@@ -144,6 +146,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Dashboard**: System status, active streams, CPU usage, provider connections in real-time via WebSocket
 - **Source Editor**: Global input management with drag & drop, block selection, batch mode, scroll wheel support
 - **Playlist Explorer**: Tree and gallery view for channels with EPG timeline and search
+- **Download & Recording Manager**: Provider-aware VOD downloads and live recordings with retries, fairness, and RBAC-controlled actions
 - **Config Editor**: Direct editing of config.yml, source.yml, mapping.yml in the browser
 - **User Management**: API users with category selection, priority, connection limits, auto-generated credentials
 - **RBAC Admin Panel**: Tabbed user/group management, permission checkbox grid, write-without-read warnings

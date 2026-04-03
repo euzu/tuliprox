@@ -1,10 +1,20 @@
-use crate::{hooks::use_service_context, model::EventMessage};
-use gloo_timers::callback::Interval;
-use shared::model::{ActiveUserConnectionChange, StatusCheck, StreamInfo, SystemInfo};
+use crate::{
+    hooks::use_service_context,
+    model::{EventMessage, BACKGROUND_TRANSFER_CLIENT_IP, BACKGROUND_TRANSFER_PROVIDER},
+};
+use shared::{
+    model::{
+        permission::Permission, ActiveUserConnectionChange, DownloadsDelta, DownloadsResponse, FileDownloadDto,
+        PlaylistItemType, ProtocolMessage, StatusCheck, StreamChannel, StreamInfo, SystemInfo, TaskKindDto,
+        TransferStatusDto, XtreamCluster,
+    },
+    utils::{current_time_secs, Internable},
+};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashSet},
-    net::SocketAddr,
+    hash::{DefaultHasher, Hash, Hasher},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     rc::Rc,
 };
 use yew::{platform::spawn_local, prelude::*};
@@ -36,6 +46,124 @@ fn find_stream_update_index(streams: &[StreamInfo], updated_stream: &StreamInfo)
 fn dedupe_streams_by_identity(streams: &mut Vec<StreamInfo>) {
     let mut seen = HashSet::new();
     streams.retain(|stream| seen.insert(stream_identity_key(stream)));
+}
+
+fn is_running_download(download: &FileDownloadDto) -> bool { download.status == TransferStatusDto::Running }
+
+fn download_stream_uid(id: &str) -> u32 {
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    let hash = hasher.finish();
+    let mixed = (hash ^ (hash >> 32)) as u32;
+    mixed.max(1)
+}
+
+fn download_stream_addr(uid: u32) -> SocketAddr {
+    let octet3 = ((uid >> 8) & 0xff) as u8;
+    let octet4 = (uid & 0xff) as u8;
+    let port = ((uid >> 16) % u32::from(u16::MAX - 1) + 1) as u16;
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 254, octet3, octet4)), port)
+}
+
+fn download_task_to_stream_with_ts(download: &FileDownloadDto, ts: u64) -> StreamInfo {
+    let uid = download_stream_uid(&download.id);
+    let (item_type, cluster, group) = match download.kind {
+        TaskKindDto::Download => (PlaylistItemType::Video, XtreamCluster::Video, "Downloads"),
+        TaskKindDto::Recording => (PlaylistItemType::Live, XtreamCluster::Live, "Recordings"),
+    };
+    StreamInfo {
+        uid,
+        meter_uid: 0,
+        username: "background task".to_string(),
+        channel: StreamChannel {
+            target_id: 0,
+            virtual_id: uid,
+            provider_id: 0,
+            input_name: "".intern(),
+            item_type,
+            cluster,
+            group: group.intern(),
+            title: download.title.clone().intern(),
+            url: "".intern(),
+            shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
+            technical: None,
+        },
+        provider: BACKGROUND_TRANSFER_PROVIDER.to_string(),
+        addr: download_stream_addr(uid),
+        client_ip: BACKGROUND_TRANSFER_CLIENT_IP.to_string(),
+        user_agent: "Tuliprox download worker".to_string(),
+        ts,
+        country_code: None,
+        session_token: None,
+        preserved: false,
+        previous_session_id: None,
+    }
+}
+
+fn preserved_download_stream_ts(existing_streams: &[StreamInfo], download: &FileDownloadDto) -> u64 {
+    let uid = download_stream_uid(&download.id);
+    existing_streams
+        .iter()
+        .find(|stream| stream.uid == uid && stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP)
+        .map_or_else(current_time_secs, |stream| stream.ts)
+}
+
+fn merge_aux_streams(server_status: &mut StatusCheck, download_streams: &[StreamInfo]) {
+    server_status.active_user_streams.retain(|stream| stream.client_ip != BACKGROUND_TRANSFER_CLIENT_IP);
+    server_status.active_user_streams.extend(download_streams.iter().cloned());
+    dedupe_streams_by_identity(&mut server_status.active_user_streams);
+}
+
+fn rebuild_status_with_downloads(
+    status_holder: &UseStateHandle<RefCell<Option<Rc<StatusCheck>>>>,
+    status_signal: &UseStateHandle<Option<Rc<StatusCheck>>>,
+    download_streams: &[StreamInfo],
+) {
+    let mut server_status =
+        status_holder.borrow().as_ref().map_or_else(StatusCheck::default, |status| (**status).clone());
+    merge_aux_streams(&mut server_status, download_streams);
+    let new_status = Rc::new(server_status);
+    *status_holder.borrow_mut() = Some(Rc::clone(&new_status));
+    status_signal.set(Some(new_status));
+}
+
+fn apply_downloads_snapshot(download_streams: &mut Vec<StreamInfo>, response: &DownloadsResponse) {
+    let previous_streams = download_streams.clone();
+    *download_streams = response
+        .active
+        .iter()
+        .filter(|download| is_running_download(download))
+        .map(|download| {
+            let ts = preserved_download_stream_ts(&previous_streams, download);
+            download_task_to_stream_with_ts(download, ts)
+        })
+        .collect();
+}
+
+fn apply_downloads_delta(download_streams: &mut Vec<StreamInfo>, delta: &DownloadsDelta) {
+    match delta {
+        DownloadsDelta::SnapshotReset(response) => apply_downloads_snapshot(download_streams, response),
+        DownloadsDelta::ActivePatched(download) => {
+            let uid = download_stream_uid(&download.id);
+            if !is_running_download(download) {
+                download_streams.retain(|stream| stream.uid != uid);
+                return;
+            }
+            let ts = preserved_download_stream_ts(download_streams, download);
+            let stream = download_task_to_stream_with_ts(download, ts);
+            if let Some(existing) = download_streams.iter_mut().find(|current| current.uid == stream.uid) {
+                *existing = stream;
+            } else {
+                download_streams.push(stream);
+            }
+        }
+        DownloadsDelta::ActiveCleared => {
+            download_streams.clear();
+        }
+        DownloadsDelta::QueueReplaced { .. } | DownloadsDelta::FinishedReplaced { .. } => {}
+    }
 }
 
 fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserConnectionChange) {
@@ -70,23 +198,44 @@ pub fn use_server_status(
     let services = use_service_context();
     let status_holder = use_state(|| RefCell::new(None::<Rc<StatusCheck>>));
     let system_info_holder = use_state(|| RefCell::new(None::<Rc<SystemInfo>>));
+    let download_streams_holder = use_state(|| RefCell::new(Vec::<StreamInfo>::new()));
 
     {
         let services_ctx = services.clone();
         let status_signal = status.clone();
         let status_holder_signal = status_holder.clone();
+        let download_streams_holder_signal = download_streams_holder.clone();
         let system_info_signal = system_info.clone();
         let system_info_holder_signal = system_info_holder.clone();
 
         use_effect_with(enabled, move |enabled| {
             let mut subid: Option<usize> = None;
-            let mut interval: Option<Interval> = None;
 
             if *enabled {
+                let fetch_status: Rc<dyn Fn()> = Rc::new({
+                    let services_clone = services_ctx.clone();
+                    move || {
+                        let services_clone = services_clone.clone();
+                        spawn_local(async move {
+                            services_clone.websocket.get_server_status().await;
+                            if services_clone.auth.has_permission(Permission::DownloadRead) {
+                                if services_clone.websocket.send_message(ProtocolMessage::DownloadsRequest) {
+                                    return;
+                                }
+                                if let Ok(downloads) = services_clone.downloads.get_downloads().await {
+                                    services_clone.event.broadcast(EventMessage::DownloadsUpdate(Rc::new(downloads)));
+                                }
+                            }
+                        });
+                    }
+                });
+                let fetch_status_on_ws = Rc::clone(&fetch_status);
+
                 subid = Some(services_ctx.event.subscribe(move |msg| match msg {
                     EventMessage::ServerStatus(server_status) => {
                         let mut server_status = (*server_status).clone();
                         dedupe_streams_by_identity(&mut server_status.active_user_streams);
+                        merge_aux_streams(&mut server_status, download_streams_holder_signal.borrow().as_slice());
                         let server_status = Rc::new(server_status);
                         *status_holder_signal.borrow_mut() = Some(Rc::clone(&server_status));
                         status_signal.set(Some(server_status));
@@ -100,6 +249,7 @@ pub fn use_server_status(
                             }
                         };
                         apply_active_user_change(&mut server_status, event);
+                        merge_aux_streams(&mut server_status, download_streams_holder_signal.borrow().as_slice());
 
                         let new_status = Rc::new(server_status);
                         *status_holder_signal.borrow_mut() = Some(Rc::clone(&new_status));
@@ -124,33 +274,34 @@ pub fn use_server_status(
                         *status_holder_signal.borrow_mut() = Some(Rc::clone(&new_status));
                         status_signal.set(Some(new_status));
                     }
+                    EventMessage::DownloadsUpdate(downloads) => {
+                        let mut next_download_streams = (*download_streams_holder_signal.borrow()).clone();
+                        apply_downloads_snapshot(&mut next_download_streams, &downloads);
+                        *download_streams_holder_signal.borrow_mut() = next_download_streams.clone();
+                        rebuild_status_with_downloads(&status_holder_signal, &status_signal, &next_download_streams);
+                    }
+                    EventMessage::DownloadsDeltaUpdate(delta) => {
+                        let mut next_download_streams = (*download_streams_holder_signal.borrow()).clone();
+                        apply_downloads_delta(&mut next_download_streams, &delta);
+                        *download_streams_holder_signal.borrow_mut() = next_download_streams.clone();
+                        rebuild_status_with_downloads(&status_holder_signal, &status_signal, &next_download_streams);
+                    }
                     EventMessage::SystemInfoUpdate(system_info) => {
                         let info = Rc::new(system_info);
                         *system_info_holder_signal.borrow_mut() = Some(Rc::clone(&info));
                         system_info_signal.set(Some(info));
                     }
+                    EventMessage::WebSocketStatus(true) => {
+                        fetch_status_on_ws();
+                    }
                     _ => {}
                 }));
 
-                let fetch_status = {
-                    let services_clone = services_ctx.clone();
-                    move || {
-                        let services_clone = services_clone.clone();
-                        spawn_local(async move {
-                            services_clone.websocket.get_server_status().await;
-                        });
-                    }
-                };
-
                 fetch_status();
-                interval = Some(Interval::new(60 * 1000, move || {
-                    fetch_status();
-                }));
             }
 
             let services_clone = services_ctx.clone();
             move || {
-                drop(interval);
                 if let Some(subid) = subid {
                     services_clone.event.unsubscribe(subid);
                 }
@@ -162,9 +313,15 @@ pub fn use_server_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_active_user_change, dedupe_streams_by_identity, find_stream_update_index};
+    use super::{
+        apply_active_user_change, apply_downloads_delta, apply_downloads_snapshot, dedupe_streams_by_identity,
+        download_task_to_stream_with_ts, find_stream_update_index,
+    };
     use shared::{
-        model::{ActiveUserConnectionChange, PlaylistItemType, StatusCheck, StreamChannel, StreamInfo, XtreamCluster},
+        model::{
+            ActiveUserConnectionChange, DownloadsDelta, DownloadsResponse, FileDownloadDto, PlaylistItemType,
+            StatusCheck, StreamChannel, StreamInfo, TaskKindDto, TaskPriorityDto, TransferStatusDto, XtreamCluster,
+        },
         utils::Internable,
     };
     use std::net::SocketAddr;
@@ -247,5 +404,126 @@ mod tests {
         assert_eq!(status.active_users, 0);
         assert_eq!(status.active_user_connections, 0);
         assert!(status.active_user_streams.is_empty());
+    }
+
+    fn test_download(id: &str, status: TransferStatusDto, kind: TaskKindDto) -> FileDownloadDto {
+        FileDownloadDto {
+            id: id.to_string(),
+            title: format!("{id}.ts"),
+            kind,
+            priority: TaskPriorityDto::Background,
+            status,
+            retry_attempts: 0,
+            downloaded_bytes: 128,
+            total_bytes: Some(1024),
+            next_retry_at: None,
+            scheduled_start_at: None,
+            duration_secs: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn downloads_snapshot_creates_running_pseudo_streams_only() {
+        let response = DownloadsResponse {
+            queue: Vec::new(),
+            finished: Vec::new(),
+            active: vec![
+                test_download("running", TransferStatusDto::Running, TaskKindDto::Download),
+                test_download("paused", TransferStatusDto::Paused, TaskKindDto::Recording),
+            ],
+        };
+        let mut streams = Vec::new();
+
+        apply_downloads_snapshot(&mut streams, &response);
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].provider, "Download Manager");
+        assert_eq!(streams[0].client_ip, "background-task");
+        assert_eq!(streams[0].channel.item_type, PlaylistItemType::Video);
+    }
+
+    #[test]
+    fn downloads_delta_updates_only_matching_pseudo_stream() {
+        let mut streams = Vec::new();
+        apply_downloads_snapshot(
+            &mut streams,
+            &DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: vec![
+                    test_download("one", TransferStatusDto::Running, TaskKindDto::Download),
+                    test_download("two", TransferStatusDto::Running, TaskKindDto::Recording),
+                ],
+            },
+        );
+
+        apply_downloads_delta(
+            &mut streams,
+            &DownloadsDelta::ActivePatched(test_download("one", TransferStatusDto::Paused, TaskKindDto::Download)),
+        );
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].channel.title.as_ref(), "two.ts");
+    }
+
+    #[test]
+    fn downloads_delta_clears_pseudo_stream_when_active_stops_running() {
+        let mut streams = Vec::new();
+        apply_downloads_snapshot(
+            &mut streams,
+            &DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: vec![test_download("running", TransferStatusDto::Running, TaskKindDto::Recording)],
+            },
+        );
+
+        apply_downloads_delta(
+            &mut streams,
+            &DownloadsDelta::ActivePatched(test_download(
+                "running",
+                TransferStatusDto::Completed,
+                TaskKindDto::Recording,
+            )),
+        );
+
+        assert!(streams.is_empty());
+    }
+
+    #[test]
+    fn downloads_delta_preserves_pseudo_stream_start_timestamp() {
+        let mut streams = vec![download_task_to_stream_with_ts(
+            &test_download("running", TransferStatusDto::Running, TaskKindDto::Download),
+            123,
+        )];
+
+        apply_downloads_delta(
+            &mut streams,
+            &DownloadsDelta::ActivePatched(test_download("running", TransferStatusDto::Running, TaskKindDto::Download)),
+        );
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].ts, 123);
+    }
+
+    #[test]
+    fn downloads_snapshot_preserves_pseudo_stream_start_timestamp() {
+        let mut streams = vec![download_task_to_stream_with_ts(
+            &test_download("running", TransferStatusDto::Running, TaskKindDto::Recording),
+            456,
+        )];
+
+        apply_downloads_snapshot(
+            &mut streams,
+            &DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: vec![test_download("running", TransferStatusDto::Running, TaskKindDto::Recording)],
+            },
+        );
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].ts, 456);
     }
 }

@@ -1,18 +1,12 @@
 use crate::model::{
-    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PermissionSet,
-    PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo,
+    user_command::UserCommand, ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
+    LibraryScanSummary, PermissionSet, PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{io, sync::Arc};
 
-pub const PROTOCOL_VERSION: u8 = 2;
-pub const STREAM_METER_PROTOCOL_VERSION: u8 = 2;
-pub const SERVER_ERROR_PROTOCOL_VERSION: u8 = 2;
-
-pub fn supports_stream_meter_messages(version: u8) -> bool { version >= STREAM_METER_PROTOCOL_VERSION }
-
-pub fn supports_server_error_messages(version: u8) -> bool { version >= SERVER_ERROR_PROTOCOL_VERSION }
+pub const PROTOCOL_VERSION: u8 = 3;
 
 #[derive(Default, PartialOrd, PartialEq, Debug, Clone)]
 pub enum UserRole {
@@ -29,7 +23,6 @@ impl UserRole {
 
 #[derive(Default)]
 pub struct ProtocolHandlerMemory {
-    pub peer_version: u8,
     pub token: Option<String>,
     pub permissions: PermissionSet,
     pub role: UserRole,
@@ -87,6 +80,7 @@ pub enum ProtocolMessage {
     Authorized,
     StreamMeterSubscribe,
     StreamMeterUnsubscribe,
+    DownloadsRequest,
     ServerError(String),
     StatusRequest(String),
     UserAction(UserCommand),
@@ -103,6 +97,8 @@ pub enum ProtocolMessage {
     SystemInfoResponse(SystemInfo),
     LibraryScanProgressResponse(LibraryScanSummary),
     StreamMeterBatchResponse(Vec<StreamMeterEntry>),
+    DownloadsResponse(DownloadsResponse),
+    DownloadsDeltaResponse(DownloadsDelta),
 }
 
 impl ProtocolMessage {

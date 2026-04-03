@@ -772,6 +772,13 @@ impl ActiveProviderManager {
         self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, None).await
     }
 
+    /// Acquire a provider connection for background transfers (downloads/recordings).
+    /// Transfers participate in the same provider priority/preemption model as normal
+    /// streams, but they never consume grace capacity and wait externally on notifications.
+    pub async fn acquire_connection_for_download(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
+        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, None).await
+    }
+
     // This method is used for redirects to cycle through the provider
     pub async fn get_next_provider(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
         self.providers.get_next_provider(provider_name).await
@@ -1099,6 +1106,16 @@ impl ActiveProviderManager {
     }
 
     pub async fn get_provider_connections_count(&self) -> usize { self.providers.active_connection_count().await }
+
+    pub async fn provider_capacities_for_input(&self, input_name: &Arc<str>) -> Vec<(Arc<str>, usize, usize)> {
+        let mut result = Vec::new();
+        for provider_name in self.providers.provider_names_for_input(input_name) {
+            if let Some((current, max)) = self.providers.provider_capacity(&provider_name).await {
+                result.push((provider_name, current, max));
+            }
+        }
+        result
+    }
 
 }
 

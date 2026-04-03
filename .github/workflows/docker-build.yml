@@ -169,13 +169,17 @@ jobs:
           chmod +x ./bin/build_docker.sh
           ./bin/build_docker.sh ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
 
-      - name: Verify static binary artifacts
+      - name: Verify release bundle artifacts
         run: |
           ls -la artifacts
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl"
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.sha256"
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl"
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.sha256"
+          for arch in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            artifact="artifacts/tuliprox-v${{ steps.version.outputs.value }}-${arch}.tar.gz"
+            test -f "${artifact}"
+            test -f "${artifact}.sha256"
+            for required_path in tuliprox/tuliprox tuliprox/web/ tuliprox/resources/; do
+              tar -tzf "${artifact}" | grep -qx "${required_path}"
+            done
+          done
           for sum_file in artifacts/*.sha256; do
             (cd artifacts && sha256sum -c "$(basename "$sum_file")")
           done
@@ -183,7 +187,7 @@ jobs:
       - name: Build release checksum notes
         run: |
           {
-            echo "## Static Binary Checksums"
+            echo "## Release Bundle Checksums"
             echo
             echo "The checksums below were validated in CI via \`sha256sum -c\` before upload."
             echo
@@ -201,10 +205,10 @@ jobs:
             echo "\`\`\`"
           } > artifacts/RELEASE_NOTES_SHA256.md
 
-      - name: Upload static binary artifacts
+      - name: Upload release bundle artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tuliprox-static-v${{ steps.version.outputs.value }}
+          name: tuliprox-release-v${{ steps.version.outputs.value }}
           path: artifacts/*
           if-no-files-found: error
 
@@ -220,7 +224,7 @@ jobs:
           # Use origin HEAD to push to the correct remote branch
           git push origin HEAD
 
-      - name: Publish static binaries to GitHub Release
+      - name: Publish release bundles to GitHub Release
         if: >-
           success() && (
             (github.event_name == 'workflow_dispatch' && github.event.inputs.branch == 'master') ||
@@ -231,9 +235,9 @@ jobs:
           tag_name: v${{ steps.version.outputs.value }}
           name: v${{ steps.version.outputs.value }}
           files: |
-            artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl
-            artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.sha256
-            artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl
-            artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.sha256
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.tar.gz
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.tar.gz.sha256
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.tar.gz
+            artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.tar.gz.sha256
           body_path: artifacts/RELEASE_NOTES_SHA256.md
           generate_release_notes: true

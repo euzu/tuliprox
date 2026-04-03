@@ -35,7 +35,6 @@ pub fn format_ts(ts: u64) -> String {
     chrono::DateTime::from_timestamp(ts as i64, 0)
         .map_or_else(|| ts.to_string(), |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
 }
-
 pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;

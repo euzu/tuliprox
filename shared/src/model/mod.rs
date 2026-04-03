@@ -2,6 +2,7 @@ mod active_user_connection_change;
 mod auth;
 mod cluster_flags;
 mod config;
+mod download;
 mod epg;
 mod epg_request;
 mod info_doc_utils;
@@ -28,6 +29,7 @@ mod stream_properties;
 mod strm_export_style;
 pub mod system_info;
 mod target_type;
+mod transfer;
 mod ui_playlist_item;
 mod user_command;
 mod uuidtype;
@@ -36,10 +38,10 @@ mod xtream;
 pub mod xtream_const;
 
 pub use self::{
-    active_user_connection_change::*, auth::*, cluster_flags::*, config::*, epg::*, epg_request::*, ip_check::*,
-    item_field::*, library_request::*, mapping::*, media_properties::*, messaging::*, playlist::*,
+    active_user_connection_change::*, auth::*, cluster_flags::*, config::*, download::*, epg::*, epg_request::*,
+    ip_check::*, item_field::*, library_request::*, mapping::*, media_properties::*, messaging::*, playlist::*,
     playlist_categories::*, playlist_info_document::*, playlist_request::*, processing_order::*, regex_cache::*,
     search_request::*, short_epg::*, stats::*, status_check::*, stream_info::*, stream_meter::*, stream_properties::*,
-    strm_export_style::*, system_info::*, target_type::*, ui_playlist_item::*, user_command::*, uuidtype::*,
-    web_socket::*, xtream::*,
+    strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*, user_command::*,
+    uuidtype::*, web_socket::*, xtream::*,
 };

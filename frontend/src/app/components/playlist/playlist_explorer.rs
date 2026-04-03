@@ -1,36 +1,42 @@
 use crate::{
     app::{
         components::{menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, IconButton, NoContent, Panel, Search},
-        context::PlaylistExplorerContext,
+        context::{ConfigContext, PlaylistExplorerContext},
     },
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
-    model::{BusyStatus, EventMessage},
+    model::{BusyStatus, DialogAction, DialogActions, DialogResult, EventMessage},
     services::DialogService,
 };
 use shared::{
     error::{info_err_res, TuliproxError},
     model::{
-        PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
+        Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
         SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::format_float_localized,
 };
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use wasm_bindgen::JsCast;
+use web_sys::HtmlInputElement;
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
 
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
+const DOWNLOAD_ITEM: &str = "download_item";
+const RECORD_ITEM: &str = "record_item";
 
 #[derive(Clone)]
 struct ChannelSelection {
     virtual_id: VirtualId,
     cluster: XtreamCluster,
+    downloadable: bool,
     url: String,
+    title: String,
+    input_name: String,
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -39,6 +45,8 @@ enum ExplorerAction {
     CopyLinkTuliproxVirtualId,
     CopyLinkTuliproxWebPlayerUrl,
     CopyLinkProviderUrl,
+    Download,
+    Record,
 }
 
 impl Display for ExplorerAction {
@@ -50,6 +58,8 @@ impl Display for ExplorerAction {
                 Self::CopyLinkTuliproxVirtualId => COPY_LINK_TULIPROX_VIRTUAL_ID,
                 Self::CopyLinkTuliproxWebPlayerUrl => COPY_LINK_TULIPROX_WEBPLAYER_URL,
                 Self::CopyLinkProviderUrl => COPY_LINK_PROVIDER_URL,
+                Self::Download => DOWNLOAD_ITEM,
+                Self::Record => RECORD_ITEM,
             }
         )
     }
@@ -65,10 +75,96 @@ impl FromStr for ExplorerAction {
             Ok(Self::CopyLinkTuliproxWebPlayerUrl)
         } else if s.eq(COPY_LINK_PROVIDER_URL) {
             Ok(Self::CopyLinkProviderUrl)
+        } else if s.eq(DOWNLOAD_ITEM) {
+            Ok(Self::Download)
+        } else if s.eq(RECORD_ITEM) {
+            Ok(Self::Record)
         } else {
             info_err_res!("Unknown ExplorerAction: {}", s)
         }
     }
+}
+
+fn build_download_filename(title: &str, url: &str) -> String {
+    let sanitized = title
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    let base = if sanitized.is_empty() { "download".to_string() } else { sanitized };
+    let ext = url
+        .split('?')
+        .next()
+        .and_then(|base| base.rsplit('/').next())
+        .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_else(|| ".mp4".to_string());
+    if base.ends_with(&ext) {
+        base
+    } else {
+        format!("{base}{ext}")
+    }
+}
+
+fn default_record_start_value() -> String { chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string() }
+
+fn parse_record_start_value(start_value: &str) -> Option<i64> {
+    use chrono::TimeZone;
+
+    let start_value = start_value.trim();
+    let naive = ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"]
+        .into_iter()
+        .find_map(|format| chrono::NaiveDateTime::parse_from_str(start_value, format).ok())?;
+    chrono::Local.from_local_datetime(&naive).earliest().map(|dt| dt.timestamp())
+}
+
+fn parse_record_duration_minutes(duration_value: &str) -> Option<u64> {
+    let minutes = duration_value.trim().parse::<u64>().ok()?;
+    (minutes > 0).then_some(minutes)
+}
+
+fn build_record_filename(title: &str, start_at: &str) -> String {
+    let sanitized = title
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    let base = if sanitized.is_empty() { "recording".to_string() } else { sanitized };
+    let time_part = start_at.replace([':', 'T'], "-");
+    format!("{base}_{time_part}.ts")
+}
+
+fn parse_optional_priority_input(priority_value: Option<String>) -> Result<Option<i8>, String> {
+    let Some(raw) = priority_value.as_deref() else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed.parse::<i8>().map(Some).map_err(|_| "Priority must be a whole number between -128 and 127".to_string())
+}
+
+fn normalize_input_name(input_name: &str) -> Option<String> {
+    let trimmed = input_name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn can_show_download_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
+    can_write_downloads && selected_channel.is_some_and(|item| item.cluster != XtreamCluster::Live && item.downloadable)
+}
+
+fn can_show_record_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
+    can_write_downloads && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live)
 }
 
 enum ExplorerLevel {
@@ -80,9 +176,23 @@ enum ExplorerLevel {
 #[component]
 pub fn PlaylistExplorer() -> Html {
     let context = use_context::<PlaylistExplorerContext>().expect("PlaylistExplorer context not found");
+    let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();
     let service_ctx = use_service_context();
+    let can_write_downloads = service_ctx.auth.has_permission(Permission::DownloadWrite);
+    let default_download_priority = config_ctx
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.config.video.as_ref())
+        .and_then(|video| video.download.as_ref())
+        .map(|download| download.download_priority);
+    let default_recording_priority = config_ctx
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.config.video.as_ref())
+        .and_then(|video| video.download.as_ref())
+        .map(|download| download.recording_priority);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
     let selected_channel = use_state(|| None::<ChannelSelection>);
@@ -118,7 +228,10 @@ pub fn PlaylistExplorer() -> Html {
                 set_selected_channel.set(Some(ChannelSelection {
                     virtual_id: dto.virtual_id,
                     cluster: dto.xtream_cluster,
+                    downloadable: dto.xtream_cluster == XtreamCluster::Video,
                     url: dto.url.to_string(),
+                    title: dto.title.to_string(),
+                    input_name: dto.input_name.to_string(),
                 }));
                 set_anchor_ref.set(Some(target));
                 set_is_open.set(true);
@@ -219,10 +332,12 @@ pub fn PlaylistExplorer() -> Html {
 
     let handle_menu_click = {
         let services = service_ctx.clone();
+        let dialog = dialog.clone();
         let popup_is_open_state = popup_is_open.clone();
         let selected_channel = selected_channel.clone();
         let playlist_ctx = context.clone();
         let translate_clone = translate.clone();
+        let can_queue_downloads = can_write_downloads;
         let copy_to_clipboard = copy_to_clipboard.clone();
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = ExplorerAction::from_str(&name) {
@@ -312,6 +427,318 @@ pub fn PlaylistExplorer() -> Html {
                                     });
                                 }
                             }
+                        }
+                    }
+                    ExplorerAction::Download => {
+                        if !can_queue_downloads {
+                            popup_is_open_state.set(false);
+                            return;
+                        }
+                        if let Some(dto) = &*selected_channel {
+                            let dialog = dialog.clone();
+                            let services = services.clone();
+                            let translate_clone = translate_clone.clone();
+                            let playlist_request = (*playlist_ctx.playlist_request).clone();
+                            let default_download_priority = default_download_priority;
+                            let selected = dto.clone();
+                            spawn_local(async move {
+                                let resolved_url = if !selected.url.is_empty() {
+                                    if let Some(playlist_request) = playlist_request.clone() {
+                                        let request = PlaylistUrlResolveRequest::Provider {
+                                            playlist_request,
+                                            url: selected.url.clone(),
+                                        };
+                                        services.playlist.resolve_url(request).await.unwrap_or(selected.url.clone())
+                                    } else {
+                                        selected.url.clone()
+                                    }
+                                } else if selected.cluster == XtreamCluster::Series {
+                                    if let Some(playlist_request) = playlist_request.as_ref() {
+                                        if let Some(pli) =
+                                            services.playlist.get_episode(selected.virtual_id, playlist_request).await
+                                        {
+                                            let episode_url = pli.url.to_string();
+                                            let request = PlaylistUrlResolveRequest::Provider {
+                                                playlist_request: playlist_request.clone(),
+                                                url: episode_url.clone(),
+                                            };
+                                            services.playlist.resolve_url(request).await.unwrap_or(episode_url)
+                                        } else {
+                                            String::new()
+                                        }
+                                    } else {
+                                        String::new()
+                                    }
+                                } else {
+                                    String::new()
+                                };
+
+                                if resolved_url.is_empty() {
+                                    services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
+                                    return;
+                                }
+
+                                let default_filename = build_download_filename(&selected.title, &resolved_url);
+                                let filename_value = Rc::new(RefCell::new(default_filename.clone()));
+                                let default_download_priority_value =
+                                    default_download_priority.map_or_else(String::new, |priority| priority.to_string());
+                                let priority_value = Rc::new(RefCell::new(default_download_priority_value.clone()));
+                                let actions = DialogActions {
+                                    left: Some(vec![DialogAction::new(
+                                        "cancel",
+                                        "LABEL.CANCEL",
+                                        DialogResult::Cancel,
+                                        Some("Close".to_owned()),
+                                        None,
+                                    )]),
+                                    right: vec![DialogAction::new_focused(
+                                        "download",
+                                        "LABEL.DOWNLOAD",
+                                        DialogResult::Ok,
+                                        Some("Download".to_owned()),
+                                        Some("primary".to_string()),
+                                    )],
+                                };
+                                let filename_value_input = Rc::clone(&filename_value);
+                                let priority_value_input = Rc::clone(&priority_value);
+                                let result = dialog
+                                    .content(
+                                        html! {
+                                            <div class="tp__record-dialog">
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.FILENAME")}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            type="text"
+                                                            value={default_filename.clone()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *filename_value_input.borrow_mut() = input.value();
+                                                            })}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            type="number"
+                                                            min="-127"
+                                                            max="127"
+                                                            step="1"
+                                                            value={default_download_priority_value.clone()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *priority_value_input.borrow_mut() = input.value();
+                                                            })}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div class="tp__field-explanation">
+                                                    {selected.title.clone()}
+                                                </div>
+                                            </div>
+                                        },
+                                        Some(actions),
+                                        false,
+                                    )
+                                    .await;
+
+                                if result != DialogResult::Ok {
+                                    return;
+                                }
+
+                                let filename = filename_value.borrow().clone().trim().to_string();
+                                let priority =
+                                    match parse_optional_priority_input(Some(priority_value.borrow().clone())) {
+                                        Ok(priority) => priority,
+                                        Err(err) => {
+                                            services.toastr.error(err);
+                                            return;
+                                        }
+                                    };
+
+                                if filename.is_empty() {
+                                    services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
+                                    return;
+                                }
+
+                                let input_name = normalize_input_name(&selected.input_name);
+                                match services
+                                    .downloads
+                                    .queue_download(resolved_url, filename, input_name, priority)
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"))
+                                    }
+                                    Err(_) => services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL")),
+                                }
+                            });
+                        }
+                    }
+                    ExplorerAction::Record => {
+                        if !can_queue_downloads {
+                            popup_is_open_state.set(false);
+                            return;
+                        }
+                        if let Some(dto) = &*selected_channel {
+                            let dialog = dialog.clone();
+                            let services = services.clone();
+                            let translate_clone = translate_clone.clone();
+                            let playlist_request = (*playlist_ctx.playlist_request).clone();
+                            let default_recording_priority = default_recording_priority;
+                            let selected = dto.clone();
+                            spawn_local(async move {
+                                let default_start_value = default_record_start_value();
+                                let start_value = Rc::new(RefCell::new(default_start_value.clone()));
+                                let duration_value = Rc::new(RefCell::new("90".to_string()));
+                                let priority_value = Rc::new(RefCell::new(
+                                    default_recording_priority
+                                        .map_or_else(String::new, |priority| priority.to_string()),
+                                ));
+                                let actions = DialogActions {
+                                    left: Some(vec![DialogAction::new(
+                                        "cancel",
+                                        "LABEL.CANCEL",
+                                        DialogResult::Cancel,
+                                        Some("Close".to_owned()),
+                                        None,
+                                    )]),
+                                    right: vec![DialogAction::new_focused(
+                                        "record",
+                                        "LABEL.RECORD",
+                                        DialogResult::Ok,
+                                        Some("Record".to_owned()),
+                                        Some("primary".to_string()),
+                                    )],
+                                };
+                                let start_value_input = Rc::clone(&start_value);
+                                let duration_value_input = Rc::clone(&duration_value);
+                                let priority_value_input = Rc::clone(&priority_value);
+                                let default_recording_priority_value = default_recording_priority
+                                    .map_or_else(String::new, |priority| priority.to_string());
+                                let result = dialog
+                                    .content(
+                                        html! {
+                                            <div class="tp__record-dialog">
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.START")}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            type="datetime-local"
+                                                            value={default_start_value.clone()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *start_value_input.borrow_mut() = input.value();
+                                                            })}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.DURATION")}{" (min)"}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            type="number"
+                                                            min="1"
+                                                            step="1"
+                                                            value="90"
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *duration_value_input.borrow_mut() = input.value();
+                                                            })}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div class="tp__input">
+                                                    <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
+                                                    <div class="tp__input-wrapper">
+                                                        <input
+                                                            type="number"
+                                                            min="-127"
+                                                            max="127"
+                                                            step="1"
+                                                            value={default_recording_priority_value.clone()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *priority_value_input.borrow_mut() = input.value();
+                                                            })}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                <div class="tp__field-explanation">
+                                                    {selected.title.clone()}
+                                                </div>
+                                            </div>
+                                        },
+                                        Some(actions),
+                                        false,
+                                    )
+                                    .await;
+
+                                if result == DialogResult::Ok {
+                                    let start_value = start_value.borrow().clone();
+                                    let duration_value = duration_value.borrow().clone();
+                                    let priority =
+                                        match parse_optional_priority_input(Some(priority_value.borrow().clone())) {
+                                            Ok(priority) => priority,
+                                            Err(err) => {
+                                                services.toastr.error(err);
+                                                return;
+                                            }
+                                        };
+                                    let start_ts = parse_record_start_value(&start_value);
+                                    let duration_mins = parse_record_duration_minutes(&duration_value);
+
+                                    match (start_ts, duration_mins) {
+                                        (Some(start_at), Some(minutes)) => {
+                                            let filename = build_record_filename(&selected.title, &start_value);
+                                            let input_name = normalize_input_name(&selected.input_name);
+                                            let resolved_url = if let Some(playlist_request) = playlist_request.clone()
+                                            {
+                                                let request = PlaylistUrlResolveRequest::Provider {
+                                                    playlist_request,
+                                                    url: selected.url.clone(),
+                                                };
+                                                services
+                                                    .playlist
+                                                    .resolve_url(request)
+                                                    .await
+                                                    .unwrap_or(selected.url.clone())
+                                            } else {
+                                                selected.url.clone()
+                                            };
+                                            match services
+                                                .downloads
+                                                .queue_recording(
+                                                    resolved_url,
+                                                    filename,
+                                                    start_at,
+                                                    minutes.saturating_mul(60),
+                                                    input_name,
+                                                    priority,
+                                                )
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                    services.toastr.success(
+                                                        translate_clone.t("MESSAGES.DOWNLOAD.RECORDING_QUEUED"),
+                                                    );
+                                                }
+                                                Err(_) => {
+                                                    services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
+                                                }
+                                            }
+                                        }
+                                        (None, _) => services
+                                            .toastr
+                                            .error(translate_clone.t("MESSAGES.DOWNLOAD.INVALID_RECORD_START")),
+                                        (_, None) => services
+                                            .toastr
+                                            .error(translate_clone.t("MESSAGES.DOWNLOAD.INVALID_RECORD_DURATION")),
+                                    }
+                                }
+                            });
                         }
                     }
                 }
@@ -512,7 +939,10 @@ pub fn PlaylistExplorer() -> Html {
         let channel_select = ChannelSelection {
             virtual_id: chan.id,
             cluster: XtreamCluster::Series,
+            downloadable: true,
             url: String::new(), // TODO provider url
+            title: chan.title.to_string(),
+            input_name: String::new(),
         };
         let popup_onclick = handle_episode_popup_onclick.clone();
         let rating = chan.rating.unwrap_or_default();
@@ -687,7 +1117,124 @@ pub fn PlaylistExplorer() -> Html {
              })
             }
             <MenuItem icon="Clipboard" name={ExplorerAction::CopyLinkProviderUrl.to_string()} label={translate.t("LABEL.COPY_LINK_PROVIDER_URL")} onclick={&handle_menu_click}></MenuItem>
+            { html_if!(
+                can_show_record_action(can_write_downloads, selected_channel.as_ref()),
+                {
+                <MenuItem icon="Record" name={ExplorerAction::Record.to_string()} label={translate.t("LABEL.RECORD")} onclick={&handle_menu_click}></MenuItem>
+            })}
+            { html_if!(
+                can_show_download_action(can_write_downloads, selected_channel.as_ref()),
+                {
+                <MenuItem icon="Download" name={ExplorerAction::Download.to_string()} label={translate.t("LABEL.DOWNLOAD")} onclick={&handle_menu_click}></MenuItem>
+            })}
         </PopupMenu>
       </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_download_filename, can_show_download_action, can_show_record_action, normalize_input_name,
+        parse_optional_priority_input, parse_record_duration_minutes, parse_record_start_value, ChannelSelection,
+    };
+    use shared::model::{VirtualId, XtreamCluster};
+
+    #[test]
+    fn parse_optional_priority_input_treats_blank_as_none() {
+        assert_eq!(parse_optional_priority_input(None), Ok(None));
+        assert_eq!(parse_optional_priority_input(Some(String::new())), Ok(None));
+        assert_eq!(parse_optional_priority_input(Some("   ".to_string())), Ok(None));
+    }
+
+    #[test]
+    fn parse_optional_priority_input_parses_valid_i8_values() {
+        assert_eq!(parse_optional_priority_input(Some("-1".to_string())), Ok(Some(-1)));
+        assert_eq!(parse_optional_priority_input(Some("12".to_string())), Ok(Some(12)));
+        assert_eq!(parse_optional_priority_input(Some(" 0 ".to_string())), Ok(Some(0)));
+    }
+
+    #[test]
+    fn parse_optional_priority_input_rejects_invalid_non_empty_values() {
+        assert!(parse_optional_priority_input(Some("abc".to_string())).is_err());
+    }
+
+    #[test]
+    fn normalize_input_name_treats_blank_as_none() {
+        assert_eq!(normalize_input_name(""), None);
+        assert_eq!(normalize_input_name("   "), None);
+        assert_eq!(normalize_input_name(" provider-a "), Some("provider-a".to_string()));
+    }
+
+    #[test]
+    fn popup_actions_require_download_write_permission() {
+        let live = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Live,
+            downloadable: false,
+            url: String::new(),
+            title: "Live".to_string(),
+            input_name: String::new(),
+        };
+        let vod = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Video,
+            downloadable: true,
+            url: String::new(),
+            title: "VOD".to_string(),
+            input_name: String::new(),
+        };
+        let series_container = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Series,
+            downloadable: false,
+            url: String::new(),
+            title: "Series".to_string(),
+            input_name: String::new(),
+        };
+        let episode = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Series,
+            downloadable: true,
+            url: String::new(),
+            title: "Episode".to_string(),
+            input_name: String::new(),
+        };
+
+        assert!(!can_show_record_action(false, Some(&live)));
+        assert!(!can_show_download_action(false, Some(&vod)));
+        assert!(can_show_record_action(true, Some(&live)));
+        assert!(can_show_download_action(true, Some(&vod)));
+        assert!(!can_show_download_action(true, Some(&live)));
+        assert!(!can_show_download_action(true, Some(&series_container)));
+        assert!(can_show_download_action(true, Some(&episode)));
+        assert!(!can_show_record_action(true, Some(&vod)));
+    }
+
+    #[test]
+    fn parse_record_duration_minutes_rejects_zero_and_invalid_values() {
+        assert_eq!(parse_record_duration_minutes("0"), None);
+        assert_eq!(parse_record_duration_minutes("abc"), None);
+        assert_eq!(parse_record_duration_minutes("15"), Some(15));
+    }
+
+    #[test]
+    fn parse_record_start_value_accepts_default_format() {
+        let default_value = super::default_record_start_value();
+        assert!(parse_record_start_value(&default_value).is_some());
+        assert!(parse_record_start_value("2026-04-03T12:34:00").is_some());
+        assert!(parse_record_start_value("not-a-date").is_none());
+    }
+
+    #[test]
+    fn build_download_filename_keeps_url_extension() {
+        let filename = build_download_filename("My Movie", "https://example.com/video.mkv?token=1");
+        assert_eq!(filename, "My_Movie.mkv");
+    }
+
+    #[test]
+    fn build_download_filename_falls_back_to_mp4() {
+        let filename = build_download_filename("Episode 01", "https://example.com/stream");
+        assert_eq!(filename, "Episode_01.mp4");
     }
 }

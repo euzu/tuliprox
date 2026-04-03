@@ -16,10 +16,12 @@ create_bitset!(
     SystemRead,
     SystemWrite,
     EpgRead,
-    EpgWrite
+    EpgWrite,
+    DownloadRead,
+    DownloadWrite
 );
 
-pub const PERM_ALL: PermissionSet = PermissionSet((1u16 << PERMISSION_NAMES.len()) - 1);
+pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
 
 pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("config.read", Permission::ConfigRead),
@@ -36,6 +38,8 @@ pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("system.write", Permission::SystemWrite),
     ("epg.read", Permission::EpgRead),
     ("epg.write", Permission::EpgWrite),
+    ("download.read", Permission::DownloadRead),
+    ("download.write", Permission::DownloadWrite),
 ];
 
 pub fn permission_from_name(name: &str) -> Option<Permission> {
@@ -106,11 +110,17 @@ mod tests {
         assert!(PERM_ALL.contains(Permission::ConfigWrite));
         assert!(PERM_ALL.contains(Permission::EpgRead));
         assert!(PERM_ALL.contains(Permission::EpgWrite));
+        assert!(PERM_ALL.contains(Permission::DownloadRead));
+        assert!(PERM_ALL.contains(Permission::DownloadWrite));
     }
 
     #[test]
     fn test_perm_all_matches_defined_permissions_only() {
-        let expected_mask = (1u16 << PERMISSION_NAMES.len()) - 1;
+        let expected_mask = if PermissionSet::VARIANT_COUNT == u16::BITS as usize {
+            u16::MAX
+        } else {
+            ((1u32 << PermissionSet::VARIANT_COUNT) - 1) as u16
+        };
         assert_eq!(PERM_ALL.0, expected_mask);
     }
 

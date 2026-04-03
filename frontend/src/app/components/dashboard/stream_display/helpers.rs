@@ -1,4 +1,8 @@
-use crate::{app::ConfigContext, utils::format_duration};
+use crate::{
+    app::ConfigContext,
+    model::{BACKGROUND_TRANSFER_CLIENT_IP, BACKGROUND_TRANSFER_PROVIDER},
+    utils::format_duration,
+};
 use gloo_utils::window;
 use shared::{
     model::{PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo},
@@ -39,6 +43,10 @@ pub fn get_adaptive_session_ttl_secs(config_ctx: &ConfigContext) -> u64 {
 
 pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
     stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
+}
+
+pub fn is_background_transfer_stream(stream: &StreamInfo) -> bool {
+    stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP && stream.provider == BACKGROUND_TRANSFER_PROVIDER
 }
 
 pub fn filter_visible_streams(

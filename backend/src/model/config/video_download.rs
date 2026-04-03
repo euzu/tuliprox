@@ -11,6 +11,15 @@ pub struct VideoDownloadConfig {
     pub directory: String,
     pub organize_into_directories: bool,
     pub episode_pattern: Option<Arc<Regex>>,
+    pub download_priority: i8,
+    pub recording_priority: i8,
+    pub reserve_slots_for_users: u8,
+    pub max_background_per_provider: u8,
+    pub retry_backoff_initial_secs: u64,
+    pub retry_backoff_multiplier: f64,
+    pub retry_backoff_max_secs: u64,
+    pub retry_backoff_jitter_percent: u8,
+    pub retry_max_attempts: u8,
 }
 
 macros::from_impl!(VideoDownloadConfig);
@@ -23,6 +32,15 @@ impl From<&VideoDownloadConfigDto> for VideoDownloadConfig {
             episode_pattern: dto.episode_pattern.as_ref().and_then(|s| shared::model::REGEX_CACHE.get_or_compile(s)
                 .map_err(|e| log::warn!("Invalid episode_pattern regex '{s}': {e}"))
                 .ok()),
+            download_priority: dto.download_priority,
+            recording_priority: dto.recording_priority,
+            reserve_slots_for_users: dto.reserve_slots_for_users,
+            max_background_per_provider: dto.max_background_per_provider,
+            retry_backoff_initial_secs: dto.retry_backoff_initial_secs.max(1),
+            retry_backoff_multiplier: dto.retry_backoff_multiplier.max(1.0),
+            retry_backoff_max_secs: dto.retry_backoff_max_secs.max(dto.retry_backoff_initial_secs.max(1)),
+            retry_backoff_jitter_percent: dto.retry_backoff_jitter_percent.min(95),
+            retry_max_attempts: dto.retry_max_attempts.max(1),
         }
     }
 }
@@ -34,6 +52,15 @@ impl From<&VideoDownloadConfig> for VideoDownloadConfigDto {
             directory: Some(instance.directory.clone()),
             organize_into_directories: instance.organize_into_directories,
             episode_pattern: instance.episode_pattern.as_ref().map(std::string::ToString::to_string),
+            download_priority: instance.download_priority,
+            recording_priority: instance.recording_priority,
+            reserve_slots_for_users: instance.reserve_slots_for_users,
+            max_background_per_provider: instance.max_background_per_provider,
+            retry_backoff_initial_secs: instance.retry_backoff_initial_secs,
+            retry_backoff_multiplier: instance.retry_backoff_multiplier,
+            retry_backoff_max_secs: instance.retry_backoff_max_secs,
+            retry_backoff_jitter_percent: instance.retry_backoff_jitter_percent,
+            retry_max_attempts: instance.retry_max_attempts,
         }
     }
 }

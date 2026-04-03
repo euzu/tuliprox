@@ -253,6 +253,10 @@
     border: 1px solid var(--card-border-color);
   }
 
+  &__stat--duration {
+    width: 90px;
+  }
+
   &__stat-label {
     color: var(--tertiary-title-text-color);
     font-size: var(--font-size-xs);

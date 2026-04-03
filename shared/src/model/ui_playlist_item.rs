@@ -33,6 +33,8 @@ pub struct UiPlaylistItem {
     pub category_id: u32,
     #[serde(rename = "s")]
     pub rating: f64,
+    #[serde(rename = "i", with = "arc_str_serde")]
+    pub input_name: Arc<str>,
 }
 
 /// Helper to pick the best logo: prefer `logo` if non-empty, else `logo_small`
@@ -92,6 +94,7 @@ impl From<&CommonPlaylistItem> for UiPlaylistItem {
             xtream_cluster: item.xtream_cluster.unwrap_or_default(),
             category_id: item.category_id.unwrap_or(0),
             rating: get_rating(item.additional_properties.as_ref()),
+            input_name: Arc::clone(&item.input_name),
         }
     }
 }
@@ -110,6 +113,7 @@ impl From<XtreamPlaylistItem> for UiPlaylistItem {
             xtream_cluster: item.xtream_cluster,
             category_id: item.category_id,
             rating: get_rating(item.additional_properties.as_ref()),
+            input_name: Arc::clone(&item.input_name),
         }
     }
 }
@@ -128,6 +132,7 @@ impl From<M3uPlaylistItem> for UiPlaylistItem {
             xtream_cluster: XtreamCluster::try_from(item.item_type).unwrap_or_default(),
             category_id: 0,
             rating: 0.0,
+            input_name: Arc::clone(&item.input_name),
         }
     }
 }
@@ -147,6 +152,7 @@ impl From<&PlaylistItem> for UiPlaylistItem {
             xtream_cluster: header.xtream_cluster,
             category_id: header.category_id,
             rating: get_rating(header.additional_properties.as_ref()),
+            input_name: Arc::clone(&header.input_name),
         }
     }
 }

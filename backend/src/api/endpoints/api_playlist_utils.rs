@@ -113,6 +113,7 @@ mod tests {
             xtream_cluster: XtreamCluster::Live,
             category_id: 0,
             rating: 0.0,
+            input_name: "test".intern(),
         }
     }
 

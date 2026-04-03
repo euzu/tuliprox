@@ -1,10 +1,10 @@
 use crate::{
     app::{
         components::{
-            config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, EpgView,
-            IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView,
-            PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView,
-            ThemePicker, ToastrView, UserlistView, WebsocketStatus,
+            config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, DownloadsView,
+            EpgView, IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView,
+            PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView,
+            StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -91,6 +91,7 @@ pub fn Home() -> Html {
     let can_write_playlist = services.auth.has_permission(Permission::PlaylistWrite);
     let can_read_playlist = services.auth.has_permission(Permission::PlaylistRead);
     let can_read_epg = services.auth.has_permission(Permission::EpgRead);
+    let can_read_downloads = services.auth.has_permission(Permission::DownloadRead);
     let is_admin = services.auth.is_admin();
     let _ = use_server_status(status.clone(), system_info.clone(), !setup_mode && can_read_system_status);
 
@@ -290,6 +291,11 @@ pub fn Home() -> Html {
                                               <StreamsView embedded={false}/>
                                             </Panel>
                                         })}
+                                       { html_if!(can_read_downloads, {
+                                       <Panel class="tp__full-width" value={ViewType::Downloads.to_string()} active={view_visible.to_string()}>
+                                         <DownloadsView/>
+                                       </Panel>
+                                       })}
                                         { html_if!(can_read_system_status, {
                                             <Panel class="tp__full-width" value={ViewType::StreamHistory.to_string()} active={view_visible.to_string()}>
                                                 <StreamHistoryView/>

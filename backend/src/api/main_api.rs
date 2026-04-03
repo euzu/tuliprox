@@ -4,6 +4,7 @@ use crate::{
         config_watch::exec_config_watch,
         endpoints::{
             custom_video_stream_api::cvs_api_register,
+            download_api::{resume_download_worker_if_needed, spawn_download_services},
             hdhomerun_api::hdhr_api_register,
             hls_api::hls_api_register,
             m3u_api::m3u_api_register,
@@ -49,7 +50,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::{atomic::AtomicI8, Arc},
+    sync::{atomic::{AtomicI8, AtomicU64, Ordering}, Arc},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -58,6 +59,62 @@ use tower_http::compression::predicate::{DefaultPredicate, Predicate};
 use tower_http::services::ServeDir;
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
+static CORRUPT_DOWNLOADS_STATE_SUFFIX: AtomicU64 = AtomicU64::new(1);
+
+fn corrupt_downloads_state_path(state_file: &std::path::Path) -> PathBuf {
+    let now = chrono::Utc::now();
+    let suffix = CORRUPT_DOWNLOADS_STATE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    let timestamp = format!("{}{:09}.{:016x}", now.format("%Y%m%d%H%M%S"), now.timestamp_subsec_nanos(), suffix);
+    let stem = state_file.file_stem().and_then(|stem| stem.to_str()).unwrap_or("downloads_state");
+    let extension = state_file.extension().and_then(|ext| ext.to_str()).unwrap_or("json");
+    state_file.with_file_name(format!("{stem}_corrupt.{timestamp}.{extension}"))
+}
+
+async fn recover_persisted_downloads_state(downloads: &DownloadQueue) -> Result<(), TuliproxError> {
+    match downloads.load_from_disk().await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+            if let Some(state_file) = downloads.state_file.as_ref() {
+                let corrupt_path = corrupt_downloads_state_path(state_file);
+                match tokio::fs::rename(state_file, &corrupt_path).await {
+                    Ok(()) => error!(
+                        "Persisted downloads state is corrupted. Renamed {} to {} and starting with an empty queue: {}",
+                        state_file.display(),
+                        corrupt_path.display(),
+                        err
+                    ),
+                    Err(rename_err) => error!(
+                        "Persisted downloads state is corrupted. Failed to rename {} to {}: {}. Starting with an empty queue anyway: {}",
+                        state_file.display(),
+                        corrupt_path.display(),
+                        rename_err,
+                        err
+                    ),
+                }
+            } else {
+                error!("Persisted downloads state is corrupted. Starting with an empty queue: {err}");
+            }
+            Ok(())
+        }
+        Err(err) => Err(TuliproxError::new(
+            shared::error::TuliproxErrorKind::Info,
+            format!("Failed to load persisted downloads: {err}"),
+        )),
+    }
+}
+
+async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue) {
+    if let Err(err) = recover_persisted_downloads_state(downloads).await {
+        error!("Failed to recover persisted downloads state during startup; continuing with downloads paused: {err}");
+    }
+}
+
+async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::VideoDownloadConfig) {
+    spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
+    if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
+        error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
+    }
+}
 
 fn collect_rescheduled_targets(
     targets_set: &HashSet<String>,
@@ -203,6 +260,7 @@ async fn create_shared_data(
     forced_targets: &Arc<ProcessTargets>,
 ) -> Result<(AppState, mpsc::Receiver<Arc<ProcessTargets>>), TuliproxError> {
     let config = app_config.config.load();
+    let downloads_state_file = std::path::PathBuf::from(&config.storage_dir).join("downloads_state.json");
 
     let use_geoip = config.is_geoip_enabled();
     let geoip = if use_geoip {
@@ -248,13 +306,12 @@ async fn create_shared_data(
 
     let (manual_update_sender, manual_update_rx) = mpsc::channel::<Arc<ProcessTargets>>(1);
 
-    Ok((
-        AppState {
+    let app_state = AppState {
             forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
             app_config: Arc::clone(app_config),
             http_client: Arc::new(ArcSwap::from_pointee(client)),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
-            downloads: Arc::new(DownloadQueue::new()),
+            downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
             cache: Arc::new(ArcSwapOption::from(cache)),
             shared_stream_manager,
             active_users,
@@ -267,9 +324,11 @@ async fn create_shared_data(
             update_guard: UpdateGuard::new(),
             metadata_manager,
             manual_update_sender,
-        },
-        manual_update_rx,
-    ))
+        };
+
+    recover_persisted_downloads_state_for_startup(&app_state.downloads).await;
+
+    Ok((app_state, manual_update_rx))
 }
 
 async fn run_manual_update_worker(
@@ -303,11 +362,95 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.file_watch.cancel();
     cancel_tokens.provider_dns.cancel();
     cancel_tokens.qos_aggregation.cancel();
+    cancel_tokens.downloads.cancel();
     app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
     app_state.metadata_manager.shutdown();
     app_state.connection_manager.shutdown().await;
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut quit = signal(SignalKind::quit())?;
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            res?;
+            Ok("Ctrl+C")
+        },
+        _ = terminate.recv() => Ok("SIGTERM"),
+        _ = quit.recv() => Ok("SIGQUIT")
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
+    tokio::signal::ctrl_c().await?;
+    Ok("Ctrl+C")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
+    use crate::api::model::DownloadQueue;
+    use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+
+    fn temp_state_file(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
+    }
+
+    #[test]
+    fn corrupt_downloads_state_path_is_unique_for_rapid_calls() {
+        let state_file = temp_state_file("corrupt_downloads_unique");
+
+        let first = corrupt_downloads_state_path(&state_file);
+        let second = corrupt_downloads_state_path(&state_file);
+
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn recover_persisted_downloads_state_renames_corrupt_file_and_continues() {
+        let state_file = temp_state_file("corrupt_downloads_state");
+        std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
+        let corrupt_dir = state_file.parent().expect("state dir").to_path_buf();
+        let expected_prefix = format!(
+            "{}_corrupt.",
+            state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem")
+        );
+        let expected_extension = state_file.extension().and_then(|ext| ext.to_str()).expect("state ext");
+        let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+
+        recover_persisted_downloads_state(&downloads).await.expect("recovery should continue");
+
+        assert!(!state_file.exists());
+        let matching_corrupt_paths = std::fs::read_dir(&corrupt_dir)
+            .expect("read corrupt dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&expected_prefix) && name.ends_with(expected_extension))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching_corrupt_paths.len(), 1);
+        assert!(downloads.queue.lock().await.is_empty());
+        assert!(downloads.scheduled.read().await.is_empty());
+        assert!(downloads.active.read().await.is_none());
+        assert!(downloads.finished.read().await.is_empty());
+
+        for path in matching_corrupt_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {
@@ -586,18 +729,22 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         .await
         .map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
 
+    if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
+        resume_downloads_after_bind(&app_state, download_cfg).await;
+    }
+
     let server_cancel_token = CancellationToken::new();
     let server_cancel_token_signal = server_cancel_token.clone();
     let app_state_signal = Arc::clone(&app_state);
     tokio::spawn(async move {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => {
-                info!("Received shutdown signal (Ctrl+C), cancelling all background services");
+        match wait_for_shutdown_signal().await {
+            Ok(signal_name) => {
+                info!("Received shutdown signal ({signal_name}), cancelling all background services");
                 server_cancel_token_signal.cancel();
                 cancel_all_service_tokens(&app_state_signal).await;
             }
             Err(err) => {
-                error!("Failed to listen for Ctrl+C: {err}");
+                error!("Failed to listen for shutdown signal: {err}");
             }
         }
     });

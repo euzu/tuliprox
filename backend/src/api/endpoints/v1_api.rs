@@ -123,7 +123,6 @@ pub fn v1_api_register(
     let system_read = axum::routing::Router::new()
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
-        .route("/file/download/info", axum::routing::get(download_api::download_file_info))
         .route("/ipinfo", axum::routing::get(ipinfo))
         .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_query))
         .route("/stream-history/summary", axum::routing::get(super::stream_history_api::stream_history_summary_query))
@@ -134,8 +133,19 @@ pub fn v1_api_register(
         );
 
     let system_write = axum::routing::Router::new()
-        .route("/geoip/update", axum::routing::get(geoip_update))
-        .route("/file/download", axum::routing::post(download_api::queue_download_file));
+        .route("/geoip/update", axum::routing::get(geoip_update));
+
+    let download_read = axum::routing::Router::new()
+        .route("/file/download/info", axum::routing::get(download_api::download_file_info));
+
+    let download_write = axum::routing::Router::new()
+        .route("/file/download", axum::routing::post(download_api::queue_download_file))
+        .route("/file/record", axum::routing::post(download_api::queue_recording_file))
+        .route("/file/download/pause", axum::routing::post(download_api::pause_download))
+        .route("/file/download/resume", axum::routing::post(download_api::resume_download))
+        .route("/file/download/cancel", axum::routing::post(download_api::cancel_download))
+        .route("/file/download/remove", axum::routing::post(download_api::remove_download))
+        .route("/file/download/retry", axum::routing::post(download_api::retry_download));
 
     let mut router = axum::routing::Router::new();
 
@@ -143,6 +153,8 @@ pub fn v1_api_register(
         router = router
             .merge(system_read.layer(permission_layer!(app_state, Permission::SystemRead)))
             .merge(system_write.layer(permission_layer!(app_state, Permission::SystemWrite)))
+            .merge(download_read.layer(permission_layer!(app_state, Permission::DownloadRead)))
+            .merge(download_write.layer(permission_layer!(app_state, Permission::DownloadWrite)))
             .merge(v1_api_config_register_with_permissions(app_state))
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
@@ -152,6 +164,8 @@ pub fn v1_api_register(
         router = router
             .merge(system_read)
             .merge(system_write)
+            .merge(download_read)
+            .merge(download_write)
             .merge(v1_api_config_register(axum::routing::Router::new()))
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))

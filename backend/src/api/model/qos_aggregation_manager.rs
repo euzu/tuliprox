@@ -783,7 +783,9 @@ mod tests {
     async fn run_aggregation_once_persists_current_day_snapshot() {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path().join("stream_history");
+        let today = current_utc_day();
         let mut connect = base_record(EventType::Connect);
+        connect.partition_day_utc = today.clone();
         connect.input_name = Some("input-a".to_string());
         connect.provider_name = Some("provider-a".to_string());
         connect.provider_id = Some(22);
@@ -795,7 +797,6 @@ mod tests {
         write_pending_history_records(&history_dir, vec![connect]);
 
         let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
-        let today = current_utc_day();
         run_aggregation_once(&repo, &history_dir, &today).expect("aggregation should succeed");
 
         let snapshot = repo
@@ -810,8 +811,10 @@ mod tests {
     async fn run_aggregation_once_rereads_current_day_without_double_counting() {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path().join("stream_history");
+        let today = current_utc_day();
 
         let mut connect = base_record(EventType::Connect);
+        connect.partition_day_utc = today.clone();
         connect.input_name = Some("input-a".to_string());
         connect.provider_name = Some("provider-a".to_string());
         connect.provider_id = Some(22);
@@ -823,7 +826,6 @@ mod tests {
         write_pending_history_records(&history_dir, vec![connect]);
 
         let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
-        let today = current_utc_day();
 
         run_aggregation_once(&repo, &history_dir, &today).expect("first aggregation should succeed");
         run_aggregation_once(&repo, &history_dir, &today).expect("second aggregation should succeed");

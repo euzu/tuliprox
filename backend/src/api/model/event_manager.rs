@@ -1,6 +1,9 @@
 use crate::api::model::streams::{MeterReading, StreamMeterHandle};
 use log::trace;
-use shared::model::{ActiveUserConnectionChange, ConfigType, LibraryScanSummary, PlaylistUpdateState, StreamMeterEntry, SystemInfo};
+use shared::model::{
+    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanSummary, PlaylistUpdateState,
+    StreamMeterEntry, SystemInfo,
+};
 use std::{
     collections::HashMap,
     sync::{
@@ -26,6 +29,8 @@ pub enum EventMessage {
     PlaylistUpdateProgress(String, String),
     SystemInfoUpdate(SystemInfo),
     LibraryScanProgress(LibraryScanSummary),
+    DownloadsUpdate(DownloadsResponse),
+    DownloadsDeltaUpdate(DownloadsDelta),
     InputMetadataUpdatesCompleted(Arc<str>),
     InputMetadataUpdatesStarted(Arc<str>),
 }

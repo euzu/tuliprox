@@ -1,6 +1,7 @@
 use crate::{
     api::{
         config_watch::exec_config_watch,
+        endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::provider_dns_manager::exec_provider_dns,
         model::{
             qos_aggregation_manager::exec_qos_aggregation,
@@ -24,7 +25,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
 use shared::{
-    create_bitset, error::TuliproxError, info_err_res, model::UserConnectionPermission,
+    create_bitset, error::TuliproxError, info_err_res, model::{UserConnectionPermission, VideoDownloadConfigDto},
     utils::small_vecs_equal_unordered,
 };
 use std::{
@@ -72,7 +73,7 @@ struct TargetChanges {
     target: Arc<ConfigTarget>,
 }
 
-create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns, Metadata, QosAggregation);
+create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns, Metadata, QosAggregation, Downloads);
 
 pub(in crate::api) struct UpdateChanges {
     flags: UpdateChangesFlagsSet,
@@ -156,6 +157,9 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     if !changes.modified() {
         return;
     }
+    if changes.flags.contains(UpdateChangesFlags::Downloads) {
+        app_state.downloads.request_worker_restart();
+    }
     let cancel_tokens = app_state.cancel_tokens.load();
 
     let scheduler = cancel_service!(scheduler, UpdateChangesFlags::Scheduler, changes, cancel_tokens);
@@ -170,6 +174,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         cancel_tokens.metadata.clone()
     };
     let qos_aggregation = cancel_service!(qos_aggregation, UpdateChangesFlags::QosAggregation, changes, cancel_tokens);
+    let downloads = cancel_service!(downloads, UpdateChangesFlags::Downloads, changes, cancel_tokens);
 
     let tokens = CancelTokens {
         scheduler,
@@ -178,6 +183,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         provider_dns,
         metadata,
         qos_aggregation,
+        downloads,
     };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
@@ -214,6 +220,35 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
     if changes.flags.contains(UpdateChangesFlags::QosAggregation) {
         exec_qos_aggregation(app_state, &app_state.cancel_tokens.load().qos_aggregation);
+        let history_cfg = app_state
+            .app_config
+            .config
+            .load()
+            .reverse_proxy
+            .as_ref()
+            .and_then(|rp| rp.stream_history.clone());
+        let connection_manager = Arc::clone(&app_state.connection_manager);
+        tokio::spawn(async move {
+            connection_manager.reload_history_writer(history_cfg.as_ref()).await;
+        });
+    }
+    if changes.flags.contains(UpdateChangesFlags::Downloads) {
+        spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
+        let config = app_state.app_config.config.load();
+        if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()).cloned() {
+            let app_state = Arc::clone(app_state);
+            tokio::spawn(async move {
+                for _ in 0..50 {
+                    if !*app_state.downloads.worker_running.read().await {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), &download_cfg).await {
+                    error!("Failed to resume downloads after hot reload: {err}");
+                }
+            });
+        }
     }
 }
 
@@ -322,6 +357,7 @@ pub struct CancelTokens {
     pub(crate) provider_dns: CancellationToken,
     pub(crate) metadata: CancellationToken,
     pub(crate) qos_aggregation: CancellationToken,
+    pub(crate) downloads: CancellationToken,
 }
 impl Default for CancelTokens {
     fn default() -> Self {
@@ -332,6 +368,7 @@ impl Default for CancelTokens {
             provider_dns: CancellationToken::new(),
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
+            downloads: CancellationToken::new(),
         }
     }
 }
@@ -344,6 +381,10 @@ macro_rules! change_detect {
             (Some(o), Some(n)) => $fn_name(o, n),
         }
     };
+}
+
+fn video_download_changed(a: &crate::model::VideoDownloadConfig, b: &crate::model::VideoDownloadConfig) -> bool {
+    VideoDownloadConfigDto::from(a) != VideoDownloadConfigDto::from(b)
 }
 
 #[derive(Clone)]
@@ -484,6 +525,11 @@ impl AppState {
         let geoip_enabled_old = old_config.is_geoip_enabled();
         let changed_storage_dir = old_config.storage_dir != config.storage_dir;
         let changed_qos_aggregation = qos_aggregation_changed(&old_config, config);
+        let changed_video_download = change_detect!(
+            video_download_changed,
+            old_config.video.as_ref().and_then(|video| video.download.as_ref()),
+            config.video.as_ref().and_then(|video| video.download.as_ref())
+        );
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
         changes.set_flag_if(changed_schedules || changed_library_enabled || geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Scheduler);
@@ -492,6 +538,7 @@ impl AppState {
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
         changes.set_flag_if(changed_storage_dir, UpdateChangesFlags::Metadata);
         changes.set_flag_if(changed_qos_aggregation || changed_storage_dir, UpdateChangesFlags::QosAggregation);
+        changes.set_flag_if(changed_video_download, UpdateChangesFlags::Downloads);
         changes
     }
 
@@ -731,9 +778,13 @@ pub struct HdHomerunAppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{schedules_changed, should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars};
-    use crate::model::ScheduleConfig;
-    use shared::model::ScheduleTaskType;
+    use super::{
+        qos_aggregation_changed, schedules_changed, should_use_manual_redirect_for_proxy,
+        should_use_manual_redirects_for_env_vars, video_download_changed,
+    };
+    use crate::model::{Config, ScheduleConfig, VideoDownloadConfig};
+    use shared::model::{QosAggregationConfigDto, ReverseProxyConfigDto, ScheduleTaskType, StreamHistoryConfigDto};
+    use std::{collections::HashMap, sync::Arc};
 
     #[test]
     fn should_use_manual_redirect_for_proxy_only_http_or_https() {
@@ -813,5 +864,75 @@ mod tests {
             },
         ];
         assert!(!schedules_changed(&a, &b));
+    }
+
+    #[test]
+    fn video_download_changed_detects_retry_policy_changes() {
+        let base = VideoDownloadConfig {
+            headers: HashMap::new(),
+            directory: "/tmp/downloads".to_string(),
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 1,
+            max_background_per_provider: 2,
+            retry_backoff_initial_secs: 3,
+            retry_backoff_multiplier: 2.0,
+            retry_backoff_max_secs: 60,
+            retry_backoff_jitter_percent: 5,
+            retry_max_attempts: 5,
+        };
+        let changed = VideoDownloadConfig {
+            retry_backoff_multiplier: 3.0,
+            ..base.clone()
+        };
+
+        assert!(video_download_changed(&base, &changed));
+    }
+
+    #[test]
+    fn video_download_changed_treats_equivalent_configs_as_unchanged() {
+        let base = VideoDownloadConfig {
+            headers: HashMap::new(),
+            directory: "/tmp/downloads".to_string(),
+            organize_into_directories: true,
+            episode_pattern: Some(Arc::new(regex::Regex::new("S(?P<episode>\\d+)").unwrap())),
+            download_priority: -1,
+            recording_priority: 1,
+            reserve_slots_for_users: 2,
+            max_background_per_provider: 3,
+            retry_backoff_initial_secs: 3,
+            retry_backoff_multiplier: 2.0,
+            retry_backoff_max_secs: 60,
+            retry_backoff_jitter_percent: 5,
+            retry_max_attempts: 5,
+        };
+
+        assert!(!video_download_changed(&base, &base.clone()));
+    }
+
+    #[test]
+    fn qos_aggregation_changed_detects_stream_history_batch_size_changes() {
+        let mut old_config = Config::default();
+        old_config.reverse_proxy = Some(crate::model::ReverseProxyConfig::from(&ReverseProxyConfigDto {
+            stream_history: Some(StreamHistoryConfigDto {
+                stream_history_enabled: true,
+                stream_history_batch_size: 64,
+                stream_history_retention_days: 7,
+                stream_history_directory: "/tmp/history".to_string(),
+            }),
+            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 60 }),
+            ..Default::default()
+        }));
+
+        let mut new_config = old_config.clone();
+        if let Some(reverse_proxy) = new_config.reverse_proxy.as_mut() {
+            if let Some(history) = reverse_proxy.stream_history.as_mut() {
+                history.stream_history_batch_size = 128;
+            }
+        }
+
+        assert!(qos_aggregation_changed(&old_config, &new_config));
     }
 }

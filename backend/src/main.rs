@@ -117,7 +117,6 @@ struct Args {
 
     #[arg(long = "dbq")] // QoS Snapshot DB
     db_qos_snapshot_file_name: Option<String>,
-
     /// Query stream history (inline JSON or @file.json)
     #[arg(long = "sh")]
     stream_history: Option<String>,
