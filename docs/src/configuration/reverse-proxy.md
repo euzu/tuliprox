@@ -306,6 +306,10 @@ This block enables persistent stream lifecycle telemetry. Tuliprox writes daily 
 successful connects, startup failures, disconnect reasons, provider-open failures, reconnect counts, latency
 signals, and stable stream identity fields.
 
+When the same channel exists multiple times across different providers, stream history gives Tuliprox the raw
+event-level view for each variant. It records which variant failed, how it failed, how often it reconnects, and
+whether the problem happened during startup or while streaming.
+
 **User impact:**
 
 * Gives you a reliable answer to questions like "Which stream failed?", "Was this a provider abort or a capacity problem?",  
@@ -353,6 +357,10 @@ reverse_proxy:
 
 This block enables the periodic QoS aggregation worker. It reads stream history in the background and builds
 compact per-stream QoS snapshots that summarize recent reliability.
+
+In practice, QoS turns raw stream history into a compact health view for each channel variant. This makes it
+possible to compare equivalent variants of the same channel across providers, rank them by reliability, and use
+that information for channel selection and failover decisions.
 
 **User impact:**
 

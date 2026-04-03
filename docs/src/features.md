@@ -35,8 +35,8 @@ That makes it usable both for IPTV players and for media-server-oriented workflo
 - enforce user connection limits
 - prioritize higher-value sessions over lower-priority traffic
 - serve custom fallback videos for failure cases
-- persist optional stream history for connect/disconnect and startup-failure telemetry
-- aggregate optional QoS snapshots from stream history for reliability analysis and failover planning
+- persist optional stream history for per-variant connect/disconnect, startup-failure, and reconnect telemetry
+- aggregate optional QoS snapshots from stream history to rank equivalent channel variants by reliability
 
 ## Metadata and library
 
