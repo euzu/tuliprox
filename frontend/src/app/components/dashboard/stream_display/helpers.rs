@@ -1,4 +1,8 @@
-use crate::{app::ConfigContext, utils::format_duration};
+use crate::{
+    app::ConfigContext,
+    model::{BACKGROUND_TRANSFER_CLIENT_IP, BACKGROUND_TRANSFER_PROVIDER},
+    utils::format_duration,
+};
 use gloo_utils::window;
 use shared::{
     model::{PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo},
@@ -42,7 +46,7 @@ pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
 }
 
 pub fn is_background_transfer_stream(stream: &StreamInfo) -> bool {
-    stream.client_ip == "background-task" && stream.provider == "Download Manager"
+    stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP && stream.provider == BACKGROUND_TRANSFER_PROVIDER
 }
 
 pub fn filter_visible_streams(

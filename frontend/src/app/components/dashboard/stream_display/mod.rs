@@ -226,13 +226,15 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             .unwrap_or_else(default_kick_secs);
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = StreamDisplayAction::from_str(&name) {
+                if let Some(dto) = (*selected_dto).as_ref() {
+                    if is_background_transfer_stream(dto) {
+                        popup_is_open_state.set(false);
+                        return;
+                    }
+                }
                 match action {
                     StreamDisplayAction::Kick => {
                         if let Some(dto) = (*selected_dto).as_ref() {
-                            if is_background_transfer_stream(dto) {
-                                popup_is_open_state.set(false);
-                                return;
-                            }
                             if !services.websocket.send_message(ProtocolMessage::UserAction(UserCommand::Kick(
                                 dto.addr,
                                 dto.channel.virtual_id,
@@ -244,10 +246,6 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                     }
                     StreamDisplayAction::CopyLinkTuliproxVirtualId => {
                         if let Some(dto) = &*selected_dto {
-                            if is_background_transfer_stream(dto) {
-                                popup_is_open_state.set(false);
-                                return;
-                            }
                             copy_to_clipboard.emit(dto.channel.virtual_id.to_string());
                         }
                     }

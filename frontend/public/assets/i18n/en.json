@@ -1365,6 +1365,12 @@
     "CONFIRM_SOURCES_SAVE": "Do you really want to save?",
     "DOWNLOAD": {
       "DOWNLOAD_QUEUED": "Download queued.",
+      "RECORDING_QUEUED": "Recording queued.",
+      "DOWNLOAD_PAUSED": "Download paused.",
+      "DOWNLOAD_RESUMED": "Download resumed",
+      "DOWNLOAD_CANCELLED": "Download cancelled.",
+      "DOWNLOAD_REMOVED": "Download removed.",
+      "DOWNLOAD_RETRIED": "Download retried.",
       "FAIL": "Failed to download!",
       "INVALID_RECORD_DURATION": "Recording duration must be a positive number of minutes.",
       "INVALID_RECORD_START": "Recording start time is invalid.",

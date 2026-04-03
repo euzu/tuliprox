@@ -2,6 +2,7 @@ use crate::{
     app::components::{Breadcrumbs, IconButton, Table, TableDefinition, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
+    model::EventMessage,
     utils::format_bytes,
 };
 use shared::{
@@ -137,7 +138,19 @@ fn compare_downloads(a: &FileDownloadDto, b: &FileDownloadDto, col: usize) -> Or
     }
 }
 
-fn is_sortable(col: usize) -> bool { col < 8 }
+fn is_sortable(col: usize) -> bool { (1..=8).contains(&col) }
+
+fn optimistic_active_delta(
+    active: &Rc<Vec<Rc<FileDownloadDto>>>,
+    uuid: &str,
+    status: TransferStatusDto,
+) -> Option<DownloadsDelta> {
+    active.iter().find(|download| download.id == uuid).map(|download| {
+        let mut updated = (**download).clone();
+        updated.status = status;
+        DownloadsDelta::ActivePatched(updated)
+    })
+}
 
 fn apply_download_snapshot(
     response: &DownloadsResponse,
@@ -165,7 +178,6 @@ fn apply_download_delta(
             if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
                 *existing = Rc::new(download.clone());
             } else {
-                active_items.clear();
                 active_items.push(Rc::new(download.clone()));
             }
             active_download.set(Rc::new(active_items));
@@ -250,12 +262,17 @@ pub fn downloads_view() -> Html {
         let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
+        let active_download = active_download.clone();
         Callback::from(move |uuid: String| {
             let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
+            let active_download = active_download.clone();
             spawn_local(async move {
-                if services.downloads.pause_download(uuid).await.is_ok() {
+                if services.downloads.pause_download(uuid.clone()).await.is_ok_and(|response| response.success) {
+                    if let Some(delta) = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Paused) {
+                        services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
+                    }
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_PAUSED"));
                     request_downloads.emit(());
                 }
@@ -267,12 +284,17 @@ pub fn downloads_view() -> Html {
         let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
+        let active_download = active_download.clone();
         Callback::from(move |uuid: String| {
             let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
+            let active_download = active_download.clone();
             spawn_local(async move {
-                if services.downloads.resume_download(uuid).await.is_ok() {
+                if services.downloads.resume_download(uuid.clone()).await.is_ok_and(|response| response.success) {
+                    if let Some(delta) = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Running) {
+                        services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
+                    }
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RESUMED"));
                     request_downloads.emit(());
                 }
@@ -284,12 +306,18 @@ pub fn downloads_view() -> Html {
         let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
+        let active_download = active_download.clone();
         Callback::from(move |uuid: String| {
             let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
+            let active_download = active_download.clone();
             spawn_local(async move {
-                if services.downloads.cancel_download(uuid).await.is_ok() {
+                if services.downloads.cancel_download(uuid.clone()).await.is_ok_and(|response| response.success) {
+                    if let Some(delta) = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Cancelled)
+                    {
+                        services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
+                    }
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_CANCELLED"));
                     request_downloads.emit(());
                 }
@@ -306,7 +334,7 @@ pub fn downloads_view() -> Html {
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
-                if services.downloads.remove_download(uuid).await.is_ok() {
+                if services.downloads.remove_download(uuid).await.is_ok_and(|response| response.success) {
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_REMOVED"));
                     request_downloads.emit(());
                 }
@@ -323,7 +351,7 @@ pub fn downloads_view() -> Html {
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
-                if services.downloads.retry_download(uuid).await.is_ok() {
+                if services.downloads.retry_download(uuid).await.is_ok_and(|response| response.success) {
                     services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RETRIED"));
                     request_downloads.emit(());
                 }
@@ -481,7 +509,7 @@ pub fn downloads_view() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_downloads_for_tab, normalize_download_tab, DownloadTab};
+    use super::{collect_downloads_for_tab, is_sortable, normalize_download_tab, optimistic_active_delta, DownloadTab};
     use shared::model::{DownloadsDelta, FileDownloadDto, TaskKindDto, TransferStatusDto};
     use std::rc::Rc;
 
@@ -563,7 +591,6 @@ mod tests {
                 if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
                     *existing = Rc::new(download.clone());
                 } else {
-                    active_items.clear();
                     active_items.push(Rc::new(download.clone()));
                 }
                 Rc::new(active_items)
@@ -589,13 +616,37 @@ mod tests {
     }
 
     #[test]
-    fn active_delta_resets_to_new_active_when_uuid_differs() {
+    fn active_delta_appends_new_active_when_uuid_differs() {
         let active = Rc::new(vec![Rc::new(download("old", TransferStatusDto::Running))]);
         let updated = download("new", TransferStatusDto::Running);
 
         let patched = apply_active_delta(&active, &DownloadsDelta::ActivePatched(updated));
 
-        assert_eq!(patched.len(), 1);
-        assert_eq!(patched[0].id, "new");
+        assert_eq!(patched.len(), 2);
+        assert_eq!(patched[0].id, "old");
+        assert_eq!(patched[1].id, "new");
+    }
+
+    #[test]
+    fn optimistic_active_delta_updates_matching_item_status() {
+        let active = Rc::new(vec![Rc::new(download("active", TransferStatusDto::Running))]);
+
+        let delta = optimistic_active_delta(&active, "active", TransferStatusDto::Paused).expect("delta");
+
+        match delta {
+            DownloadsDelta::ActivePatched(download) => {
+                assert_eq!(download.id, "active");
+                assert_eq!(download.status, TransferStatusDto::Paused);
+            }
+            _ => panic!("expected active patch"),
+        }
+    }
+
+    #[test]
+    fn is_sortable_matches_compare_columns() {
+        assert!(!is_sortable(0));
+        assert!(is_sortable(1));
+        assert!(is_sortable(8));
+        assert!(!is_sortable(9));
     }
 }

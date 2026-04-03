@@ -1,4 +1,7 @@
-use crate::{hooks::use_service_context, model::EventMessage};
+use crate::{
+    hooks::use_service_context,
+    model::{EventMessage, BACKGROUND_TRANSFER_CLIENT_IP, BACKGROUND_TRANSFER_PROVIDER},
+};
 use shared::{
     model::{
         ActiveUserConnectionChange, DownloadsDelta, DownloadsResponse, FileDownloadDto, PlaylistItemType, StatusCheck,
@@ -61,7 +64,7 @@ fn download_stream_addr(uid: u32) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 254, octet3, octet4)), port)
 }
 
-fn download_task_to_stream(download: &FileDownloadDto) -> StreamInfo {
+fn download_task_to_stream_with_ts(download: &FileDownloadDto, ts: u64) -> StreamInfo {
     let uid = download_stream_uid(&download.id);
     let (item_type, cluster, group) = match download.kind {
         TaskKindDto::Download => (PlaylistItemType::Video, XtreamCluster::Video, "Downloads"),
@@ -86,11 +89,11 @@ fn download_task_to_stream(download: &FileDownloadDto) -> StreamInfo {
             shared_stream_id: None,
             technical: None,
         },
-        provider: "Download Manager".to_string(),
+        provider: BACKGROUND_TRANSFER_PROVIDER.to_string(),
         addr: download_stream_addr(uid),
-        client_ip: "background-task".to_string(),
+        client_ip: BACKGROUND_TRANSFER_CLIENT_IP.to_string(),
         user_agent: "Tuliprox download worker".to_string(),
-        ts: current_time_secs(),
+        ts,
         country_code: None,
         session_token: None,
         preserved: false,
@@ -98,8 +101,16 @@ fn download_task_to_stream(download: &FileDownloadDto) -> StreamInfo {
     }
 }
 
+fn preserved_download_stream_ts(existing_streams: &[StreamInfo], download: &FileDownloadDto) -> u64 {
+    let uid = download_stream_uid(&download.id);
+    existing_streams
+        .iter()
+        .find(|stream| stream.uid == uid && stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP)
+        .map_or_else(current_time_secs, |stream| stream.ts)
+}
+
 fn merge_aux_streams(server_status: &mut StatusCheck, download_streams: &[StreamInfo]) {
-    server_status.active_user_streams.retain(|stream| stream.client_ip != "background-task");
+    server_status.active_user_streams.retain(|stream| stream.client_ip != BACKGROUND_TRANSFER_CLIENT_IP);
     server_status.active_user_streams.extend(download_streams.iter().cloned());
     dedupe_streams_by_identity(&mut server_status.active_user_streams);
 }
@@ -118,23 +129,32 @@ fn rebuild_status_with_downloads(
 }
 
 fn apply_downloads_snapshot(download_streams: &mut Vec<StreamInfo>, response: &DownloadsResponse) {
-    *download_streams =
-        response.active.iter().filter(|download| is_running_download(download)).map(download_task_to_stream).collect();
+    let previous_streams = download_streams.clone();
+    *download_streams = response
+        .active
+        .iter()
+        .filter(|download| is_running_download(download))
+        .map(|download| {
+            let ts = preserved_download_stream_ts(&previous_streams, download);
+            download_task_to_stream_with_ts(download, ts)
+        })
+        .collect();
 }
 
 fn apply_downloads_delta(download_streams: &mut Vec<StreamInfo>, delta: &DownloadsDelta) {
     match delta {
         DownloadsDelta::SnapshotReset(response) => apply_downloads_snapshot(download_streams, response),
         DownloadsDelta::ActivePatched(download) => {
+            let uid = download_stream_uid(&download.id);
             if !is_running_download(download) {
-                download_streams.clear();
+                download_streams.retain(|stream| stream.uid != uid);
                 return;
             }
-            let stream = download_task_to_stream(download);
+            let ts = preserved_download_stream_ts(download_streams, download);
+            let stream = download_task_to_stream_with_ts(download, ts);
             if let Some(existing) = download_streams.iter_mut().find(|current| current.uid == stream.uid) {
                 *existing = stream;
             } else {
-                download_streams.clear();
                 download_streams.push(stream);
             }
         }
@@ -286,7 +306,7 @@ pub fn use_server_status(
 mod tests {
     use super::{
         apply_active_user_change, apply_downloads_delta, apply_downloads_snapshot, dedupe_streams_by_identity,
-        find_stream_update_index,
+        download_task_to_stream_with_ts, find_stream_update_index,
     };
     use shared::{
         model::{
@@ -415,6 +435,30 @@ mod tests {
     }
 
     #[test]
+    fn downloads_delta_updates_only_matching_pseudo_stream() {
+        let mut streams = Vec::new();
+        apply_downloads_snapshot(
+            &mut streams,
+            &DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: vec![
+                    test_download("one", TransferStatusDto::Running, TaskKindDto::Download),
+                    test_download("two", TransferStatusDto::Running, TaskKindDto::Recording),
+                ],
+            },
+        );
+
+        apply_downloads_delta(
+            &mut streams,
+            &DownloadsDelta::ActivePatched(test_download("one", TransferStatusDto::Paused, TaskKindDto::Download)),
+        );
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].channel.title.as_ref(), "two.ts");
+    }
+
+    #[test]
     fn downloads_delta_clears_pseudo_stream_when_active_stops_running() {
         let mut streams = Vec::new();
         apply_downloads_snapshot(
@@ -436,5 +480,41 @@ mod tests {
         );
 
         assert!(streams.is_empty());
+    }
+
+    #[test]
+    fn downloads_delta_preserves_pseudo_stream_start_timestamp() {
+        let mut streams = vec![download_task_to_stream_with_ts(
+            &test_download("running", TransferStatusDto::Running, TaskKindDto::Download),
+            123,
+        )];
+
+        apply_downloads_delta(
+            &mut streams,
+            &DownloadsDelta::ActivePatched(test_download("running", TransferStatusDto::Running, TaskKindDto::Download)),
+        );
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].ts, 123);
+    }
+
+    #[test]
+    fn downloads_snapshot_preserves_pseudo_stream_start_timestamp() {
+        let mut streams = vec![download_task_to_stream_with_ts(
+            &test_download("running", TransferStatusDto::Running, TaskKindDto::Recording),
+            456,
+        )];
+
+        apply_downloads_snapshot(
+            &mut streams,
+            &DownloadsResponse {
+                queue: Vec::new(),
+                finished: Vec::new(),
+                active: vec![test_download("running", TransferStatusDto::Running, TaskKindDto::Recording)],
+            },
+        );
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].ts, 456);
     }
 }

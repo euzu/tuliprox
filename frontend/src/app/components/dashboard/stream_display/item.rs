@@ -112,7 +112,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.SHARED")}</span>
                         <span class="tp__stream-display__stat-value"><ToggleSwitch value={stream.channel.shared} readonly={true} compact={true}/></span>
                     </div>
-                    <div class="tp__stream-display__stat">
+                    <div class="tp__stream-display__stat tp__stream-display__stat--duration">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.DURATION")}</span>
                         <span class="tp__stream-display__stat-value tp__stream-display__duration" data-ts={stream.ts.to_string()}>
                             {format_duration(current_time_secs().saturating_sub(stream.ts))}

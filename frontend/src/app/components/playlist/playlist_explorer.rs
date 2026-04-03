@@ -554,6 +554,7 @@ pub fn PlaylistExplorer() -> Html {
                             let dialog = dialog.clone();
                             let services = services.clone();
                             let translate_clone = translate_clone.clone();
+                            let playlist_request = (*playlist_ctx.playlist_request).clone();
                             let selected = dto.clone();
                             spawn_local(async move {
                                 let start_ref = NodeRef::default();
@@ -642,10 +643,24 @@ pub fn PlaylistExplorer() -> Html {
                                         (Some(start_at), Some(minutes)) => {
                                             let filename = build_record_filename(&selected.title, &start_value);
                                             let input_name = normalize_input_name(&selected.input_name);
+                                            let resolved_url = if let Some(playlist_request) = playlist_request.clone()
+                                            {
+                                                let request = PlaylistUrlResolveRequest::Provider {
+                                                    playlist_request,
+                                                    url: selected.url.clone(),
+                                                };
+                                                services
+                                                    .playlist
+                                                    .resolve_url(request)
+                                                    .await
+                                                    .unwrap_or(selected.url.clone())
+                                            } else {
+                                                selected.url.clone()
+                                            };
                                             match services
                                                 .downloads
                                                 .queue_recording(
-                                                    selected.url.clone(),
+                                                    resolved_url,
                                                     filename,
                                                     start_at,
                                                     minutes.saturating_mul(60),
@@ -656,7 +671,7 @@ pub fn PlaylistExplorer() -> Html {
                                             {
                                                 Ok(_) => {
                                                     services.toastr.success(
-                                                        translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"),
+                                                        translate_clone.t("MESSAGES.DOWNLOAD.RECORDING_QUEUED"),
                                                     );
                                                 }
                                                 Err(_) => {

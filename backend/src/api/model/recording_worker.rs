@@ -50,7 +50,10 @@ fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
         || msg.contains("502 bad gateway")
         || msg.contains("504 gateway timeout")
         || msg.contains("500 internal server error")
-        || msg.contains("tls")
+        || msg.contains("tls handshake")
+        || msg.contains("tls handshake timeout")
+        || msg.contains("tls timeout")
+        || msg.contains("tls: handshake")
         || msg.contains("i/o error")
 }
 
@@ -189,12 +192,24 @@ mod tests {
     use tokio::sync::{Notify, RwLock};
     use tokio_util::sync::CancellationToken;
 
+    fn unique_recording_output() -> (PathBuf, PathBuf, String) {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let file_dir = std::env::temp_dir().join(format!("tuliprox_recording_test_{nanos}"));
+        let filename = format!("recording_{nanos}.ts");
+        let file_path = file_dir.join(&filename);
+        (file_dir, file_path, filename)
+    }
+
     fn make_recording(start_at: i64, duration_secs: u64) -> FileDownload {
+        let (file_dir, file_path, filename) = unique_recording_output();
         FileDownload {
             uuid: "id".to_string(),
-            file_dir: PathBuf::from("/tmp"),
-            file_path: PathBuf::from("/tmp/recording.ts"),
-            filename: "recording.ts".to_string(),
+            file_dir,
+            file_path,
+            filename,
             url: reqwest::Url::parse("https://example.com/live/1").expect("valid url"),
             finished: false,
             size: 0,
@@ -219,7 +234,7 @@ mod tests {
 
         assert!(args.windows(2).any(|pair| pair == ["-t", "5400"]));
         assert!(args.windows(2).any(|pair| pair == ["-i", "https://example.com/live/1"]));
-        assert_eq!(args.last().map(String::as_str), Some("/tmp/recording.ts"));
+        assert_eq!(args.last(), Some(&recording.file_path.to_string_lossy().to_string()));
     }
 
     #[test]
@@ -263,6 +278,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn classify_ffmpeg_failure_marks_only_transient_tls_failures_retryable() {
+        let retryable = classify_ffmpeg_failure(b"Last message\ntls handshake timeout\n");
+        let certificate = classify_ffmpeg_failure(b"Last message\ncertificate verify failed\n");
+        let protocol = classify_ffmpeg_failure(b"Last message\nunsupported protocol version\n");
+
+        assert_eq!(
+            retryable,
+            RecordingExecutionResult::Retryable("tls handshake timeout".to_string())
+        );
+        assert_eq!(
+            certificate,
+            RecordingExecutionResult::Failed("certificate verify failed".to_string())
+        );
+        assert_eq!(
+            protocol,
+            RecordingExecutionResult::Failed("unsupported protocol version".to_string())
+        );
+    }
+
     fn fake_ffmpeg_script(name: &str, body: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -293,6 +328,8 @@ mod tests {
         assert_eq!(result, RecordingExecutionResult::Completed);
         assert_eq!(tokio::fs::read(&recording.file_path).await.expect("read output"), b"recorded");
         let _ = fs::remove_file(script);
+        let _ = fs::remove_file(&recording.file_path);
+        let _ = fs::remove_dir_all(&recording.file_dir);
     }
 
     #[tokio::test]
@@ -312,6 +349,7 @@ mod tests {
             RecordingExecutionResult::Retryable("Could not resolve host: upstream.example".to_string())
         );
         let _ = fs::remove_file(script);
+        let _ = fs::remove_dir_all(&recording.file_dir);
     }
 
     #[tokio::test]
@@ -337,5 +375,6 @@ mod tests {
         assert_eq!(result, RecordingExecutionResult::Preempted);
         assert!(remaining_recording_duration_secs(&recording, chrono::Utc::now().timestamp()).is_some());
         let _ = fs::remove_file(script);
+        let _ = fs::remove_dir_all(&recording.file_dir);
     }
 }

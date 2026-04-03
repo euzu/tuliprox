@@ -257,7 +257,12 @@ async fn handle_incoming_message(
     match handler {
         ProtocolHandler::Version(version) => {
             handle_handshake(msg, socket, *version).await?;
-            *handler = ProtocolHandler::Default(ProtocolHandlerMemory::default());
+            let mut mem = ProtocolHandlerMemory::default();
+            if !auth_required {
+                mem.permissions = PERM_ALL;
+                mem.role = UserRole::Admin;
+            }
+            *handler = ProtocolHandler::Default(mem);
             Ok(())
         }
         ProtocolHandler::Default(mem) => {

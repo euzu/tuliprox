@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::response::IntoResponse;
 use futures::stream::TryStreamExt;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use serde::Deserialize;
 use serde_json::json;
 use shared::{error::to_io_error, model::{DownloadsDelta, DownloadsResponse}, utils::bytes_to_megabytes};
@@ -116,7 +116,13 @@ fn parse_content_range_total(headers: &reqwest::header::HeaderMap) -> Option<u64
 fn compute_download_total_size(response: &reqwest::Response, existing_size: u64) -> Option<u64> {
     let is_resume = existing_size > 0 || response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     if is_resume {
-        parse_content_range_total(response.headers()).or_else(|| response.content_length())
+        parse_content_range_total(response.headers()).or_else(|| {
+            if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                response.content_length().map(|len| len.saturating_add(existing_size))
+            } else {
+                response.content_length()
+            }
+        })
     } else {
         response.content_length()
     }
@@ -203,13 +209,21 @@ async fn broadcast_download_queue_update(event_manager: &Arc<EventManager>, down
     if !event_manager.has_event_receivers() {
         return;
     }
-    let queue = download_queue
+    let mut queue = download_queue
         .queue
         .lock()
         .await
         .iter()
         .map(shared::model::FileDownloadDto::from)
         .collect::<Vec<_>>();
+    queue.extend(
+        download_queue
+            .scheduled
+            .read()
+            .await
+            .iter()
+            .map(shared::model::FileDownloadDto::from),
+    );
     let finished = download_queue
         .finished
         .read()
@@ -266,14 +280,43 @@ async fn download_file(
             request_builder = request_builder.header("Range", format!("bytes={existing_size}-"));
         }
 
-        let response_result = if let Some(cancel_token) = provider_cancel_token.as_ref() {
-            tokio::select! {
-                biased;
-                () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
-                response = request_builder.send() => response,
+        if let Some(result) =
+            handle_download_control_without_writer(&active, current_download_control(&control_signal)).await
+        {
+            return result;
+        }
+
+        let send_request = request_builder.send();
+        tokio::pin!(send_request);
+        let response_result = loop {
+            if let Some(cancel_token) = provider_cancel_token.as_ref() {
+                tokio::select! {
+                    biased;
+                    () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
+                    () = control_notify.notified() => {
+                        if let Some(result) = handle_download_control_without_writer(
+                            &active,
+                            *control_signal.read().await,
+                        ).await {
+                            return result;
+                        }
+                    }
+                    response = &mut send_request => break response,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    () = control_notify.notified() => {
+                        if let Some(result) = handle_download_control_without_writer(
+                            &active,
+                            *control_signal.read().await,
+                        ).await {
+                            return result;
+                        }
+                    }
+                    response = &mut send_request => break response,
+                }
             }
-        } else {
-            request_builder.send().await
         };
 
         match response_result {
@@ -599,6 +642,34 @@ where
             }
             Some(DownloadExecutionResult::Preempted)
         }
+        DownloadControl::None => None,
+    }
+}
+
+async fn handle_download_control_without_writer(
+    active: &Arc<RwLock<Option<FileDownload>>>,
+    control: DownloadControl,
+) -> Option<DownloadExecutionResult> {
+    match control {
+        DownloadControl::Pause => {
+            if let Some(download) = active.write().await.as_mut() {
+                download.paused = true;
+                download.state = DownloadState::Paused;
+            }
+            Some(DownloadExecutionResult::Paused)
+        }
+        DownloadControl::Cancel => {
+            if let Some(download) = active.write().await.as_mut() {
+                download.finished = true;
+                download.paused = false;
+                download.state = DownloadState::Cancelled;
+                if download.error.is_none() {
+                    download.error = Some("Cancelled by user".to_string());
+                }
+            }
+            Some(DownloadExecutionResult::Cancelled)
+        }
+        DownloadControl::Restart => Some(DownloadExecutionResult::Preempted),
         DownloadControl::None => None,
     }
 }
@@ -1160,6 +1231,8 @@ pub(in crate::api) fn start_download_scheduler(
                 continue;
             }
 
+            broadcast_download_queue_update(&event_manager, &download_queue).await;
+
             let _ = ensure_download_worker_running(
                 &app_config,
                 &scheduler_download_cfg,
@@ -1305,6 +1378,13 @@ pub async fn queue_recording_file(
 
     if let Some(video_cfg) = config.video.as_ref() {
         if let Some(download_cfg) = video_cfg.download.as_ref() {
+            if download_cfg.directory.is_empty() {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": "Server config missing video.download.directory configuration"})),
+                )
+                    .into_response();
+            }
             let input_name = req.input_name.map(|s| std::sync::Arc::from(s.as_str()));
             let priority = req.priority.unwrap_or(download_cfg.recording_priority);
             match FileDownload::new_recording(req.url.as_str(), req.filename.as_str(), download_cfg, req.start_at, req.duration_secs, input_name, priority) {
@@ -1348,7 +1428,8 @@ pub async fn pause_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    if let Some(active) = app_state.downloads.active.read().await.as_ref() {
+    let active = { app_state.downloads.active.read().await.clone() };
+    if let Some(active) = active {
         if active.uuid == req.uuid {
             app_state.downloads.pause_active().await;
             broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
@@ -1362,23 +1443,40 @@ pub async fn resume_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    if let Some(active) = app_state.downloads.active.read().await.as_ref() {
+    let active = { app_state.downloads.active.read().await.clone() };
+    if let Some(active) = active {
         if active.uuid == req.uuid && active.paused {
             app_state.downloads.resume_active().await;
-            let app_config = &app_state.app_config;
-            let config = app_config.config.load();
-            if let Some(video_cfg) = config.video.as_ref() {
-                if let Some(download_cfg) = video_cfg.download.as_ref() {
-                    let _ = ensure_download_worker_running(
-                        app_config,
-                        download_cfg,
+            let download_cfg = app_state
+                .app_config
+                .config
+                .load()
+                .video
+                .as_ref()
+                .and_then(|video| video.download.as_ref())
+                .cloned();
+            if let Some(download_cfg) = download_cfg {
+                let app_state = Arc::clone(&app_state);
+                tokio::spawn(async move {
+                    for _ in 0..50 {
+                        if !*app_state.downloads.worker_running.read().await {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    if let Err(err) = ensure_download_worker_running(
+                        &app_state.app_config,
+                        &download_cfg,
                         &app_state.downloads,
                         &app_state.event_manager,
                         &app_state.active_provider,
                         &app_state.connection_manager,
                     )
-                    .await;
-                }
+                    .await
+                    {
+                        error!("Failed to restart resumed download worker: {err}");
+                    }
+                });
             }
             broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
             return axum::Json(json!({"success": true})).into_response();
@@ -1391,9 +1489,38 @@ pub async fn cancel_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    if let Some(active) = app_state.downloads.active.read().await.as_ref() {
+    let active = { app_state.downloads.active.read().await.clone() };
+    if let Some(active) = active {
         if active.uuid == req.uuid {
+            let was_paused = active.paused;
             app_state.downloads.cancel_active().await;
+            if was_paused {
+                if let Some(fd) = app_state.downloads.active.write().await.take() {
+                    let mut fd = fd;
+                    fd.next_retry_at = None;
+                    fd.finished = true;
+                    fd.paused = false;
+                    fd.state = DownloadState::Cancelled;
+                    fd.error.get_or_insert_with(|| "Cancelled by user".to_string());
+                    app_state.downloads.finished.write().await.push(fd);
+                }
+                *app_state.downloads.control_signal.write().await = DownloadControl::None;
+                let next_active = app_state.downloads.queue.lock().await.pop_front();
+                *app_state.downloads.active.write().await = next_active;
+                let _ = app_state.downloads.persist_to_disk().await;
+                let config = app_state.app_config.config.load();
+                if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
+                    let _ = ensure_download_worker_running(
+                        &app_state.app_config,
+                        download_cfg,
+                        &app_state.downloads,
+                        &app_state.event_manager,
+                        &app_state.active_provider,
+                        &app_state.connection_manager,
+                    )
+                    .await;
+                }
+            }
             broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
             return axum::Json(json!({"success": true})).into_response();
         }
@@ -1450,13 +1577,26 @@ pub async fn retry_download(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_download_snapshot, parse_content_range_total, preemption_reason_for, recording_deadline_reached,
-        requeue_active_download_for_capacity_wait, requeue_active_download_for_retry, retryable_transport_error_message,
-        set_active_download_state, should_exit_worker_after_preempt, DOWNLOAD_PREEMPTED_REASON, RECORDING_PREEMPTED_REASON,
+        active_download_snapshot, parse_content_range_total, pause_download, preemption_reason_for, recording_deadline_reached,
+        requeue_active_download_for_capacity_wait, requeue_active_download_for_retry, resume_download,
+        retryable_transport_error_message, set_active_download_state, should_exit_worker_after_preempt, DownloadActionRequest,
+        DOWNLOAD_PREEMPTED_REASON, RECORDING_PREEMPTED_REASON,
     };
-    use crate::api::model::{DownloadControl, DownloadKind, DownloadQueue, DownloadState, FileDownload};
+    use crate::{
+        api::model::{
+            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadControl,
+            DownloadKind, DownloadQueue, DownloadState, EventManager, FileDownload, MetadataUpdateManager,
+            PlaylistStorageState, SharedStreamManager, UpdateGuard,
+        },
+        model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
+        utils::{FileLockManager, GeoIp},
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use axum::response::IntoResponse;
     use reqwest::header::{HeaderMap, HeaderValue};
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use shared::{model::{ConfigPaths, InputFetchMethod, InputType}, utils::Internable};
+    use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+    use tokio::sync::mpsc;
     use tokio::sync::RwLock;
 
     fn make_download(kind: DownloadKind, state: DownloadState, start_at: Option<i64>, duration_secs: Option<u64>) -> FileDownload {
@@ -1698,5 +1838,153 @@ mod tests {
         headers.insert("content-range", HeaderValue::from_static("bytes 512-1023/4096"));
 
         assert_eq!(parse_content_range_total(&headers), Some(4096));
+    }
+
+    fn create_test_app_config() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: None,
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig {
+            inputs: vec![input],
+            ..SourcesConfig::default()
+        };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        }
+    }
+
+    fn create_test_app_state() -> Arc<AppState> {
+        let app_cfg = Arc::new(create_test_app_config());
+        let event_manager = Arc::new(EventManager::new());
+        let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+        active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let config = app_cfg.config.load();
+        let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+        let connection_manager = Arc::new(ConnectionManager::new(
+            &active_users,
+            &active_provider,
+            &shared_stream_manager,
+            &event_manager,
+            None,
+        ));
+
+        let tokens = CancelTokens::default();
+        let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+        let (manual_update_sender, _) = mpsc::channel::<Arc<ProcessTargets>>(1);
+
+        Arc::new(AppState {
+            forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
+                enabled: false,
+                inputs: Vec::new(),
+                targets: Vec::new(),
+                target_names: Vec::new(),
+            })),
+            app_config: app_cfg,
+            http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            downloads: Arc::new(DownloadQueue::new()),
+            cache: Arc::new(ArcSwapOption::default()),
+            shared_stream_manager,
+            active_users,
+            active_provider,
+            connection_manager,
+            event_manager,
+            cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+            playlists: Arc::new(PlaylistStorageState::new()),
+            geoip,
+            update_guard: UpdateGuard::new(),
+            metadata_manager,
+            manual_update_sender,
+        })
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_handlers_return_without_hanging() {
+        let app_state = create_test_app_state();
+        let active = FileDownload {
+            uuid: "handler-id".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/handler-file.bin"),
+            filename: "handler-file.bin".to_string(),
+            url: reqwest::Url::parse("https://example.com/file.bin").expect("valid url"),
+            finished: false,
+            size: 32,
+            total_size: Some(64),
+            paused: false,
+            error: None,
+            state: DownloadState::Downloading,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        };
+        *app_state.downloads.active.write().await = Some(active);
+
+        let pause_response = tokio::time::timeout(
+            Duration::from_millis(100),
+            pause_download(
+                axum::extract::State(Arc::clone(&app_state)),
+                axum::extract::Json(DownloadActionRequest {
+                    uuid: "handler-id".to_string(),
+                }),
+            ),
+        )
+        .await;
+        assert!(pause_response.is_ok(), "pause handler should return promptly");
+
+        let resume_response = tokio::time::timeout(
+            Duration::from_millis(100),
+            resume_download(
+                axum::extract::State(app_state),
+                axum::extract::Json(DownloadActionRequest {
+                    uuid: "handler-id".to_string(),
+                }),
+            ),
+        )
+        .await;
+        assert!(resume_response.is_ok(), "resume handler should return promptly");
+
+        let _ = pause_response.expect("pause response").into_response();
+        let _ = resume_response.expect("resume response").into_response();
     }
 }

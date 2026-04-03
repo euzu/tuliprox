@@ -81,7 +81,14 @@ async fn https_ip_connect_uses_hostname_sni_with_resolve_to_addrs() {
     let expected_host = "sni-test.local";
     let wrong_host = "wrong-sni.local";
 
-    let (server_addr, handle) = start_tls_server(expected_host).await.expect("tls server should start");
+    let (server_addr, handle) = match start_tls_server(expected_host).await {
+        Ok(server) => server,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1) => {
+            eprintln!("skipping TLS SNI integration test because the local TLS server is not permitted in this environment: {err}");
+            return;
+        }
+        Err(err) => panic!("tls server should start: {err}"),
+    };
 
     let client_ok = reqwest::Client::builder()
         .no_proxy()

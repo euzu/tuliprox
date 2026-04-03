@@ -73,6 +73,8 @@ echo "  settings: $SETTINGS_DIR"
 echo "  output: $OUTPUT_FILE"
 echo "  duration: ${PROFILE_DURATION_SECONDS}s"
 
+mkdir -p "$(dirname "$OUTPUT_FILE")"
+
 samply record \
     --save-only \
     --unstable-presymbolicate \

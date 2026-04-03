@@ -354,6 +354,22 @@ impl DownloadSlotWaitQueue {
             notify: Arc::clone(&notify),
         });
 
+        match *control_signal.read().await {
+            DownloadControl::Pause => {
+                self.remove_waiter(waiter_id).await;
+                return DownloadWaitOutcome::Paused;
+            }
+            DownloadControl::Cancel => {
+                self.remove_waiter(waiter_id).await;
+                return DownloadWaitOutcome::Cancelled;
+            }
+            DownloadControl::Restart => {
+                self.remove_waiter(waiter_id).await;
+                return DownloadWaitOutcome::Restarted;
+            }
+            DownloadControl::None => {}
+        }
+
         loop {
             tokio::select! {
                 () = notify.notified() => return DownloadWaitOutcome::Signalled,
@@ -1626,5 +1642,19 @@ mod tests {
             DownloadWaitOutcome::Restarted
         );
         assert_eq!(*queue.control_signal.read().await, DownloadControl::Restart);
+    }
+
+    #[tokio::test]
+    async fn wait_observes_preexisting_control_before_selecting() {
+        let queue = DownloadQueue::new();
+        *queue.control_signal.write().await = DownloadControl::Pause;
+
+        let outcome = queue
+            .slot_waiters
+            .wait(None, 0, queue.control_signal.as_ref(), queue.control_notify.as_ref())
+            .await;
+
+        assert_eq!(outcome, DownloadWaitOutcome::Paused);
+        assert!(queue.slot_waiters.snapshots().await.is_empty());
     }
 }

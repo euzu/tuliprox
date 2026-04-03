@@ -366,7 +366,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
+    use super::recover_persisted_downloads_state;
     use crate::api::model::DownloadQueue;
     use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
@@ -382,19 +382,36 @@ mod tests {
     async fn recover_persisted_downloads_state_renames_corrupt_file_and_continues() {
         let state_file = temp_state_file("corrupt_downloads_state");
         std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
-        let expected_corrupt_path = corrupt_downloads_state_path(&state_file);
+        let corrupt_dir = state_file.parent().expect("state dir").to_path_buf();
+        let expected_prefix = format!(
+            "{}_corrupt.",
+            state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem")
+        );
+        let expected_extension = state_file.extension().and_then(|ext| ext.to_str()).expect("state ext");
         let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
 
         recover_persisted_downloads_state(&downloads).await.expect("recovery should continue");
 
         assert!(!state_file.exists());
-        assert!(expected_corrupt_path.exists());
+        let matching_corrupt_paths = std::fs::read_dir(&corrupt_dir)
+            .expect("read corrupt dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&expected_prefix) && name.ends_with(expected_extension))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching_corrupt_paths.len(), 1);
         assert!(downloads.queue.lock().await.is_empty());
         assert!(downloads.scheduled.read().await.is_empty());
         assert!(downloads.active.read().await.is_none());
         assert!(downloads.finished.read().await.is_empty());
 
-        let _ = std::fs::remove_file(expected_corrupt_path);
+        for path in matching_corrupt_paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
