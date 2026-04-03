@@ -4,8 +4,9 @@ use crate::{
 };
 use shared::{
     model::{
-        ActiveUserConnectionChange, DownloadsDelta, DownloadsResponse, FileDownloadDto, PlaylistItemType, StatusCheck,
-        StreamChannel, StreamInfo, SystemInfo, TaskKindDto, TransferStatusDto, XtreamCluster,
+        permission::Permission, ActiveUserConnectionChange, DownloadsDelta, DownloadsResponse, FileDownloadDto,
+        PlaylistItemType, ProtocolMessage, StatusCheck, StreamChannel, StreamInfo, SystemInfo, TaskKindDto,
+        TransferStatusDto, XtreamCluster,
     },
     utils::{current_time_secs, Internable},
 };
@@ -217,6 +218,14 @@ pub fn use_server_status(
                         let services_clone = services_clone.clone();
                         spawn_local(async move {
                             services_clone.websocket.get_server_status().await;
+                            if services_clone.auth.has_permission(Permission::DownloadRead) {
+                                if services_clone.websocket.send_message(ProtocolMessage::DownloadsRequest) {
+                                    return;
+                                }
+                                if let Ok(downloads) = services_clone.downloads.get_downloads().await {
+                                    services_clone.event.broadcast(EventMessage::DownloadsUpdate(Rc::new(downloads)));
+                                }
+                            }
                         });
                     }
                 });

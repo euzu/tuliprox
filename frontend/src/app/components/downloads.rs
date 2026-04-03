@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{Breadcrumbs, IconButton, Table, TableDefinition, TextButton},
+    app::components::{IconButton, Table, TableDefinition, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
     model::EventMessage,
@@ -152,6 +152,28 @@ fn optimistic_active_delta(
     })
 }
 
+fn handle_download_action_result(
+    result: Result<shared::model::DownloadActionResponse, crate::error::Error>,
+    success_message: &str,
+    failure_message: &str,
+    request_downloads: &Callback<()>,
+    services: &Rc<crate::hooks::Services>,
+    optimistic_delta: Option<DownloadsDelta>,
+) {
+    match result {
+        Ok(response) if response.success => {
+            if let Some(delta) = optimistic_delta {
+                services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
+            }
+            services.toastr.success(success_message);
+        }
+        Ok(_) | Err(_) => {
+            services.toastr.error(failure_message);
+        }
+    }
+    request_downloads.emit(());
+}
+
 fn apply_download_snapshot(
     response: &DownloadsResponse,
     queue_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
@@ -198,7 +220,6 @@ fn apply_download_delta(
 pub fn downloads_view() -> Html {
     let translate = use_translation();
     let services = use_service_context();
-    let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.DOWNLOADS"), translate.t("LABEL.LIST")]));
     let active_tab = use_state(|| DownloadTab::Queue);
     let queue_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
     let finished_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
@@ -269,13 +290,16 @@ pub fn downloads_view() -> Html {
             let translate = translate.clone();
             let active_download = active_download.clone();
             spawn_local(async move {
-                if services.downloads.pause_download(uuid.clone()).await.is_ok_and(|response| response.success) {
-                    if let Some(delta) = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Paused) {
-                        services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
-                    }
-                    services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_PAUSED"));
-                    request_downloads.emit(());
-                }
+                let optimistic_delta = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Paused);
+                let result = services.downloads.pause_download(uuid).await;
+                handle_download_action_result(
+                    result,
+                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_PAUSED"),
+                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
+                    &request_downloads,
+                    &services,
+                    optimistic_delta,
+                );
             });
         })
     };
@@ -291,13 +315,16 @@ pub fn downloads_view() -> Html {
             let translate = translate.clone();
             let active_download = active_download.clone();
             spawn_local(async move {
-                if services.downloads.resume_download(uuid.clone()).await.is_ok_and(|response| response.success) {
-                    if let Some(delta) = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Running) {
-                        services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
-                    }
-                    services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RESUMED"));
-                    request_downloads.emit(());
-                }
+                let optimistic_delta = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Running);
+                let result = services.downloads.resume_download(uuid).await;
+                handle_download_action_result(
+                    result,
+                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RESUMED"),
+                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
+                    &request_downloads,
+                    &services,
+                    optimistic_delta,
+                );
             });
         })
     };
@@ -313,14 +340,16 @@ pub fn downloads_view() -> Html {
             let translate = translate.clone();
             let active_download = active_download.clone();
             spawn_local(async move {
-                if services.downloads.cancel_download(uuid.clone()).await.is_ok_and(|response| response.success) {
-                    if let Some(delta) = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Cancelled)
-                    {
-                        services.event.broadcast(EventMessage::DownloadsDeltaUpdate(Rc::new(delta)));
-                    }
-                    services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_CANCELLED"));
-                    request_downloads.emit(());
-                }
+                let optimistic_delta = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Cancelled);
+                let result = services.downloads.cancel_download(uuid).await;
+                handle_download_action_result(
+                    result,
+                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_CANCELLED"),
+                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
+                    &request_downloads,
+                    &services,
+                    optimistic_delta,
+                );
             });
         })
     };
@@ -334,10 +363,15 @@ pub fn downloads_view() -> Html {
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
-                if services.downloads.remove_download(uuid).await.is_ok_and(|response| response.success) {
-                    services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_REMOVED"));
-                    request_downloads.emit(());
-                }
+                let result = services.downloads.remove_download(uuid).await;
+                handle_download_action_result(
+                    result,
+                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_REMOVED"),
+                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
+                    &request_downloads,
+                    &services,
+                    None,
+                );
             });
         })
     };
@@ -351,10 +385,15 @@ pub fn downloads_view() -> Html {
             let services = services.clone();
             let translate = translate.clone();
             spawn_local(async move {
-                if services.downloads.retry_download(uuid).await.is_ok_and(|response| response.success) {
-                    services.toastr.success(translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RETRIED"));
-                    request_downloads.emit(());
-                }
+                let result = services.downloads.retry_download(uuid).await;
+                handle_download_action_result(
+                    result,
+                    &translate.t("MESSAGES.DOWNLOAD.DOWNLOAD_RETRIED"),
+                    &translate.t("MESSAGES.DOWNLOAD.FAIL"),
+                    &request_downloads,
+                    &services,
+                    None,
+                );
             });
         })
     };
@@ -397,7 +436,10 @@ pub fn downloads_view() -> Html {
                         dto.status,
                         TransferStatusDto::Failed | TransferStatusDto::Completed | TransferStatusDto::Cancelled
                     );
-                    let can_retry = dto.status == TransferStatusDto::Failed;
+                    let can_retry = dto.kind == TaskKindDto::Download
+                        && matches!(dto.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled);
+                    let retry_label = if dto.status == TransferStatusDto::Cancelled { "Resume" } else { "Retry" };
+                    let retry_icon = if dto.status == TransferStatusDto::Cancelled { "Play" } else { "Refresh" };
                     let pause_uuid = dto.id.clone();
                     let resume_uuid = dto.id.clone();
                     let cancel_uuid = dto.id.clone();
@@ -420,7 +462,7 @@ pub fn downloads_view() -> Html {
                                 <IconButton name="Cancel" icon="Stop" onclick={Callback::from(move |_| cancel_handle.emit(cancel_uuid.clone()))} />
                             }
                             if can_retry {
-                                <IconButton name="Retry" icon="Refresh" onclick={Callback::from(move |_| retry_handle.emit(retry_uuid.clone()))} />
+                                <IconButton name={retry_label} icon={retry_icon} onclick={Callback::from(move |_| retry_handle.emit(retry_uuid.clone()))} />
                             }
                             if can_remove {
                                 <IconButton name="Remove" icon="Delete" onclick={Callback::from(move |_| remove_handle.emit(remove_uuid.clone()))} />
@@ -488,7 +530,6 @@ pub fn downloads_view() -> Html {
 
     html! {
         <div class="tp__downloads-view tp__list-view">
-            <Breadcrumbs items={&*breadcrumbs}/>
             <div class="tp__downloads-view__body tp__list-view__body">
                 <div class="tp__downloads-list tp__list-list">
                     <div class="tp__downloads-list__header tp__list-list__header">
@@ -648,5 +689,28 @@ mod tests {
         assert!(is_sortable(1));
         assert!(is_sortable(8));
         assert!(!is_sortable(9));
+    }
+
+    #[test]
+    fn cancelled_recordings_do_not_offer_retry_semantics() {
+        let dto = FileDownloadDto {
+            id: "rec".to_string(),
+            title: "rec.ts".to_string(),
+            kind: TaskKindDto::Recording,
+            priority: shared::model::TaskPriorityDto::Background,
+            status: TransferStatusDto::Cancelled,
+            retry_attempts: 0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            next_retry_at: None,
+            scheduled_start_at: None,
+            duration_secs: Some(60),
+            error: Some("Cancelled by user".to_string()),
+        };
+
+        let can_retry = dto.kind == TaskKindDto::Download
+            && matches!(dto.status, TransferStatusDto::Failed | TransferStatusDto::Cancelled);
+
+        assert!(!can_retry);
     }
 }

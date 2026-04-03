@@ -1,4 +1,4 @@
-use crate::model::VideoDownloadConfig;
+use crate::{model::VideoDownloadConfig, utils::file_exists_async};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use shared::model::{FileDownloadDto, TaskKindDto, TaskPriorityDto, TransferStatusDto};
@@ -544,7 +544,7 @@ impl DownloadQueue {
         let Some(state_file) = self.state_file.as_ref() else {
             return Ok(());
         };
-        if !state_file.exists() {
+        if !file_exists_async(state_file).await {
             return Ok(());
         }
 
@@ -739,6 +739,10 @@ impl DownloadQueue {
         let mut finished = self.finished.write().await;
         if let Some(pos) = finished.iter().position(|d| d.uuid == uuid) {
             let mut download = finished.remove(pos);
+            if download.kind == DownloadKind::Recording {
+                finished.insert(pos, download);
+                return false;
+            }
             download.finished = false;
             download.size = 0;
             download.paused = false;
@@ -1154,6 +1158,35 @@ mod tests {
         assert_eq!(queued.retry_attempts, 0);
         assert!(queued.next_retry_at.is_none());
         assert!(queued.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_finished_rejects_recordings() {
+        let queue = DownloadQueue::new();
+        queue.finished.write().await.push(FileDownload {
+            uuid: "recording".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/recording.ts"),
+            filename: "recording.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/recording.ts").expect("valid url"),
+            finished: true,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: Some("Cancelled by user".to_string()),
+            state: DownloadState::Cancelled,
+            start_at: Some(1_700_000_000),
+            duration_secs: Some(300),
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        });
+
+        assert!(!queue.retry_finished("recording").await);
+        assert!(queue.queue.lock().await.is_empty());
+        assert_eq!(queue.finished.read().await.len(), 1);
     }
 
     #[tokio::test]

@@ -80,11 +80,13 @@ input:-webkit-autofill:active {
 
 
 
-body:not([data-theme="bright"]) input[type="date"]::-webkit-calendar-picker-indicator {
+body:not([data-theme="bright"]) input[type="date"]::-webkit-calendar-picker-indicator,
+body:not([data-theme="bright"]) input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   filter: invert(1) brightness(0.6) saturate(0) opacity(0.7);
 }
 
-body[data-theme="bright"] input[type="date"]::-webkit-calendar-picker-indicator {
+body[data-theme="bright"] input[type="date"]::-webkit-calendar-picker-indicator,
+body[data-theme="bright"] input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   filter: none;
 }
 

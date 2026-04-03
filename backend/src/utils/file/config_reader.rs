@@ -477,7 +477,7 @@ pub async fn prepare_users(
 
     if use_user_db {
         let user_db_path = get_api_user_db_path(app_config);
-        if user_db_path.exists() {
+        if file_exists_async(&user_db_path).await {
             match load_api_user(app_config).await {
                 Ok(stored_users) => {
                     if let Some(api_proxy) = app_config_dto.api_proxy.as_mut() {
@@ -684,7 +684,7 @@ where
     serde_saphyr::to_fmt_writer_with_options(&mut serialized, &config, options)
         .map_err(|err| info_err!("Could not serialize config: {}", err))?;
 
-    if path.exists() {
+    if file_exists_async(&path).await {
         if let Ok(existing) = fs::read_to_string(&path).await {
             if existing == serialized {
                 // info!("File {} unchanged, skipping write", path.display());
@@ -693,7 +693,7 @@ where
         }
     }
 
-    if path.exists() {
+    if file_exists_async(&path).await {
         let backup_path = PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S")));
 
         match fs::copy(&path, &backup_path).await {

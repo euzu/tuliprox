@@ -1,7 +1,7 @@
 use crate::{
     app::{
         components::{menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, IconButton, NoContent, Panel, Search},
-        context::PlaylistExplorerContext,
+        context::{ConfigContext, PlaylistExplorerContext},
     },
     hooks::use_service_context,
     html_if,
@@ -17,7 +17,7 @@ use shared::{
     },
     utils::format_float_localized,
 };
-use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 use yew::{platform::spawn_local, prelude::*};
@@ -115,7 +115,10 @@ fn default_record_start_value() -> String { chrono::Local::now().format("%Y-%m-%
 fn parse_record_start_value(start_value: &str) -> Option<i64> {
     use chrono::TimeZone;
 
-    let naive = chrono::NaiveDateTime::parse_from_str(start_value.trim(), "%Y-%m-%dT%H:%M").ok()?;
+    let start_value = start_value.trim();
+    let naive = ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"]
+        .into_iter()
+        .find_map(|format| chrono::NaiveDateTime::parse_from_str(start_value, format).ok())?;
     chrono::Local.from_local_datetime(&naive).single().map(|dt| dt.timestamp())
 }
 
@@ -169,10 +172,23 @@ enum ExplorerLevel {
 #[component]
 pub fn PlaylistExplorer() -> Html {
     let context = use_context::<PlaylistExplorerContext>().expect("PlaylistExplorer context not found");
+    let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();
     let service_ctx = use_service_context();
     let can_write_downloads = service_ctx.auth.has_permission(Permission::DownloadWrite);
+    let default_download_priority = config_ctx
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.config.video.as_ref())
+        .and_then(|video| video.download.as_ref())
+        .map_or(0, |download| download.download_priority);
+    let default_recording_priority = config_ctx
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.config.video.as_ref())
+        .and_then(|video| video.download.as_ref())
+        .map_or(0, |download| download.recording_priority);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
     let selected_channel = use_state(|| None::<ChannelSelection>);
@@ -418,6 +434,7 @@ pub fn PlaylistExplorer() -> Html {
                             let services = services.clone();
                             let translate_clone = translate_clone.clone();
                             let playlist_request = (*playlist_ctx.playlist_request).clone();
+                            let default_download_priority = default_download_priority;
                             let selected = dto.clone();
                             spawn_local(async move {
                                 let resolved_url = if !selected.url.is_empty() {
@@ -456,9 +473,9 @@ pub fn PlaylistExplorer() -> Html {
                                     return;
                                 }
 
-                                let filename_ref = NodeRef::default();
-                                let priority_ref = NodeRef::default();
                                 let default_filename = build_download_filename(&selected.title, &resolved_url);
+                                let filename_value = Rc::new(RefCell::new(default_filename.clone()));
+                                let priority_value = Rc::new(RefCell::new(default_download_priority.to_string()));
                                 let actions = DialogActions {
                                     left: Some(vec![DialogAction::new(
                                         "cancel",
@@ -475,6 +492,8 @@ pub fn PlaylistExplorer() -> Html {
                                         Some("primary".to_string()),
                                     )],
                                 };
+                                let filename_value_input = Rc::clone(&filename_value);
+                                let priority_value_input = Rc::clone(&priority_value);
                                 let result = dialog
                                     .content(
                                         html! {
@@ -483,9 +502,12 @@ pub fn PlaylistExplorer() -> Html {
                                                     <label class="tp__label">{translate_clone.t("LABEL.FILENAME")}</label>
                                                     <div class="tp__input-wrapper">
                                                         <input
-                                                            ref={filename_ref.clone()}
                                                             type="text"
                                                             value={default_filename.clone()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *filename_value_input.borrow_mut() = input.value();
+                                                            })}
                                                         />
                                                     </div>
                                                 </div>
@@ -493,12 +515,15 @@ pub fn PlaylistExplorer() -> Html {
                                                     <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
                                                     <div class="tp__input-wrapper">
                                                         <input
-                                                            ref={priority_ref.clone()}
                                                             type="number"
                                                             min="-127"
                                                             max="127"
                                                             step="1"
-                                                            placeholder="config default"
+                                                            value={default_download_priority.to_string()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *priority_value_input.borrow_mut() = input.value();
+                                                            })}
                                                         />
                                                     </div>
                                                 </div>
@@ -516,15 +541,8 @@ pub fn PlaylistExplorer() -> Html {
                                     return;
                                 }
 
-                                let filename = filename_ref
-                                    .cast::<HtmlInputElement>()
-                                    .map(|input| input.value())
-                                    .unwrap_or(default_filename)
-                                    .trim()
-                                    .to_string();
-                                let priority = parse_optional_priority_input(
-                                    priority_ref.cast::<HtmlInputElement>().map(|input| input.value()),
-                                );
+                                let filename = filename_value.borrow().clone().trim().to_string();
+                                let priority = parse_optional_priority_input(Some(priority_value.borrow().clone()));
 
                                 if filename.is_empty() {
                                     services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
@@ -555,11 +573,13 @@ pub fn PlaylistExplorer() -> Html {
                             let services = services.clone();
                             let translate_clone = translate_clone.clone();
                             let playlist_request = (*playlist_ctx.playlist_request).clone();
+                            let default_recording_priority = default_recording_priority;
                             let selected = dto.clone();
                             spawn_local(async move {
-                                let start_ref = NodeRef::default();
-                                let duration_ref = NodeRef::default();
-                                let priority_ref = NodeRef::default();
+                                let default_start_value = default_record_start_value();
+                                let start_value = Rc::new(RefCell::new(default_start_value.clone()));
+                                let duration_value = Rc::new(RefCell::new("90".to_string()));
+                                let priority_value = Rc::new(RefCell::new(default_recording_priority.to_string()));
                                 let actions = DialogActions {
                                     left: Some(vec![DialogAction::new(
                                         "cancel",
@@ -576,6 +596,9 @@ pub fn PlaylistExplorer() -> Html {
                                         Some("primary".to_string()),
                                     )],
                                 };
+                                let start_value_input = Rc::clone(&start_value);
+                                let duration_value_input = Rc::clone(&duration_value);
+                                let priority_value_input = Rc::clone(&priority_value);
                                 let result = dialog
                                     .content(
                                         html! {
@@ -584,9 +607,12 @@ pub fn PlaylistExplorer() -> Html {
                                                     <label class="tp__label">{translate_clone.t("LABEL.START")}</label>
                                                     <div class="tp__input-wrapper">
                                                         <input
-                                                            ref={start_ref.clone()}
                                                             type="datetime-local"
-                                                            value={default_record_start_value()}
+                                                            value={default_start_value.clone()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *start_value_input.borrow_mut() = input.value();
+                                                            })}
                                                         />
                                                     </div>
                                                 </div>
@@ -594,11 +620,14 @@ pub fn PlaylistExplorer() -> Html {
                                                     <label class="tp__label">{translate_clone.t("LABEL.DURATION")}{" (min)"}</label>
                                                     <div class="tp__input-wrapper">
                                                         <input
-                                                            ref={duration_ref.clone()}
                                                             type="number"
                                                             min="1"
                                                             step="1"
                                                             value="90"
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *duration_value_input.borrow_mut() = input.value();
+                                                            })}
                                                         />
                                                     </div>
                                                 </div>
@@ -606,11 +635,15 @@ pub fn PlaylistExplorer() -> Html {
                                                     <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
                                                     <div class="tp__input-wrapper">
                                                         <input
-                                                            ref={priority_ref.clone()}
                                                             type="number"
                                                             min="-127"
                                                             max="127"
                                                             step="1"
+                                                            value={default_recording_priority.to_string()}
+                                                            oninput={Callback::from(move |event: InputEvent| {
+                                                                let input: HtmlInputElement = event.target_unchecked_into();
+                                                                *priority_value_input.borrow_mut() = input.value();
+                                                            })}
                                                         />
                                                     </div>
                                                 </div>
@@ -625,19 +658,11 @@ pub fn PlaylistExplorer() -> Html {
                                     .await;
 
                                 if result == DialogResult::Ok {
-                                    let start_value = start_ref
-                                        .cast::<HtmlInputElement>()
-                                        .map(|input| input.value())
-                                        .unwrap_or_default();
-                                    let duration_value = duration_ref
-                                        .cast::<HtmlInputElement>()
-                                        .map(|input| input.value())
-                                        .unwrap_or_else(|| "90".to_string());
-                                    let priority_value =
-                                        priority_ref.cast::<HtmlInputElement>().map(|input| input.value());
+                                    let start_value = start_value.borrow().clone();
+                                    let duration_value = duration_value.borrow().clone();
+                                    let priority = parse_optional_priority_input(Some(priority_value.borrow().clone()));
                                     let start_ts = parse_record_start_value(&start_value);
                                     let duration_mins = parse_record_duration_minutes(&duration_value);
-                                    let priority = parse_optional_priority_input(priority_value);
 
                                     match (start_ts, duration_mins) {
                                         (Some(start_at), Some(minutes)) => {
@@ -1145,6 +1170,7 @@ mod tests {
     fn parse_record_start_value_accepts_default_format() {
         let default_value = super::default_record_start_value();
         assert!(parse_record_start_value(&default_value).is_some());
+        assert!(parse_record_start_value("2026-04-03T12:34:00").is_some());
         assert!(parse_record_start_value("not-a-date").is_none());
     }
 

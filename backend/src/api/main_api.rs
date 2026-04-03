@@ -50,7 +50,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::{atomic::AtomicI8, Arc},
+    sync::{atomic::{AtomicI8, AtomicU64, Ordering}, Arc},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -59,9 +59,12 @@ use tower_http::compression::predicate::{DefaultPredicate, Predicate};
 use tower_http::services::ServeDir;
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
+static CORRUPT_DOWNLOADS_STATE_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 fn corrupt_downloads_state_path(state_file: &std::path::Path) -> PathBuf {
-    let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let now = chrono::Utc::now();
+    let suffix = CORRUPT_DOWNLOADS_STATE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    let timestamp = format!("{}{:09}.{:016x}", now.format("%Y%m%d%H%M%S"), now.timestamp_subsec_nanos(), suffix);
     let stem = state_file.file_stem().and_then(|stem| stem.to_str()).unwrap_or("downloads_state");
     let extension = state_file.extension().and_then(|ext| ext.to_str()).unwrap_or("json");
     state_file.with_file_name(format!("{stem}_corrupt.{timestamp}.{extension}"))
@@ -366,7 +369,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::recover_persisted_downloads_state;
+    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
     use crate::api::model::DownloadQueue;
     use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
@@ -376,6 +379,16 @@ mod tests {
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
+    }
+
+    #[test]
+    fn corrupt_downloads_state_path_is_unique_for_rapid_calls() {
+        let state_file = temp_state_file("corrupt_downloads_unique");
+
+        let first = corrupt_downloads_state_path(&state_file);
+        let second = corrupt_downloads_state_path(&state_file);
+
+        assert_ne!(first, second);
     }
 
     #[tokio::test]

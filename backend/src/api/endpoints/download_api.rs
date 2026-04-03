@@ -27,6 +27,7 @@ const DOWNLOAD_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PROGRESS_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const DOWNLOAD_SNAPSHOT_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 const DOWNLOAD_SNAPSHOT_UPDATE_BYTES: u64 = 4 * 1024 * 1024;
+const RECORDING_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 type ProviderCapacities = Vec<(Arc<str>, usize, usize)>;
 
 enum DownloadExecutionResult {
@@ -255,6 +256,30 @@ async fn broadcast_active_download_delta(event_manager: &Arc<EventManager>, acti
     }
 }
 
+async fn refresh_recording_progress(
+    active: &RwLock<Option<FileDownload>>,
+    file_path: &std::path::Path,
+    event_manager: &Arc<EventManager>,
+) {
+    let current_size = tokio::fs::metadata(file_path).await.map_or(0, |metadata| metadata.len());
+    let changed = {
+        let mut active = active.write().await;
+        if let Some(download) = active.as_mut() {
+            if download.kind == DownloadKind::Recording && download.size != current_size {
+                download.size = current_size;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    if changed {
+        broadcast_active_download_delta(event_manager, active).await;
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn download_file(
     active: Arc<RwLock<Option<FileDownload>>>,
@@ -269,11 +294,7 @@ async fn download_file(
         let url = file_download.url.clone();
         let file_path = file_download.file_path.clone();
         // Check for existing partial file for resume
-        let existing_size = if file_path.exists() {
-            tokio::fs::metadata(&file_path).await.map_or(0, |m| m.len())
-        } else {
-            0
-        };
+        let existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
 
         let mut request_builder = client.get(url.clone());
         if existing_size > 0 {
@@ -927,21 +948,39 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         Some(&dq),
                                     )
                                     .await,
-                                    DownloadKind::Recording => match run_recording(
-                                        &download,
-                                        &control_signal,
-                                        &control_notify,
-                                        provider_handle.as_ref().and_then(|handle| handle.cancel_token.as_ref()),
-                                    )
-                                    .await
-                                    {
-                                        RecordingExecutionResult::Completed => DownloadExecutionResult::Completed,
-                                        RecordingExecutionResult::Paused => DownloadExecutionResult::Paused,
-                                        RecordingExecutionResult::Cancelled => DownloadExecutionResult::Cancelled,
-                                        RecordingExecutionResult::Preempted => DownloadExecutionResult::Preempted,
-                                        RecordingExecutionResult::Retryable(err) => DownloadExecutionResult::Retryable(err),
-                                        RecordingExecutionResult::Failed(err) => DownloadExecutionResult::Failed(err),
-                                    },
+                                    DownloadKind::Recording => {
+                                        let mut recording_future = Box::pin(run_recording(
+                                            &download,
+                                            &control_signal,
+                                            &control_notify,
+                                            provider_handle.as_ref().and_then(|handle| handle.cancel_token.as_ref()),
+                                        ));
+                                        let mut progress_tick = time::interval(RECORDING_PROGRESS_UPDATE_INTERVAL);
+                                        progress_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
+                                        let result = loop {
+                                            tokio::select! {
+                                                recording_result = &mut recording_future => break recording_result,
+                                                _ = progress_tick.tick() => {
+                                                    if event_manager.has_event_receivers() {
+                                                        refresh_recording_progress(&dq.active, &download.file_path, &event_manager).await;
+                                                    }
+                                                }
+                                            }
+                                        };
+                                        if event_manager.has_event_receivers() {
+                                            refresh_recording_progress(&dq.active, &download.file_path, &event_manager).await;
+                                        }
+
+                                        match result {
+                                            RecordingExecutionResult::Completed => DownloadExecutionResult::Completed,
+                                            RecordingExecutionResult::Paused => DownloadExecutionResult::Paused,
+                                            RecordingExecutionResult::Cancelled => DownloadExecutionResult::Cancelled,
+                                            RecordingExecutionResult::Preempted => DownloadExecutionResult::Preempted,
+                                            RecordingExecutionResult::Retryable(err) => DownloadExecutionResult::Retryable(err),
+                                            RecordingExecutionResult::Failed(err) => DownloadExecutionResult::Failed(err),
+                                        }
+                                    }
                                 }
                             };
 

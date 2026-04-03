@@ -1356,7 +1356,8 @@
     "TOTAL": "Total",
     "INPUT": "Input",
     "ACTIONS": "Actions",
-    "ERROR": "Error"
+    "ERROR": "Error",
+    "RECORD": "Record"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

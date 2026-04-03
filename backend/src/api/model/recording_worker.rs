@@ -13,13 +13,20 @@ pub enum RecordingExecutionResult {
     Failed(String),
 }
 
+fn is_generic_ffmpeg_stderr_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("conversion failed!")
+        || trimmed.eq_ignore_ascii_case("exiting normally, received signal 15.")
+}
+
 fn stderr_summary(stderr: &[u8]) -> String {
     let stderr = String::from_utf8_lossy(stderr);
     stderr
         .lines()
         .rev()
-        .find(|line| !line.trim().is_empty())
-        .map_or_else(|| "ffmpeg failed".to_string(), ToString::to_string)
+        .find(|line| !is_generic_ffmpeg_stderr_line(line))
+        .map_or_else(|| "ffmpeg failed".to_string(), |line| line.trim().to_string())
 }
 
 fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
@@ -86,7 +93,6 @@ pub fn remaining_recording_duration_secs(download: &FileDownload, now_ts: i64) -
 
 pub fn build_recording_args(download: &FileDownload, effective_duration_secs: u64) -> Vec<String> {
     vec![
-        "-y".to_string(),
         "-nostdin".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -101,6 +107,16 @@ pub fn build_recording_args(download: &FileDownload, effective_duration_secs: u6
         "copy".to_string(),
         download.file_path.to_string_lossy().to_string(),
     ]
+}
+
+async fn recording_resume_or_retry_is_unsupported(download: &FileDownload) -> bool {
+    if download.retry_attempts > 0 {
+        return true;
+    }
+
+    tokio::fs::metadata(&download.file_path)
+        .await
+        .is_ok_and(|metadata| metadata.len() > 0)
 }
 
 pub fn recording_start_missed_window(download: &FileDownload, now_ts: i64) -> bool {
@@ -127,6 +143,13 @@ async fn run_recording_with_binary(
 
     if let Err(err) = tokio::fs::create_dir_all(&download.file_dir).await {
         return RecordingExecutionResult::Failed(format!("Error while creating recording directory: {err}"));
+    }
+
+    if recording_resume_or_retry_is_unsupported(download).await {
+        return RecordingExecutionResult::Failed(
+            "Recording resume is not supported".to_string(),
+            //  yet because ffmpeg segment stitching is not implemented
+        );
     }
 
     let mut command = tokio::process::Command::new(ffmpeg_binary);
@@ -232,9 +255,20 @@ mod tests {
         let recording = make_recording(1_000, 5400);
         let args = build_recording_args(&recording, 5400);
 
+        assert!(!args.iter().any(|arg| arg == "-y"));
         assert!(args.windows(2).any(|pair| pair == ["-t", "5400"]));
         assert!(args.windows(2).any(|pair| pair == ["-i", "https://example.com/live/1"]));
         assert_eq!(args.last(), Some(&recording.file_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn classify_ffmpeg_failure_skips_generic_trailer_lines() {
+        let result = classify_ffmpeg_failure(b"Connection timed out\nConversion failed!\n");
+
+        assert_eq!(
+            result,
+            RecordingExecutionResult::Retryable("Connection timed out".to_string())
+        );
     }
 
     #[test]
@@ -375,6 +409,33 @@ mod tests {
         assert_eq!(result, RecordingExecutionResult::Preempted);
         assert!(remaining_recording_duration_secs(&recording, chrono::Utc::now().timestamp()).is_some());
         let _ = fs::remove_file(script);
+        let _ = fs::remove_dir_all(&recording.file_dir);
+    }
+
+    #[tokio::test]
+    async fn run_recording_refuses_retry_or_resume_when_partial_output_exists() {
+        let script = fake_ffmpeg_script(
+            "no-resume",
+            "#!/bin/sh\nprintf 'should not run' >&2\nexit 1\n",
+        );
+        let control_signal = RwLock::new(DownloadControl::None);
+        let control_notify = Notify::new();
+        let recording = make_recording(chrono::Utc::now().timestamp(), 5);
+
+        fs::create_dir_all(&recording.file_dir).expect("create recording dir");
+        fs::write(&recording.file_path, b"partial").expect("write partial output");
+
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None).await;
+
+        assert_eq!(
+            result,
+            RecordingExecutionResult::Failed(
+                "Recording retry/resume is not supported yet because ffmpeg segment stitching is not implemented"
+                    .to_string(),
+            )
+        );
+        let _ = fs::remove_file(script);
+        let _ = fs::remove_file(&recording.file_path);
         let _ = fs::remove_dir_all(&recording.file_dir);
     }
 }
