@@ -41,6 +41,10 @@ pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
     stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
 }
 
+pub fn is_background_transfer_stream(stream: &StreamInfo) -> bool {
+    stream.client_ip == "background-task" && stream.provider == "Download Manager"
+}
+
 pub fn filter_visible_streams(
     streams: Option<Vec<std::rc::Rc<StreamInfo>>>,
     adaptive_last_seen: &HashMap<u32, u64>,

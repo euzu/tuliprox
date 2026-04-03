@@ -1,7 +1,7 @@
 use crate::model::BusyStatus;
 use shared::model::{
-    ActiveUserConnectionChange, ConfigType, DownloadsResponse, LibraryScanSummary, PlaylistUpdateState, StatusCheck,
-    StreamMeterEntry, SystemInfo,
+    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanSummary, PlaylistUpdateState,
+    StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use std::{rc::Rc, sync::Arc};
 
@@ -23,4 +23,5 @@ pub enum EventMessage {
     LibraryScanProgress(LibraryScanSummary),
     StreamMeterBatch(Vec<StreamMeterEntry>),
     DownloadsUpdate(Rc<DownloadsResponse>),
+    DownloadsDeltaUpdate(Rc<DownloadsDelta>),
 }

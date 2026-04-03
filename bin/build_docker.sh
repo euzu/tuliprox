@@ -65,11 +65,12 @@ write_checksum() {
 create_release_bundle() {
     local architecture="$1"
     local binary_path="$2"
-    local bundle_root
+    local bundle_root=""
     local bundle_name
     local bundle_path
 
     bundle_root="$(mktemp -d)"
+    trap 'if [ -n "${bundle_root:-}" ] && [ -d "${bundle_root}" ]; then rm -rf "${bundle_root}"; fi' RETURN ERR INT
     mkdir -p "${bundle_root}/tuliprox"
 
     cp "${binary_path}" "${bundle_root}/tuliprox/tuliprox"
@@ -81,8 +82,6 @@ create_release_bundle() {
     bundle_path="${ARTIFACT_DIR}/${bundle_name}"
     tar -C "${bundle_root}" -czf "${bundle_path}" tuliprox
     write_checksum "${bundle_path}"
-
-    rm -rf "${bundle_root}"
 }
 
 # -----------------------------------------

@@ -147,6 +147,19 @@ fn parse_optional_priority_input(priority_value: Option<String>) -> Option<i8> {
         .and_then(|value| value.parse::<i8>().ok())
 }
 
+fn normalize_input_name(input_name: &str) -> Option<String> {
+    let trimmed = input_name.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn can_show_download_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
+    can_write_downloads && selected_channel.is_some_and(|item| item.cluster != XtreamCluster::Live)
+}
+
+fn can_show_record_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
+    can_write_downloads && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live)
+}
+
 enum ExplorerLevel {
     Categories,
     Group(Rc<UiPlaylistGroup>),
@@ -303,6 +316,7 @@ pub fn PlaylistExplorer() -> Html {
         let selected_channel = selected_channel.clone();
         let playlist_ctx = context.clone();
         let translate_clone = translate.clone();
+        let can_queue_downloads = can_write_downloads;
         let copy_to_clipboard = copy_to_clipboard.clone();
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = ExplorerAction::from_str(&name) {
@@ -395,6 +409,10 @@ pub fn PlaylistExplorer() -> Html {
                         }
                     }
                     ExplorerAction::Download => {
+                        if !can_queue_downloads {
+                            popup_is_open_state.set(false);
+                            return;
+                        }
                         if let Some(dto) = &*selected_channel {
                             let dialog = dialog.clone();
                             let services = services.clone();
@@ -513,7 +531,7 @@ pub fn PlaylistExplorer() -> Html {
                                     return;
                                 }
 
-                                let input_name = Some(selected.input_name.to_string());
+                                let input_name = normalize_input_name(&selected.input_name);
                                 match services
                                     .downloads
                                     .queue_download(resolved_url, filename, input_name, priority)
@@ -528,6 +546,10 @@ pub fn PlaylistExplorer() -> Html {
                         }
                     }
                     ExplorerAction::Record => {
+                        if !can_queue_downloads {
+                            popup_is_open_state.set(false);
+                            return;
+                        }
                         if let Some(dto) = &*selected_channel {
                             let dialog = dialog.clone();
                             let services = services.clone();
@@ -588,7 +610,6 @@ pub fn PlaylistExplorer() -> Html {
                                                             min="-127"
                                                             max="127"
                                                             step="1"
-                                                            value="0"
                                                         />
                                                     </div>
                                                 </div>
@@ -620,7 +641,7 @@ pub fn PlaylistExplorer() -> Html {
                                     match (start_ts, duration_mins) {
                                         (Some(start_at), Some(minutes)) => {
                                             let filename = build_record_filename(&selected.title, &start_value);
-                                            let input_name = Some(selected.input_name.to_string());
+                                            let input_name = normalize_input_name(&selected.input_name);
                                             match services
                                                 .downloads
                                                 .queue_recording(
@@ -1030,12 +1051,12 @@ pub fn PlaylistExplorer() -> Html {
             }
             <MenuItem icon="Clipboard" name={ExplorerAction::CopyLinkProviderUrl.to_string()} label={translate.t("LABEL.COPY_LINK_PROVIDER_URL")} onclick={&handle_menu_click}></MenuItem>
             { html_if!(
-                can_write_downloads && selected_channel.as_ref().is_some_and(|item| item.cluster == XtreamCluster::Live),
+                can_show_record_action(can_write_downloads, selected_channel.as_ref()),
                 {
                 <MenuItem icon="Record" name={ExplorerAction::Record.to_string()} label={translate.t("LABEL.RECORD")} onclick={&handle_menu_click}></MenuItem>
             })}
             { html_if!(
-                can_write_downloads && selected_channel.as_ref().is_some_and(|item| item.cluster != XtreamCluster::Live),
+                can_show_download_action(can_write_downloads, selected_channel.as_ref()),
                 {
                 <MenuItem icon="Download" name={ExplorerAction::Download.to_string()} label={translate.t("LABEL.DOWNLOAD")} onclick={&handle_menu_click}></MenuItem>
             })}
@@ -1047,8 +1068,10 @@ pub fn PlaylistExplorer() -> Html {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_download_filename, parse_optional_priority_input, parse_record_duration_minutes, parse_record_start_value,
+        build_download_filename, can_show_download_action, can_show_record_action, normalize_input_name,
+        parse_optional_priority_input, parse_record_duration_minutes, parse_record_start_value, ChannelSelection,
     };
+    use shared::model::{VirtualId, XtreamCluster};
 
     #[test]
     fn parse_optional_priority_input_treats_blank_as_none() {
@@ -1062,6 +1085,38 @@ mod tests {
         assert_eq!(parse_optional_priority_input(Some("-1".to_string())), Some(-1));
         assert_eq!(parse_optional_priority_input(Some("12".to_string())), Some(12));
         assert_eq!(parse_optional_priority_input(Some(" 0 ".to_string())), Some(0));
+    }
+
+    #[test]
+    fn normalize_input_name_treats_blank_as_none() {
+        assert_eq!(normalize_input_name(""), None);
+        assert_eq!(normalize_input_name("   "), None);
+        assert_eq!(normalize_input_name(" provider-a "), Some("provider-a".to_string()));
+    }
+
+    #[test]
+    fn popup_actions_require_download_write_permission() {
+        let live = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Live,
+            url: String::new(),
+            title: "Live".to_string(),
+            input_name: String::new(),
+        };
+        let vod = ChannelSelection {
+            virtual_id: VirtualId::default(),
+            cluster: XtreamCluster::Video,
+            url: String::new(),
+            title: "VOD".to_string(),
+            input_name: String::new(),
+        };
+
+        assert!(!can_show_record_action(false, Some(&live)));
+        assert!(!can_show_download_action(false, Some(&vod)));
+        assert!(can_show_record_action(true, Some(&live)));
+        assert!(can_show_download_action(true, Some(&vod)));
+        assert!(!can_show_download_action(true, Some(&live)));
+        assert!(!can_show_record_action(true, Some(&vod)));
     }
 
     #[test]

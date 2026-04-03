@@ -11,6 +11,7 @@ It also contains the optional telemetry pipeline for stream reliability analysis
 
 * `stream_history` stores raw stream lifecycle events on disk.
 * `qos_aggregation` periodically condenses those raw events into compact QoS snapshots.
+* The Web UI can then inspect both the raw history view and the aggregated QoS summaries.
 
 ## Top-level entries
 

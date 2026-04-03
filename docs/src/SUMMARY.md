@@ -2,6 +2,7 @@
 
 - [Introduction & Architecture](./index.md)
 - [Quick-Start](./getting-started.md)
+- [REST API Cookbook](./rest-api-cookbook.md)
 - [Build & Deploy](./build-and-deploy.md)
 - [Installation](./installation.md)
 - [Configuration & Setup (Overview)](./configuration/overview.md)

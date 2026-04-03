@@ -72,9 +72,9 @@ video:
     recording_priority: 0
     reserve_slots_for_users: 1
     max_background_per_provider: 1
-    retry_backoff_step_1_secs: 3
-    retry_backoff_step_2_secs: 10
-    retry_backoff_step_3_secs: 30
+    retry_backoff_initial_secs: 3
+    retry_backoff_multiplier: 3.0
+    retry_backoff_max_secs: 30
     retry_backoff_jitter_percent: 20
     retry_max_attempts: 5
 

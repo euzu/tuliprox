@@ -17,14 +17,18 @@
     - `max_background_per_provider`
     - `download_priority`
     - `recording_priority`
-  - Transient retries now use staged backoff with jitter and an explicit retry ceiling via:
-    - `retry_backoff_step_1_secs`
-    - `retry_backoff_step_2_secs`
-    - `retry_backoff_step_3_secs`
+  - Transient retries now use exponential backoff with jitter and an explicit retry ceiling via:
+    - `retry_backoff_initial_secs`
+    - `retry_backoff_multiplier`
+    - `retry_backoff_max_secs`
     - `retry_backoff_jitter_percent`
     - `retry_max_attempts`
   - Transfer snapshots now expose `WaitingForCapacity`, `RetryWaiting`, `retry_attempts` and `next_retry_at`.
-  - Waiting transfers stay cancel-/pauseable while they are blocked on provider capacity or retry backoff.
+  - Waiting transfers stay cancelable/pausable while they are blocked on provider capacity or retry backoff.
+  - The download scheduler and active worker now participate in config hot reloads and restart under updated `video.download` settings.
+  - Corrupted persisted download state is renamed to a timestamped `*_corrupt.*.json` backup and no longer blocks server startup.
+  - Playlist Explorer download and recording actions are hidden without `download.write`, and duplicate queue requests now return the existing  
+    task instead of creating a second entry.
   - The Playlist Explorer now supports:
     - optional priority override for VOD/series/episode downloads
     - start time, duration and optional priority override for live recordings

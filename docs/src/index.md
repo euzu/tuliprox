@@ -83,6 +83,7 @@ This Operator Manual will guide you through every single configuration variable 
 
 * [Build & Deploy](./build-and-deploy.md)
 * **[Installation](./installation.md)**
+* [REST API Cookbook](./rest-api-cookbook.md)
 * **[Configuration Overview](./configuration/overview.md)**
   * [Main Config](./configuration/config.md)
     * [Streaming & Proxy Behavior](./configuration/reverse-proxy.md)

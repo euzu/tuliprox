@@ -70,11 +70,11 @@ mod setup;
 pub(crate) use self::{
     accordion::*, accordion_panel::*, authentication::*, breadcrumbs::*, card::*, cell_value::*, chip::*,
     cluster_flags_input::*, collapse_panel::*, csv_table::*, custom_dialog::*, dashboard::*, date_input::*,
-    date_input_action::*, drop_down_icon_button::*, field_explanation::*, field_id::*, filter::*, hide_content::*,
-    home::*, icon_button::*, key_value_editor::*, loading_screen::*, login::*, no_access::*, no_content::*, panel::*,
-    particle_flow_background::*, playlist::*, radio_button_group::*, rbac::*, reveal_content::*, role_based_content::*,
-    search::*, select::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, table::*, tabset::*, tag_list::*,
-    text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
-    websocket_status::*,
+    date_input_action::*, downloads::DownloadsView, drop_down_icon_button::*, field_explanation::*, field_id::*,
+    filter::*, hide_content::*, home::*, icon_button::*, key_value_editor::*, loading_screen::*, login::*,
+    no_access::*, no_content::*, panel::*, particle_flow_background::*, playlist::*, radio_button_group::*, rbac::*,
+    reveal_content::*, role_based_content::*, search::*, select::*, setup::*, sidebar::*, source_editor::*,
+    svg_icon::*, table::*, tabset::*, tag_list::*, text_button::*, textarea::*, theme_picker::*, title_card::*,
+    toastr::*, toggle_switch::*, userlist::*, websocket_status::*,
 };
 pub use self::{confirm_dialog::*, content_dialog::*};

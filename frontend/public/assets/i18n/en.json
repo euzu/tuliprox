@@ -700,9 +700,9 @@
     "VIDEO_CONFIG": {
       "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "Random jitter added to download retry delays.\n\nA value of 20 means delays vary by about ±20%. This helps avoid retry spikes when many downloads fail at the same time.\n\nMust stay between 0 and 95.",
       "DOWNLOAD_RETRY_MAX_ATTEMPTS": "Maximum number of transient retry attempts before a transfer is marked as failed.\n\nThis applies to downloads and live recordings after transient startup or transport failures.\n\nMust be at least 1.",
-      "DOWNLOAD_RETRY_BACKOFF_STEP_1": "Wait time in seconds after the first transient download failure.\n\nUse a short delay here so temporary hiccups recover quickly without hammering the provider.",
-      "DOWNLOAD_RETRY_BACKOFF_STEP_2": "Wait time in seconds after the second transient download failure.\n\nUsually longer than step 1 to back off more aggressively on repeated failures.",
-      "DOWNLOAD_RETRY_BACKOFF_STEP_3": "Wait time in seconds after the third and later transient download failures.\n\nThis is the steady-state retry delay once a download keeps failing.",
+      "DOWNLOAD_RETRY_BACKOFF_INITIAL": "Initial wait time in seconds after the first transient download failure.\n\nLater retries grow from this base using the configured multiplier.",
+      "DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "Multiplier applied to each subsequent transient retry delay.\n\nExample: initial 3 and multiplier 3.0 yields about 3s, 9s, 27s until the max delay is reached.",
+      "DOWNLOAD_RETRY_BACKOFF_MAX": "Maximum retry delay in seconds.\n\nOnce exponential growth reaches this value, later retries stay capped here.",
       "EXTENSIONS": "List of valid video file extensions (e.g. mp4, avi, mkv). Streams ending in these are classified as video VODs.",
       "HEADERS": "Custom HTTP headers applied to video download requests (e.g. User-Agent).",
       "MAX_BACKGROUND_PER_PROVIDER": "Maximum number of background-priority transfers allowed per provider before additional background jobs wait.\n\nSet to 0 to disable this limit.",
@@ -900,6 +900,7 @@
     "DNS_SCHEME_HTTPS": "HTTPS",
     "DNS_SCHEMES": "DNS Schemes",
     "DOWNLOAD": "Download",
+    "DOWNLOADS": "Downloads",
     "DOWNLOAD_CANCEL": "Cancelled",
     "DOWNLOAD_DOWNLOADED": "Downloaded",
     "DOWNLOAD_FILE_SIZE": "File size",
@@ -907,9 +908,9 @@
     "DOWNLOAD_QUEUE": "Queue",
     "DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT": "Download retry jitter (%)",
     "DOWNLOAD_RETRY_MAX_ATTEMPTS": "Download retry max attempts",
-    "DOWNLOAD_RETRY_BACKOFF_STEP_1": "Download retry backoff step 1 (secs)",
-    "DOWNLOAD_RETRY_BACKOFF_STEP_2": "Download retry backoff step 2 (secs)",
-    "DOWNLOAD_RETRY_BACKOFF_STEP_3": "Download retry backoff step 3 (secs)",
+    "DOWNLOAD_RETRY_BACKOFF_INITIAL": "Download retry initial backoff (secs)",
+    "DOWNLOAD_RETRY_BACKOFF_MULTIPLIER": "Download retry backoff multiplier",
+    "DOWNLOAD_RETRY_BACKOFF_MAX": "Download retry max backoff (secs)",
     "DOWNLOAD_STATE_COMPLETED": "Completed",
     "DOWNLOAD_STATE_DOWNLOADING": "Downloading",
     "DOWNLOAD_STATE_FAILED": "Failed",
@@ -1353,7 +1354,9 @@
     "SELECTED": "Selected",
     "FILTERED": "Filtered",
     "TOTAL": "Total",
-    "INPUT": "Input"
+    "INPUT": "Input",
+    "ACTIONS": "Actions",
+    "ERROR": "Error"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -1361,6 +1364,7 @@
     "CONFIRM_DELETE": "You really want to delete it?",
     "CONFIRM_SOURCES_SAVE": "Do you really want to save?",
     "DOWNLOAD": {
+      "DOWNLOAD_QUEUED": "Download queued.",
       "FAIL": "Failed to download!",
       "INVALID_RECORD_DURATION": "Recording duration must be a positive number of minutes.",
       "INVALID_RECORD_START": "Recording start time is invalid.",

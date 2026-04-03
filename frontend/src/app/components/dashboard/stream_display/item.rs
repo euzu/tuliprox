@@ -1,5 +1,5 @@
 use super::{
-    helpers::{build_technical_chips, render_cluster},
+    helpers::{build_technical_chips, is_background_transfer_stream, render_cluster},
     meter::{MeterDisplayKind, StreamMeterBadge},
 };
 use crate::{
@@ -38,6 +38,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let stream = props.stream.clone();
+    let is_background_transfer = is_background_transfer_stream(&stream);
     let chips = build_technical_chips(stream.channel.item_type, stream.channel.technical.as_ref());
     let country_code = display_country_code(stream.country_code.as_deref());
     let country = country_code.as_ref().map_or_else(String::new, |code| {
@@ -54,9 +55,11 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
     html! {
         <article class="tp__stream-display__item">
-            <button class="tp__stream-display__menu" onclick={handle_popup_click}>
-                <AppIcon name="Handle" />
-            </button>
+            if !is_background_transfer {
+                <button class="tp__stream-display__menu" onclick={handle_popup_click}>
+                    <AppIcon name="Handle" />
+                </button>
+            }
         <div class="tp__stream-display__item-content">
             <div class="tp__stream-display__item-head">
                 <div class="tp__stream-display__identity">
@@ -115,7 +118,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                             {format_duration(current_time_secs().saturating_sub(stream.ts))}
                         </span>
                     </div>
-                    if props.metrics_enabled {
+                    if props.metrics_enabled && stream.meter_uid != 0 {
                         <div class="tp__stream-display__stat">
                             <span class="tp__stream-display__stat-label">{translate.t("LABEL.BANDWIDTH")}</span>
                             <span class="tp__stream-display__stat-value">

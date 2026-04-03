@@ -172,16 +172,14 @@ jobs:
       - name: Verify release bundle artifacts
         run: |
           ls -la artifacts
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.tar.gz"
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.tar.gz.sha256"
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.tar.gz"
-          test -f "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.tar.gz.sha256"
-          tar -tzf "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.tar.gz" | grep -qx "tuliprox/tuliprox"
-          tar -tzf "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.tar.gz" | grep -qx "tuliprox/web/"
-          tar -tzf "artifacts/tuliprox-v${{ steps.version.outputs.value }}-x86_64-unknown-linux-musl.tar.gz" | grep -qx "tuliprox/resources/"
-          tar -tzf "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.tar.gz" | grep -qx "tuliprox/tuliprox"
-          tar -tzf "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.tar.gz" | grep -qx "tuliprox/web/"
-          tar -tzf "artifacts/tuliprox-v${{ steps.version.outputs.value }}-aarch64-unknown-linux-musl.tar.gz" | grep -qx "tuliprox/resources/"
+          for arch in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            artifact="artifacts/tuliprox-v${{ steps.version.outputs.value }}-${arch}.tar.gz"
+            test -f "${artifact}"
+            test -f "${artifact}.sha256"
+            for required_path in tuliprox/tuliprox tuliprox/web/ tuliprox/resources/; do
+              tar -tzf "${artifact}" | grep -qx "${required_path}"
+            done
+          done
           for sum_file in artifacts/*.sha256; do
             (cd artifacts && sha256sum -c "$(basename "$sum_file")")
           done

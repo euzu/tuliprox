@@ -4,8 +4,9 @@ mod meter;
 
 use self::{
     helpers::{
-        filter_visible_streams, get_adaptive_session_ttl_secs, is_stream_metrics_enabled, refresh_adaptive_last_seen,
-        update_timestamps, ADAPTIVE_STREAM_CLEANUP_INTERVAL_MILLIS,
+        filter_visible_streams, get_adaptive_session_ttl_secs, is_background_transfer_stream,
+        is_stream_metrics_enabled, refresh_adaptive_last_seen, update_timestamps,
+        ADAPTIVE_STREAM_CLEANUP_INTERVAL_MILLIS,
     },
     item::StreamDisplayItem,
 };
@@ -228,6 +229,10 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                 match action {
                     StreamDisplayAction::Kick => {
                         if let Some(dto) = (*selected_dto).as_ref() {
+                            if is_background_transfer_stream(dto) {
+                                popup_is_open_state.set(false);
+                                return;
+                            }
                             if !services.websocket.send_message(ProtocolMessage::UserAction(UserCommand::Kick(
                                 dto.addr,
                                 dto.channel.virtual_id,
@@ -239,11 +244,19 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                     }
                     StreamDisplayAction::CopyLinkTuliproxVirtualId => {
                         if let Some(dto) = &*selected_dto {
+                            if is_background_transfer_stream(dto) {
+                                popup_is_open_state.set(false);
+                                return;
+                            }
                             copy_to_clipboard.emit(dto.channel.virtual_id.to_string());
                         }
                     }
                     StreamDisplayAction::CopyLinkProviderUrl => {
                         if let Some(dto) = &*selected_dto {
+                            if is_background_transfer_stream(dto) {
+                                popup_is_open_state.set(false);
+                                return;
+                            }
                             let url = dto.channel.url.to_string();
                             let playlist_request = PlaylistRequest::Target(dto.channel.target_id);
                             let copy_to_clipboard = copy_to_clipboard.clone();
@@ -261,6 +274,10 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                     }
                     StreamDisplayAction::CopyLinkTuliproxWebPlayerUrl => {
                         if let Some(dto) = &*selected_dto {
+                            if is_background_transfer_stream(dto) {
+                                popup_is_open_state.set(false);
+                                return;
+                            }
                             let target_id = dto.channel.target_id;
                             let virtual_id = dto.channel.virtual_id;
                             let cluster = dto.channel.cluster;

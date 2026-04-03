@@ -13,7 +13,7 @@ use log::{error, trace};
 use shared::{
     model::{
         Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
-        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION, supports_server_error_messages, supports_stream_meter_messages,
+        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION,
     },
     utils::{concat_path_leading_slash, default_kick_secs},
 };
@@ -69,7 +69,9 @@ fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMe
 
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
     match event {
-        EventMessage::DownloadsUpdate(_) => mem.permissions.contains(Permission::DownloadRead),
+        EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
+            mem.permissions.contains(Permission::DownloadRead)
+        }
         _ => mem.permissions.contains(Permission::SystemRead),
     }
 }
@@ -199,11 +201,7 @@ async fn handle_protocol_message(
 }
 
 fn handle_stream_meter_subscribe(mem: &mut ProtocolHandlerMemory, app_state: &Arc<AppState>, auth_required: bool) {
-    if supports_stream_meter_messages(mem.peer_version)
-        && websocket_requires_system_read(auth_required, mem)
-        && (!auth_required || mem.token.is_some())
-        && !mem.stream_meter_subscribed
-    {
+    if websocket_requires_system_read(auth_required, mem) && (!auth_required || mem.token.is_some()) && !mem.stream_meter_subscribed {
         mem.stream_meter_subscribed = true;
         app_state.event_manager.stream_meter_subscriber_connected();
     }
@@ -259,10 +257,7 @@ async fn handle_incoming_message(
     match handler {
         ProtocolHandler::Version(version) => {
             handle_handshake(msg, socket, *version).await?;
-            *handler = ProtocolHandler::Default(ProtocolHandlerMemory {
-                peer_version: *version,
-                ..ProtocolHandlerMemory::default()
-            });
+            *handler = ProtocolHandler::Default(ProtocolHandlerMemory::default());
             Ok(())
         }
         ProtocolHandler::Default(mem) => {
@@ -292,10 +287,8 @@ async fn handle_event_message(
             if websocket_can_receive_runtime_events(mem, &event) {
                 match event {
                     EventMessage::ServerError(error) => {
-                        if supports_server_error_messages(mem.peer_version) {
-                            let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
-                            socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
-                        }
+                        let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
+                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
                     }
                     EventMessage::ActiveUser(event) => {
                         let msg = ProtocolMessage::ActiveUserResponse(event).to_bytes().map_err(|e| e.to_string())?;
@@ -352,6 +345,13 @@ async fn handle_event_message(
                     EventMessage::DownloadsUpdate(downloads) => {
                         let msg = ProtocolMessage::DownloadsResponse(downloads).to_bytes().map_err(|e| e.to_string())?;
                         socket.send(Message::Binary(msg)).await.map_err(|e| format!("Downloads event: {e} "))?;
+                    }
+                    EventMessage::DownloadsDeltaUpdate(delta) => {
+                        let msg = ProtocolMessage::DownloadsDeltaResponse(delta).to_bytes().map_err(|e| e.to_string())?;
+                        socket
+                            .send(Message::Binary(msg))
+                            .await
+                            .map_err(|e| format!("Downloads delta event: {e} "))?;
                     }
                     EventMessage::InputMetadataUpdatesCompleted(_)
                     | EventMessage::InputMetadataUpdatesStarted(_) => {
@@ -454,7 +454,7 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 mod tests {
     use super::websocket_can_receive_runtime_events;
     use crate::api::model::EventMessage;
-    use shared::model::{DownloadsResponse, Permission, ProtocolHandlerMemory, UserRole};
+    use shared::model::{DownloadsDelta, DownloadsResponse, FileDownloadDto, Permission, ProtocolHandlerMemory, TaskKindDto, TaskPriorityDto, TransferStatusDto, UserRole};
 
     #[test]
     fn test_websocket_runtime_events_allowed_for_admin() {
@@ -542,6 +542,33 @@ mod tests {
                 finished: Vec::new(),
                 active: Vec::new(),
             })
+        ));
+    }
+
+    #[test]
+    fn test_websocket_download_delta_updates_allowed_for_download_read_user() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::DownloadRead.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActivePatched(FileDownloadDto {
+                id: "id".to_string(),
+                title: "file.ts".to_string(),
+                kind: TaskKindDto::Download,
+                priority: TaskPriorityDto::Background,
+                status: TransferStatusDto::Running,
+                retry_attempts: 0,
+                downloaded_bytes: 1,
+                total_bytes: Some(2),
+                next_retry_at: None,
+                scheduled_start_at: None,
+                duration_secs: None,
+                error: None,
+            }))
         ));
     }
 }

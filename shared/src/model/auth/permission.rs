@@ -21,8 +21,7 @@ create_bitset!(
     DownloadWrite
 );
 
-/// Use u32 arithmetic to avoid overflow when all 16 bits of u16 are used.
-pub const PERM_ALL: PermissionSet = PermissionSet(((1u32 << PERMISSION_NAMES.len()) - 1) as u16);
+pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
 
 pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("config.read", Permission::ConfigRead),
@@ -117,7 +116,11 @@ mod tests {
 
     #[test]
     fn test_perm_all_matches_defined_permissions_only() {
-        let expected_mask = ((1u32 << PERMISSION_NAMES.len()) - 1) as u16;
+        let expected_mask = if PermissionSet::VARIANT_COUNT == u16::BITS as usize {
+            u16::MAX
+        } else {
+            ((1u32 << PermissionSet::VARIANT_COUNT) - 1) as u16
+        };
         assert_eq!(PERM_ALL.0, expected_mask);
     }
 

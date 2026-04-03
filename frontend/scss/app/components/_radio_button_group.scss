@@ -1,6 +1,6 @@
 .tp__radio-button-group {
   display: flex;
-  flex-flow: row nowrap;
+  flex-flow: row nowrap !important;
   button {
     margin: 0;
   }

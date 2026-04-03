@@ -504,14 +504,15 @@ video:
   * `organize_into_directories`: If true, Tuliprox automatically creates neat subfolders for series.
   * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group
     `(?P<episode>...)` in the Regex to identify and strip the episode identifier (e.g., `S01E01`)
-    from the filename, ensuring all episodes of a show land in the exact same base-show folder.
+    from the filename, ensuring all episodes of a show land in the same base-show folder.
   * `download_priority`: Default provider priority for VOD/series/episode downloads. Lower values mean higher priority.
   * `recording_priority`: Default provider priority for live recordings. Lower values mean higher priority.
   * `reserve_slots_for_users`: Keeps provider headroom for normal foreground users before background-priority transfers
     may consume the last slots.
   * `max_background_per_provider`: Limits how many background-priority transfers may run in parallel against one provider.
-  * `retry_backoff_step_1_secs`, `retry_backoff_step_2_secs`, `retry_backoff_step_3_secs`: Retry delays for transient
-    download/recording failures.
+  * `retry_backoff_initial_secs`: Initial retry delay for transient download/recording failures.
+  * `retry_backoff_multiplier`: Growth factor applied to each later retry delay.
+  * `retry_backoff_max_secs`: Maximum retry delay once the backoff curve reaches its cap.
   * `retry_backoff_jitter_percent`: Randomizes retry delays to avoid retry spikes after shared upstream problems.
   * `retry_max_attempts`: Maximum number of transient retries before a transfer is marked as failed.
 
@@ -520,9 +521,13 @@ Tuliprox handles these transfers like provider-bound background streams:
 * They respect provider limits, user priorities, and connection preemption instead of bypassing normal stream capacity.
 * Waiting for provider capacity is notify-based, not polling-based.
 * The Web UI loads an initial transfer snapshot and then stays synchronized through websocket updates.
+* Changes to `video.download` participate in hot config reloads. The background scheduler restarts and active transfers are  
+  re-queued so they continue under the updated download configuration.
 * RBAC integration is explicit:
   * `download.read` allows opening the downloads view and receiving transfer snapshots.
   * `download.write` allows queueing, pausing, cancelling, retrying, and removing transfers.
+* Persisted queue recovery is tolerant of corruption. If `downloads_state.json` cannot be deserialized,  
+  Tuliprox renames it to a timestamped `*_corrupt.*.json` backup and starts with an empty transfer queue instead of aborting server boot.
 
 > **Note:** The named capture group `(?P<episode>...)` is **mandatory** for this to function correctly.
 >

@@ -5,7 +5,9 @@ use crate::{
     utils::format_bytes,
 };
 use shared::{
-    model::{DownloadsResponse, FileDownloadDto, ProtocolMessage, SortOrder, TaskKindDto, TransferStatusDto},
+    model::{
+        DownloadsDelta, DownloadsResponse, FileDownloadDto, ProtocolMessage, SortOrder, TaskKindDto, TransferStatusDto,
+    },
     utils::unix_ts_to_str,
 };
 use std::{cmp::Ordering, rc::Rc};
@@ -148,6 +150,38 @@ fn apply_download_snapshot(
     active_download.set(Rc::new(response.active.iter().cloned().map(Rc::new).collect()));
 }
 
+fn apply_download_delta(
+    delta: &DownloadsDelta,
+    queue_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
+    finished_state: &UseStateHandle<Rc<Vec<FileDownloadDto>>>,
+    active_download: &UseStateHandle<Rc<Vec<Rc<FileDownloadDto>>>>,
+) {
+    match delta {
+        DownloadsDelta::SnapshotReset(response) => {
+            apply_download_snapshot(response, queue_state, finished_state, active_download);
+        }
+        DownloadsDelta::ActivePatched(download) => {
+            let mut active_items: Vec<Rc<FileDownloadDto>> = active_download.iter().cloned().collect();
+            if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
+                *existing = Rc::new(download.clone());
+            } else {
+                active_items.clear();
+                active_items.push(Rc::new(download.clone()));
+            }
+            active_download.set(Rc::new(active_items));
+        }
+        DownloadsDelta::ActiveCleared => {
+            active_download.set(Rc::new(Vec::new()));
+        }
+        DownloadsDelta::QueueReplaced { queue } => {
+            queue_state.set(Rc::new(queue.clone()));
+        }
+        DownloadsDelta::FinishedReplaced { finished } => {
+            finished_state.set(Rc::new(finished.clone()));
+        }
+    }
+}
+
 #[function_component(DownloadsView)]
 pub fn downloads_view() -> Html {
     let translate = use_translation();
@@ -177,6 +211,9 @@ pub fn downloads_view() -> Html {
             let sub_id = services.event.subscribe(move |msg| match msg {
                 crate::model::EventMessage::DownloadsUpdate(snapshot) => {
                     apply_download_snapshot(&snapshot, &queue_state, &finished_state, &active_download);
+                }
+                crate::model::EventMessage::DownloadsDeltaUpdate(delta) => {
+                    apply_download_delta(&delta, &queue_state, &finished_state, &active_download);
                 }
                 crate::model::EventMessage::WebSocketStatus(true) => {
                     request_downloads_effect.emit(());
@@ -445,7 +482,7 @@ pub fn downloads_view() -> Html {
 #[cfg(test)]
 mod tests {
     use super::{collect_downloads_for_tab, normalize_download_tab, DownloadTab};
-    use shared::model::{FileDownloadDto, TaskKindDto, TransferStatusDto};
+    use shared::model::{DownloadsDelta, FileDownloadDto, TaskKindDto, TransferStatusDto};
     use std::rc::Rc;
 
     fn download(id: &str, status: TransferStatusDto) -> FileDownloadDto {
@@ -513,5 +550,52 @@ mod tests {
             normalize_download_tab(&DownloadTab::Finished, &queue, &finished, active.as_ref()),
             DownloadTab::Queue
         );
+    }
+
+    fn apply_active_delta(
+        active: &Rc<Vec<Rc<FileDownloadDto>>>,
+        delta: &DownloadsDelta,
+    ) -> Rc<Vec<Rc<FileDownloadDto>>> {
+        match delta {
+            DownloadsDelta::SnapshotReset(response) => Rc::new(response.active.iter().cloned().map(Rc::new).collect()),
+            DownloadsDelta::ActivePatched(download) => {
+                let mut active_items: Vec<Rc<FileDownloadDto>> = active.iter().cloned().collect();
+                if let Some(existing) = active_items.iter_mut().find(|item| item.id == download.id) {
+                    *existing = Rc::new(download.clone());
+                } else {
+                    active_items.clear();
+                    active_items.push(Rc::new(download.clone()));
+                }
+                Rc::new(active_items)
+            }
+            DownloadsDelta::ActiveCleared => Rc::new(Vec::new()),
+            DownloadsDelta::QueueReplaced { .. } | DownloadsDelta::FinishedReplaced { .. } => active.clone(),
+        }
+    }
+
+    #[test]
+    fn active_delta_replaces_existing_active_download() {
+        let active = Rc::new(vec![Rc::new(download("active", TransferStatusDto::Running))]);
+        let mut updated = download("active", TransferStatusDto::Running);
+        updated.downloaded_bytes = 2048;
+        updated.total_bytes = Some(4096);
+
+        let patched = apply_active_delta(&active, &DownloadsDelta::ActivePatched(updated.clone()));
+
+        assert_eq!(patched.len(), 1);
+        assert_eq!(patched[0].id, "active");
+        assert_eq!(patched[0].downloaded_bytes, 2048);
+        assert_eq!(patched[0].total_bytes, Some(4096));
+    }
+
+    #[test]
+    fn active_delta_resets_to_new_active_when_uuid_differs() {
+        let active = Rc::new(vec![Rc::new(download("old", TransferStatusDto::Running))]);
+        let updated = download("new", TransferStatusDto::Running);
+
+        let patched = apply_active_delta(&active, &DownloadsDelta::ActivePatched(updated));
+
+        assert_eq!(patched.len(), 1);
+        assert_eq!(patched[0].id, "new");
     }
 }

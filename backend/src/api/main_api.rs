@@ -4,6 +4,7 @@ use crate::{
         config_watch::exec_config_watch,
         endpoints::{
             custom_video_stream_api::cvs_api_register,
+            download_api::resume_download_worker_if_needed,
             hdhomerun_api::hdhr_api_register,
             hls_api::hls_api_register,
             m3u_api::m3u_api_register,
@@ -58,6 +59,46 @@ use tower_http::compression::predicate::{DefaultPredicate, Predicate};
 use tower_http::services::ServeDir;
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
+
+fn corrupt_downloads_state_path(state_file: &std::path::Path) -> PathBuf {
+    let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let stem = state_file.file_stem().and_then(|stem| stem.to_str()).unwrap_or("downloads_state");
+    let extension = state_file.extension().and_then(|ext| ext.to_str()).unwrap_or("json");
+    state_file.with_file_name(format!("{stem}_corrupt.{timestamp}.{extension}"))
+}
+
+async fn recover_persisted_downloads_state(downloads: &DownloadQueue) -> Result<(), TuliproxError> {
+    match downloads.load_from_disk().await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+            if let Some(state_file) = downloads.state_file.as_ref() {
+                let corrupt_path = corrupt_downloads_state_path(state_file);
+                match tokio::fs::rename(state_file, &corrupt_path).await {
+                    Ok(()) => error!(
+                        "Persisted downloads state is corrupted. Renamed {} to {} and starting with an empty queue: {}",
+                        state_file.display(),
+                        corrupt_path.display(),
+                        err
+                    ),
+                    Err(rename_err) => error!(
+                        "Persisted downloads state is corrupted. Failed to rename {} to {}: {}. Starting with an empty queue anyway: {}",
+                        state_file.display(),
+                        corrupt_path.display(),
+                        rename_err,
+                        err
+                    ),
+                }
+            } else {
+                error!("Persisted downloads state is corrupted. Starting with an empty queue: {err}");
+            }
+            Ok(())
+        }
+        Err(err) => Err(TuliproxError::new(
+            shared::error::TuliproxErrorKind::Info,
+            format!("Failed to load persisted downloads: {err}"),
+        )),
+    }
+}
 
 fn collect_rescheduled_targets(
     targets_set: &HashSet<String>,
@@ -269,36 +310,16 @@ async fn create_shared_data(
             manual_update_sender,
         };
 
-    app_state.downloads.load_from_disk().await.map_err(|err| {
-        TuliproxError::new(shared::error::TuliproxErrorKind::Info, format!("Failed to load persisted downloads: {err}"))
-    })?;
+    recover_persisted_downloads_state(&app_state.downloads).await?;
 
     if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
-        crate::api::endpoints::download_api::start_download_scheduler(
-            Arc::clone(app_config),
-            Arc::clone(&app_state.downloads),
-            Arc::clone(&app_state.event_manager),
-            Arc::clone(&app_state.active_provider),
-            Arc::clone(&app_state.connection_manager),
-        );
-
-        if !app_state.downloads.queue.lock().await.is_empty() || app_state.downloads.active.read().await.is_some() {
-            crate::api::endpoints::download_api::ensure_download_worker_running(
-                app_config,
-                download_cfg,
-                &app_state.downloads,
-                &app_state.event_manager,
-                &app_state.active_provider,
-                &app_state.connection_manager,
+        crate::api::endpoints::download_api::spawn_download_services(&app_state, &app_state.cancel_tokens.load().downloads);
+        resume_download_worker_if_needed(&app_state, download_cfg).await.map_err(|err| {
+            TuliproxError::new(
+                shared::error::TuliproxErrorKind::Info,
+                format!("Failed to resume persisted downloads: {err}"),
             )
-                .await
-                .map_err(|err| {
-                    TuliproxError::new(
-                        shared::error::TuliproxErrorKind::Info,
-                        format!("Failed to resume persisted downloads: {err}"),
-                    )
-                })?;
-        }
+        })?;
     }
 
     Ok((app_state, manual_update_rx))
@@ -335,11 +356,46 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.file_watch.cancel();
     cancel_tokens.provider_dns.cancel();
     cancel_tokens.qos_aggregation.cancel();
+    cancel_tokens.downloads.cancel();
     app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
     app_state.metadata_manager.shutdown();
     app_state.connection_manager.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
+    use crate::api::model::DownloadQueue;
+    use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+
+    fn temp_state_file(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
+    }
+
+    #[tokio::test]
+    async fn recover_persisted_downloads_state_renames_corrupt_file_and_continues() {
+        let state_file = temp_state_file("corrupt_downloads_state");
+        std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
+        let expected_corrupt_path = corrupt_downloads_state_path(&state_file);
+        let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+
+        recover_persisted_downloads_state(&downloads).await.expect("recovery should continue");
+
+        assert!(!state_file.exists());
+        assert!(expected_corrupt_path.exists());
+        assert!(downloads.queue.lock().await.is_empty());
+        assert!(downloads.scheduled.read().await.is_empty());
+        assert!(downloads.active.read().await.is_none());
+        assert!(downloads.finished.read().await.is_empty());
+
+        let _ = std::fs::remove_file(expected_corrupt_path);
+    }
 }
 
 fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {

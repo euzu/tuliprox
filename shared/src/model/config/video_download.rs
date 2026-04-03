@@ -4,22 +4,25 @@ use crate::{
     utils::{
         default_download_dir, default_episode_pattern, default_supported_video_extensions, is_blank_optional_str,
         is_blank_optional_string, is_blank_or_default_download_dir, is_blank_or_default_episode_pattern,
-        is_default_supported_video_extensions, is_false, DEFAULT_USER_AGENT,
+        is_default_supported_video_extensions, is_false, DEFAULT_USER_AGENT, F64_DEFAULT_EPSILON,
     },
 };
 use std::{borrow::BorrowMut, collections::HashMap};
 
-const fn default_retry_backoff_step_1_secs() -> u64 { 3 }
-const fn default_retry_backoff_step_2_secs() -> u64 { 10 }
-const fn default_retry_backoff_step_3_secs() -> u64 { 30 }
+const fn default_retry_backoff_initial_secs() -> u64 { 3 }
+const fn default_retry_backoff_multiplier() -> f64 { 3.0 }
+const fn default_retry_backoff_max_secs() -> u64 { 30 }
 const fn default_retry_backoff_jitter_percent() -> u8 { 20 }
 const fn default_retry_max_attempts() -> u8 { 5 }
-fn is_default_retry_backoff_step_1_secs(value: &u64) -> bool { *value == default_retry_backoff_step_1_secs() }
-fn is_default_retry_backoff_step_2_secs(value: &u64) -> bool { *value == default_retry_backoff_step_2_secs() }
-fn is_default_retry_backoff_step_3_secs(value: &u64) -> bool { *value == default_retry_backoff_step_3_secs() }
+fn is_default_retry_backoff_initial_secs(value: &u64) -> bool { *value == default_retry_backoff_initial_secs() }
+fn is_default_retry_backoff_multiplier(value: &f64) -> bool {
+    (*value - default_retry_backoff_multiplier()).abs() < F64_DEFAULT_EPSILON
+}
+fn is_default_retry_backoff_max_secs(value: &u64) -> bool { *value == default_retry_backoff_max_secs() }
 fn is_default_retry_backoff_jitter_percent(value: &u8) -> bool { *value == default_retry_backoff_jitter_percent() }
 fn is_default_retry_max_attempts(value: &u8) -> bool { *value == default_retry_max_attempts() }
 fn is_zero_u8(value: &u8) -> bool { *value == 0 }
+fn is_zero_i8(value: &i8) -> bool { *value == 0 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -32,29 +35,23 @@ pub struct VideoDownloadConfigDto {
     pub organize_into_directories: bool,
     #[serde(default = "default_episode_pattern", skip_serializing_if = "is_blank_or_default_episode_pattern")]
     pub episode_pattern: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_i8")]
     pub download_priority: i8,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_i8")]
     pub recording_priority: i8,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub reserve_slots_for_users: u8,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub max_background_per_provider: u8,
     #[serde(
-        default = "default_retry_backoff_step_1_secs",
-        skip_serializing_if = "is_default_retry_backoff_step_1_secs"
+        default = "default_retry_backoff_initial_secs",
+        skip_serializing_if = "is_default_retry_backoff_initial_secs"
     )]
-    pub retry_backoff_step_1_secs: u64,
-    #[serde(
-        default = "default_retry_backoff_step_2_secs",
-        skip_serializing_if = "is_default_retry_backoff_step_2_secs"
-    )]
-    pub retry_backoff_step_2_secs: u64,
-    #[serde(
-        default = "default_retry_backoff_step_3_secs",
-        skip_serializing_if = "is_default_retry_backoff_step_3_secs"
-    )]
-    pub retry_backoff_step_3_secs: u64,
+    pub retry_backoff_initial_secs: u64,
+    #[serde(default = "default_retry_backoff_multiplier", skip_serializing_if = "is_default_retry_backoff_multiplier")]
+    pub retry_backoff_multiplier: f64,
+    #[serde(default = "default_retry_backoff_max_secs", skip_serializing_if = "is_default_retry_backoff_max_secs")]
+    pub retry_backoff_max_secs: u64,
     #[serde(
         default = "default_retry_backoff_jitter_percent",
         skip_serializing_if = "is_default_retry_backoff_jitter_percent"
@@ -70,11 +67,13 @@ impl VideoDownloadConfigDto {
             && self.headers.is_empty()
             && is_blank_or_default_download_dir(&self.directory)
             && is_blank_or_default_episode_pattern(&self.episode_pattern)
+            && self.download_priority == 0
+            && self.recording_priority == 0
             && self.reserve_slots_for_users == 0
             && self.max_background_per_provider == 0
-            && is_default_retry_backoff_step_1_secs(&self.retry_backoff_step_1_secs)
-            && is_default_retry_backoff_step_2_secs(&self.retry_backoff_step_2_secs)
-            && is_default_retry_backoff_step_3_secs(&self.retry_backoff_step_3_secs)
+            && is_default_retry_backoff_initial_secs(&self.retry_backoff_initial_secs)
+            && is_default_retry_backoff_multiplier(&self.retry_backoff_multiplier)
+            && is_default_retry_backoff_max_secs(&self.retry_backoff_max_secs)
             && is_default_retry_backoff_jitter_percent(&self.retry_backoff_jitter_percent)
             && is_default_retry_max_attempts(&self.retry_max_attempts)
     }
@@ -140,9 +139,9 @@ impl VideoConfigDto {
                     }
                 }
 
-                downl.retry_backoff_step_1_secs = downl.retry_backoff_step_1_secs.max(1);
-                downl.retry_backoff_step_2_secs = downl.retry_backoff_step_2_secs.max(1);
-                downl.retry_backoff_step_3_secs = downl.retry_backoff_step_3_secs.max(1);
+                downl.retry_backoff_initial_secs = downl.retry_backoff_initial_secs.max(1);
+                downl.retry_backoff_multiplier = downl.retry_backoff_multiplier.max(1.0);
+                downl.retry_backoff_max_secs = downl.retry_backoff_max_secs.max(downl.retry_backoff_initial_secs);
                 downl.retry_backoff_jitter_percent = downl.retry_backoff_jitter_percent.min(95);
                 downl.retry_max_attempts = downl.retry_max_attempts.max(1);
             }
@@ -169,9 +168,9 @@ mod tests {
                 recording_priority: 0,
                 reserve_slots_for_users: 0,
                 max_background_per_provider: 0,
-                retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
-                retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
-                retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+                retry_backoff_multiplier: default_retry_backoff_multiplier(),
+                retry_backoff_max_secs: default_retry_backoff_max_secs(),
                 retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
                 retry_max_attempts: default_retry_max_attempts(),
             }),
@@ -195,9 +194,9 @@ mod tests {
                 recording_priority: 0,
                 reserve_slots_for_users: 0,
                 max_background_per_provider: 0,
-                retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
-                retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
-                retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+                retry_backoff_multiplier: default_retry_backoff_multiplier(),
+                retry_backoff_max_secs: default_retry_backoff_max_secs(),
                 retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
                 retry_max_attempts: default_retry_max_attempts(),
             }),
@@ -221,9 +220,9 @@ mod tests {
                 recording_priority: 0,
                 reserve_slots_for_users: 0,
                 max_background_per_provider: 0,
-                retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
-                retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
-                retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+                retry_backoff_multiplier: default_retry_backoff_multiplier(),
+                retry_backoff_max_secs: default_retry_backoff_max_secs(),
                 retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
                 retry_max_attempts: default_retry_max_attempts(),
             }),
@@ -245,9 +244,9 @@ mod tests {
             recording_priority: 0,
             reserve_slots_for_users: 0,
             max_background_per_provider: 0,
-            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
-            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
-            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            retry_backoff_max_secs: default_retry_backoff_max_secs(),
             retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
             retry_max_attempts: default_retry_max_attempts(),
         };
@@ -269,9 +268,9 @@ mod tests {
             recording_priority: 0,
             reserve_slots_for_users: 0,
             max_background_per_provider: 0,
-            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
-            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
-            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            retry_backoff_max_secs: default_retry_backoff_max_secs(),
             retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
             retry_max_attempts: default_retry_max_attempts(),
         };
@@ -290,9 +289,9 @@ mod tests {
             recording_priority: 0,
             reserve_slots_for_users: 0,
             max_background_per_provider: 0,
-            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
-            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
-            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            retry_backoff_max_secs: default_retry_backoff_max_secs(),
             retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
             retry_max_attempts: default_retry_max_attempts(),
         };
@@ -316,9 +315,9 @@ mod tests {
                 recording_priority: 0,
                 reserve_slots_for_users: 0,
                 max_background_per_provider: 0,
-                retry_backoff_step_1_secs: 3,
-                retry_backoff_step_2_secs: 12,
-                retry_backoff_step_3_secs: 45,
+                retry_backoff_initial_secs: 3,
+                retry_backoff_multiplier: 2.5,
+                retry_backoff_max_secs: 45,
                 retry_backoff_jitter_percent: 0,
                 retry_max_attempts: 7,
             }),
@@ -327,9 +326,9 @@ mod tests {
 
         video.prepare().expect("prepare should succeed");
         let download = video.download.expect("download should exist");
-        assert_eq!(download.retry_backoff_step_1_secs, 3);
-        assert_eq!(download.retry_backoff_step_2_secs, 12);
-        assert_eq!(download.retry_backoff_step_3_secs, 45);
+        assert_eq!(download.retry_backoff_initial_secs, 3);
+        assert!((download.retry_backoff_multiplier - 2.5).abs() < F64_DEFAULT_EPSILON);
+        assert_eq!(download.retry_backoff_max_secs, 45);
         assert_eq!(download.retry_backoff_jitter_percent, 0);
         assert_eq!(download.retry_max_attempts, 7);
     }
@@ -345,17 +344,17 @@ mod tests {
             recording_priority: 0,
             reserve_slots_for_users: 0,
             max_background_per_provider: 0,
-            retry_backoff_step_1_secs: 4,
-            retry_backoff_step_2_secs: 15,
-            retry_backoff_step_3_secs: 60,
+            retry_backoff_initial_secs: 4,
+            retry_backoff_multiplier: 2.0,
+            retry_backoff_max_secs: 60,
             retry_backoff_jitter_percent: 10,
             retry_max_attempts: 6,
         };
 
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
-        assert!(serialized.contains("\"retry_backoff_step_1_secs\":4"));
-        assert!(serialized.contains("\"retry_backoff_step_2_secs\":15"));
-        assert!(serialized.contains("\"retry_backoff_step_3_secs\":60"));
+        assert!(serialized.contains("\"retry_backoff_initial_secs\":4"));
+        assert!(serialized.contains("\"retry_backoff_multiplier\":2.0"));
+        assert!(serialized.contains("\"retry_backoff_max_secs\":60"));
         assert!(serialized.contains("\"retry_backoff_jitter_percent\":10"));
         assert!(serialized.contains("\"retry_max_attempts\":6"));
     }
@@ -371,9 +370,9 @@ mod tests {
             recording_priority: 0,
             reserve_slots_for_users: 1,
             max_background_per_provider: 2,
-            retry_backoff_step_1_secs: default_retry_backoff_step_1_secs(),
-            retry_backoff_step_2_secs: default_retry_backoff_step_2_secs(),
-            retry_backoff_step_3_secs: default_retry_backoff_step_3_secs(),
+            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            retry_backoff_max_secs: default_retry_backoff_max_secs(),
             retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
             retry_max_attempts: default_retry_max_attempts(),
         };
@@ -381,5 +380,60 @@ mod tests {
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(serialized.contains("\"reserve_slots_for_users\":1"));
         assert!(serialized.contains("\"max_background_per_provider\":2"));
+    }
+
+    #[test]
+    fn clean_preserves_download_block_when_non_zero_priorities_are_set() {
+        let mut video = VideoConfigDto {
+            extensions: Vec::new(),
+            download: Some(VideoDownloadConfigDto {
+                headers: HashMap::new(),
+                directory: None,
+                organize_into_directories: false,
+                episode_pattern: None,
+                download_priority: -2,
+                recording_priority: 3,
+                reserve_slots_for_users: 0,
+                max_background_per_provider: 0,
+                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+                retry_backoff_multiplier: default_retry_backoff_multiplier(),
+                retry_backoff_max_secs: default_retry_backoff_max_secs(),
+                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+                retry_max_attempts: default_retry_max_attempts(),
+            }),
+            web_search: None,
+        };
+
+        video.clean();
+
+        assert!(video.download.is_some());
+    }
+
+    #[test]
+    fn serializing_keeps_non_zero_priorities_and_skips_zero_priorities() {
+        let non_zero = VideoDownloadConfigDto {
+            headers: HashMap::new(),
+            directory: None,
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: -1,
+            recording_priority: 2,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            retry_backoff_max_secs: default_retry_backoff_max_secs(),
+            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+            retry_max_attempts: default_retry_max_attempts(),
+        };
+        let zero = VideoDownloadConfigDto { download_priority: 0, recording_priority: 0, ..non_zero.clone() };
+
+        let non_zero_serialized = serde_json::to_string(&non_zero).expect("non-zero priorities serialize");
+        let zero_serialized = serde_json::to_string(&zero).expect("zero priorities serialize");
+
+        assert!(non_zero_serialized.contains("\"download_priority\":-1"));
+        assert!(non_zero_serialized.contains("\"recording_priority\":2"));
+        assert!(!zero_serialized.contains("\"download_priority\""));
+        assert!(!zero_serialized.contains("\"recording_priority\""));
     }
 }

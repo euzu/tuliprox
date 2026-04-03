@@ -2,16 +2,18 @@ use crate::model::VideoDownloadConfig;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use shared::model::{FileDownloadDto, TaskKindDto, TaskPriorityDto, TransferStatusDto};
-use shared::utils::{deunicode_string, hash_string_as_hex, CONSTANTS, FILENAME_TRIM_PATTERNS};
+use shared::utils::{deunicode_string, CONSTANTS, FILENAME_TRIM_PATTERNS};
 use std::{
     collections::VecDeque,
     ffi::OsStr,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
     sync::{atomic::{AtomicU64, Ordering}, Arc},
 };
 use tokio::{fs, sync::{Mutex, Notify, RwLock}};
 
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
+static DOWNLOAD_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// File-Download information.
 #[derive(Clone, Debug)]
@@ -115,6 +117,7 @@ pub enum DownloadControl {
     None,
     Pause,
     Cancel,
+    Restart,
 }
 
 /// Returns the directory for th file download.
@@ -144,6 +147,14 @@ fn get_download_directory(download_cfg: &VideoDownloadConfig, filestem: &str) ->
     } else {
         PathBuf::from(download_cfg.directory.as_str())
     }
+}
+
+fn generate_download_task_id() -> String {
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let counter = DOWNLOAD_TASK_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{now_nanos:032x}{counter:016x}")
 }
 
 impl FileDownload {
@@ -184,7 +195,7 @@ impl FileDownload {
                 file_path.to_str()?;
 
                 Some(Self {
-                    uuid: hash_string_as_hex(req_url),
+                    uuid: generate_download_task_id(),
                     file_dir,
                     file_path,
                     filename,
@@ -218,20 +229,27 @@ impl FileDownload {
         priority: i8,
     ) -> Option<Self> {
         let mut recording = Self::new(req_url, req_filename, download_cfg, input_name, priority)?;
-        let identity = format!(
-            "{}:{}:{}:{}:{}",
-            "recording",
-            req_url,
-            recording.filename,
-            start_at,
-            duration_secs
-        );
-        recording.uuid = hash_string_as_hex(&identity);
         recording.state = DownloadState::Scheduled;
         recording.start_at = Some(start_at);
         recording.duration_secs = Some(duration_secs);
         recording.kind = DownloadKind::Recording;
         Some(recording)
+    }
+}
+
+impl FileDownload {
+    fn matches_existing_task(&self, other: &Self) -> bool {
+        if self.kind != other.kind {
+            return false;
+        }
+
+        match self.kind {
+            DownloadKind::Download => self.url == other.url || self.file_path == other.file_path,
+            DownloadKind::Recording => {
+                (self.url == other.url && self.start_at == other.start_at && self.duration_secs == other.duration_secs)
+                    || self.file_path == other.file_path
+            }
+        }
     }
 }
 
@@ -299,6 +317,7 @@ pub enum DownloadWaitOutcome {
     Signalled,
     Paused,
     Cancelled,
+    Restarted,
 }
 
 pub struct DownloadSlotWaitQueue {
@@ -347,6 +366,10 @@ impl DownloadSlotWaitQueue {
                         DownloadControl::Cancel => {
                             self.remove_waiter(waiter_id).await;
                             return DownloadWaitOutcome::Cancelled;
+                        }
+                        DownloadControl::Restart => {
+                            self.remove_waiter(waiter_id).await;
+                            return DownloadWaitOutcome::Restarted;
                         }
                         DownloadControl::None => {}
                     }
@@ -510,7 +533,8 @@ impl DownloadQueue {
         }
 
         let content = fs::read_to_string(state_file).await?;
-        let persisted: PersistedDownloadQueue = serde_json::from_str(&content).map_err(std::io::Error::other)?;
+        let persisted: PersistedDownloadQueue =
+            serde_json::from_str(&content).map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
         let queue = persisted
             .queue
@@ -576,6 +600,43 @@ impl DownloadQueue {
         download
     }
 
+    pub async fn find_duplicate(&self, candidate: &FileDownload) -> Option<FileDownload> {
+        if let Some(active) = self.active.read().await.as_ref() {
+            if active.matches_existing_task(candidate) {
+                return Some(active.clone());
+            }
+        }
+
+        if let Some(queued) = self
+            .queue
+            .lock()
+            .await
+            .iter()
+            .find(|download| download.matches_existing_task(candidate))
+            .cloned()
+        {
+            return Some(queued);
+        }
+
+        if let Some(scheduled) = self
+            .scheduled
+            .read()
+            .await
+            .iter()
+            .find(|download| download.matches_existing_task(candidate))
+            .cloned()
+        {
+            return Some(scheduled);
+        }
+
+        self.finished
+            .read()
+            .await
+            .iter()
+            .find(|download| download.matches_existing_task(candidate))
+            .cloned()
+    }
+
     pub async fn pause_active(&self) {
         *self.control_signal.write().await = DownloadControl::Pause;
         self.control_notify.notify_waiters();
@@ -607,6 +668,20 @@ impl DownloadQueue {
             download.next_retry_at = None;
         }
         let _ = self.persist_to_disk().await;
+    }
+
+    pub fn request_worker_restart(&self) {
+        if let Ok(mut control) = self.control_signal.try_write() {
+            *control = DownloadControl::Restart;
+            self.control_notify.notify_waiters();
+            return;
+        }
+        let control_signal = Arc::clone(&self.control_signal);
+        let control_notify = Arc::clone(&self.control_notify);
+        tokio::spawn(async move {
+            *control_signal.write().await = DownloadControl::Restart;
+            control_notify.notify_waiters();
+        });
     }
 
     pub async fn remove_from_queue(&self, uuid: &str) -> bool {
@@ -696,6 +771,7 @@ impl DownloadQueue {
         drop(scheduled);
 
         let had_missed_recordings = !missed_recordings.is_empty();
+        let missed_count = missed_recordings.len();
         if had_missed_recordings {
             self.finished.write().await.extend(missed_recordings);
         }
@@ -703,13 +779,16 @@ impl DownloadQueue {
         if due_downloads.is_empty() {
             if had_missed_recordings {
                 let _ = self.persist_to_disk().await;
+                return missed_count;
             }
             return 0;
         }
 
         let due_count = due_downloads.len();
         let mut queue = self.queue.lock().await;
-        queue.extend(due_downloads);
+        for download in due_downloads.into_iter().rev() {
+            queue.push_front(download);
+        }
         drop(queue);
 
         let _ = self.persist_to_disk().await;
@@ -1148,7 +1227,7 @@ mod tests {
         queue.scheduled.write().await.push(expired);
         let promoted = queue.promote_due_scheduled(200).await;
 
-        assert_eq!(promoted, 0);
+        assert_eq!(promoted, 1);
         assert!(queue.queue.lock().await.is_empty());
         let finished = queue.finished.read().await.clone();
         assert_eq!(finished.len(), 1);
@@ -1210,9 +1289,9 @@ mod tests {
             recording_priority: 0,
             reserve_slots_for_users: 0,
             max_background_per_provider: 0,
-            retry_backoff_step_1_secs: 3,
-            retry_backoff_step_2_secs: 10,
-            retry_backoff_step_3_secs: 30,
+            retry_backoff_initial_secs: 3,
+            retry_backoff_multiplier: 3.0,
+            retry_backoff_max_secs: 30,
             retry_backoff_jitter_percent: 0,
             retry_max_attempts: 5,
         };
@@ -1239,6 +1318,105 @@ mod tests {
         .expect("second recording");
 
         assert_ne!(first.uuid, second.uuid);
+    }
+
+    #[test]
+    fn download_uuid_differs_for_same_url_with_different_filenames() {
+        let download_cfg = VideoDownloadConfig {
+            directory: "/tmp".to_string(),
+            organize_into_directories: false,
+            episode_pattern: None,
+            headers: std::collections::HashMap::new(),
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_initial_secs: 3,
+            retry_backoff_multiplier: 3.0,
+            retry_backoff_max_secs: 30,
+            retry_backoff_jitter_percent: 0,
+            retry_max_attempts: 5,
+        };
+
+        let first = FileDownload::new("https://example.com/video.mp4", "first.mp4", &download_cfg, None, 0)
+            .expect("first download");
+        let second = FileDownload::new("https://example.com/video.mp4", "second.mp4", &download_cfg, None, 0)
+            .expect("second download");
+
+        assert_ne!(first.uuid, second.uuid);
+    }
+
+    #[tokio::test]
+    async fn promote_due_scheduled_places_due_recordings_ahead_of_existing_queue_items() {
+        let queue = DownloadQueue::new();
+        queue.queue.lock().await.push_back(FileDownload {
+            uuid: "existing".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/existing.ts"),
+            filename: "existing.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/existing").expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Queued,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        });
+        queue.scheduled.write().await.extend([
+            FileDownload {
+                uuid: "due-first".to_string(),
+                file_dir: PathBuf::from("/tmp"),
+                file_path: PathBuf::from("/tmp/due-first.ts"),
+                filename: "due-first.ts".to_string(),
+                url: reqwest::Url::parse("https://example.com/live/due-first").expect("valid url"),
+                finished: false,
+                size: 0,
+                total_size: None,
+                paused: false,
+                error: None,
+                state: DownloadState::Scheduled,
+                start_at: Some(100),
+                duration_secs: Some(60),
+                kind: DownloadKind::Recording,
+                input_name: None,
+                priority: 0,
+                retry_attempts: 0,
+                next_retry_at: None,
+            },
+            FileDownload {
+                uuid: "due-second".to_string(),
+                file_dir: PathBuf::from("/tmp"),
+                file_path: PathBuf::from("/tmp/due-second.ts"),
+                filename: "due-second.ts".to_string(),
+                url: reqwest::Url::parse("https://example.com/live/due-second").expect("valid url"),
+                finished: false,
+                size: 0,
+                total_size: None,
+                paused: false,
+                error: None,
+                state: DownloadState::Scheduled,
+                start_at: Some(110),
+                duration_secs: Some(60),
+                kind: DownloadKind::Recording,
+                input_name: None,
+                priority: 0,
+                retry_attempts: 0,
+                next_retry_at: None,
+            },
+        ]);
+
+        let promoted = queue.promote_due_scheduled(150).await;
+
+        assert_eq!(promoted, 2);
+        let queued = queue.queue.lock().await.iter().map(|download| download.uuid.clone()).collect::<Vec<_>>();
+        assert_eq!(queued, vec!["due-first", "due-second", "existing"]);
     }
 
     #[tokio::test]
@@ -1299,5 +1477,154 @@ mod tests {
             timeout(Duration::from_millis(100), waiter_a).await.expect("waiter_a finished").expect("join ok"),
             DownloadWaitOutcome::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn find_duplicate_matches_active_queue_scheduled_and_finished_downloads() {
+        let queue = DownloadQueue::new();
+        let candidate = FileDownload {
+            uuid: "candidate".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/movie.mp4"),
+            filename: "movie.mp4".to_string(),
+            url: reqwest::Url::parse("https://example.com/movie.mp4").expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Queued,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Download,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        };
+
+        *queue.active.write().await = Some(FileDownload {
+            uuid: "active".to_string(),
+            ..candidate.clone()
+        });
+        assert_eq!(queue.find_duplicate(&candidate).await.map(|download| download.uuid), Some("active".to_string()));
+
+        *queue.active.write().await = None;
+        queue.queue.lock().await.push_back(FileDownload {
+            uuid: "queued".to_string(),
+            ..candidate.clone()
+        });
+        assert_eq!(queue.find_duplicate(&candidate).await.map(|download| download.uuid), Some("queued".to_string()));
+
+        queue.queue.lock().await.clear();
+        queue.scheduled.write().await.push(FileDownload {
+            uuid: "scheduled".to_string(),
+            state: DownloadState::Scheduled,
+            kind: DownloadKind::Recording,
+            start_at: Some(100),
+            duration_secs: Some(60),
+            url: reqwest::Url::parse("https://example.com/live/1").expect("valid url"),
+            file_path: PathBuf::from("/tmp/recording.ts"),
+            filename: "recording.ts".to_string(),
+            ..candidate.clone()
+        });
+        let recording_candidate = FileDownload {
+            uuid: "recording-candidate".to_string(),
+            state: DownloadState::Scheduled,
+            kind: DownloadKind::Recording,
+            start_at: Some(100),
+            duration_secs: Some(60),
+            url: reqwest::Url::parse("https://example.com/live/1").expect("valid url"),
+            file_path: PathBuf::from("/tmp/recording.ts"),
+            filename: "recording.ts".to_string(),
+            ..candidate.clone()
+        };
+        assert_eq!(
+            queue.find_duplicate(&recording_candidate).await.map(|download| download.uuid),
+            Some("scheduled".to_string())
+        );
+
+        queue.scheduled.write().await.clear();
+        queue.finished.write().await.push(FileDownload {
+            uuid: "finished".to_string(),
+            finished: true,
+            state: DownloadState::Completed,
+            ..candidate.clone()
+        });
+        assert_eq!(
+            queue.find_duplicate(&candidate).await.map(|download| download.uuid),
+            Some("finished".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn find_duplicate_allows_distinct_recording_windows() {
+        let queue = DownloadQueue::new();
+        queue.scheduled.write().await.push(FileDownload {
+            uuid: "scheduled".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/recording_1.ts"),
+            filename: "recording_1.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/1").expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Scheduled,
+            start_at: Some(100),
+            duration_secs: Some(60),
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        });
+
+        let different_window = FileDownload {
+            uuid: "candidate".to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from("/tmp/recording_2.ts"),
+            filename: "recording_2.ts".to_string(),
+            url: reqwest::Url::parse("https://example.com/live/1").expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Scheduled,
+            start_at: Some(200),
+            duration_secs: Some(60),
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+        };
+
+        assert!(queue.find_duplicate(&different_window).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_worker_restart_sets_restart_control_and_notifies_waiters() {
+        let queue = DownloadQueue::new();
+        let waiter_queue = Arc::clone(&queue.slot_waiters);
+        let control_signal = Arc::clone(&queue.control_signal);
+        let control_notify = Arc::clone(&queue.control_notify);
+
+        let waiter = tokio::spawn(async move {
+            waiter_queue
+                .wait(None, 0, control_signal.as_ref(), control_notify.as_ref())
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        queue.request_worker_restart();
+
+        assert_eq!(
+            timeout(Duration::from_millis(100), waiter).await.expect("waiter finished").expect("join ok"),
+            DownloadWaitOutcome::Restarted
+        );
+        assert_eq!(*queue.control_signal.read().await, DownloadControl::Restart);
     }
 }

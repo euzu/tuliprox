@@ -1,4 +1,5 @@
 use crate::api::model::{DownloadControl, FileDownload};
+use std::path::Path;
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -27,13 +28,28 @@ fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
         || msg.contains("timed out")
         || msg.contains("temporarily unavailable")
         || msg.contains("temporary failure")
+        || msg.contains("resource temporarily unavailable")
         || msg.contains("connection reset")
         || msg.contains("connection refused")
+        || msg.contains("connection closed")
+        || msg.contains("broken pipe")
+        || msg.contains("unexpected eof")
+        || msg.contains("end of file")
         || msg.contains("network is unreachable")
+        || msg.contains("no route to host")
+        || msg.contains("name or service not known")
+        || msg.contains("temporary failure in name resolution")
+        || msg.contains("could not resolve host")
+        || msg.contains("could not resolve")
+        || msg.contains("failed to resolve hostname")
         || msg.contains("server returned 5")
         || msg.contains("http error 5")
+        || msg.contains("http error 429")
+        || msg.contains("429 too many requests")
         || msg.contains("503 service unavailable")
         || msg.contains("502 bad gateway")
+        || msg.contains("504 gateway timeout")
+        || msg.contains("500 internal server error")
         || msg.contains("tls")
         || msg.contains("i/o error")
 }
@@ -91,7 +107,8 @@ pub fn recording_start_missed_window(download: &FileDownload, now_ts: i64) -> bo
         .is_some_and(|(start_at, duration_secs)| now_ts >= start_at.saturating_add(i64::try_from(duration_secs).unwrap_or(i64::MAX)))
 }
 
-pub async fn run_recording(
+async fn run_recording_with_binary(
+    ffmpeg_binary: &Path,
     download: &FileDownload,
     control_signal: &RwLock<DownloadControl>,
     control_notify: &Notify,
@@ -109,7 +126,7 @@ pub async fn run_recording(
         return RecordingExecutionResult::Failed(format!("Error while creating recording directory: {err}"));
     }
 
-    let mut command = tokio::process::Command::new("ffmpeg");
+    let mut command = tokio::process::Command::new(ffmpeg_binary);
     command
         .args(build_recording_args(download, effective_duration_secs))
         .stdout(std::process::Stdio::null())
@@ -137,6 +154,7 @@ pub async fn run_recording(
                 match *control_signal.read().await {
                     DownloadControl::Pause => return RecordingExecutionResult::Paused,
                     DownloadControl::Cancel => return RecordingExecutionResult::Cancelled,
+                    DownloadControl::Restart => return RecordingExecutionResult::Preempted,
                     DownloadControl::None => {}
                 }
             }
@@ -151,14 +169,25 @@ pub async fn run_recording(
     }
 }
 
+pub async fn run_recording(
+    download: &FileDownload,
+    control_signal: &RwLock<DownloadControl>,
+    control_notify: &Notify,
+    cancel_token: Option<&CancellationToken>,
+) -> RecordingExecutionResult {
+    run_recording_with_binary(Path::new("ffmpeg"), download, control_signal, control_notify, cancel_token).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         RecordingExecutionResult, build_recording_args, classify_ffmpeg_failure, recording_start_missed_window,
-        remaining_recording_duration_secs,
+        remaining_recording_duration_secs, run_recording_with_binary,
     };
-    use crate::api::model::{DownloadKind, DownloadState, FileDownload};
-    use std::path::PathBuf;
+    use crate::api::model::{DownloadControl, DownloadKind, DownloadState, FileDownload};
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+    use tokio::sync::{Notify, RwLock};
+    use tokio_util::sync::CancellationToken;
 
     fn make_recording(start_at: i64, duration_secs: u64) -> FileDownload {
         FileDownload {
@@ -223,5 +252,90 @@ mod tests {
     fn classify_ffmpeg_failure_keeps_terminal_usage_errors_failed() {
         let result = classify_ffmpeg_failure(b"Last message\nInvalid argument\n");
         assert_eq!(result, RecordingExecutionResult::Failed("Invalid argument".to_string()));
+    }
+
+    #[test]
+    fn classify_ffmpeg_failure_marks_broader_transient_network_errors_retryable() {
+        let result = classify_ffmpeg_failure(b"Last message\nCould not resolve host: example.com\n");
+        assert_eq!(
+            result,
+            RecordingExecutionResult::Retryable("Could not resolve host: example.com".to_string())
+        );
+    }
+
+    fn fake_ffmpeg_script(name: &str, body: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("tuliprox_fake_ffmpeg_{name}_{nanos}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let script_path = dir.join("ffmpeg");
+        fs::write(&script_path, body).expect("write fake ffmpeg");
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod");
+        script_path
+    }
+
+    #[tokio::test]
+    async fn run_recording_completes_with_fake_ffmpeg() {
+        let script = fake_ffmpeg_script(
+            "success",
+            "#!/bin/sh\nfor arg in \"$@\"; do output=\"$arg\"; done\nprintf 'recorded' > \"$output\"\nexit 0\n",
+        );
+        let control_signal = RwLock::new(DownloadControl::None);
+        let control_notify = Notify::new();
+        let recording = make_recording(chrono::Utc::now().timestamp(), 5);
+
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None).await;
+
+        assert_eq!(result, RecordingExecutionResult::Completed);
+        assert_eq!(tokio::fs::read(&recording.file_path).await.expect("read output"), b"recorded");
+        let _ = fs::remove_file(script);
+    }
+
+    #[tokio::test]
+    async fn run_recording_returns_retryable_for_fake_transient_ffmpeg_failure() {
+        let script = fake_ffmpeg_script(
+            "retryable",
+            "#!/bin/sh\nprintf 'Could not resolve host: upstream.example\\n' >&2\nexit 1\n",
+        );
+        let control_signal = RwLock::new(DownloadControl::None);
+        let control_notify = Notify::new();
+        let recording = make_recording(chrono::Utc::now().timestamp(), 5);
+
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None).await;
+
+        assert_eq!(
+            result,
+            RecordingExecutionResult::Retryable("Could not resolve host: upstream.example".to_string())
+        );
+        let _ = fs::remove_file(script);
+    }
+
+    #[tokio::test]
+    async fn run_recording_preempts_fake_ffmpeg_and_preserves_window_semantics() {
+        let script = fake_ffmpeg_script(
+            "preempt",
+            "#!/bin/sh\ntrap 'exit 0' TERM INT\nsleep 30\n",
+        );
+        let control_signal = RwLock::new(DownloadControl::None);
+        let control_notify = Notify::new();
+        let cancel_token = CancellationToken::new();
+        let recording = make_recording(chrono::Utc::now().timestamp().saturating_sub(2), 30);
+        let notify_cancel = cancel_token.clone();
+
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            notify_cancel.cancel();
+        });
+
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, Some(&cancel_token)).await;
+        cancel_task.await.expect("cancel task");
+
+        assert_eq!(result, RecordingExecutionResult::Preempted);
+        assert!(remaining_recording_duration_secs(&recording, chrono::Utc::now().timestamp()).is_some());
+        let _ = fs::remove_file(script);
     }
 }
