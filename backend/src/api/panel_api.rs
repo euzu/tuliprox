@@ -31,7 +31,6 @@ use shared::{
         SourcesConfigDto, VirtualId,
     },
     utils::{
-        default_kick_secs,
         get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, get_i64_from_serde_value,
         get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable,
         PROVIDER_SCHEME_PREFIX,
@@ -3487,13 +3486,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
     if stop_signal.is_cancelled() {
         return Ok(());
     }
-    let provisioning_kick_secs = app_state
-        .app_config
-        .config
-        .load()
-        .web_ui
-        .as_ref()
-        .map_or_else(default_kick_secs, |wc| wc.kick_secs);
+    let provisioning_kick_secs = 0;
 
     let Some(panel_cfg) = input.panel_api.as_ref() else {
         debug_if_enabled!(

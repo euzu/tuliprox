@@ -217,6 +217,7 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "disconnect_reason" => {
             // Match against serde rename_all = "snake_case" names
             RecordFieldValue::String(record.disconnect_reason.as_ref().map(|r| match r {
+                DisconnectReason::Cleanup => "cleanup",
                 DisconnectReason::ClientClosed => "client_closed",
                 DisconnectReason::ClientKicked => "client_kicked",
                 DisconnectReason::Provisioning => "provisioning",

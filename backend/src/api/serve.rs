@@ -7,7 +7,7 @@ use hyper_util::{
     server::conn::auto::Builder,
     service::TowerToHyperService,
 };
-use log::{debug, error, trace, warn};
+use log::{debug, error, trace};
 use socket2::{SockRef, TcpKeepalive};
 use std::{convert::Infallible, fmt::Debug, net::SocketAddr, pin::pin, sync::Arc, time::Duration};
 use tokio::sync::watch;
@@ -167,7 +167,7 @@ async fn handle_connection<M, S>(
                             break;
                         }
                         CloseConnectionSignal::WithReason(..) => {
-                            warn!("Unhandled CloseConnectionSignal");
+                            trace!("Ignored CloseConnectionSignal for a different connection");
                         }
                     }
                 }

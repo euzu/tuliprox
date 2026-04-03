@@ -88,7 +88,7 @@ impl Stream for TimedClientStream {
                             &addr,
                             virtual_id,
                             kick_secs,
-                            crate::repository::DisconnectReason::ClientClosed,
+                            crate::repository::DisconnectReason::Timeout,
                         )
                         .await;
                 });

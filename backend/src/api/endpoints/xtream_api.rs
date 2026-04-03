@@ -283,9 +283,18 @@ async fn xtream_player_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let admission = app_state
-            .get_connection_admission(&user.username, user.max_connections, user.soft_connections)
-            .await;
+        let admission = if (user.max_connections > 0 || user.soft_connections > 0)
+            && app_state.app_config.config.load().user_access_control
+        {
+            app_state
+                .get_connection_admission(&user.username, user.max_connections, user.soft_connections)
+                .await
+        } else {
+            crate::api::model::ConnectionAdmission {
+                permission: UserConnectionPermission::Allowed,
+                kind: Some(crate::api::model::ConnectionKind::Normal),
+            }
+        };
         let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
         return local_stream_response(
             fingerprint,

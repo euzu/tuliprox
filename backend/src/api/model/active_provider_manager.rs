@@ -2159,4 +2159,105 @@ mod tests {
         // Verify alloc_a handle can be safely released (already evicted - no-op)
         manager.release_handle(&alloc_a).await;
     }
+
+    #[tokio::test]
+    async fn test_normal_connection_preempts_existing_soft_connection() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let soft_addr: SocketAddr = "127.0.0.1:49011".parse().unwrap();
+        let normal_addr: SocketAddr = "127.0.0.1:49012".parse().unwrap();
+
+        let soft_alloc = manager
+            .acquire_connection(&input_name, &soft_addr, default_user_priority(), ConnectionKind::Soft)
+            .await
+            .expect("soft allocation");
+        let soft_token = soft_alloc.cancel_token.clone().expect("soft allocations expose a cancel token");
+
+        let normal_alloc = manager
+            .acquire_connection(&input_name, &normal_addr, default_user_priority(), ConnectionKind::Normal)
+            .await
+            .expect("normal allocation should preempt soft allocation");
+
+        tokio::task::yield_now().await;
+        assert!(soft_token.is_cancelled(), "soft allocation should be preempted by normal traffic");
+        assert_eq!(manager.get_provider_connections_count().await, 1);
+
+        manager.release_handle(&normal_alloc).await;
+    }
+
+    #[tokio::test]
+    async fn test_higher_priority_soft_preempts_lower_priority_soft() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let low_soft_addr: SocketAddr = "127.0.0.1:49013".parse().unwrap();
+        let high_soft_addr: SocketAddr = "127.0.0.1:49014".parse().unwrap();
+
+        let low_soft_alloc = manager
+            .acquire_connection(&input_name, &low_soft_addr, 10, ConnectionKind::Soft)
+            .await
+            .expect("low-priority soft allocation");
+        let low_soft_token = low_soft_alloc
+            .cancel_token
+            .clone()
+            .expect("soft allocations expose a cancel token");
+
+        let high_soft_alloc = manager
+            .acquire_connection(&input_name, &high_soft_addr, -5, ConnectionKind::Soft)
+            .await
+            .expect("higher-priority soft allocation should preempt lower-priority soft allocation");
+
+        tokio::task::yield_now().await;
+        assert!(low_soft_token.is_cancelled(), "lower-priority soft allocation should be preempted");
+        assert_eq!(manager.get_provider_connections_count().await, 1);
+
+        manager.release_handle(&high_soft_alloc).await;
+    }
+
+    #[tokio::test]
+    async fn test_reclassify_soft_to_normal_prevents_same_priority_preemption() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let promoted_addr: SocketAddr = "127.0.0.1:49015".parse().unwrap();
+        let challenger_addr: SocketAddr = "127.0.0.1:49016".parse().unwrap();
+
+        let promoted_alloc = manager
+            .acquire_connection(&input_name, &promoted_addr, default_user_priority(), ConnectionKind::Soft)
+            .await
+            .expect("initial soft allocation");
+        let promoted_token = promoted_alloc
+            .cancel_token
+            .clone()
+            .expect("soft allocations expose a cancel token");
+
+        assert!(
+            manager
+                .reclassify_connection(&promoted_addr, ConnectionKind::Normal, default_user_priority())
+                .await,
+            "soft allocation should be promotable to normal"
+        );
+
+        let challenger = manager
+            .acquire_connection_with_grace(
+                &input_name,
+                &challenger_addr,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+            )
+            .await;
+        assert!(challenger.is_none(), "same-priority normal traffic should not preempt a promoted normal connection");
+        assert!(!promoted_token.is_cancelled(), "promoted connection should remain active");
+        assert_eq!(manager.get_provider_connections_count().await, 1);
+
+        manager.release_handle(&promoted_alloc).await;
+    }
 }

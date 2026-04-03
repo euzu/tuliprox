@@ -501,5 +501,7 @@ mod tests {
         // Verify non-zero priority survives the store/load round-trip.
         let test4 = loaded.credentials.iter().find(|c| c.username == "Test4").unwrap();
         assert_eq!(test4.priority, -10);
+        assert_eq!(test4.soft_connections, 2);
+        assert_eq!(test4.soft_priority, -3);
     }
 }

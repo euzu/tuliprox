@@ -16,7 +16,7 @@ pub fn NoContent(props: &NoContentProps) -> Html {
             <div class="tp__no_content__indicator">
                <AppIcon name="Clear" />
             </div>
-            <label>{props.text.clone()}</label>
+            <p>{&props.text}</p>
         </div>
     }
 }

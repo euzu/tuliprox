@@ -84,17 +84,7 @@ pub(crate) enum CleanupEvent {
 }
 
 async fn handle_release_connection(deps: &CleanupWorkerDeps, addr: SocketAddr) {
-    let removed = deps.user_manager.release_connection(&addr).await;
-    for stream_info in &removed.removed_streams {
-        deps.event_manager.unregister_meter_client(stream_info.uid).await;
-    }
-    deps.provider_manager.release_connection(&addr).await;
-    deps.shared_stream_manager.release_connection(&addr, true).await;
-    if removed.addr_removed && !removed.removed_streams.is_empty() {
-        deps.event_manager
-            .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(addr)));
-    }
-    notify_capacity(deps.capacity_notify.as_ref());
+    release_connection_with_reason_from_deps(deps, &addr, &DisconnectReason::Cleanup, true).await;
 }
 
 async fn release_connection_with_reason(
@@ -103,12 +93,58 @@ async fn release_connection_with_reason(
     reason: &DisconnectReason,
     send_shared_stop_signal: bool,
 ) {
-    let removed = connection_manager.user_manager.release_connection(addr).await;
+    release_connection_parts(
+        &connection_manager.user_manager,
+        &connection_manager.provider_manager,
+        &connection_manager.shared_stream_manager,
+        &connection_manager.event_manager,
+        &connection_manager.capacity_notify,
+        &connection_manager.history_writer,
+        addr,
+        reason,
+        send_shared_stop_signal,
+    )
+    .await;
+}
+
+async fn release_connection_with_reason_from_deps(
+    deps: &CleanupWorkerDeps,
+    addr: &SocketAddr,
+    reason: &DisconnectReason,
+    send_shared_stop_signal: bool,
+) {
+    release_connection_parts(
+        &deps.user_manager,
+        &deps.provider_manager,
+        &deps.shared_stream_manager,
+        &deps.event_manager,
+        &deps.capacity_notify,
+        &deps.history_writer,
+        addr,
+        reason,
+        send_shared_stop_signal,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn release_connection_parts(
+    user_manager: &Arc<ActiveUserManager>,
+    provider_manager: &Arc<ActiveProviderManager>,
+    shared_stream_manager: &Arc<SharedStreamManager>,
+    event_manager: &Arc<EventManager>,
+    capacity_notify: &Arc<Notify>,
+    history_writer: &Arc<ArcSwapOption<StreamHistoryWriter>>,
+    addr: &SocketAddr,
+    reason: &DisconnectReason,
+    send_shared_stop_signal: bool,
+) {
+    let removed = user_manager.release_connection(addr).await;
     for stream_info in &removed.removed_streams {
-        let (bytes_sent, first_byte_latency_ms) = connection_manager.event_manager.read_meter_qos(stream_info.meter_uid).await;
-        connection_manager.event_manager.unregister_meter_client(stream_info.uid).await;
+        let (bytes_sent, first_byte_latency_ms) = event_manager.read_meter_qos(stream_info.meter_uid).await;
+        event_manager.unregister_meter_client(stream_info.uid).await;
         emit_disconnect_record(
-            &connection_manager.history_writer,
+            history_writer,
             stream_info,
             reason,
             &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
@@ -116,17 +152,12 @@ async fn release_connection_with_reason(
             None,
         );
     }
-    connection_manager.provider_manager.release_connection(addr).await;
-    connection_manager
-        .shared_stream_manager
-        .release_connection(addr, send_shared_stop_signal)
-        .await;
+    provider_manager.release_connection(addr).await;
+    shared_stream_manager.release_connection(addr, send_shared_stop_signal).await;
     if removed.addr_removed && !removed.removed_streams.is_empty() {
-        connection_manager
-            .event_manager
-            .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
     }
-    notify_capacity(connection_manager.capacity_notify.as_ref());
+    notify_capacity(capacity_notify.as_ref());
 }
 
 async fn handle_release_stream(

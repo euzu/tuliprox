@@ -158,19 +158,13 @@ impl UserConnectionData {
     }
 
     fn decrement_kind(&mut self, kind: ConnectionKind) {
-        if self.connections > 0 {
-            self.connections -= 1;
-        }
+        self.connections = self.connections.saturating_sub(1);
         match kind {
             ConnectionKind::Normal => {
-                if self.counts.normal > 0 {
-                    self.counts.normal -= 1;
-                }
+                self.counts.normal = self.counts.normal.saturating_sub(1);
             }
             ConnectionKind::Soft => {
-                if self.counts.soft > 0 {
-                    self.counts.soft -= 1;
-                }
+                self.counts.soft = self.counts.soft.saturating_sub(1);
             }
         }
     }

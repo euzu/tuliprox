@@ -580,8 +580,8 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         for (key, v1) in &tree {
             v4_tree.insert(key.clone(), StoredApiUserV4::from_v1(v1));
         }
-        v4_tree.store(db_path)?;
         create_user_db_merge_guard(merge_guard_path)?;
+        v4_tree.store(db_path)?;
         return Ok(true);
     }
 
@@ -590,8 +590,8 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         for (key, v2) in &tree {
             v4_tree.insert(key.clone(), StoredApiUserV4::from_v2(v2));
         }
-        v4_tree.store(db_path)?;
         create_user_db_merge_guard(merge_guard_path)?;
+        v4_tree.store(db_path)?;
         return Ok(true);
     }
 
@@ -600,8 +600,8 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         for (key, v3) in &tree {
             v4_tree.insert(key.clone(), StoredApiUserV4::from_v3(v3));
         }
-        v4_tree.store(db_path)?;
         create_user_db_merge_guard(merge_guard_path)?;
+        v4_tree.store(db_path)?;
         return Ok(true);
     }
 
