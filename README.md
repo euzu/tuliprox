@@ -50,6 +50,9 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Redirect Mode**: Lightweight redirection for resource-efficient operation
 - **Shared Live Streams**: One provider stream shared across multiple users — saves valuable provider slots
 - **User Connection Priority**: Higher-priority users evict lower-priority connections when all provider slots are full
+- **Soft Connections & Soft Priority**: Users can temporarily exceed their normal slot limit with preemptible soft slots;  
+  a dedicated `soft_priority` applies only while a connection is on a soft slot and automatically switches back to the normal  
+  priority when a regular slot becomes free again
 - **Grace Period**: Configurable transition window during connection handovers — no abrupt drops
 - **Bandwidth Throttling**: With flexible units (KB/s, MB/s, kbps, mbps)
 - **Per-Stream Metrics**: Bandwidth and transferred bytes per stream in the Web UI (opt-in)
@@ -148,7 +151,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Playlist Explorer**: Tree and gallery view for channels with EPG timeline and search
 - **Download & Recording Manager**: Provider-aware VOD downloads and live recordings with retries, fairness, and RBAC-controlled actions
 - **Config Editor**: Direct editing of config.yml, source.yml, mapping.yml in the browser
-- **User Management**: API users with category selection, priority, connection limits, auto-generated credentials
+- **User Management**: API users with category selection, priority, soft-priority, normal/soft connection limits, auto-generated credentials
 - **RBAC Admin Panel**: Tabbed user/group management, permission checkbox grid, write-without-read warnings
 - **Stream Table**: Real-time stream monitoring with copy-to-clipboard, bandwidth metrics, episode titles
 - **EPG View**: Timeline with channels, now-line, program details

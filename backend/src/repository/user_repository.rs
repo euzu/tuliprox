@@ -14,7 +14,7 @@ use std::io::Error;
 use std::path::{Path, PathBuf};
 use tokio::task;
 
-// V3 (current): added priority field. V1 and V2 are migrated to V3 at startup
+// V4 (current): added soft_connections and soft_priority. V1/V2/V3 are migrated to V4 at startup
 // by `bplustree_migration::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredProxyUserCredentials {
@@ -33,6 +33,8 @@ struct StoredProxyUserCredentials {
     pub ui_enabled: bool,
     pub comment: Option<String>,
     pub priority: Option<i8>,
+    pub soft_connections: Option<u16>,
+    pub soft_priority: Option<i8>,
 }
 
 impl StoredProxyUserCredentials {
@@ -53,6 +55,8 @@ impl StoredProxyUserCredentials {
             ui_enabled: proxy.ui_enabled,
             comment: proxy.comment.clone(),
             priority: if proxy.priority != 0 { Some(proxy.priority) } else { None },
+            soft_connections: if proxy.soft_connections > 0 { Some(proxy.soft_connections) } else { None },
+            soft_priority: if proxy.soft_priority != 0 { Some(proxy.soft_priority) } else { None },
         }
     }
 
@@ -72,6 +76,8 @@ impl StoredProxyUserCredentials {
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
             priority: stored.priority.unwrap_or(0),
+            soft_connections: stored.soft_connections.unwrap_or(0),
+            soft_priority: stored.soft_priority.unwrap_or(0),
             t_is_api_user: false,
         }
     }
@@ -396,6 +402,8 @@ mod tests {
                         ui_enabled: true,
                         comment: None,
                         priority: 0,
+                        soft_connections: 0,
+                        soft_priority: 0,
                         t_is_api_user: false,
                     },
                     ProxyUserCredentials {
@@ -413,6 +421,8 @@ mod tests {
                         ui_enabled: true,
                         comment: None,
                         priority: 0,
+                        soft_connections: 0,
+                        soft_priority: 0,
                         t_is_api_user: false,
                     },
                     ProxyUserCredentials {
@@ -430,6 +440,8 @@ mod tests {
                         ui_enabled: true,
                         comment: None,
                         priority: 0,
+                        soft_connections: 0,
+                        soft_priority: 0,
                         t_is_api_user: false,
                     },
                     ProxyUserCredentials {
@@ -447,6 +459,8 @@ mod tests {
                         ui_enabled: true,
                         comment: None,
                         priority: -10, // non-zero priority to verify round-trip serialization
+                        soft_connections: 2,
+                        soft_priority: -3,
                         t_is_api_user: false,
                     }
                 ],

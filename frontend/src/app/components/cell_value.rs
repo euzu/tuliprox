@@ -8,6 +8,8 @@ pub enum CellValue<'a> {
     Text(&'a str),
     Date(i64),
     I8(i8),
+    U16(u16),
+    U32(u32),
 }
 
 impl<'a> PartialOrd for CellValue<'a> {
@@ -23,6 +25,11 @@ impl<'a> Ord for CellValue<'a> {
             (CellValue::Proxy(a), CellValue::Proxy(b)) => a.cmp(b),
             (CellValue::Text(a), CellValue::Text(b)) => a.cmp(b),
             (CellValue::Date(a), CellValue::Date(b)) => a.cmp(b),
+            (CellValue::U16(a), CellValue::U16(b)) => a.cmp(b),
+            (CellValue::U32(a), CellValue::U32(b)) => a.cmp(b),
+            (CellValue::U16(a), CellValue::U32(b)) => u32::from(*a).cmp(b),
+            (CellValue::U32(a), CellValue::U16(b)) => a.cmp(&u32::from(*b)),
+            (CellValue::I8(a), CellValue::I8(b)) => a.cmp(b),
 
             (CellValue::Empty, _) => std::cmp::Ordering::Less,
             (CellValue::Bool(_), CellValue::Empty) => std::cmp::Ordering::Greater,
@@ -33,12 +40,16 @@ impl<'a> Ord for CellValue<'a> {
                 std::cmp::Ordering::Greater
             }
             (CellValue::Proxy(_), _) => std::cmp::Ordering::Less,
-            (CellValue::I8(a), CellValue::I8(b)) => a.cmp(b),
-            (CellValue::Text(_), CellValue::Date(_) | CellValue::I8(_)) => std::cmp::Ordering::Less,
+            (CellValue::Text(_), CellValue::Date(_) | CellValue::I8(_) | CellValue::U16(_) | CellValue::U32(_)) => {
+                std::cmp::Ordering::Less
+            }
             (CellValue::Text(_), _) => std::cmp::Ordering::Greater,
-            (CellValue::Date(_), CellValue::I8(_)) => std::cmp::Ordering::Less,
+            (CellValue::Date(_), CellValue::I8(_) | CellValue::U16(_) | CellValue::U32(_)) => std::cmp::Ordering::Less,
             (CellValue::Date(_), _) => std::cmp::Ordering::Greater,
+            (CellValue::I8(_), CellValue::U16(_) | CellValue::U32(_)) => std::cmp::Ordering::Less,
             (CellValue::I8(_), _) => std::cmp::Ordering::Greater,
+            (CellValue::U16(_), _) => std::cmp::Ordering::Greater,
+            (CellValue::U32(_), _) => std::cmp::Ordering::Greater,
         }
     }
 }

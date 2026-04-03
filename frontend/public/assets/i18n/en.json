@@ -574,6 +574,8 @@
       "EPG_TIMESHIFT": "TimeZone or offset (e.g. +2:00, Europe/Berlin) to adjust EPG times for this user.",
       "EXP_DATE": "Unix timestamp or 'YYYY-MM-DD' when this user access expires.",
       "MAX_CONNECTIONS": "Limit of simultaneous streams for this user. 0 = unlimited.",
+      "SOFT_CONNECTIONS": "Additional provider slots above max_connections. Soft connections can be preempted by any normal connection or by a higher-priority soft connection.",
+      "SOFT_PRIORITY": "Priority used while this user's connection is consuming a soft slot. Once promoted back to a normal slot, the regular priority applies again.",
       "PASSWORD": "Access password for this user's playlist and streams.",
       "PLAYLIST": "Playlist specifically assigned to the user proxy context.",
       "PROXY": "Proxy access definitions or roles for the designated user.",
@@ -1023,6 +1025,9 @@
     "MAX_BACKGROUND_PER_PROVIDER": "Max background per provider",
     "MAX_CON": "Max Con.",
     "MAX_CONNECTIONS": "Max Connections",
+    "SOFT_PRIORITY": "Soft Priority",
+    "SOFT_CONNECTIONS": "Soft Connections",
+    "SOFT_CON": "Soft Con.",
     "MEMORY": "Memory",
     "MESSAGE": "Message",
     "MESSAGING": "Messaging",
@@ -1248,6 +1253,7 @@
     "STREAM_HISTORY_QOS": "QoS Snapshot",
     "STREAM_HISTORY_REASON": "Reason",
     "STREAM_HISTORY_CONFIDENCE": "Confidence",
+    "CONTAINER": "Container",
     "STREAM_HISTORY_TIME": "Time",
     "STREAM_HISTORY_TO": "To",
     "STREAM_HISTORY_ENABLED": "Enable stream history",
@@ -1310,7 +1316,7 @@
     "USERNAME": "Username",
     "USERS": "Users",
     "USER_ACCESS_CONTROL": "User Access Control",
-    "USER_AGENT": "Player",
+    "USER_AGENT": "User Agent",
     "USER_CONFIG_DIR": "User Config dir",
     "USER_STATUS_ACTIVE": "Active",
     "USER_STATUS_BANNED": "Banned",
@@ -1410,6 +1416,12 @@
     "NO_CONTENT": "No content",
     "PLAYLIST": {
       "WEBPLAYER_URL_COPY_TO_CLIPBOARD": "The copied WebPlayer url is valid for 30 seconds."
+    },
+    "PLAYLIST_EXPLORER": {
+      "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content."
+    },
+    "EPG": {
+      "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content."
     },
     "RBAC": {
       "ADMIN_HINT": "User is Admin \u2014 additional groups have no effect.",

@@ -102,6 +102,7 @@ pub(crate) struct ActiveClientStreamParams<'a> {
     pub app_state: &'a Arc<AppState>,
     pub user: &'a ProxyUserCredentials,
     pub connection_permission: UserConnectionPermission,
+    pub connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
     pub fingerprint: &'a Fingerprint,
     pub stream_channel: StreamChannel,
     pub session_token: Option<&'a str>,
@@ -697,6 +698,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         app_state,
         user,
         connection_permission,
+        connection_kind,
         fingerprint,
         stream_channel,
         session_token,
@@ -721,6 +723,10 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             meter_uid,
             username,
             max_connections: user.max_connections,
+            soft_connections: user.soft_connections,
+            connection_kind,
+            priority: user.priority,
+            soft_priority: user.soft_priority,
             fingerprint,
             provider: provider_name,
             stream_channel: &stream_channel,
@@ -1288,7 +1294,13 @@ mod tests {
     ) {
         let deferred_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(provider_name, &deferred_addr, true, 0)
+            .acquire_exact_connection_with_grace(
+                provider_name,
+                &deferred_addr,
+                true,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await
             .expect("deferred client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(provider_name, deferred_handle);
@@ -1419,7 +1431,13 @@ mod tests {
 
         let holder_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &holder_addr, false, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &holder_addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await
             .expect("holder should consume the provider's live capacity");
         let (flag, grace_task, deferred_handle) =
@@ -1457,12 +1475,24 @@ mod tests {
 
         let holder_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &holder_addr, false, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &holder_addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await
             .expect("holder should consume the provider's live capacity");
         let deferred_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &deferred_addr, true, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &deferred_addr,
+                true,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await
             .expect("deferred client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(&provider_name, deferred_handle.clone());
@@ -1473,6 +1503,7 @@ mod tests {
             app_state: &app_state,
             user: &test_user,
             connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
             session_token: None,
@@ -1490,7 +1521,13 @@ mod tests {
 
         let third_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &third_addr, true, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &third_addr,
+                true,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await;
 
         assert!(
@@ -1512,12 +1549,24 @@ mod tests {
 
         let holder_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &holder_addr, false, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &holder_addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await
             .expect("holder should consume the provider's live capacity");
         let deferred_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &deferred_addr, true, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &deferred_addr,
+                true,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await
             .expect("deferred shared client should receive provider grace allocation");
         let stream_details = create_deferred_provider_grace_details(&provider_name, deferred_handle.clone());
@@ -1528,6 +1577,7 @@ mod tests {
             app_state: &app_state,
             user: &test_user,
             connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_shared_stream_channel(1, "http://provider-1.example/live/1"),
             session_token: None,
@@ -1545,7 +1595,13 @@ mod tests {
 
         let third_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &third_addr, true, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &third_addr,
+                true,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await;
 
         assert!(
@@ -1637,7 +1693,13 @@ mod tests {
 
         let holder_handle = app_state
             .active_provider
-            .acquire_exact_connection_with_grace(&provider_name, &holder_addr, false, 0)
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &holder_addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
             .await
             .expect("holder should consume the provider's live capacity");
         let (flag, grace_task, deferred_handle) =
@@ -1685,6 +1747,7 @@ mod tests {
             app_state: &app_state,
             user: &test_user,
             connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
             session_token: None,

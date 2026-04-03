@@ -814,7 +814,7 @@ pub fn PlaylistExplorer() -> Html {
     let render_categories = || {
         if playlist.is_none() {
             html! {
-                <NoContent/>
+                <NoContent text={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_TO_VIEW_CONTENT")} />
             }
         } else {
             html! {

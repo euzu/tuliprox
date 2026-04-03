@@ -24,6 +24,8 @@ pub struct ProxyUserCredentials {
     pub ui_enabled: bool,
     pub comment: Option<String>,
     pub priority: i8,
+    pub soft_connections: u16,
+    pub soft_priority: i8,
     pub t_is_api_user: bool,
 }
 
@@ -45,6 +47,8 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             ui_enabled: dto.ui_enabled,
             comment: dto.comment.clone(),
             priority: dto.priority,
+            soft_connections: dto.soft_connections,
+            soft_priority: dto.soft_priority,
             t_is_api_user: false,
         }
     }
@@ -67,6 +71,8 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             ui_enabled: instance.ui_enabled,
             comment: instance.comment.clone(),
             priority: instance.priority,
+            soft_connections: instance.soft_connections,
+            soft_priority: instance.soft_priority,
         }
     }
 }
@@ -111,8 +117,10 @@ impl ProxyUserCredentials {
 
     pub async fn connection_permission(&self, app_state: &AppState) -> UserConnectionPermission {
         let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
-        if self.max_connections > 0 && config.user_access_control {
-            return app_state.get_connection_permission(&self.username, self.max_connections).await;
+        if (self.max_connections > 0 || self.soft_connections > 0) && config.user_access_control {
+            return app_state
+                .get_connection_permission(&self.username, self.max_connections, self.soft_connections)
+                .await;
         }
         UserConnectionPermission::Allowed
     }

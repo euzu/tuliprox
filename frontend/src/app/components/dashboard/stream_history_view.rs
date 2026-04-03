@@ -11,7 +11,7 @@ use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-const NUM_COLS: usize = 11;
+const NUM_COLS: usize = 13;
 const SUMMARY_NUM_COLS: usize = 6;
 const QOS_SUMMARY_NUM_COLS: usize = 8;
 const QOS_DETAIL_NUM_COLS: usize = 8;
@@ -53,38 +53,7 @@ fn ts_to_date_str(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0).map_or_else(String::new, |dt| dt.format("%Y-%m-%d").to_string())
 }
 
-fn record_details(record: &StreamHistoryRecord) -> String {
-    let mut parts = Vec::new();
-    if let Some(user_agent) = record.user_agent.as_deref() {
-        parts.push(user_agent.to_string());
-    }
-    if let Some(cluster) = record.cluster.as_deref() {
-        parts.push(cluster.to_string());
-    }
-    if record.shared.unwrap_or(false) {
-        parts.push(String::from("shared"));
-    }
-    if let Some(container) = record.container.as_deref() {
-        parts.push(container.to_string());
-    }
-    if let Some(video_codec) = record.video_codec.as_deref() {
-        parts.push(video_codec.to_string());
-    }
-    if let Some(audio_codec) = record.audio_codec.as_deref() {
-        parts.push(audio_codec.to_string());
-    }
-    if let Some(resolution) = record.resolution.as_deref() {
-        parts.push(resolution.to_string());
-    }
-    if let Some(previous_session_id) = record.previous_session_id {
-        parts.push(format!("prev #{previous_session_id}"));
-    }
-    if parts.is_empty() {
-        String::from("-")
-    } else {
-        parts.join(" | ")
-    }
-}
+fn optional_record_text(value: Option<&str>) -> &str { value.unwrap_or("-") }
 
 fn record_matches(record: &StreamHistoryRecord, filter: &SearchRequest) -> bool {
     match filter {
@@ -96,7 +65,8 @@ fn record_matches(record: &StreamHistoryRecord, filter: &SearchRequest) -> bool 
                 record.title.as_deref().unwrap_or(""),
                 record.provider_name.as_deref().unwrap_or(""),
                 record.user_agent.as_deref().unwrap_or(""),
-                record.cluster.as_deref().unwrap_or(""),
+                record.item_type.as_deref().unwrap_or(""),
+                record.container.as_deref().unwrap_or(""),
                 record.video_codec.as_deref().unwrap_or(""),
                 record.audio_codec.as_deref().unwrap_or(""),
                 record.resolution.as_deref().unwrap_or(""),
@@ -113,7 +83,8 @@ fn record_matches(record: &StreamHistoryRecord, filter: &SearchRequest) -> bool 
                     record.title.as_deref().unwrap_or(""),
                     record.provider_name.as_deref().unwrap_or(""),
                     record.user_agent.as_deref().unwrap_or(""),
-                    record.cluster.as_deref().unwrap_or(""),
+                    record.item_type.as_deref().unwrap_or(""),
+                    record.container.as_deref().unwrap_or(""),
                     record.video_codec.as_deref().unwrap_or(""),
                     record.audio_codec.as_deref().unwrap_or(""),
                     record.resolution.as_deref().unwrap_or(""),
@@ -405,9 +376,11 @@ pub fn StreamHistoryView() -> Html {
                     5 => translate.t("LABEL.DURATION"),
                     6 => translate.t("LABEL.STREAM_HISTORY_BYTES"),
                     7 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
-                    8 => translate.t("LABEL.STREAM_HISTORY_DETAILS"),
-                    9 => translate.t("LABEL.STREAM_HISTORY_REASON"),
-                    10 => translate.t("LABEL.STREAM_HISTORY_IP"),
+                    8 => translate.t("LABEL.USER_AGENT"),
+                    9 => translate.t("LABEL.TYPE"),
+                    10 => translate.t("LABEL.CONTAINER"),
+                    11 => translate.t("LABEL.STREAM_HISTORY_REASON"),
+                    12 => translate.t("LABEL.STREAM_HISTORY_IP"),
                     _ => String::new(),
                 };
                 html! { <span>{label}</span> }
@@ -455,16 +428,26 @@ pub fn StreamHistoryView() -> Html {
                     </span>
                 },
                 8 => html! {
-                    <span>
-                        {record_details(&record)}
+                    <span class="tp__stream-history__cell--title">
+                        {optional_record_text(record.user_agent.as_deref())}
                     </span>
                 },
                 9 => html! {
                     <span>
-                        {record.disconnect_reason.as_deref().unwrap_or("-").replace('_', " ")}
+                        {optional_record_text(record.item_type.as_deref())}
                     </span>
                 },
                 10 => html! {
+                    <span>
+                        {optional_record_text(record.container.as_deref())}
+                    </span>
+                },
+                11 => html! {
+                    <span>
+                        {record.disconnect_reason.as_deref().unwrap_or("-").replace('_', " ")}
+                    </span>
+                },
+                12 => html! {
                     <span class="tp__stream-history__cell--ip">
                         {record.source_addr.as_deref().unwrap_or("-")}
                     </span>
@@ -665,7 +648,7 @@ pub fn StreamHistoryView() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_summary_rows, qos_detail_rows, qos_score_label, top_qos_snapshots};
+    use super::{optional_record_text, provider_summary_rows, qos_detail_rows, qos_score_label, top_qos_snapshots};
     use crate::services::{StreamHistoryProviderSummary, StreamHistoryQosSnapshot, StreamHistoryQosSnapshotWindow};
     use shared::model::SearchRequest;
 
@@ -772,5 +755,12 @@ mod tests {
         assert_eq!(qos_score_label(70), "good");
         assert_eq!(qos_score_label(50), "watch");
         assert_eq!(qos_score_label(10), "poor");
+    }
+
+    #[test]
+    fn optional_record_text_preserves_value_or_dash_fallback() {
+        assert_eq!(optional_record_text(Some("Lavf53.32.100")), "Lavf53.32.100");
+        assert_eq!(optional_record_text(Some("live")), "live");
+        assert_eq!(optional_record_text(None), "-");
     }
 }

@@ -23,7 +23,7 @@ use std::{cmp::Ordering, collections::HashSet, fmt::Display, rc::Rc, str::FromSt
 use yew::{platform::spawn_local, prelude::*};
 use yew_hooks::use_clipboard;
 
-const HEADERS: [&str; 17] = [
+const HEADERS: [&str; 19] = [
     "LABEL.EMPTY",
     "LABEL.ENABLED",
     "LABEL.STATUS",
@@ -34,7 +34,9 @@ const HEADERS: [&str; 17] = [
     "LABEL.PROXY",
     "LABEL.SERVER",
     "LABEL.MAX_CON",
+    "LABEL.SOFT_CON",
     "LABEL.PRIORITY",
+    "LABEL.SOFT_PRIORITY",
     "LABEL.UI_ENABLED",
     "LABEL.EPG_TIMESHIFT",
     "LABEL.EPG_REQUEST_TIMESHIFT",
@@ -51,14 +53,17 @@ fn get_cell_value(user: &TargetUser, col: usize) -> CellValue<'_> {
         4 => CellValue::Text(user.credentials.username.as_str()),
         7 => CellValue::Proxy(user.credentials.proxy),
         8 => user.credentials.server.as_ref().map_or(CellValue::Empty, |s| CellValue::Text(s)),
-        10 => CellValue::I8(user.credentials.priority),
-        14 => user.credentials.created_at.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
-        15 => user.credentials.exp_date.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
+        9 => CellValue::U32(user.credentials.max_connections),
+        10 => CellValue::U16(user.credentials.soft_connections),
+        11 => CellValue::I8(user.credentials.priority),
+        12 => CellValue::I8(user.credentials.soft_priority),
+        16 => user.credentials.created_at.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
+        17 => user.credentials.exp_date.as_ref().map_or(CellValue::Empty, |d| CellValue::Date(*d)),
         _ => CellValue::Empty,
     }
 }
 
-fn is_col_sortable(col: usize) -> bool { matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 10 | 14 | 15) }
+fn is_col_sortable(col: usize) -> bool { matches!(col, 1 | 2 | 3 | 4 | 7 | 8 | 9 | 10 | 11 | 12 | 16 | 17) }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum TableAction {
@@ -206,18 +211,20 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                     7 => html! {<ProxyTypeView value={dto.credentials.proxy} /> },
                     8 => dto.credentials.server.as_ref().map_or_else(|| html! {}, |s| html! { s }),
                     9 => html! { <MaxConnections value={dto.credentials.max_connections} /> },
-                    10 => html! { <span class="tp__table__number-cell">{ dto.credentials.priority }</span> },
-                    11 => html! { <Chip class={ convert_bool_to_chip_style(dto.credentials.ui_enabled ) }
+                    10 => html! { <span class="tp__table__number-cell">{ dto.credentials.soft_connections }</span> },
+                    11 => html! { <span class="tp__table__number-cell">{ dto.credentials.priority }</span> },
+                    12 => html! { <span class="tp__table__number-cell">{ dto.credentials.soft_priority }</span> },
+                    13 => html! { <Chip class={ convert_bool_to_chip_style(dto.credentials.ui_enabled ) }
                                    label={if dto.credentials.ui_enabled {translator.t("LABEL.ENABLED")} else { translator.t("LABEL.DISABLED")} }
                                     />  },
-                    12 => dto.credentials.epg_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
-                    13 => dto.credentials.epg_request_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
-                    14 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts))
+                    14 => dto.credentials.epg_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
+                    15 => dto.credentials.epg_request_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
+                    16 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts))
                         .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
-                    15 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
+                    17 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
                         .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
                         .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
-                    16 => dto.credentials.comment.as_ref()
+                    18 => dto.credentials.comment.as_ref()
                         .map_or_else(|| html! {},
                                      |comment| html! { <RevealContent preview={Some(html! {comment.substring(0, 50)})}>{comment}</RevealContent> }),
                     _ => html! {""},

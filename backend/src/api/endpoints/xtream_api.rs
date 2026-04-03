@@ -283,7 +283,9 @@ async fn xtream_player_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let connection_permission = user.connection_permission(app_state).await;
+        let admission = app_state
+            .get_connection_admission(&user.username, user.max_connections, user.soft_connections)
+            .await;
         let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
         return local_stream_response(
             fingerprint,
@@ -293,7 +295,8 @@ async fn xtream_player_api_stream(
             &input,
             &target,
             &user,
-            connection_permission,
+            admission.permission,
+            admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
             Some(playback_session_token.as_str()),
             true,
         )
@@ -367,7 +370,28 @@ async fn xtream_player_api_stream(
         pli.url.clone()
     };
 
-    let connection_permission = user.connection_permission(app_state).await;
+    let connection_admission = if (user.max_connections > 0 || user.soft_connections > 0)
+        && app_state.app_config.config.load().user_access_control
+    {
+        app_state
+            .get_connection_admission_for_session(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                &session_key,
+            )
+            .await
+    } else {
+        crate::api::model::ConnectionAdmission {
+            permission: UserConnectionPermission::Allowed,
+            kind: user_session.as_ref().and_then(|session| session.connection_kind),
+        }
+    };
+    let connection_permission = connection_admission.permission;
+    let connection_kind = connection_admission
+        .kind
+        .or(user_session.as_ref().and_then(|session| session.connection_kind))
+        .unwrap_or(crate::api::model::ConnectionKind::Normal);
     let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
         is_stream_share_enabled(item_type, &target),
         user_session.as_ref(),
@@ -429,6 +453,7 @@ async fn xtream_player_api_stream(
             &input,
             req_headers,
             connection_permission,
+            connection_kind,
         )
         .await
         .into_response();
@@ -447,6 +472,7 @@ async fn xtream_player_api_stream(
         &target,
         &user,
         connection_permission,
+        connection_kind,
         allow_exhausted_shared_reconnect,
     )
     .await
@@ -535,6 +561,7 @@ async fn xtream_player_api_stream_with_token(
                 &target,
                 &user,
                 UserConnectionPermission::Allowed,
+                crate::api::model::ConnectionKind::Normal,
                 Some(playback_session_token.as_str()),
                 true,
             )
@@ -563,6 +590,7 @@ async fn xtream_player_api_stream_with_token(
                 &input,
                 req_headers,
                 UserConnectionPermission::Allowed,
+                crate::api::model::ConnectionKind::Normal,
             )
             .await
             .into_response();
@@ -591,6 +619,7 @@ async fn xtream_player_api_stream_with_token(
             &target,
             &user,
             UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
             false,
         )
         .await

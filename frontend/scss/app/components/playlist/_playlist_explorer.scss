@@ -27,7 +27,7 @@ $series-backdrop-mobile-height: 150px;
       height: $height;
       width: $width;
       box-sizing: border-box;
-      object-fit: cover;
+      object-fit: contain;
       object-position: center;
       overflow: hidden;
       border-radius: $border-radius;
