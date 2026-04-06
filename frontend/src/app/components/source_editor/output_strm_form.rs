@@ -10,8 +10,9 @@ use crate::{
 use shared::{
     error::TuliproxError,
     model::{StrmExportStyle, StrmTargetOutputDto, TargetOutputDto},
+    utils::Internable,
 };
-use std::{fmt::Display, rc::Rc, str::FromStr};
+use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
 use yew::{
     component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
     UseReducerHandle,
@@ -63,6 +64,16 @@ impl Display for StrmFormPage {
                 StrmFormPage::Options => Self::OPTIONS,
             }
         )
+    }
+}
+
+impl Internable for StrmFormPage {
+    fn intern(self) -> Arc<str> {
+        match self {
+            Self::Main => Self::MAIN,
+            Self::Options => Self::OPTIONS,
+        }
+        .intern()
     }
 }
 
@@ -222,10 +233,10 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
         html! {
             <div class="tp__source-editor-form__body">
                 <div class="tp__source-editor-form__body__pages">
-                    <Panel value={StrmFormPage::Main.to_string()} active={view_visible.to_string()}>
+                    <Panel value={StrmFormPage::Main.intern()} active={view_visible.intern()}>
                         {render_main()}
                     </Panel>
-                    <Panel value={StrmFormPage::Options.to_string()} active={view_visible.to_string()}>
+                    <Panel value={StrmFormPage::Options.intern()} active={view_visible.intern()}>
                         {render_options()}
                     </Panel>
                 </div>

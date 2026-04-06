@@ -10,11 +10,10 @@ use crate::{
 use shared::{
     error::TuliproxError,
     model::{PlaylistBouquetDto, PlaylistCategoriesDto, PlaylistClusterBouquetDto},
+    utils::Internable,
 };
-use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc, str::FromStr};
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc, str::FromStr, sync::Arc};
 use yew::prelude::*;
-use shared::utils::Internable;
 
 const XTREAM: &str = "xtream";
 const M3U: &str = "m3u";

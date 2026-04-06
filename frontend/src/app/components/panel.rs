@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::sync::Arc;
 use yew::prelude::*;
 
@@ -14,7 +13,7 @@ pub struct PanelProps {
 #[component]
 pub fn Panel(props: &PanelProps) -> Html {
     html! {
-        <div class={classes!("tp__panel", props.class, if props.value == props.active {""} else {"tp__hidden"} )}>
+        <div class={classes!("tp__panel", &props.class, if props.value == props.active {""} else {"tp__hidden"} )}>
             { for props.children.iter() }
         </div>
     }

@@ -10,8 +10,9 @@ use crate::{
 use shared::{
     error::TuliproxError,
     model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder},
+    utils::Internable,
 };
-use std::{fmt::Display, rc::Rc, str::FromStr};
+use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
 use yew::{
     component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
     UseReducerHandle,
@@ -62,6 +63,16 @@ impl Display for TargetFormPage {
             TargetFormPage::Main => write!(f, "Main"),
             TargetFormPage::Options => write!(f, "Options"),
         }
+    }
+}
+
+impl Internable for TargetFormPage {
+    fn intern(self) -> Arc<str> {
+        match self {
+            Self::Main => "Main",
+            Self::Options => "Options",
+        }
+        .intern()
     }
 }
 
@@ -274,10 +285,10 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         html! {
             <div class="tp__source-editor-form__body">
             <div class="tp__source-editor-form__body__pages">
-                <Panel value={TargetFormPage::Main.to_string()} active={view_visible.to_string()}>
+                <Panel value={TargetFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_target()}
                 </Panel>
-                <Panel value={TargetFormPage::Options.to_string()} active={view_visible.to_string()}>
+                <Panel value={TargetFormPage::Options.intern()} active={view_visible.intern()}>
                 {render_options()}
                 </Panel>
             </div>

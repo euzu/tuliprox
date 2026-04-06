@@ -1,14 +1,20 @@
-use crate::{app::{
-    components::{
-        config::{
-            config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
-            config_view_context::ConfigViewContext,
-            use_emit_mapped, HasFormData,
+use crate::{
+    app::{
+        components::{
+            config::{
+                config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
+                config_view_context::ConfigViewContext,
+                use_emit_mapped, HasFormData,
+            },
+            AppIcon, Card, Chip, DropDownOption, DropDownSelection, Select,
         },
-        AppIcon, Card, Chip, DropDownOption, DropDownSelection, Select,
+        context::ConfigContext,
     },
-    context::ConfigContext,
-}, config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional, edit_field_bool, edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer, html_if, i18n::use_translation};
+    config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
+    edit_field_bool, edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text,
+    edit_field_text_option, generate_form_reducer, html_if,
+    i18n::use_translation,
+};
 use shared::model::{view_type::ViewType, ContentSecurityPolicyConfigDto, WebAuthConfigDto, WebUiConfigDto};
 use yew::prelude::*;
 

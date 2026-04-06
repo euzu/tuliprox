@@ -183,6 +183,10 @@ impl Internable for PlaylistItemType {
     fn intern(self) -> Arc<str> { self.as_str().intern() }
 }
 
+impl Internable for XtreamCluster {
+    fn intern(self) -> Arc<str> { self.as_str().intern() }
+}
+
 #[derive(Copy, Clone, Default, Debug)]
 pub struct PlaylistItemTypeSet(u16);
 impl PlaylistItemTypeSet {

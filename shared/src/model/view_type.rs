@@ -1,9 +1,7 @@
-use crate::error::TuliproxError;
+use crate::{error::TuliproxError, utils::Internable};
 use enum_iterator::Sequence;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{fmt, str::FromStr};
-use std::sync::Arc;
-use crate::utils::Internable;
+use std::{fmt, str::FromStr, sync::Arc};
 
 const DASHBOARD: &str = "dashboard";
 const STATS: &str = "stats";

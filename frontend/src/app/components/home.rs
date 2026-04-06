@@ -15,14 +15,16 @@ use crate::{
     provider::DialogProvider,
     services::{ToastCloseMode, ToastOptions},
 };
-use shared::model::{
-    permission::{Permission, PERM_ALL},
-    ApiProxyConfigDto, AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck,
-    SystemInfo,
+use shared::{
+    model::{
+        permission::{Permission, PERM_ALL},
+        ApiProxyConfigDto, AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck,
+        SystemInfo,
+    },
+    utils::Internable,
 };
 use std::{collections::HashMap, future, rc::Rc, sync::Arc};
 use yew::{prelude::*, suspense::use_future};
-use shared::utils::Internable;
 
 #[component]
 pub fn Home() -> Html {
@@ -49,12 +51,6 @@ pub fn Home() -> Html {
         Callback::from(move |_| services_ctx.auth.logout())
     };
 
-    let handle_view_change = {
-        let view_vis = view_visible.clone();
-        Callback::from(move |view: Option<ViewType>| {
-             view_vis.set(view);
-        })
-    };
     let handle_view_change_sidebar = {
         let view_vis = view_visible.clone();
         Callback::from(move |view: ViewType| {
@@ -237,7 +233,7 @@ pub fn Home() -> Html {
         .map(|web_ui| !web_ui.combine_views_stats_streams)
         .unwrap_or(true);
 
-   let view_page = view_visible.unwrap_or(ViewType::Dashboard).intern();
+    let view_page = view_visible.unwrap_or(ViewType::Dashboard).intern();
     html! {
         <ContextProvider<ConfigContext> context={config_context}>
         <ContextProvider<StatusContext> context={status_context}>

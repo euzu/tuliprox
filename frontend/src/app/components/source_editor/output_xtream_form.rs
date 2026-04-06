@@ -13,8 +13,9 @@ use shared::{
     model::{
         TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
     },
+    utils::Internable,
 };
-use std::{fmt::Display, rc::Rc, str::FromStr};
+use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
 use web_sys::MouseEvent;
 use yew::{
     component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle,
@@ -69,6 +70,16 @@ impl Display for XtreamOutputFormPage {
                 XtreamOutputFormPage::Trakt => Self::TRAKT,
             }
         )
+    }
+}
+
+impl Internable for XtreamOutputFormPage {
+    fn intern(self) -> Arc<str> {
+        match self {
+            Self::Main => Self::MAIN,
+            Self::Trakt => Self::TRAKT,
+        }
+        .intern()
     }
 }
 
@@ -348,10 +359,10 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
         html! {
             <div class="tp__input-form__body">
             <div class="tp__input-form__body__pages">
-                <Panel value={XtreamOutputFormPage::Main.to_string()} active={view_visible.to_string()}>
+                <Panel value={XtreamOutputFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_output()}
                 </Panel>
-                <Panel value={XtreamOutputFormPage::Trakt.to_string()} active={view_visible.to_string()}>
+                <Panel value={XtreamOutputFormPage::Trakt.intern()} active={view_visible.intern()}>
                 {render_trakt()}
                 </Panel>
             </div>

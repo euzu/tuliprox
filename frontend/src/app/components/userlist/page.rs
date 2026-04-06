@@ -1,5 +1,5 @@
-use shared::error::TuliproxError;
-use std::{fmt::Display, str::FromStr};
+use shared::{error::TuliproxError, utils::Internable};
+use std::{fmt::Display, str::FromStr, sync::Arc};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UserlistPage {
@@ -29,5 +29,15 @@ impl Display for UserlistPage {
                 Self::Edit => "edit",
             }
         )
+    }
+}
+
+impl Internable for UserlistPage {
+    fn intern(self) -> Arc<str> {
+        match self {
+            Self::List => "list",
+            Self::Edit => "edit",
+        }
+        .intern()
     }
 }
