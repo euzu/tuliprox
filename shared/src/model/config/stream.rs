@@ -1,5 +1,5 @@
 use crate::{
-    error::{info_err_res, TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     utils::{
         default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
@@ -99,7 +99,7 @@ impl StreamConfigDto {
             buffer.prepare();
         }
         if let Some(throttle) = &self.throttle {
-            parse_to_kbps(throttle).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, err))?;
+            parse_to_kbps(throttle).map_err(TuliproxError::ConfigStream)?;
         } else {
             self.throttle_kbps = 0;
         }
@@ -109,16 +109,17 @@ impl StreamConfigDto {
                 let triple_ms = self.grace_period_millis.saturating_mul(3);
                 self.grace_period_timeout_secs = std::cmp::max(1, triple_ms.div_ceil(1000));
             } else if self.grace_period_millis / 1000 > self.grace_period_timeout_secs {
-                return info_err_res!(
+                return Err(TuliproxError::ConfigStream(format!(
                     "Grace time period timeout {} sec should be more than grace time period {} ms",
-                    self.grace_period_timeout_secs,
-                    self.grace_period_millis
-                );
+                    self.grace_period_timeout_secs, self.grace_period_millis
+                )));
             }
         }
 
         if self.shared_burst_buffer_mb < MIN_SHARED_BURST_BUFFER_MB {
-            return info_err_res!("`shared_burst_buffer_mb` must be at least {MIN_SHARED_BURST_BUFFER_MB} MB");
+            return Err(TuliproxError::ConfigStream(format!(
+                "`shared_burst_buffer_mb` must be at least {MIN_SHARED_BURST_BUFFER_MB} MB"
+            )));
         }
 
         Ok(())

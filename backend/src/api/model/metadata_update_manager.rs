@@ -1644,10 +1644,10 @@ impl InputWorker {
                         apply_rate_limit = true;
                     }
                     Err(e) => {
-                        if Self::is_permanent_not_found_error(&e.message) {
+                        if Self::is_permanent_not_found_error(e.message()) {
                             debug!(
                                 "[Task] Task failed with permanent not-found for input {}: {} (error={})",
-                                input_name, task_for_execution, e.message
+                                input_name, task_for_execution, e.message()
                             );
                             let retry_domain = Self::retry_domain_for_task(&task_for_execution);
                             self.scheduled_requeues.remove(&current_key);
@@ -1659,7 +1659,7 @@ impl InputWorker {
                                     state.attempts = runtime_settings.max_attempts_probe;
                                     state.next_allowed_at_ts = cooldown_until_ts;
                                     state.cooldown_until_ts = Some(cooldown_until_ts);
-                                    state.last_error = Some(e.message.clone());
+                                    state.last_error = Some(e.message().to_string());
                                     state_bundle.touch(now_ts);
                                     state_bundle.clone()
                                 };
@@ -1681,7 +1681,7 @@ impl InputWorker {
                                     state.attempts = runtime_settings.max_attempts_resolve;
                                     state.next_allowed_at_ts = cooldown_until_ts;
                                     state.cooldown_until_ts = Some(cooldown_until_ts);
-                                    state.last_error = Some(e.message.clone());
+                                    state.last_error = Some(e.message().to_string());
                                     state_bundle.touch(now_ts);
                                     state_bundle.clone()
                                 };
@@ -1695,11 +1695,11 @@ impl InputWorker {
                                     task_for_execution,
                                     cooldown_until_ts,
                                     runtime_settings.resolve_exhaustion_reset_gap_secs,
-                                    e.message
+                                    e.message()
                                 );
                             }
-                        } else if Self::is_transient_worker_error(&e.message) {
-                            if e.message == TASK_ERR_UPDATE_IN_PROGRESS {
+                        } else if Self::is_transient_worker_error(e.message()) {
+                            if e.message() == TASK_ERR_UPDATE_IN_PROGRESS {
                                 // Drop cached readers quickly so foreground writer can progress.
                                 self.release_db_handles();
                             }
@@ -1713,7 +1713,7 @@ impl InputWorker {
                                 input_name,
                                 task_for_execution,
                                 retry_delay_secs,
-                                e.message
+                                e.message()
                             );
                         } else {
                             let retry_domain = Self::retry_domain_for_task(&task_for_execution);
@@ -1728,7 +1728,7 @@ impl InputWorker {
                                 let state_after_update = {
                                     let state = state_bundle.get_mut_or_insert(retry_domain);
                                     state.attempts = state.attempts.saturating_add(1);
-                                    state.last_error = Some(e.message.clone());
+                                    state.last_error = Some(e.message().to_string());
 
                                     if state.attempts < max_attempts {
                                         let backoff_secs = if retry_domain == RetryDomain::Probe {
@@ -1772,7 +1772,7 @@ impl InputWorker {
                                         state_after_update.attempts,
                                         max_attempts,
                                         cooldown_until,
-                                        e.message
+                                        e.message()
                                     );
                                 } else {
                                     let cooldown_until_ts =
@@ -1783,7 +1783,7 @@ impl InputWorker {
                                         state.attempts = max_attempts;
                                         state.next_allowed_at_ts = cooldown_until_ts;
                                         state.cooldown_until_ts = Some(cooldown_until_ts);
-                                        state.last_error = Some(e.message.clone());
+                                        state.last_error = Some(e.message().to_string());
                                         state_bundle.touch(now_ts);
                                         state_bundle.clone()
                                     };
@@ -1798,7 +1798,7 @@ impl InputWorker {
                                         attempts,
                                         max_attempts,
                                         runtime_settings.resolve_exhaustion_reset_gap_secs,
-                                        e.message
+                                        e.message()
                                     );
                                 }
                             } else {
@@ -1818,7 +1818,7 @@ impl InputWorker {
                                     max_attempts,
                                     state_after_update.next_allowed_at_ts,
                                     state_after_update.next_allowed_at_ts.saturating_sub(now_ts),
-                                    e.message
+                                    e.message()
                                 );
                             }
                         }
@@ -3173,14 +3173,14 @@ impl InputWorker {
         failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Result<ProcessTaskOutcome, TuliproxError> {
         let app_state =
-            app_state_weak.and_then(Weak::upgrade).ok_or_else(|| shared::error::info_err!("AppState not available"))?;
+            app_state_weak.and_then(Weak::upgrade).ok_or_else(|| shared::error::TuliproxError::Config("AppState not available".to_string()))?;
 
         let Some(input_base) = app_state.app_config.get_input_by_name(input_name) else {
-            return Err(shared::error::info_err!("Input {} not found", input_name));
+            return Err(shared::error::TuliproxError::Config(format!("Input {input_name} not found")));
         };
 
         if !input_base.enabled {
-            return Err(shared::error::info_err!("Input {} is disabled", input_name));
+            return Err(shared::error::TuliproxError::Config(format!("Input {input_name} is disabled")));
         }
 
         // Background metadata/probe tasks are low-priority.
@@ -3188,7 +3188,7 @@ impl InputWorker {
         if let Some(guard) = app_state.update_guard.try_playlist() {
             drop(guard);
         } else {
-            return Err(shared::error::info_err!("{}", TASK_ERR_UPDATE_IN_PROGRESS));
+            return Err(shared::error::TuliproxError::Config(TASK_ERR_UPDATE_IN_PROGRESS.to_string()));
         }
 
         let needs_probe_connection = Self::task_needs_provider_connection(task, input_base.input_type);
@@ -3205,7 +3205,7 @@ impl InputWorker {
         let provider_handle = if needs_probe_connection {
             let Some(handle) = app_state.active_provider.acquire_connection_for_probe(input_name, probe_priority).await else {
                 debug_if_enabled!("No provider connection available for background task {}, skipping...", task);
-                return Err(shared::error::info_err!("{}", TASK_ERR_NO_CONNECTION));
+                return Err(shared::error::TuliproxError::Config(TASK_ERR_NO_CONNECTION.to_string()));
             };
             Some(handle)
         } else {
@@ -3256,7 +3256,7 @@ impl InputWorker {
 
                         () = token.cancelled() => {
                             debug_if_enabled!("Metadata update task preempted by user request for input {}", input_name);
-                            Err(shared::error::info_err!("{}", TASK_ERR_PREEMPTED))
+                            Err(shared::error::TuliproxError::Config(TASK_ERR_PREEMPTED.to_string()))
                         }
 
                         res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
@@ -3304,9 +3304,9 @@ impl InputWorker {
                         "Metadata probe task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}; \
                          releasing provider handle and skipping task"
                     );
-                    Err(shared::error::info_err!(
+                    Err(shared::error::TuliproxError::Config(format!(
                         "Task timed out after {PROBE_TASK_TIMEOUT_SECS}s for input {input_name}: {task}"
-                    ))
+                    )))
                 }
             }
         } else {
@@ -3525,11 +3525,9 @@ impl InputWorker {
 
                 match outcome {
                     GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok((false, false)),
-                    GenericProbeOutcome::ProbeFailed => Err(shared::error::info_err!(
-                        "Probe stream task failed for key {:?} ({})",
-                        task_key,
-                        probe_identifier
-                    )),
+                      GenericProbeOutcome::ProbeFailed => Err(shared::error::TuliproxError::Config(format!(
+                        "Probe stream task failed for key {task_key:?} ({probe_identifier})"
+                      ))),
                 }
             }
         }

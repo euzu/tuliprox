@@ -1,4 +1,3 @@
-use shared::error::info_err;
 use shared::error::TuliproxError;
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::ConfigTarget;
@@ -156,7 +155,7 @@ impl M3uPlaylistIterator {
 
         // TODO use playlist memory cache, but be aware of sorting !
 
-        let m3u_output = target.get_m3u_output().ok_or_else(|| info_err!("Unexpected failure, missing m3u target output for target {}",  target.name))?;
+        let m3u_output = target.get_m3u_output().ok_or_else(|| TuliproxError::Config(format!("Unexpected failure, missing m3u target output for target {}",  target.name)))?;
         let config = cfg.config.load();
         let target_path = ensure_target_storage_path(&config, target.name.as_str()).await?;
         let m3u_path = m3u_get_file_path_for_db(&target_path);

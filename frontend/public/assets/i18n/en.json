@@ -1365,7 +1365,21 @@
     "INPUT": "Input",
     "ACTIONS": "Actions",
     "ERROR": "Error",
-    "RECORD": "Record"
+    "RECORD": "Record",
+    "LANDING_PAGE": "Landing Page",
+    "VIEW_TYPE_DASHBOARD": "Dashboard",
+    "VIEW_TYPE_STATS": "Stats",
+    "VIEW_TYPE_STREAMS":  "Streams",
+    "VIEW_TYPE_STREAM_HISTORY": "Stream History",
+    "VIEW_TYPE_DOWNLOADS":  "Downloads",
+    "VIEW_TYPE_USERS": "Api Users",
+    "VIEW_TYPE_CONFIG":  "Config",
+    "VIEW_TYPE_SOURCE_EDITOR": "Sources",
+    "VIEW_TYPE_PLAYLIST_UPDATE":  "Playlist Update",
+    "VIEW_TYPE_PLAYLIST_SETTINGS": "Playlist Settings",
+    "VIEW_TYPE_PLAYLIST_EXPLORER":  "Playlist Explorer",
+    "VIEW_TYPE_PLAYLIST_EPG": "Playlist EPG",
+    "VIEW_TYPE_RBAC":  "WebUI Users"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

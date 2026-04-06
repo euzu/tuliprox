@@ -1,5 +1,5 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     model::{
         ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto, MessagingConfigDto,
         MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto, ScheduleConfigDto, VideoConfigDto,
@@ -247,10 +247,7 @@ impl ConfigDto {
 
         if let Some(mins) = self.sleep_timer_mins {
             if mins == 0 {
-                return Err(TuliproxError::new(
-                    TuliproxErrorKind::Info,
-                    "`sleep_timer_mins` must be > 0 when specified".to_string(),
-                ));
+                return Err(TuliproxError::ConfigBase("`sleep_timer_mins` must be > 0 when specified".to_string()));
             }
         }
 

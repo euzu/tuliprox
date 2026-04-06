@@ -2,7 +2,7 @@ use crate::utils::FileReadGuard;
 use futures::Stream;
 use log::error;
 use serde::{Deserialize, Serialize};
-use shared::error::{info_err, TuliproxError};
+use shared::error::{ TuliproxError};
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -48,7 +48,10 @@ where
     SortKey: for<'de> Deserialize<'de>,
 {
     let query = BPlusTreeQuery::<K, V>::try_new(path)
-        .map_err(|err| info_err!("Could not open BPlusTreeQuery {path:?} - {err}"))?;
+        .map_err(|err| TuliproxError::Config(format!(
+            "Could not open BPlusTreeQuery {} - {err}",
+            path.display()
+        )))?;
 
     if index_path.exists() {
         match SortedIndexReader::<SortKey, K>::open(index_path) {

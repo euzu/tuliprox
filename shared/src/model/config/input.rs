@@ -1,8 +1,7 @@
 use super::PanelApiConfigDto;
 use crate::{
     check_input_connections, check_input_credentials,
-    error::{TuliproxError, TuliproxErrorKind},
-    info_err_res,
+    error::TuliproxError,
     model::EpgConfigDto,
     utils::{
         arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
@@ -67,15 +66,15 @@ macro_rules! check_provider_scheme_url {
             let (host, _path) = match parse_provider_scheme_url_parts(&$url) {
                 Ok(parts) => parts,
                 Err(err) => {
-                    return info_err_res!(
+                    return Err(TuliproxError::ConfigInput(format!(
                         "Malformed provider URL {}: {}",
                         sanitize_sensitive_info(&$url),
                         sanitize_sensitive_info(err.to_string().as_str())
-                    );
+                    )));
                 }
             };
             if !$provider_names.contains(host) {
-                return info_err_res!("Provider name {host} is not defined");
+                return Err(TuliproxError::ConfigInput(format!("Provider name {host} is not defined")));
             }
         }
     };
@@ -139,7 +138,7 @@ impl FromStr for InputType {
         } else if s.eq(Self::LIBRARY) {
             Ok(Self::Library)
         } else {
-            info_err_res!("Unknown InputType: {}", s)
+            Err(TuliproxError::ConfigInput(format!("Unknown InputType: {}", s)))
         }
     }
 }
@@ -180,7 +179,7 @@ impl FromStr for InputFetchMethod {
         } else if s.eq(Self::POST_METHOD) {
             Ok(Self::POST)
         } else {
-            info_err_res!("Unknown Fetch Method: {}", s)
+            Err(TuliproxError::ConfigInput(format!("Unknown Fetch Method: {}", s)))
         }
     }
 }
@@ -327,7 +326,7 @@ impl FromStr for ClusterSource {
         } else if s.eq(Self::SKIP) {
             Ok(Self::Skip)
         } else {
-            info_err_res!("Unknown ClusterSource: {}", s)
+            Err(TuliproxError::ConfigInput(format!("Unknown ClusterSource: {}", s)))
         }
     }
 }
@@ -429,11 +428,11 @@ impl ConfigInputAliasDto {
         self.id = index + 1;
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
-            return info_err_res!("name for input is mandatory");
+            return Err(TuliproxError::ConfigInput("name for input is mandatory".to_string()));
         }
         self.url = self.url.trim().to_string();
         if self.url.is_empty() {
-            return info_err_res!("url for input is mandatory (input: {})", self.name);
+            return Err(TuliproxError::ConfigInput(format!("url for input is mandatory (input: {})", self.name)));
         }
         check_input_credentials!(self, input_type, true, true);
         check_input_connections!(self, input_type, true);
@@ -550,7 +549,7 @@ impl ConfigInputDto {
     ) -> Result<u16, TuliproxError> {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
-            return info_err_res!("name for input is mandatory");
+            return Err(TuliproxError::ConfigInput("name for input is mandatory".to_string()));
         }
 
         if let Some(duration_str) = &self.cache_duration {
@@ -564,11 +563,10 @@ impl ConfigInputDto {
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
-            return info_err_res!(
+            return Err(TuliproxError::ConfigInput(format!(
                 "input type {} does not support provider:// URLs for batch definitions; use batch:// URL (input: {})",
-                self.input_type,
-                self.name
-            );
+                self.input_type, self.name
+            )));
         }
 
         check_input_credentials!(self, self.input_type, true, false);
@@ -577,11 +575,10 @@ impl ConfigInputDto {
             if staged_input.enabled {
                 check_input_credentials!(staged_input, staged_input.input_type, true, true);
                 if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                    return info_err_res!(
+                    return Err(TuliproxError::ConfigInput(format!(
                         "Staged input can only be of type m3u or xtream (input: {}, staged: {})",
-                        self.name,
-                        staged_input.name
-                    );
+                        self.name, staged_input.name
+                    )));
                 }
                 if self.input_type.is_xtream() {
                     let live = staged_input.live_source.unwrap_or(ClusterSource::Staged);
@@ -601,19 +598,19 @@ impl ConfigInputDto {
                     let series_uses_staged = matches!(series, ClusterSource::Staged) && !skip_series;
 
                     if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged' (input: {}, staged: {})",
                             self.name,
                             staged_input.name
-                        );
+                        )));
                     }
 
                     if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip' (input: {}, staged: {})",
                             self.name,
                             staged_input.name
-                        );
+                        )));
                     }
                 }
             }
@@ -656,7 +653,10 @@ impl ConfigInputDto {
     fn parse_duration(&self, duration_str: &str) -> Result<u64, TuliproxError> {
         match parse_duration_seconds(duration_str, false) {
             Some(seconds) => Ok(seconds),
-            None => info_err_res!("Invalid cache_duration format in '{}': {}", self.name, duration_str),
+            None => Err(TuliproxError::ConfigInput(format!(
+                "Invalid cache_duration format in '{}': {}",
+                self.name, duration_str
+            ))),
         }
     }
 
@@ -748,10 +748,10 @@ impl ConfigInputDto {
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
-            return info_err_res!(
+            return Err(TuliproxError::ConfigInput(format!(
                 "input type {} does not support provider:// URLs for batch definitions; use batch:// URL",
                 self.input_type
-            );
+            )));
         }
         Ok(())
     }
@@ -790,10 +790,9 @@ impl ConfigInputDto {
             }
         }
 
-        Err(TuliproxError::new(
-            TuliproxErrorKind::Info,
-            format!("No matching input or alias found for input '{input_name}' with username '{username}'"),
-        ))
+        Err(TuliproxError::ConfigInput(format!(
+            "No matching input or alias found for input '{input_name}' with username '{username}'"
+        )))
     }
 }
 
@@ -812,11 +811,11 @@ impl ConfigProviderDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
-            return info_err_res!("Name for provider is mandatory");
+            return Err(TuliproxError::ConfigInput("Name for provider is mandatory".to_string()));
         }
         self.urls = self.urls.drain(..).filter(|url| !url.trim().is_empty()).map(|u| u.trim().intern()).collect();
         if self.urls.is_empty() {
-            return info_err_res!("Urls for provider is mandatory");
+            return Err(TuliproxError::ConfigInput("Urls for provider is mandatory".to_string()));
         }
         if let Some(dns) = self.dns.as_mut() {
             dns.prepare()?;
@@ -914,7 +913,7 @@ impl ProviderDnsDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.refresh_secs = self.refresh_secs.max(10);
         if self.max_addrs == Some(0) {
-            return info_err_res!("Provider dns max_addrs must be >= 1 when set");
+            return Err(TuliproxError::ConfigInput("Provider dns max_addrs must be >= 1 when set".to_string()));
         }
         if let Some(schemes) = self.schemes.as_mut() {
             let mut unique = Vec::with_capacity(schemes.len());
@@ -934,10 +933,14 @@ impl ProviderDnsDto {
             for (host, ips) in std::mem::take(overrides) {
                 let host = host.trim().to_ascii_lowercase();
                 if host.is_empty() {
-                    return info_err_res!("Provider dns overrides hostname must not be empty");
+                    return Err(TuliproxError::ConfigInput(
+                        "Provider dns overrides hostname must not be empty".to_string(),
+                    ));
                 }
                 if ips.is_empty() {
-                    return info_err_res!("Provider dns overrides for host '{host}' must not be empty");
+                    return Err(TuliproxError::ConfigInput(
+                        "Provider dns overrides for host '{host}' must not be empty".to_string(),
+                    ));
                 }
                 let entry = normalized.entry(host.clone()).or_default();
                 for ip in ips {

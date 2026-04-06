@@ -9,7 +9,7 @@ macro_rules! check_input_credentials {
         if !matches!($input_type, InputType::Library) {
             $this.url = $this.url.trim().to_string();
             if $this.url.is_empty() {
-                return info_err_res!("url for input is mandatory{}", __tp_input_name_suffix);
+                return Err(TuliproxError::ConfigInput(format!("url for input is mandatory{}", __tp_input_name_suffix)));
             }
 
             $this.username = $crate::utils::get_trimmed_string($this.username.as_deref());
@@ -19,7 +19,7 @@ macro_rules! check_input_credentials {
             InputType::M3u => {
                 if $this.username.is_some() || $this.password.is_some() {
                     // TODO only for initial check
-                    //return Err(info_err!("Input types of m3u should not use username or password"));
+                    //return Err(TuliproxError::ConfigInput(format!("Input types of m3u should not use username or password")));
                 }
                 let (username, password) = $crate::utils::get_credentials_from_url_str(&$this.url);
                 $this.username = username;
@@ -28,30 +28,30 @@ macro_rules! check_input_credentials {
             InputType::M3uBatch => {
                 if $definition {
                     if $this.url.trim().is_empty() {
-                        return info_err_res!("for input type m3u-batch: url is mandatory{}", __tp_input_name_suffix);
+                        return Err(TuliproxError::ConfigInput(format!("for input type m3u-batch: url is mandatory{}", __tp_input_name_suffix)));
                     }
                 }
 
                 // if !$alias && ($this.username.is_some() || $this.password.is_some()) {
                 //     // TODO only for initial check
-                //    // return Err(info_err!("Input types of m3u-batch should not define username or password"));
+                //    // return Err(TuliproxError::ConfigInput(format!("Input types of m3u-batch should not define username or password")));
                 // }
             }
             InputType::Xtream => {
                 if $this.username.is_none() || $this.password.is_none() {
-                    return info_err_res!(
+                    return Err(TuliproxError::ConfigInput(format!(
                         "for input type xtream: username and password are mandatory{}",
                         __tp_input_name_suffix
-                    );
+                    )));
                 }
             }
             InputType::XtreamBatch => {
                 if $definition {
                     if $this.url.trim().is_empty() {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "for input type xtream-batch: url is mandatory{}",
                             __tp_input_name_suffix
-                        );
+                        )));
                     }
                 }
 
@@ -63,16 +63,16 @@ macro_rules! check_input_credentials {
 
                     if is_batch_url {
                         if has_credentials {
-                            return info_err_res!(
+                            return Err(TuliproxError::ConfigInput(format!(
                                 "input type xtream-batch with batch:// URL should not define username or password attribute{}",
                                 __tp_input_name_suffix
-                            );
+                            )));
                         }
                     } else if !has_username || !has_password {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "for input type xtream-batch without batch:// URL: username and password are mandatory{}",
                             __tp_input_name_suffix
-                        );
+                        )));
                     }
                 }
             }
@@ -96,32 +96,32 @@ macro_rules! check_input_connections {
             InputType::M3uBatch => {
                 if !$alias {
                     if $this.max_connections > 0 {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "input type m3u-batch should not define max_connections attribute{}",
                             __tp_input_name_suffix
-                        );
+                        )));
                     }
                     if $this.priority != 0 {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "input type m3u-batch should not define priority attribute{}",
                             __tp_input_name_suffix
-                        );
+                        )));
                     }
                 }
             }
             InputType::XtreamBatch => {
                 if !$alias {
                     if $this.max_connections > 0 {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "input type xtream-batch should not define max_connections attribute{}",
                             __tp_input_name_suffix
-                        );
+                        )));
                     }
                     if $this.priority != 0 {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "input type xtream-batch should not define priority attribute{}",
                             __tp_input_name_suffix
-                        );
+                        )));
                     }
                 }
             }

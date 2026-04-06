@@ -33,6 +33,7 @@ cron          = "0.16.0"
 enum-iterator = "2.3.0"
 futures       = "0.3.32"
 serde-saphyr  = "0.0.22"
+thiserror     = "2.0.18"
 tokio         = { version = "1.50.0" }
 
 [profile.release]

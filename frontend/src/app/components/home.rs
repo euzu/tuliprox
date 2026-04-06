@@ -22,6 +22,7 @@ use shared::model::{
 };
 use std::{collections::HashMap, future, rc::Rc, sync::Arc};
 use yew::{prelude::*, suspense::use_future};
+use shared::utils::Internable;
 
 #[component]
 pub fn Home() -> Html {
@@ -32,7 +33,7 @@ pub fn Home() -> Html {
     let api_proxy_config = use_state(|| None::<Rc<ApiProxyConfigDto>>);
     let status = use_state(|| None::<Rc<StatusCheck>>);
     let system_info = use_state(|| None::<Rc<SystemInfo>>);
-    let view_visible = use_state(|| if setup_mode { ViewType::Config } else { ViewType::Dashboard });
+    let view_visible = use_state(|| if setup_mode { Some(ViewType::Config) } else { None });
     let theme = use_state(Theme::get_current_theme);
 
     let handle_theme_select = {
@@ -46,6 +47,19 @@ pub fn Home() -> Html {
     let handle_logout = {
         let services_ctx = services.clone();
         Callback::from(move |_| services_ctx.auth.logout())
+    };
+
+    let handle_view_change = {
+        let view_vis = view_visible.clone();
+        Callback::from(move |view: Option<ViewType>| {
+             view_vis.set(view);
+        })
+    };
+    let handle_view_change_sidebar = {
+        let view_vis = view_visible.clone();
+        Callback::from(move |view: ViewType| {
+            view_vis.set(Some(view));
+        })
     };
 
     {
@@ -168,15 +182,20 @@ pub fn Home() -> Html {
     let status_context = StatusContext { status: (*status).clone(), system_info: (*system_info).clone() };
     let playlist_context = PlaylistContext { sources: sources.clone() };
 
-    let handle_view_change = {
-        let view_vis = view_visible.clone();
-        Callback::from(move |view| view_vis.set(view))
-    };
-
     //<div class={"app-header__toolbar"}><select onchange={handle_language} defaultValue={i18next.language}>{services.config().getUiConfig().languages.map(l => <option key={l} value={l}>{l}</option>)}</select></div>
 
     if config.is_none() {
         return html! {};
+    }
+
+    if view_visible.is_none() {
+        if let Some(web_ui) = config.as_ref().and_then(|c| c.config.web_ui.as_ref()) {
+            if web_ui.combine_views_stats_streams && web_ui.landing_page == ViewType::Streams {
+                view_visible.set(Some(ViewType::Stats));
+            } else {
+                view_visible.set(Some(web_ui.landing_page));
+            }
+        }
     }
 
     // Check if non-admin user has any permissions at all
@@ -218,6 +237,7 @@ pub fn Home() -> Html {
         .map(|web_ui| !web_ui.combine_views_stats_streams)
         .unwrap_or(true);
 
+   let view_page = view_visible.unwrap_or(ViewType::Dashboard).intern();
     html! {
         <ContextProvider<ConfigContext> context={config_context}>
         <ContextProvider<StatusContext> context={status_context}>
@@ -229,7 +249,7 @@ pub fn Home() -> Html {
                { if setup_mode {
                     html! {}
                  } else {
-                    html! { <Sidebar onview={handle_view_change} show_streams_page={show_streams_page}/> }
+                    html! { <Sidebar active_page={view_visible.unwrap_or(ViewType::Dashboard)} onview={handle_view_change_sidebar} show_streams_page={show_streams_page}/> }
                  }
                }
 
@@ -262,7 +282,7 @@ pub fn Home() -> Html {
                       { html_if!(setup_mode, { <ParticleFlowBackground /> }) }
 
                        { html_if!(setup_mode || can_read_config, {
-                       <Panel class="tp__full-width" value={ViewType::Config.to_string()} active={view_visible.to_string()}>
+                       <Panel class="tp__full-width" value={ViewType::Config.intern()} active={view_page.clone()}>
                           {
                               if setup_mode {
                                   html! { <Setup/> }
@@ -278,61 +298,61 @@ pub fn Home() -> Html {
                             } else {
                                 html! {
                                     <>
-                                       <Panel class="tp__full-width" value={ViewType::Dashboard.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::Dashboard.intern()} active={view_page.clone()}>
                                         <DashboardView/>
                                        </Panel>
                                        { html_if!(can_read_system_status, {
-                                       <Panel class="tp__full-width" value={ViewType::Stats.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::Stats.intern()} active={view_page.clone()}>
                                         <StatsView show_streams={!show_streams_page}/>
                                        </Panel>
                                        })}
                                         { html_if!(show_streams_page && can_read_system_status, {
-                                                   <Panel class="tp__full-width" value={ViewType::Streams.to_string()} active={view_visible.to_string()}>
+                                                   <Panel class="tp__full-width" value={ViewType::Streams.intern()} active={view_page.clone()}>
                                               <StreamsView embedded={false}/>
                                             </Panel>
                                         })}
                                        { html_if!(can_read_downloads, {
-                                       <Panel class="tp__full-width" value={ViewType::Downloads.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::Downloads.intern()} active={view_page.clone()}>
                                          <DownloadsView/>
                                        </Panel>
                                        })}
                                         { html_if!(can_read_system_status, {
-                                            <Panel class="tp__full-width" value={ViewType::StreamHistory.to_string()} active={view_visible.to_string()}>
+                                            <Panel class="tp__full-width" value={ViewType::StreamHistory.intern()} active={view_page.clone()}>
                                                 <StreamHistoryView/>
                                             </Panel>
                                         })}
                                        { html_if!(can_read_users, {
-                                       <Panel class="tp__full-width" value={ViewType::Users.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::Users.intern()} active={view_page.clone()}>
                                           <UserlistView/>
                                        </Panel>
                                        })}
                                        { html_if!(can_read_sources, {
-                                       <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
                                           <SourceEditor/>
                                        </Panel>
                                        })}
                                        { html_if!(can_write_playlist, {
-                                       <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.intern()} active={view_page.clone()}>
                                          <PlaylistUpdateView/>
                                        </Panel>
                                        })}
                                        { html_if!(can_read_playlist, {
                                        <>
-                                       <Panel class="tp__full-width" value={ViewType::PlaylistSettings.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistSettings.intern()} active={view_page.clone()}>
                                          <PlaylistSettingsView/>
                                        </Panel>
-                                       <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.intern()} active={view_page.clone()}>
                                          <PlaylistExplorerView/>
                                        </Panel>
                                        </>
                                        })}
                                        { html_if!(can_read_epg, {
-                                       <Panel class="tp__full-width" value={ViewType::PlaylistEpg.to_string()} active={view_visible.to_string()}>
+                                       <Panel class="tp__full-width" value={ViewType::PlaylistEpg.intern()} active={view_page.clone()}>
                                          <EpgView/>
                                        </Panel>
                                        })}
                                        { html_if!(is_admin, {
-                                           <Panel class="tp__full-width" value={ViewType::Rbac.to_string()} active={view_visible.to_string()}>
+                                           <Panel class="tp__full-width" value={ViewType::Rbac.intern()} active={view_page}>
                                                <RbacView />
                                            </Panel>
                                        })}

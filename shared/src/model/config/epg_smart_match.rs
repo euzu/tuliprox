@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err,
     utils::{
         default_epg_best_match_threshold, default_epg_match_threshold, default_epg_name_prefix_separator,
         default_epg_normalize_regex, default_epg_strip, is_default_epg_best_match_threshold,
@@ -119,7 +118,7 @@ impl EpgSmartMatchConfigDto {
         if let Some(regstr) = self.normalize_regex.as_ref() {
             crate::model::REGEX_CACHE
                 .get_or_compile(regstr.as_str())
-                .map_err(|_| info_err!("can't parse regex: {}", regstr))?;
+                .map_err(|_| TuliproxError::RegexCompile(regstr.clone()))?;
         }
 
         Ok(())

@@ -19,7 +19,7 @@ use reqwest::{
     StatusCode,
 };
 use shared::{
-    error::{notify_err_res, string_to_io_error, TuliproxError},
+    error::{string_to_io_error, TuliproxError},
     model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy},
     utils::{
         filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
@@ -607,7 +607,7 @@ pub async fn get_input_epg_content_as_file(
                     sanitize_sensitive_info(url_str),
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                notify_err_res!("Failed to download")
+                Err(TuliproxError::RepositoryNetwork("Failed to download".to_string()))
             }
         }
     } else {
@@ -616,12 +616,15 @@ pub async fn get_input_epg_content_as_file(
                 if filepath.exists() {
                     if let Err(e) = tokio::fs::copy(&filepath, persist_filepath).await {
                         error!("can't persist to: {}  => {}", persist_filepath.display(), e);
-                        return notify_err_res!("Failed to persist: {}  => {}", persist_filepath.display(), e);
+                        return Err(TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {}", persist_filepath.display(), e)));
                     }
                     if filepath.exists() {
                         Some(filepath)
                     } else {
-                        return notify_err_res!("Failed: file does not exists {filepath:?}");
+                        return Err(TuliproxError::RepositoryNetwork(format!(
+                            "Failed: file does not exists {}",
+                            filepath.display()
+                        )));
                     }
                 } else {
                     None
@@ -634,7 +637,7 @@ pub async fn get_input_epg_content_as_file(
             || {
                 let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
                 error!("{msg}");
-                notify_err_res!("{msg}")
+                Err(TuliproxError::RepositoryNetwork(msg))
             },
             Ok,
         )
@@ -663,7 +666,7 @@ pub async fn get_input_text_content(
                     &input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                notify_err_res!("Failed to download")
+                Err(TuliproxError::RepositoryNetwork("Failed to download".to_string()))
             }
         }
     } else {
@@ -674,14 +677,14 @@ pub async fn get_input_text_content(
                         let to_file = &persist_file_value;
                         if let Err(e) = tokio::fs::copy(&filepath, to_file).await {
                             error!("can't persist to: {}  => {}", to_file.to_str().unwrap_or("?"), e);
-                            return notify_err_res!("Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e);
+                            return Err(TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e)));
                         }
                     }
 
                     match get_local_file_content(&filepath).await {
                         Ok(content) => Some(content),
                         Err(err) => {
-                            return notify_err_res!("Failed : {}", err);
+                            return Err(TuliproxError::RepositoryNetwork(format!("Failed : {err}")));
                         }
                     }
                 } else {
@@ -694,7 +697,7 @@ pub async fn get_input_text_content(
             || {
                 let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
                 error!("{msg}");
-                notify_err_res!("{msg}")
+                Err(TuliproxError::RepositoryNetwork(msg))
             },
             Ok,
         )
@@ -723,7 +726,7 @@ pub async fn get_input_text_content_as_stream(
                     &input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                notify_err_res!("Failed to download")
+                Err(TuliproxError::RepositoryNetwork("Failed to download".to_string()))
             }
         }
     } else {
@@ -747,7 +750,7 @@ pub async fn get_input_text_content_as_stream(
                             }
                         }
                         Err(err) => {
-                            return notify_err_res!("Failed : {}", err);
+                            return Err(TuliproxError::RepositoryNetwork(format!("Failed : {err}")));
                         }
                     }
                 } else {
@@ -760,7 +763,7 @@ pub async fn get_input_text_content_as_stream(
             || {
                 let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
                 error!("{msg}");
-                notify_err_res!("{msg}")
+                Err(TuliproxError::RepositoryNetwork(msg))
             },
             Ok,
         )
@@ -1398,11 +1401,11 @@ pub async fn get_input_json_content(
 ) -> Result<serde_json::Value, TuliproxError> {
     match download_json_content(app_config, client, input, persist_filepath, trace_log).await {
         Ok(content) => Ok(content),
-        Err(e) => notify_err_res!(
-            "can't download input {}, => {}",
-            input.name,
-            sanitize_sensitive_info(e.to_string().as_str())
-        ),
+        Err(e) => Err(TuliproxError::RepositoryNetwork(format!(
+            "can't download input {input} => {sanitized}",
+            input = input.name,
+            sanitized = sanitize_sensitive_info(e.to_string().as_str())
+        ))),
     }
 }
 
@@ -1427,11 +1430,11 @@ pub async fn get_input_json_content_as_stream(
 ) -> Result<DynReader, TuliproxError> {
     match download_json_content_as_stream(app_config, client, input, persist_filepath).await {
         Ok(stream) => Ok(stream),
-        Err(e) => notify_err_res!(
-            "can't download input {} => {}",
-            input.name,
-            sanitize_sensitive_info(e.to_string().as_str())
-        ),
+        Err(e) => Err(TuliproxError::RepositoryNetwork(format!(
+            "can't download input {input} => {sanitized}",
+            input = input.name,
+            sanitized = sanitize_sensitive_info(e.to_string().as_str())
+        ))),
     }
 }
 

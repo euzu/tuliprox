@@ -1,5 +1,5 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     utils::{is_blank_optional_str, is_blank_optional_string},
 };
 
@@ -35,18 +35,18 @@ impl ProxyConfigDto {
                 let uname = username.trim();
                 let pwd = password.trim();
                 if uname.is_empty() || pwd.is_empty() {
-                    return Err(TuliproxError::new(TuliproxErrorKind::Info, "Proxy credentials missing".to_string()));
+                    return Err(TuliproxError::ConfigProxy("Proxy credentials missing".to_string()));
                 }
                 self.username = Some(uname.to_string());
                 self.password = Some(pwd.to_string());
             } else {
-                return Err(TuliproxError::new(TuliproxErrorKind::Info, "Proxy credentials missing".to_string()));
+                return Err(TuliproxError::ConfigProxy("Proxy credentials missing".to_string()));
             }
         }
 
         self.url = self.url.trim().to_string();
         if self.url.is_empty() {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Proxy url missing".to_string()));
+            return Err(TuliproxError::ConfigProxy("Proxy url missing".to_string()));
         }
         Ok(())
     }

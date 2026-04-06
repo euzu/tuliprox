@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err_res,
     utils::{
         default_metadata_backoff_jitter_percent, default_metadata_ffprobe_analyze_duration,
         default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size,
@@ -409,7 +408,11 @@ impl FfprobeConfigDto {
         self.analyze_duration = MetadataUpdateConfigDto::canonicalize_seconds(analyze_duration_secs);
 
         let probe_size_bytes = parse_size_base_2(&self.probe_size)
-            .map_err(|err| crate::error::info_err!("Invalid size for `ffprobe.probe_size`: {err}"))?
+            .map_err(|err| {
+                crate::error::TuliproxError::ConfigMetadataUpdate(format!(
+                    "Invalid size for `ffprobe.probe_size`: {err}"
+                ))
+            })?
             .max(1);
         self.probe_size = MetadataUpdateConfigDto::canonicalize_size_bytes(probe_size_bytes);
 
@@ -421,7 +424,11 @@ impl FfprobeConfigDto {
         self.live_analyze_duration = MetadataUpdateConfigDto::canonicalize_seconds(live_analyze_duration_secs);
 
         let live_probe_size_bytes = parse_size_base_2(&self.live_probe_size)
-            .map_err(|err| crate::error::info_err!("Invalid size for `ffprobe.live_probe_size`: {err}"))?
+            .map_err(|err| {
+                crate::error::TuliproxError::ConfigMetadataUpdate(format!(
+                    "Invalid size for `ffprobe.live_probe_size`: {err}"
+                ))
+            })?
             .max(1);
         self.live_probe_size = MetadataUpdateConfigDto::canonicalize_size_bytes(live_probe_size_bytes);
 
@@ -518,7 +525,7 @@ impl MetadataUpdateConfigDto {
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         if self.cache_path.trim().is_empty() {
-            return info_err_res!("metadata_update.cache_path cannot be empty");
+            return Err(TuliproxError::ConfigMetadataUpdate("metadata_update.cache_path cannot be empty".to_string()));
         }
         self.log.prepare()?;
         self.resolve.prepare()?;
@@ -558,16 +565,19 @@ impl MetadataUpdateConfigDto {
 
     fn parse_duration_with_required_unit(value: &str, field_name: &str) -> Result<u64, TuliproxError> {
         if value.parse::<u64>().is_ok() {
-            return info_err_res!(
+            return Err(TuliproxError::ConfigMetadataUpdate(format!(
                 "Invalid duration format for `{field_name}`: {value}. Use explicit unit suffix (`s`, `m`, `h`, `d`), e.g. `10s`."
-            );
+            )));
         }
         Self::parse_duration(value, field_name)
     }
 
     fn parse_duration(value: &str, field_name: &str) -> Result<u64, TuliproxError> {
-        parse_duration_seconds(value, false)
-            .ok_or_else(|| crate::error::info_err!("Invalid duration format for `{field_name}`: {value}"))
+        parse_duration_seconds(value, false).ok_or_else(|| {
+            crate::error::TuliproxError::ConfigMetadataUpdate(format!(
+                "Invalid duration format for `{field_name}`: {value}"
+            ))
+        })
     }
 
     fn canonicalize_seconds(seconds: u64) -> String {

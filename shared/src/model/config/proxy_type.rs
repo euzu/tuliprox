@@ -1,5 +1,5 @@
 use crate::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{ClusterFlags, PlaylistItemType},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -123,7 +123,7 @@ impl FromStr for ProxyType {
             }
         }
 
-        info_err_res!("Unknown ProxyType: {}", s)
+        Err(TuliproxError::ConfigProxyType(format!("Unknown ProxyType: {}", s)))
     }
 }
 

@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err_res,
     utils::{
         default_as_true, default_device_type, default_device_udn, default_firmware_name, default_firmware_version,
         default_friendly_name, default_manufacturer, default_model_name, generate_hdhr_device_id,
@@ -151,13 +150,16 @@ impl HdHomeRunConfigDto {
         for (device_num, device) in (0_u8..).zip(self.devices.iter_mut()) {
             device.prepare(device_num, include_computed)?;
             if !names.insert(device.name.clone()) {
-                return info_err_res!("HdHomeRun duplicate device name {}", device.name);
+                return Err(TuliproxError::ConfigHdhomerun(format!("HdHomeRun duplicate device name {}", device.name)));
             }
             if device.port > 0 && !ports.insert(device.port) {
-                return info_err_res!("HdHomeRun duplicate port {}", device.port);
+                return Err(TuliproxError::ConfigHdhomerun(format!("HdHomeRun duplicate port {}", device.port)));
             }
             if !device_ids.insert(device.device_id.clone()) {
-                return info_err_res!("HdHomeRun duplicate device_id {}", device.device_id);
+                return Err(TuliproxError::ConfigHdhomerun(format!(
+                    "HdHomeRun duplicate device_id {}",
+                    device.device_id
+                )));
             }
         }
         let mut current_port = api_port.saturating_add(1);
@@ -167,7 +169,9 @@ impl HdHomeRunConfigDto {
                     current_port = current_port.wrapping_add(1);
                     if current_port == api_port {
                         // full cycle guard
-                        return info_err_res!("No free port available for HdHomeRun devices");
+                        return Err(TuliproxError::ConfigHdhomerun(
+                            "No free port available for HdHomeRun devices".to_string(),
+                        ));
                     }
                 }
 

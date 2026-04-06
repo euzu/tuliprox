@@ -1,4 +1,4 @@
-use crate::error::{TuliproxError, TuliproxErrorKind};
+use crate::error::TuliproxError;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -13,10 +13,10 @@ impl RateLimitConfigDto {
 
     pub(crate) fn prepare(&self) -> Result<(), TuliproxError> {
         if self.period_millis == 0 {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Rate limiter period can't be 0".to_string()));
+            return Err(TuliproxError::ConfigRateLimit("Rate limiter period can't be 0".to_string()));
         }
         if self.burst_size == 0 {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Rate limiter burst can't be 0".to_string()));
+            return Err(TuliproxError::ConfigRateLimit("Rate limiter burst can't be 0".to_string()));
         }
         Ok(())
     }

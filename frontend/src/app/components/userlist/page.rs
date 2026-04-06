@@ -1,4 +1,4 @@
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use std::{fmt::Display, str::FromStr};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -14,7 +14,7 @@ impl FromStr for UserlistPage {
         match s.to_lowercase().as_str() {
             "list" => Ok(UserlistPage::List),
             "edit" => Ok(UserlistPage::Edit),
-            _ => info_err_res!("Unknown page type: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown page type: {s}"))),
         }
     }
 }

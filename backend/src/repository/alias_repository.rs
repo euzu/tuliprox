@@ -5,7 +5,6 @@ use crate::utils::{file_reader, resolve_relative_path};
 use futures::TryFutureExt;
 use log::{error, warn};
 use shared::error::{string_to_io_error, to_io_error, TuliproxError};
-use shared::info_err;
 use shared::model::{ConfigInputAliasDto, InputType};
 use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX};
 use std::io;
@@ -361,14 +360,14 @@ pub async fn csv_patch_batch_append(
     // TODO check if alias name exists in any config ?
 
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
-        .map_err(|err| info_err!("{err}"))
+        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
 
 
     let url = if input_type == InputType::M3uBatch {
-        let base = Url::parse(base_url).map_err(|e| info_err!("{e}"))?;
+        let base = Url::parse(base_url).map_err(|e| TuliproxError::Config(format!("{e}")))?;
         build_m3u_url(&base, Some(username), Some(password))
-            .map_err(|e| info_err!("{e}"))?
+            .map_err(|e| TuliproxError::ConfigInput(format!("{e}")))?
             .to_string()
     } else {
         base_url.to_string()
@@ -388,7 +387,7 @@ pub async fn csv_patch_batch_append(
     aliases.push(alias);
 
     csv_write_input_to_path(&file_path, &aliases)
-        .map_err(|err| info_err!("{err}"))
+        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
     Ok(())
 }
@@ -403,7 +402,7 @@ pub async fn csv_patch_batch_update_exp_date(
 ) -> Result<(), TuliproxError> {
     let mut matched = false;
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
-        .map_err(|err| info_err!("{err}"))
+        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
     for alias in &mut aliases {
         if &alias.name == account_name
@@ -424,7 +423,7 @@ pub async fn csv_patch_batch_update_exp_date(
 
     if matched {
         csv_write_input_to_path(&file_path, &aliases)
-            .map_err(|err| info_err!("{err}"))
+            .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
             .await?;
     } else {
         warn!("panel_api: could not find batch csv row for account {account_name}");
@@ -445,7 +444,7 @@ pub async fn csv_patch_batch_update_credentials(
 ) -> Result<(), TuliproxError> {
     let mut matched = false;
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
-        .map_err(|err| info_err!("{err}"))
+        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
 
     for alias in &mut aliases {
@@ -518,7 +517,7 @@ pub async fn csv_patch_batch_update_credentials(
 
     if matched {
         csv_write_input_to_path(&file_path, &aliases)
-            .map_err(|err| info_err!("{err}"))
+            .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
             .await?;
     } else {
         warn!("panel_api: could not find batch csv row to update credentials for account {account_name}");
@@ -531,14 +530,14 @@ pub async fn csv_patch_batch_remove_expired(
     csv_path: &Path,
 ) -> Result<bool, TuliproxError> {
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
-        .map_err(|err| info_err!("{err}"))
+        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
     let before_len = aliases.len();
     aliases.retain(|alias| !is_input_expired(alias.exp_date));
     let changed = before_len != aliases.len();
     if changed {
         csv_write_input_to_path(&file_path, &aliases)
-            .map_err(|err| info_err!("{err}"))
+            .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
             .await?;
     }
     Ok(changed)
@@ -549,7 +548,7 @@ pub async fn csv_patch_batch_sort_by_exp_date(
     csv_path: &Path,
 ) -> Result<bool, TuliproxError> {
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
-        .map_err(|err| info_err!("{err}"))
+        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
     if aliases.len() < 2 {
         return Ok(false);
@@ -565,7 +564,7 @@ pub async fn csv_patch_batch_sort_by_exp_date(
     }
     aliases = sorted;
     csv_write_input_to_path(&file_path, &aliases)
-        .map_err(|err| info_err!("{err}"))
+        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
     Ok(true)
 }

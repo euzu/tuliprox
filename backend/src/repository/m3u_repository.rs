@@ -19,9 +19,8 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
-    error::{notify_err, str_to_io_error, string_to_io_error, TuliproxError},
+    error::{str_to_io_error, string_to_io_error, TuliproxError},
     model::{M3uPlaylistItem, PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster},
-    notify_err_res,
     utils::PROVIDER_SCHEME_PREFIX,
 };
 use std::{
@@ -36,14 +35,14 @@ use tokio_stream::Stream;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
-        notify_err!("failed to write m3u playlist: {} - {}", $path.display(), $err)
+        TuliproxError::RepositoryM3u(format!("failed to write m3u playlist: {} - {}", $path.display(), $err))
     };
 }
 
 macro_rules! await_playlist_write {
     ($expr:expr, $fmt:literal $(, $args:expr)* ) => {{
         $expr.await.map_err(|err| {
-            notify_err!($fmt $(, $args)*, err)
+            TuliproxError::RepositoryM3u(format!($fmt $(, $args)*, err))
         })?
     }};
 }
@@ -74,12 +73,12 @@ pub async fn ensure_m3u_storage_path(cfg: &Config, target_name: &str) -> Result<
     if let Some(path) = m3u_get_storage_path(cfg, target_name) {
         if tokio::fs::create_dir_all(&path).await.is_err() {
             let msg = format!("Failed to save m3u data, can't create directory {}", &path.display());
-            return notify_err_res!("{msg}");
+            return Err(TuliproxError::RepositoryM3u(msg));
         }
         Ok(path)
     } else {
         let msg = format!("Failed to save m3u data, can't create directory for target {target_name}");
-        notify_err_res!("{msg}")
+        Err(TuliproxError::RepositoryM3u(msg))
     }
 }
 
@@ -219,7 +218,7 @@ async fn persist_m3u_playlist_as_text(
 
             let input = provider_input_by_name
                 .get(&m3u.input_name)
-                .ok_or_else(|| notify_err!("Input '{}' not found for provider URL resolution", m3u.input_name))?;
+                .ok_or_else(|| TuliproxError::RepositoryM3u(format!("Input '{}' not found for provider URL resolution", m3u.input_name)))?;
 
             let resolved = input.resolve_url(effective_url)?;
             if resolved.as_ref() == effective_url.as_ref() {
@@ -307,7 +306,7 @@ pub async fn m3u_write_playlist(
         Ok(())
     })
         .await
-        .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
+        .map_err(|err| TuliproxError::RepositoryM3u(format!("failed to write m3u playlist: {} - {err}", m3u_path.display())))??;
 
     Ok(())
 }
@@ -438,10 +437,10 @@ where
     tokio::spawn(async move {
         if let Err(err) = handle.await {
             error!("M3U playlist reader task failed for {}: {err}", m3u_path_for_log.display());
-            let _ = join_err_tx.send(Err(notify_err!(
+            let _ = join_err_tx.send(Err(TuliproxError::RepositoryM3u(format!(
                 "M3U playlist reader task failed for {}: {err}",
                 m3u_path_for_log.display()
-            )))
+            ))))
                 .await;
         }
     });
@@ -472,7 +471,7 @@ pub async fn persist_input_m3u_playlist(
         Ok(())
     })
         .await
-        .map_err(|err| notify_err!("failed to write m3u playlist: {} - {err}", m3u_path.display()))??;
+        .map_err(|err| TuliproxError::RepositoryM3u(format!("failed to write m3u playlist: {} - {err}", m3u_path.display())))??;
 
     Ok(())
 }
@@ -515,7 +514,7 @@ pub async fn load_input_m3u_playlist(
         Ok(groups.into_values().collect())
     })
         .await
-        .map_err(|err| notify_err!("failed to read m3u playlist: {} - {err}", m3u_path_err.display()))??;
+        .map_err(|err| TuliproxError::RepositoryM3u(format!("failed to read m3u playlist: {} - {err}", m3u_path_err.display())))??;
 
     Ok(groups)
 }

@@ -1,4 +1,4 @@
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use std::{fmt::Display, str::FromStr};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -12,7 +12,7 @@ impl FromStr for PlaylistExplorerPage {
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
         match s.to_lowercase().as_str() {
             "source-selector" => Ok(PlaylistExplorerPage::SourceSelector),
-            _ => info_err_res!("Unknown page type: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown page type: {s}"))),
         }
     }
 }

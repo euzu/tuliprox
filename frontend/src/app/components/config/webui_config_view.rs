@@ -1,21 +1,15 @@
-use crate::{
-    app::{
-        components::{
-            config::{
-                config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
-                config_view_context::ConfigViewContext,
-                use_emit_mapped,
-            },
-            AppIcon, Card, Chip,
+use crate::{app::{
+    components::{
+        config::{
+            config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
+            config_view_context::ConfigViewContext,
+            use_emit_mapped, HasFormData,
         },
-        context::ConfigContext,
+        AppIcon, Card, Chip, DropDownOption, DropDownSelection, Select,
     },
-    config_field, config_field_bool, config_field_child, config_field_hide, config_field_optional, edit_field_bool,
-    edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option,
-    generate_form_reducer, html_if,
-    i18n::use_translation,
-};
-use shared::model::{ContentSecurityPolicyConfigDto, WebAuthConfigDto, WebUiConfigDto};
+    context::ConfigContext,
+}, config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional, edit_field_bool, edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer, html_if, i18n::use_translation};
+use shared::model::{view_type::ViewType, ContentSecurityPolicyConfigDto, WebAuthConfigDto, WebUiConfigDto};
 use yew::prelude::*;
 
 // Labels
@@ -33,6 +27,7 @@ const LABEL_CONTENT_SECURITY_POLICY: &str = "LABEL.CONTENT_SECURITY_POLICY";
 const LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES: &str = "LABEL.CUSTOM_ATTRIBUTES";
 const LABEL_PATH: &str = "LABEL.PATH";
 const LABEL_COMBINE_VIEWS_STATS_STREAMS: &str = "LABEL.COMBINE_VIEWS_STATS_STREAMS";
+const LABEL_LANDING_PAGE: &str = "LABEL.LANDING_PAGE";
 
 // Reducers for form states
 generate_form_reducer!(
@@ -45,6 +40,7 @@ generate_form_reducer!(
         PlayerServer => player_server: Option<String>,
         KickSecs => kick_secs: u64,
         CombineViewsStatsStreams => combine_views_stats_streams: bool,
+        LandingPage => landing_page: shared::model::view_type::ViewType,
     }
 );
 
@@ -83,6 +79,18 @@ pub fn WebUiConfigView() -> Html {
         use_reducer(|| WebUiAuthConfigFormState { form: WebAuthConfigDto::default(), modified: false });
     let csp_state: UseReducerHandle<CspConfigFormState> =
         use_reducer(|| CspConfigFormState { form: ContentSecurityPolicyConfigDto::default(), modified: false });
+
+    let view_types = use_memo(webui_state.data().landing_page, |landing_page| {
+        enum_iterator::all::<ViewType>()
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|view_type| DropDownOption {
+                id: view_type.to_string(),
+                label: html! { translate.t(&format!("LABEL.VIEW_TYPE_{}", view_type.to_string().to_uppercase()))},
+                selected: landing_page == view_type,
+            })
+            .collect::<Vec<DropDownOption>>()
+    });
 
     // Notify parent when form changes
     {
@@ -142,6 +150,7 @@ pub fn WebUiConfigView() -> Html {
         <>
             <Card class="tp__config-view__card">
             { config_field_bool!(webui_state.form, translate.t(LABEL_ENABLED), enabled) }
+            { config_field_custom!(translate.t(LABEL_LANDING_PAGE),  translate.t(&format!("LABEL.VIEW_TYPE_{}", webui_state.form.landing_page.to_string().to_uppercase()))) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_COMBINE_VIEWS_STATS_STREAMS), combine_views_stats_streams) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PATH), path) }
@@ -181,10 +190,25 @@ pub fn WebUiConfigView() -> Html {
 
     // Edit mode
     let render_edit_mode = || {
+        let webui_state_clone = webui_state.clone();
         html! {
             <>
             <Card class="tp__config-view__card">
                 { edit_field_bool!(webui_state, translate.t(LABEL_ENABLED), enabled, WebUiConfigFormAction::Enabled) }
+                { config_field_child!(translate.t(LABEL_LANDING_PAGE), "WEB_UI_CONFIG.LANDING_PAGE", {
+                   html! { <Select name="landing_page"
+                    multi_select={false}
+                    on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
+                        let view_type = match selections {
+                            DropDownSelection::Empty => None,
+                            DropDownSelection::Single(option) => option.parse::<ViewType>().ok(),
+                            DropDownSelection::Multi(options) => options.first().as_ref().and_then(|f| f.parse::<ViewType>().ok())
+                           };
+                        webui_state_clone.dispatch(WebUiConfigFormAction::LandingPage(view_type.unwrap_or_else(ViewType::default)));
+                    })}
+                    options={view_types.clone()}
+                    />
+                }})}
                 { edit_field_bool!(webui_state, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled, WebUiConfigFormAction::UserUiEnabled) }
                 { edit_field_bool!(webui_state, translate.t(LABEL_COMBINE_VIEWS_STATS_STREAMS), combine_views_stats_streams, WebUiConfigFormAction::CombineViewsStatsStreams) }
                 { edit_field_text_option!(webui_state, translate.t(LABEL_PATH), path, WebUiConfigFormAction::Path) }

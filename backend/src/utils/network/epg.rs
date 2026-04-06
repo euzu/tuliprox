@@ -7,7 +7,7 @@ use crate::utils::{add_prefix_to_filename, prepare_file_path, request};
 use crate::utils::cleanup_unlisted_files_with_suffix;
 use log::debug;
 use shared::concat_string;
-use shared::error::{info_err, TuliproxError};
+use shared::error::{ TuliproxError};
 use shared::utils::{sanitize_sensitive_info, short_hash};
 use std::path::PathBuf;
 
@@ -32,7 +32,7 @@ async fn download_epg_file(url: &str, ctx: &PlaylistProcessingContext,
                            headers: Option<&reqwest::header::HeaderMap>,
                            storage_dir: &str) -> Result<PathBuf, TuliproxError> {
     debug!("Getting epg file path for url: {}", sanitize_sensitive_info(url));
-    let persist_file_path = get_input_raw_epg_file_path(url, input, storage_dir).await.map_err(|e| info_err!("Could not access epg file download directory: {}", e))?;
+    let persist_file_path = get_input_raw_epg_file_path(url, input, storage_dir).await.map_err(|e| TuliproxError::Io(format!("Could not access epg file download directory: {e}")))?;
 
     if input.cache_duration_seconds > 0 {
         if let Ok(metadata) = tokio::fs::metadata(&persist_file_path).await {

@@ -1,4 +1,4 @@
-use crate::{error::TuliproxError, info_err_res};
+use crate::error::TuliproxError;
 use enum_iterator::Sequence;
 use std::{fmt::Display, str::FromStr};
 
@@ -52,7 +52,7 @@ impl FromStr for ProxyUserStatus {
             Self::TRIAL => Ok(Self::Trial),
             Self::DISABLED => Ok(Self::Disabled),
             Self::PENDING => Ok(Self::Pending),
-            _ => info_err_res!("Unknown ProxyUserStatus: {}", s),
+            _ => Err(TuliproxError::Config(format!("Unknown ProxyUserStatus: {}", s))),
         }
     }
 }

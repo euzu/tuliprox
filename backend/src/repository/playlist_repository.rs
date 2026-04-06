@@ -14,7 +14,7 @@ use crate::repository::{LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, M
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::utils;
 use log::{info, warn};
-use shared::error::{info_err, TuliproxError};
+use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
@@ -136,7 +136,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     }
 
     if let Err(err) = target_id_mapping.persist() {
-        errors.push(info_err!("{err}"));
+        errors.push(TuliproxError::Config(format!("{err}")));
     }
     // Keep lock until all outputs are persisted to prevent concurrent writers
     // from interleaving mapping and output state for the same target.
@@ -315,7 +315,7 @@ pub async fn get_target_id_mapping(cfg: &AppConfig, target_path: &Path, use_memo
         TargetIdMapping::new(&mapping_path, use_memory_cache)
     })
         .await
-        .map_err(|err| info_err!("spawn_blocking failed while creating TargetIdMapping: {err}"))??;
+        .map_err(|err| TuliproxError::Config(format!("spawn_blocking failed while creating TargetIdMapping: {err}")))??;
 
     Ok((mapping, file_lock))
 }
@@ -332,8 +332,8 @@ async fn load_target_id_mapping_as_tree(app_config: &AppConfig, target_path: &Pa
         BPlusTree::<u32, VirtualIdRecord>::load(&path_clone)
     })
         .await
-        .map_err(|e| info_err!("Blocking task failed: {e}"))?
-        .map_err(|err| info_err!("Could not find path for target {} err:{err}", &target_name))
+        .map_err(|e| TuliproxError::Config(format!("Blocking task failed: {e}")))?
+        .map_err(|err| TuliproxError::Config(format!("Could not find path for target {} err:{err}", &target_name)))
 }
 
 async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Path, cluster: XtreamCluster) -> BPlusTree<u32, XtreamPlaylistItem> {
@@ -353,7 +353,7 @@ async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Pat
 async fn load_id_mapping_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
     let config = app_config.config.load();
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(||
-        info_err!("Could not find path for target {}", &target.name))?;
+        TuliproxError::Config(format!("Could not find path for target {}", &target.name)))?;
 
     load_target_id_mapping_as_tree(app_config, &target_path, target).await
 }
@@ -362,7 +362,7 @@ async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarge
     let config = app_config.config.load();
 
     let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(||
-        info_err!("Could not find path for target {} xtream output", &target.name))?;
+        TuliproxError::Config(format!("Could not find path for target {} xtream output", &target.name)))?;
 
     let live_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Live).await;
     let vod_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Video).await;
@@ -378,7 +378,7 @@ async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarge
 async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistM3uStorage, TuliproxError> {
     let config = app_config.config.load();
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(||
-        info_err!("Could not find path for target {}", &target.name))?;
+        TuliproxError::Config(format!("Could not find path for target {}", &target.name)))?;
 
     let m3u_path = m3u_get_file_path_for_db(&target_path);
     let file_lock = app_config.file_locks.read_lock(&m3u_path).await;
@@ -433,7 +433,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
     let storage_path = match get_input_storage_path(&input.name, &cfg.storage_dir).await {
         Ok(storage_path) => storage_path,
         Err(err) => {
-            return (playlist, Some(info_err!("Error creating input storage directory for input '{}' failed: {err}", input.name)));
+            return (playlist, Some(TuliproxError::Config(format!("Error creating input storage directory for input '{}' failed: {err}", input.name))));
         }
     };
 
@@ -466,7 +466,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
     let app_config = &ctx.config;
     let cfg = app_config.config.load();
     let storage_path = get_input_storage_path(&input.name, &cfg.storage_dir).await
-        .map_err(|e| info_err!("Error getting input path: {e}"))?;
+        .map_err(|e| TuliproxError::Config(format!("Error getting input path: {e}")))?;
     let disk_based_processing = cfg.disk_based_processing;
 
     match input.get_download_input_type() {

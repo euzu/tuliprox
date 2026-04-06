@@ -1,5 +1,5 @@
 use crate::model::macros;
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use shared::model::{ConfigDto, LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
 use shared::utils::DEFAULT_STORAGE_DIR;
 use shared::utils::Internable;
@@ -55,7 +55,7 @@ impl LibraryConfig {
     fn canonicalize_scan_directory_path(path: &str, storage_dir: &str) -> Result<String, TuliproxError> {
         let path = path.trim();
         if path.is_empty() {
-            return info_err_res!("Library scan directory path cannot be empty");
+            return Err(TuliproxError::Config("Library scan directory path cannot be empty".to_string()));
         }
 
         let scan_path = PathBuf::from(path);
@@ -63,7 +63,7 @@ impl LibraryConfig {
 
         match scan_path.canonicalize() {
             Ok(path_buf) => Ok(path_buf.to_string_lossy().to_string()),
-            Err(err) => info_err_res!("Failed to canonicalize directory path {}: {err}", path),
+            Err(err) => Err(TuliproxError::Config(format!("Failed to canonicalize directory path {path}: {err}"))),
         }
     }
 

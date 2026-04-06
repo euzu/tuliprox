@@ -68,21 +68,15 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         use_reducer(|| UserFormState { form: ProxyUserCredentialsDto::default(), modified: false });
 
     let proxy_user_status = use_memo(form_state.data().status, |status| {
-        [
-            ProxyUserStatus::Active,
-            ProxyUserStatus::Expired,
-            ProxyUserStatus::Banned,
-            ProxyUserStatus::Trial,
-            ProxyUserStatus::Disabled,
-            ProxyUserStatus::Pending,
-        ]
-        .iter()
-        .map(|s| DropDownOption {
-            id: s.to_string(),
-            label: html! { <UserStatus status={Some(*s)} /> },
-            selected: status.as_ref() == Some(s),
-        })
-        .collect::<Vec<DropDownOption>>()
+        enum_iterator::all::<ProxyUserStatus>()
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|s| DropDownOption {
+                id: s.to_string(),
+                label: html! { <UserStatus status={Some(*s)} /> },
+                selected: status.as_ref() == Some(s),
+            })
+            .collect::<Vec<DropDownOption>>()
     });
 
     let targets = use_memo((props.targets.clone(), (*selected_target).clone()), |(targets, selected)| {

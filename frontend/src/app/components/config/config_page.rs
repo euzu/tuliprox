@@ -1,5 +1,5 @@
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{
         ApiProxyConfigDto, ConfigApiDto, HdHomeRunConfigDto, IpCheckConfigDto, LibraryConfigDto, LogConfigDto,
         MainConfigDto, MessagingConfigDto, MetadataUpdateConfigDto, ProxyConfigDto, ReverseProxyConfigDto,
@@ -75,7 +75,7 @@ impl FromStr for ConfigPage {
             IPCHECK_PAGE => Ok(ConfigPage::IpCheck),
             PANEL_PAGE => Ok(ConfigPage::Panel),
             LIBRARY_PAGE => Ok(ConfigPage::Library),
-            _ => info_err_res!("Unknown config page: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown config page: {s}"))),
         }
     }
 }

@@ -9,7 +9,6 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    info_err_res,
     model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder},
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
@@ -52,7 +51,7 @@ impl FromStr for TargetFormPage {
         match s {
             Self::MAIN => Ok(TargetFormPage::Main),
             Self::OPTIONS => Ok(TargetFormPage::Options),
-            _ => info_err_res!("Unknown target form page: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown target form page: {s}"))),
         }
     }
 }

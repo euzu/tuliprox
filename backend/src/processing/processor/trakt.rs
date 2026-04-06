@@ -250,7 +250,7 @@ impl TraktCategoriesProcessor {
                     }
                 }
                 Err(err) => {
-                    warn!("Failed to fetch Trakt list {cache_key}: {}", err.message);
+                    warn!("Failed to fetch Trakt list {cache_key}: {}", err.message());
                 }
             }
         }

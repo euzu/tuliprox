@@ -1262,6 +1262,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cron",
+ "enum-iterator",
  "fastrand",
  "futures",
  "futures-signals",
@@ -4045,6 +4046,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "serde_tuple",
+ "thiserror 2.0.18",
  "url",
  "zeroize",
 ]

@@ -1,5 +1,5 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     model::{ProxyType, ProxyUserStatus},
     utils::{
         default_as_true, default_user_priority, deserialize_timestamp, is_blank_optional_string,
@@ -65,10 +65,10 @@ impl ProxyUserCredentialsDto {
 
     pub fn validate(&self) -> Result<(), TuliproxError> {
         if self.username.is_empty() {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Username required".to_string()));
+            return Err(TuliproxError::ProxyUser("Username required".to_string()));
         }
         if self.password.is_empty() {
-            return Err(TuliproxError::new(TuliproxErrorKind::Info, "Password required".to_string()));
+            return Err(TuliproxError::ProxyUser("Password required".to_string()));
         }
         Ok(())
     }

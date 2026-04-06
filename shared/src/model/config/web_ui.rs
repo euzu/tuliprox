@@ -1,6 +1,6 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
-    model::WebAuthConfigDto,
+    error::TuliproxError,
+    model::{view_type::ViewType, WebAuthConfigDto},
     utils::{
         default_as_true, default_kick_secs, is_blank_optional_str, is_blank_optional_string, is_default_kick_secs,
         is_false, is_true,
@@ -56,20 +56,18 @@ impl ContentSecurityPolicyConfigDto {
             for (i, attr) in attrs.iter().enumerate() {
                 // Prohibit CR/LF/NUL (header injection)
                 if attr.contains('\r') || attr.contains('\n') || attr.contains('\0') {
-                    return Err(TuliproxError::new(
-                        TuliproxErrorKind::Info,
-                        format!("custom-attributes[{i}] contains forbidden control characters"),
-                    ));
+                    return Err(TuliproxError::ConfigWebUi(format!(
+                        "custom-attributes[{i}] contains forbidden control characters"
+                    )));
                 }
                 //Optional: prohibit additional CTLs (except HTAB)
                 if attr.chars().any(|c| {
                     let u = c as u32;
                     (u < 0x20 && c != '\t') || u == 0x7F
                 }) {
-                    return Err(TuliproxError::new(
-                        TuliproxErrorKind::Info,
-                        format!("custom-attributes[{i}] contains control characters"),
-                    ));
+                    return Err(TuliproxError::ConfigWebUi(format!(
+                        "custom-attributes[{i}] contains control characters"
+                    )));
                 }
             }
         }
@@ -96,6 +94,8 @@ pub struct WebUiConfigDto {
     pub kick_secs: u64,
     #[serde(default, skip_serializing_if = "is_false")]
     pub combine_views_stats_streams: bool,
+    #[serde(default, skip_serializing_if = "ViewType::is_default")]
+    pub landing_page: ViewType,
 }
 
 impl Default for WebUiConfigDto {
@@ -109,6 +109,7 @@ impl Default for WebUiConfigDto {
             player_server: None,
             kick_secs: default_kick_secs(),
             combine_views_stats_streams: false,
+            landing_page: ViewType::default(),
         }
     }
 }
@@ -160,10 +161,9 @@ impl WebUiConfigDto {
                 } else {
                     let normalized_path = normalized_path.to_string();
                     if RESERVED_PATHS.contains(&normalized_path.to_lowercase().as_str()) {
-                        return Err(TuliproxError::new(
-                            TuliproxErrorKind::Info,
-                            format!("web ui path is a reserved path. Do not use {RESERVED_PATHS:?}"),
-                        ));
+                        return Err(TuliproxError::ConfigWebUi(format!(
+                            "web ui path is a reserved path. Do not use {RESERVED_PATHS:?}"
+                        )));
                     }
                     self.path = Some(normalized_path);
                 }

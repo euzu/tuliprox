@@ -2,9 +2,8 @@
 
 pub use crate::model::{ItemField, PatternTemplate, PlaylistItemType, TemplateValue};
 use crate::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     foundation::value_provider::ValueProvider,
-    info_err,
     utils::{DirectedGraph, Internable, CONSTANTS},
 };
 use enum_iterator::all;
@@ -228,7 +227,7 @@ fn get_parser_item_field(expr: &Pair<Rule>) -> Result<ItemField, TuliproxError> 
             }
         }
     }
-    info_err_res!("unknown field: {}", expr.as_str())
+    Err(TuliproxError::FilterParse(format!("unknown field: {}", expr.as_str())))
 }
 
 fn get_parser_regexp(expr: &Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<CompiledRegex, TuliproxError> {
@@ -239,7 +238,7 @@ fn get_parser_regexp(expr: &Pair<Rule>, templates: Option<&[PatternTemplate]>) -
         let regstr = apply_templates_to_pattern_single(&parsed_text, templates)?;
         let re = crate::model::REGEX_CACHE.get_or_compile(regstr.as_str());
         if re.is_err() {
-            return info_err_res!("can't parse regex: {}", regstr);
+            return Err(TuliproxError::RegexCompile(regstr));
         }
         let regexp = re.unwrap();
         if log_enabled!(Level::Trace) {
@@ -247,7 +246,7 @@ fn get_parser_regexp(expr: &Pair<Rule>, templates: Option<&[PatternTemplate]>) -
         }
         return Ok(CompiledRegex { restr: regstr, re: regexp });
     }
-    info_err_res!("unknown field: {}", expr.as_str())
+    Err(TuliproxError::FilterParse(format!("unknown field: {}", expr.as_str())))
 }
 
 fn get_parser_field_comparison(
@@ -288,7 +287,7 @@ fn get_parser_type_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxError>
     let text_item_type = expr_inner.as_str();
     let item_type = get_filter_item_type(text_item_type);
     item_type.map_or_else(
-        || info_err_res!("can't parse item type: {text_item_type}"),
+        || Err(TuliproxError::FilterParse(format!("can't parse item type: {text_item_type}"))),
         |itype| Ok(Filter::TypeComparison(ItemField::Type, itype)),
     )
 }
@@ -377,7 +376,7 @@ fn get_parser_binary_op(expr: &Pair<Rule>) -> Result<BinaryOperator, TuliproxErr
     match expr.as_rule() {
         Rule::and => Ok(BinaryOperator::And),
         Rule::or => Ok(BinaryOperator::Or),
-        _ => info_err_res!("Unknown binary operator {}", expr.as_str()),
+        _ => Err(TuliproxError::FilterParse(format!("Unknown binary operator {}", expr.as_str()))),
     }
 }
 
@@ -398,7 +397,10 @@ pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> R
     let source = apply_templates_to_pattern_single(filter_text, templates)?;
     let unresolved_placeholders = unresolved_template_placeholders(&source);
     if !unresolved_placeholders.is_empty() {
-        return info_err_res!("Unknown template placeholder(s) in filter: {}", unresolved_placeholders.join(", "));
+        return Err(TuliproxError::FilterParse(format!(
+            "Unknown template placeholder(s) in filter: {}",
+            unresolved_placeholders.join(", ")
+        )));
     }
 
     match FilterParser::parse(Rule::main, &source) {
@@ -448,12 +450,15 @@ pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> R
 
             if !errors.is_empty() {
                 errors.push(format!("Unable to parse filter: {}", &filter_text));
-                return info_err_res!("{}", errors.join("\n"));
+                return Err(TuliproxError::FilterParse(errors.join("\n").to_string()));
             }
 
-            result.map_or_else(|| info_err_res!("Unable to parse filter: {}", &filter_text), Ok)
+            result.map_or_else(
+                || Err(TuliproxError::FilterParse(format!("Unable to parse filter: {}", &filter_text))),
+                Ok,
+            )
         }
-        Err(err) => info_err_res!("{err}"),
+        Err(err) => Err(TuliproxError::FilterParse(format!("{err}"))),
     }
 }
 
@@ -483,7 +488,7 @@ fn build_dependency_graph(templates: &Vec<PatternTemplate>) -> Result<DirectedGr
         error!("Cyclic template dependencies detected [{}]", cyclic.join(" <-> "));
     }
     if !cycles.is_empty() {
-        return info_err_res!("Cyclic dependencies in templates detected!");
+        return Err(TuliproxError::FilterParse("Cyclic dependencies in templates detected!".to_string()));
     }
     Ok(graph)
 }
@@ -492,7 +497,7 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
     let mut seen_template_names: HashSet<&str> = HashSet::with_capacity(templates.len());
     for template in templates.iter() {
         if !seen_template_names.insert(template.name.as_str()) {
-            return info_err_res!("Duplicate template name found: {}", template.name);
+            return Err(TuliproxError::FilterParse(format!("Duplicate template name found: {}", template.name)));
         }
     }
 
@@ -512,9 +517,9 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
                 if let Some(depends_on) = dependencies.get(&template_name) {
                     let mut templ_value = template_values.get(&template_name).unwrap().clone();
                     for dep_templ_name in depends_on {
-                        let dep_value = template_values
-                            .get(dep_templ_name)
-                            .ok_or_else(|| info_err!("Failed to load template {dep_templ_name}"))?;
+                        let dep_value = template_values.get(dep_templ_name).ok_or_else(|| {
+                            TuliproxError::FilterParse(format!("Failed to load template {dep_templ_name}"))
+                        })?;
                         let dep_templ = template_map.get_mut(dep_templ_name).unwrap();
                         templ_value = match dep_value {
                             TemplateValue::Single(dep_val) => match templ_value {
@@ -647,13 +652,17 @@ pub fn apply_templates_to_pattern(
             TemplateValue::Single(_) => {}
             TemplateValue::Multi(multi_vals) => match multi_vals.len().cmp(&1) {
                 Ordering::Less => {
-                    return info_err_res!("Empty multi value templates are not supported for pattern! {pattern}");
+                    return Err(TuliproxError::FilterParse(format!(
+                        "Empty multi value templates are not supported for pattern! {pattern}"
+                    )));
                 }
                 Ordering::Equal => {
                     new_pattern = TemplateValue::Single(multi_vals.first().unwrap().to_owned());
                 }
                 Ordering::Greater => {
-                    return info_err_res!("Multi value templates are not supported for pattern! {pattern}");
+                    return Err(TuliproxError::FilterParse(format!(
+                        "Multi value templates are not supported for pattern! {pattern}"
+                    )));
                 }
             },
         }
@@ -668,7 +677,9 @@ pub fn apply_templates_to_pattern_single(
 ) -> Result<String, TuliproxError> {
     match apply_templates_to_pattern(pattern, templates, false)? {
         TemplateValue::Single(value) => Ok(value),
-        TemplateValue::Multi(_) => info_err_res!("Multi value templates are not supported for pattern!"),
+        TemplateValue::Multi(_) => {
+            Err(TuliproxError::FilterParse("Multi value templates are not supported for pattern!".to_string()))
+        }
     }
 }
 

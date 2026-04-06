@@ -15,7 +15,7 @@ use crate::{
     services::DialogService,
 };
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{permission::Permission, SortOrder},
     utils::{unix_ts_to_str, Substring},
 };
@@ -101,7 +101,7 @@ impl FromStr for TableAction {
         } else if s.eq("copy_credentials") {
             Ok(Self::CopyCredentials)
         } else {
-            info_err_res!("Unknown TableAction: {}", s)
+            Err(TuliproxError::Config(format!("Unknown TableAction: {}", s)))
         }
     }
 }

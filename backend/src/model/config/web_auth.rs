@@ -4,7 +4,7 @@ use std::io::{BufRead, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use log::{debug, error, trace, warn};
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use shared::model::permission::{permission_from_name, PermissionSet, PERM_ALL};
 use shared::model::WebAuthConfigDto;
 
@@ -99,11 +99,11 @@ impl WebAuthConfig {
             PathBuf::from(&userfile_name)
         };
         if !utils::path_exists(&userfile_path) {
-            return info_err_res!("Could not find userfile {}", &userfile_name);
+            return Err(TuliproxError::Config(format!("Could not find userfile {}", &userfile_name)));
         }
 
         let Ok(file) = File::open(&userfile_path) else {
-            return info_err_res!("Could not read userfile {:?}", &userfile_path);
+            return Err(TuliproxError::Config(format!("Could not read userfile {}", userfile_path.display())));
         };
         let reader = utils::file_reader(file);
         let mut users = vec![];

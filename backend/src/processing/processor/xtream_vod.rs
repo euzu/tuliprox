@@ -625,7 +625,7 @@ pub async fn update_vod_metadata(
     if should_fetch_info {
         if let Some(stream_id) = stream_id_opt {
             let info_url = xtream::get_xtream_player_api_info_url(input, XtreamCluster::Video, stream_id)
-                .ok_or_else(|| shared::error::info_err!("Failed to build info URL"))?;
+                .ok_or_else(|| shared::error::TuliproxError::Config("Failed to build info URL".to_string()))?;
 
             let input_source = InputSource::from(input).with_url(info_url);
 
@@ -670,12 +670,12 @@ pub async fn update_vod_metadata(
             props = Some(new_props);
         } else {
             // We can't proceed without at least a name
-            return Err(shared::error::info_err!("No VOD properties available and no title found for {display_id}"));
+            return Err(shared::error::TuliproxError::Config(format!("No VOD properties available and no title found for {display_id}")));
         }
     }
 
     let Some(mut properties) = props else {
-        return Err(shared::error::info_err!("No VOD properties available after fallback creation for {display_id}"));
+        return Err(shared::error::TuliproxError::Config(format!("No VOD properties available after fallback creation for {display_id}")));
     };
 
     let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
@@ -908,10 +908,10 @@ pub async fn update_vod_metadata(
         if let Some(kind) = probe_failure {
             let err = match kind {
                 ProbeFailureKind::NotFound => {
-                    shared::error::info_err!("Probe failed with 404 Not Found for VOD {display_id}")
+                    shared::error::TuliproxError::Config(format!("Probe failed with 404 Not Found for VOD {display_id}"))
                 }
-                ProbeFailureKind::Other => shared::error::info_err!("Probe failed for VOD {display_id}"),
-                ProbeFailureKind::Cancelled => shared::error::info_err!("Probe cancelled for VOD {display_id}"),
+                ProbeFailureKind::Other => shared::error::TuliproxError::Config(format!("Probe failed for VOD {display_id}")),
+                ProbeFailureKind::Cancelled => shared::error::TuliproxError::Config(format!("Probe cancelled for VOD {display_id}")),
             };
             return Err(err);
         }
@@ -930,7 +930,7 @@ pub async fn update_vod_metadata(
                     &properties,
                 )
                 .await
-                .map_err(|e| shared::error::info_err!("Persist error: {e}"))?;
+                .map_err(|e| shared::error::TuliproxError::Config(format!("Persist error: {e}")))?;
             }
 
             debug_if_enabled!("Successfully updated VOD metadata for '{}' (ID: {})", display_title, display_id);

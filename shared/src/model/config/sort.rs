@@ -1,7 +1,7 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     foundation::{apply_templates_to_pattern, get_filter, Filter},
-    handle_tuliprox_error_result_list, info_err, info_err_res,
+    handle_tuliprox_error_result_list,
     model::{ItemField, PatternTemplate, TemplateValue},
 };
 use regex::Regex;
@@ -18,7 +18,9 @@ fn compile_regex_vec(patterns: Option<&Vec<String>>) -> Result<Option<Vec<Arc<Re
         .map(|seq| {
             seq.iter()
                 .map(|s| {
-                    crate::model::REGEX_CACHE.get_or_compile(s).map_err(|err| info_err!("can't parse regex: {s} {err}"))
+                    crate::model::REGEX_CACHE
+                        .get_or_compile(s)
+                        .map_err(|err| TuliproxError::RegexCompile(format!("{s} {err}")))
                 })
                 .collect::<Result<Vec<_>, _>>()
         })
@@ -78,7 +80,7 @@ impl FromStr for SortTarget {
         } else if s.eq_ignore_ascii_case(Self::CHANNEL) {
             Ok(Self::Channel)
         } else {
-            info_err_res!("Unknown SortTarget: {}", s)
+            Err(TuliproxError::ConfigSort(format!("Unknown SortTarget: {}", s)))
         }
     }
 }
@@ -128,7 +130,7 @@ impl ConfigSortRuleDto {
         if self.target == SortTarget::Group {
             // What the user sets is not important, we allow this but force to use Group
             if !matches!(self.field, ItemField::Group | ItemField::Title | ItemField::Name | ItemField::Caption) {
-                return info_err_res!("Group sorting can only be done on the Group field");
+                return Err(TuliproxError::ConfigSort("Group sorting can only be done on the Group field".to_string()));
             }
             self.field = ItemField::Group; // hard coded because we only can't match a group until we can use PlaylistGroup with filter
         }
@@ -168,10 +170,7 @@ pub struct ConfigSortDto {
 
 impl ConfigSortDto {
     pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
-        handle_tuliprox_error_result_list!(
-            TuliproxErrorKind::Info,
-            self.rules.iter_mut().map(|rule| rule.prepare(templates))
-        );
+        handle_tuliprox_error_result_list!(self.rules.iter_mut().map(|rule| rule.prepare(templates)));
         Ok(())
     }
 }

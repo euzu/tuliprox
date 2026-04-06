@@ -23,7 +23,7 @@ use crate::{
 use gloo_timers::{callback::Interval, future::TimeoutFuture};
 use log::error;
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, UserCommand},
     utils::default_kick_secs,
 };
@@ -377,9 +377,7 @@ impl FromStr for StreamDisplayAction {
             COPY_LINK_TULIPROX_VIRTUAL_ID => Ok(Self::CopyLinkTuliproxVirtualId),
             COPY_LINK_TULIPROX_WEBPLAYER_URL => Ok(Self::CopyLinkTuliproxWebPlayerUrl),
             COPY_LINK_PROVIDER_URL => Ok(Self::CopyLinkProviderUrl),
-            _ => {
-                info_err_res!("Unknown Stream Action: {}", s)
-            }
+            _ => Err(TuliproxError::Config(format!("Unknown Stream Action: {}", s))),
         }
     }
 }

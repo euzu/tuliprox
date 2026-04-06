@@ -1,5 +1,5 @@
 use crate::utils::{get_local_storage_item, remove_local_storage_item, set_local_storage_item};
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use std::{
     fmt::{Display, Formatter},
     str::FromStr,
@@ -97,7 +97,7 @@ impl FromStr for Theme {
             THEME_BANANA_YELLOW => Ok(Theme::BananaYellow),
             THEME_SUN_WASHED_SOFT => Ok(Theme::SunWashedSoft),
             THEME_VINTAGE_NEUTRAL => Ok(Theme::VintageNeutral),
-            _ => info_err_res!("Unknown theme: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown theme: {s}"))),
         }
     }
 }

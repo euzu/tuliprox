@@ -1,10 +1,9 @@
 use crate::model::Config;
 use crate::repository::storage_const;
 use crate::utils;
-use shared::error::notify_err;
 use shared::error::TuliproxError;
 use std::path::{Path, PathBuf};
-use shared::{concat_string, notify_err_res};
+use shared::concat_string;
 
 pub fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
     // Join directly with &str to avoid an intermediate PathBuf allocation
@@ -15,12 +14,12 @@ pub async fn ensure_target_storage_path(cfg: &Config, target_name: &str) -> Resu
     if let Some(path) = get_target_storage_path(cfg, target_name) {
         if tokio::fs::create_dir_all(&path).await.is_err() {
             let msg = format!("Failed to save target data, can't create directory {}", path.display());
-            return notify_err_res!("{msg}");
+            return Err(TuliproxError::RepositoryStorage(msg));
         }
         Ok(path)
     } else {
         let msg = format!("Failed to save target data, can't create directory for target {target_name}");
-        notify_err_res!("{msg}")
+        Err(TuliproxError::RepositoryStorage(msg))
     }
 }
 
@@ -49,7 +48,7 @@ pub async fn get_input_storage_path(input_name: &str, storage_dir: &str) -> std:
 pub async fn ensure_input_storage_path(cfg: &Config, input_name: &str) -> Result<PathBuf, TuliproxError> {
     get_input_storage_path(input_name, &cfg.storage_dir).await
         .map_err(|err| {
-            notify_err!("Failed to save input data, can't create directory for input {input_name}: {err}")
+            TuliproxError::RepositoryStorage(format!("Failed to save input data, can't create directory for input {input_name}: {err}"))
         })
 }
 

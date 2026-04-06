@@ -1,6 +1,6 @@
 use crate::model::IpCheckConfig;
 use regex::Regex;
-use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::error::TuliproxError;
 use shared::utils::sanitize_sensitive_info;
 use std::sync::Arc;
 
@@ -10,17 +10,11 @@ async fn fetch_ip(
     regex: Option<&Arc<Regex>>,
 ) -> Result<String, TuliproxError> {
     let response = client.get(url).send().await.map_err(|e| {
-        TuliproxError::new(
-            TuliproxErrorKind::Info,
-            format!("Failed to request {}: {e}", sanitize_sensitive_info(url)),
-        )
+        TuliproxError::ConfigIpCheck(format!("Failed to request {}: {e}", sanitize_sensitive_info(url)))
     })?;
 
     let text = response.text().await.map_err(|e| {
-        TuliproxError::new(
-            TuliproxErrorKind::Info,
-            format!("Failed to read response: {e}"),
-        )
+        TuliproxError::Io(format!("Failed to read response: {e}"))
     })?;
 
     if let Some(re) = regex {
@@ -28,23 +22,16 @@ async fn fetch_ip(
             if let Some(m) = caps.get(1) {
                 Ok(m.as_str().to_string())
             } else {
-                Err(TuliproxError::new(
-                    TuliproxErrorKind::Info,
-                    "Regex matched but no group found".to_string(),
-                ))
+                Err(TuliproxError::ConfigIpCheck("Regex matched but no group found".to_string()))
             }
         } else {
-            Err(TuliproxError::new(
-                TuliproxErrorKind::Info,
-                "Regex did not match".to_string(),
-            ))
+            Err(TuliproxError::ConfigIpCheck("Regex did not match".to_string()))
         };
     }
 
     Ok(text.trim().to_string())
 }
 
-/// Fetch both IPs from a shared URL (if both regex patterns are available)
 async fn fetch_combined_ips(
     client: &reqwest::Client,
     config: &IpCheckConfig,
@@ -75,13 +62,11 @@ async fn fetch_combined_ips(
     }
 }
 
-/// Fetch both IPv4 and IPv6 addresses, using separate or combined URL(s)
 pub async fn get_ips(
     client: &reqwest::Client,
     config: &IpCheckConfig,
 ) -> Result<(Option<String>, Option<String>), TuliproxError> {
     match (&config.url_ipv4, &config.url_ipv6, &config.url) {
-        // Both dedicated URLs provided
         (Some(url_v4), Some(url_v6), _) => {
             let (ipv4, ipv6) = tokio::join!(
                 fetch_ip(client, url_v4, config.pattern_ipv4.as_ref()),
@@ -90,13 +75,11 @@ pub async fn get_ips(
             Ok((ipv4.ok(), ipv6.ok()))
         }
 
-        // Only one combined URL provided
         (_, _, Some(shared_url)) => {
             let result = fetch_combined_ips(client, config, shared_url).await;
             Ok(result)
         }
 
-        // Only one dedicated URL
         (Some(url_v4), None, _) => {
             let ipv4 = fetch_ip(client, url_v4, config.pattern_ipv4.as_ref())
                 .await
@@ -110,10 +93,6 @@ pub async fn get_ips(
             Ok((None, ipv6))
         }
 
-        // No URLs given
-        _ => Err(TuliproxError::new(
-            TuliproxErrorKind::Info,
-            "No valid IP-check URLs provided".to_owned(),
-        )),
+        _ => Err(TuliproxError::Config("No valid IP-check URLs provided".to_string())),
     }
 }

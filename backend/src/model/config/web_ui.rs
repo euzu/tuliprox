@@ -1,3 +1,4 @@
+use shared::model::view_type::ViewType;
 use shared::error::TuliproxError;
 use shared::model::{ContentSecurityPolicyConfigDto, WebUiConfigDto};
 use shared::utils::default_kick_secs;
@@ -19,6 +20,7 @@ pub struct WebUiConfig {
     pub player_server: Option<String>,
     pub kick_secs: u64,
     pub combine_views_stats_streams: bool,
+    pub landing_page: ViewType,
 }
 
 impl WebUiConfig {
@@ -76,7 +78,8 @@ impl From<&WebUiConfigDto> for WebUiConfig {
             auth: dto.auth.as_ref().map(Into::into),
             player_server: dto.player_server.clone(),
             kick_secs: dto.kick_secs,
-            combine_views_stats_streams: dto.combine_views_stats_streams
+            combine_views_stats_streams: dto.combine_views_stats_streams,
+            landing_page: dto.landing_page,
         }
     }
 }
@@ -90,7 +93,8 @@ impl From<&WebUiConfig> for WebUiConfigDto {
             auth: instance.auth.as_ref().map(Into::into),
             player_server: instance.player_server.clone(),
             kick_secs: instance.kick_secs,
-            combine_views_stats_streams: instance.combine_views_stats_streams
+            combine_views_stats_streams: instance.combine_views_stats_streams,
+            landing_page: instance.landing_page,
         }
     }
 }

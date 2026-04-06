@@ -24,7 +24,7 @@ use std::str::FromStr;
 
 use std::sync::Arc;
 
-use shared::{concat_string, info_err};
+use shared::{concat_string };
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
 
@@ -77,22 +77,22 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     pli: &XtreamPlaylistItem,
                                     info_url: &str,
                                     cluster: XtreamCluster) -> Result<String, TuliproxError> {
-    let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!("Unexpected error, missing xtream output"))?;
+    let xtream_output = target.get_xtream_output().ok_or_else(|| TuliproxError::ApiXtream("Unexpected error, missing xtream output".to_string()))?;
 
     let app_config = &app_state.app_config;
     let encrypt_secret = app_state.get_encrypt_secret();
     let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret);
 
     if let Some(content) = pli.get_resolved_info_document(&options) {
-        return serde_json::to_string(&content).map_err(|err| info_err!("{err}"));
+        return serde_json::to_string(&content).map_err(|err| TuliproxError::ApiXtream(format!("{err}")));
     }
 
     let resolved_url = input.resolve_url(info_url)?;
     let input_source = InputSource::from(input).with_url(resolved_url.to_string());
     if let Ok(content) = get_xtream_stream_info_content(app_config, client, &input_source, false).await {
         if content.is_empty() {
-            return Err(info_err!("Provider returned no response for stream with id: {}/{}/{}",
-                                                  target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id()));
+            return Err(TuliproxError::ApiXtream(format!("Provider returned no response for stream with id: {}/{}/{}",
+                                                  target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())));
         }
         if let Some(provider_id) = pli.get_provider_id() {
             match cluster {
@@ -242,8 +242,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
         }
     }
 
-    Err(info_err!("Can't find stream with id: {}/{}/{}",
-                                   target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id()))
+    Err(TuliproxError::ApiXtream(format!("Can't find stream with id: {}/{}/{}",
+                                   target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())))
 }
 
 fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredentials,
@@ -253,7 +253,7 @@ fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredent
     let encrypt_secret = app_state.get_encrypt_secret();
     let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret);
     if let Some(content) = pli.get_resolved_info_document(&options) {
-        return Some(serde_json::to_string(&content).map_err(|err| info_err!("Failed to serialize stream info: {err}")));
+        return Some(serde_json::to_string(&content).map_err(|err| TuliproxError::ApiXtream(format!("Failed to serialize stream info: {err}"))));
     }
     None
 }

@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err_res,
     utils::{
         is_blank_optional_str, is_blank_optional_string, is_blank_or_default_cache_dir, parse_size_base_2,
         DEFAULT_CACHE_DIR,
@@ -33,7 +32,7 @@ impl CacheConfigDto {
 
             if let Some(val) = self.size.as_ref() {
                 if let Err(err) = parse_size_base_2(val) {
-                    return info_err_res!("Failed to read cache size: {err}");
+                    return Err(TuliproxError::ConfigCache(format!("Failed to read cache size: {err}")));
                 }
             }
         }

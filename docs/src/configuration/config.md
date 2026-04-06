@@ -128,6 +128,7 @@ web_ui:
   player_server: default
   kick_secs: 90
   combine_views_stats_streams: false
+  landing_page: dashboard
   content_security_policy:
     enabled: true
     custom-attributes:
@@ -144,14 +145,15 @@ web_ui:
 
 ### 2.1 Web UI Parameters
 
-| Parameter                     | Type   | Default   | Technical Impact & Background                                                                                                                                                                                                                      |
-|:------------------------------|:-------|:----------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`                     | Bool   | `true`    | Completely toggles the Web Dashboard and its REST API endpoints on or off.                                                                                                                                                                         |
-| `user_ui_enabled`             | Bool   | `true`    | Allows standard proxy users (not just admins) to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                       |
-| `path`                        | String | `""`      | Base path for the UI (e.g., `admin`). Critical for reverse proxy subfolder setups so assets load from `example.com/admin/assets/`.                                                                                                                 |
-| `player_server`               | String | `default` | Determines which virtual server block from `api-proxy.yml` is used to construct the streaming URLs when playing a channel directly within the Web UI player.                                                                                       |
-| `kick_secs`                   | Int    | `90`      | **Background:** When you kick a user via the Dashboard, they are not only disconnected but hard-blocked at the IP/User level for X seconds. This prevents their IPTV player's auto-reconnect logic from instantly stealing the provider slot back. |
-| `combine_views_stats_streams` | Bool   | `false`   | Combines the "Server Stats" and "Active Streams" views into a single unified window in the UI.                                                                                                                                                     |
+| Parameter                     | Type   | Default     | Technical Impact & Background                                                                                                                                                                                                                           |
+|:------------------------------|:-------|:------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`                     | Bool   | `true`      | Completely toggles the Web Dashboard and its REST API endpoints on or off.                                                                                                                                                                              |
+| `user_ui_enabled`             | Bool   | `true`      | Allows standard proxy users (not just admins) to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                            |
+| `path`                        | String | `""`        | Base path for the UI (e.g., `admin`). Critical for reverse proxy subfolder setups so assets load from `example.com/admin/assets/`.                                                                                                                      |
+| `player_server`               | String | `default`   | Determines which virtual server block from `api-proxy.yml` is used to construct the streaming URLs when playing a channel directly within the Web UI player.                                                                                            |
+| `kick_secs`                   | Int    | `90`        | **Background:** When you kick a user via the Dashboard, they are not only disconnected but hard-blocked at the IP/User level for X seconds. This prevents their IPTV player's auto-reconnect logic from instantly stealing the provider slot back.      |
+| `combine_views_stats_streams` | Bool   | `false`     | Combines the "Server Stats" and "Active Streams" views into a single unified window in the UI.                                                                                                                                                          |
+| `landing_page`                | String | `dashboard` | Set the initial landing page for the webui. Possible values are `dashboard`, `stats`, `streams`, `stream_history`, `downloads`, `users`, `config`, `source_editor`, `playlist_update`, `playlist_settings`, `playlist_explorer`, `playlist_epg`, `rbac` |
 
 ### 2.2 Content Security Policy (`content_security_policy`)
 
@@ -214,7 +216,8 @@ playlist_manager:playlist.read,playlist.write,source.read
 
 Available Permissions: `config.read/write`, `source.read/write`, `user.read/write`, `playlist.read/write`,
 `library.read/write`,
-`system.read/write`, `epg.read/write`, `download.read/write`. Note: Write does not imply Read. A group must explicitly grant both if users need
+`system.read/write`, `epg.read/write`, `download.read/write`. Note: Write does not imply Read. A group must explicitly
+grant both if users need
 to view
 and edit content.
 
@@ -505,11 +508,14 @@ video:
   * `episode_pattern`: Crucial for the directory organization. It uses the mandatory Named Capture Group
     `(?P<episode>...)` in the Regex to identify and strip the episode identifier (e.g., `S01E01`)
     from the filename, ensuring all episodes of a show land in the same base-show folder.
-  * `download_priority`: Default provider priority for VOD/series/episode downloads. Lower values mean higher priority.
+  * `download_priority`: Default provider priority for VOD/series/episode downloads. Lower values mean higher
+    priority.
   * `recording_priority`: Default provider priority for live recordings. Lower values mean higher priority.
-  * `reserve_slots_for_users`: Keeps provider headroom for normal foreground users before background-priority transfers
+  * `reserve_slots_for_users`: Keeps provider headroom for normal foreground users before background-priority
+    transfers
     may consume the last slots.
-  * `max_background_per_provider`: Limits how many background-priority transfers may run in parallel against one provider.
+  * `max_background_per_provider`: Limits how many background-priority transfers may run in parallel against one
+    provider.
   * `retry_backoff_initial_secs`: Initial retry delay for transient download/recording failures.
   * `retry_backoff_multiplier`: Growth factor applied to each later retry delay.
   * `retry_backoff_max_secs`: Maximum retry delay once the backoff curve reaches its cap.
@@ -521,13 +527,15 @@ Tuliprox handles these transfers like provider-bound background streams:
 * They respect provider limits, user priorities, and connection preemption instead of bypassing normal stream capacity.
 * Waiting for provider capacity is notify-based, not polling-based.
 * The Web UI loads an initial transfer snapshot and then stays synchronized through websocket updates.
-* Changes to `video.download` participate in hot config reloads. The background scheduler restarts and active transfers are  
+* Changes to `video.download` participate in hot config reloads. The background scheduler restarts and active transfers
+  are  
   re-queued so they continue under the updated download configuration.
 * RBAC integration is explicit:
   * `download.read` allows opening the downloads view and receiving transfer snapshots.
   * `download.write` allows queueing, pausing, cancelling, retrying, and removing transfers.
 * Persisted queue recovery is tolerant of corruption. If `downloads_state.json` cannot be deserialized,  
-  Tuliprox renames it to a timestamped `*_corrupt.*.json` backup and starts with an empty transfer queue instead of aborting server boot.
+  Tuliprox renames it to a timestamped `*_corrupt.*.json` backup and starts with an empty transfer queue instead of
+  aborting server boot.
 
 > **Note:** The named capture group `(?P<episode>...)` is **mandatory** for this to function correctly.
 >

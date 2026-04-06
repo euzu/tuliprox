@@ -23,7 +23,7 @@ pub async fn update_live_stream_metadata(
 ) -> Result<Option<LiveStreamProperties>, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
     let storage_path = get_input_storage_path(&input.name, storage_dir).await
-        .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
+        .map_err(|e| TuliproxError::Io(format!("Storage path error: {e}")))?;
 
     // Try to load existing info first to preserve data
     let mut props: Option<LiveStreamProperties> = None;
@@ -175,16 +175,16 @@ pub async fn update_live_stream_metadata(
         if let Some(stream_id) = stream_id_opt {
             persist_input_live_info(app_config, &storage_path, XtreamCluster::Live, &input.name, stream_id, &properties)
                 .await
-                .map_err(|e| shared::error::info_err!("Persist error: {e}"))?;
+                .map_err(|e| shared::error::TuliproxError::Config(format!("Persist error: {e}")))?;
         }
     }
     
     if !success {
         if not_found {
-            return Err(shared::error::info_err!("Probe failed with 404 Not Found for stream {display_id}"));
+            return Err(shared::error::TuliproxError::Config(format!("Probe failed with 404 Not Found for stream {display_id}")));
         }
         // Return error to propagate failure up to task manager/logs
-        return Err(shared::error::info_err!("Probe failed for stream {display_id}"));
+        return Err(shared::error::TuliproxError::Config(format!("Probe failed for stream {display_id}")));
     }
     
     Ok(Some(properties))

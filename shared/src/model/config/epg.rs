@@ -1,4 +1,4 @@
-use crate::{error::TuliproxError, info_err_res, model::EpgSmartMatchConfigDto, utils::is_false};
+use crate::{error::TuliproxError, model::EpgSmartMatchConfigDto, utils::is_false};
 
 const AUTO_URL: &str = "auto";
 
@@ -58,7 +58,7 @@ impl EpgConfigDto {
                                     logo_override: epg_source.logo_override,
                                 });
                             }
-                            Err(err) => return info_err_res!("{err}"),
+                            Err(err) => return Err(TuliproxError::ConfigEpg(err.to_string())),
                         }
                     } else {
                         self.t_sources.push(epg_source.clone());

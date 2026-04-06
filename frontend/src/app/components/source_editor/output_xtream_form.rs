@@ -10,7 +10,6 @@ use crate::{
 use shared::{
     concat_string,
     error::TuliproxError,
-    info_err_res,
     model::{
         TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
     },
@@ -55,7 +54,7 @@ impl FromStr for XtreamOutputFormPage {
         match s {
             Self::MAIN => Ok(XtreamOutputFormPage::Main),
             Self::TRAKT => Ok(XtreamOutputFormPage::Trakt),
-            _ => info_err_res!("Unknown xtream output form page: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown xtream output form page: {s}"))),
         }
     }
 }

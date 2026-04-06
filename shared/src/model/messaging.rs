@@ -1,4 +1,4 @@
-use crate::{concat_string, error::TuliproxError, info_err_res};
+use crate::{concat_string, error::TuliproxError};
 use std::{fmt, str::FromStr};
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
@@ -43,7 +43,7 @@ impl FromStr for MsgKind {
         } else if s.eq_ignore_ascii_case("watch") {
             Ok(Self::Watch)
         } else {
-            info_err_res!("Unknown MsgKind: {}", s)
+            Err(TuliproxError::Config(format!("Unknown MsgKind: {}", s)))
         }
     }
 }

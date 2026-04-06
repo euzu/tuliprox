@@ -35,7 +35,7 @@ use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
 use shared::{
     concat_string,
-    error::{get_errors_notify_message, notify_err, TuliproxError},
+    error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
         ClusterSource, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
@@ -596,7 +596,7 @@ async fn process_source(
                 if playlist_groups.is_empty() {
                     broadcast_step("Playlist download", &format!("Input '{}' playlist is empty", input.name));
                     info!("Source is empty {input_name}");
-                    errors.push(notify_err!("Source is empty {input_name}"));
+                    errors.push(TuliproxError::RepositoryPlaylist(format!("Source is empty {input_name}")));
                 } else {
                     source_playlists.push(FetchedPlaylist { input, source: playlist_groups, epg: tvguide });
                     log_memory_snapshot(
@@ -621,10 +621,10 @@ async fn process_source(
         if source_downloaded {
             if source_playlists.is_empty() {
                 debug!("Source at index {source_idx} is empty");
-                errors.push(notify_err!(
+                errors.push(TuliproxError::RepositoryPlaylist(format!(
                     "Source at index {source_idx} is empty: {}",
                     source.inputs.iter().map(Clone::clone).collect::<Vec<Arc<str>>>().join(", ")
-                ));
+                )));
             } else {
                 debug_if_enabled!(
                     "Source has {} groups",
@@ -1542,7 +1542,7 @@ pub async fn exec_processing(
 
     // log errors
     for err in &errors {
-        error!("{}", err.message);
+        error!("{}", err.message());
     }
 
     if !stats.is_empty() {

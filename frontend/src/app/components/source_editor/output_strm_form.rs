@@ -9,7 +9,6 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    info_err_res,
     model::{StrmExportStyle, StrmTargetOutputDto, TargetOutputDto},
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
@@ -49,7 +48,7 @@ impl FromStr for StrmFormPage {
         match s {
             Self::MAIN => Ok(StrmFormPage::Main),
             Self::OPTIONS => Ok(StrmFormPage::Options),
-            _ => info_err_res!("Unknown strm output form page: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown strm output form page: {s}"))),
         }
     }
 }

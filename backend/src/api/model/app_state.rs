@@ -26,7 +26,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
 use shared::{
-    create_bitset, error::TuliproxError, info_err_res, model::{UserConnectionPermission, VideoDownloadConfigDto},
+    create_bitset, error::TuliproxError, model::{UserConnectionPermission, VideoDownloadConfigDto},
     utils::small_vecs_equal_unordered,
 };
 use std::{
@@ -315,7 +315,7 @@ fn build_http_client_with_fallback(
 
     if proxy_configured {
         error!("{proxy_error_log}");
-        return info_err_res!("{proxy_error_msg}");
+        return Err(TuliproxError::Config(proxy_error_msg.to_string()));
     }
 
     error!("{fallback_log}");

@@ -43,7 +43,6 @@ use dashmap::DashSet;
 use log::{debug, error, info, warn};
 use shared::{
     error::TuliproxError,
-    info_err, info_err_res,
     utils::{concat_path_leading_slash, sanitize_sensitive_info},
 };
 use std::{
@@ -96,8 +95,7 @@ async fn recover_persisted_downloads_state(downloads: &DownloadQueue) -> Result<
             }
             Ok(())
         }
-        Err(err) => Err(TuliproxError::new(
-            shared::error::TuliproxErrorKind::Info,
+        Err(err) => Err(TuliproxError::Io(
             format!("Failed to load persisted downloads: {err}"),
         )),
     }
@@ -239,7 +237,7 @@ fn spawn_metadata_trigger_update(
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
     let web_dir_path = if web_root.is_empty() { get_default_web_root_path() } else { PathBuf::from(web_root) };
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
-        return info_err_res!("web_root does not exist or is not a directory: {}", web_dir_path.display());
+        return Err(TuliproxError::Server(format!("web_root does not exist or is not a directory: {}", web_dir_path.display())));
     }
     Ok(web_dir_path)
 }
@@ -727,7 +725,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     let router: axum::Router<()> = router.with_state(shared_data.clone());
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
         .await
-        .map_err(|err| info_err!("Failed to bind to {host}:{port}, {err}"))?;
+        .map_err(|err| TuliproxError::Server(format!("Failed to bind to {host}:{port}, {err}")))?;
 
     if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
         resume_downloads_after_bind(&app_state, download_cfg).await;

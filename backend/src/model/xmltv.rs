@@ -7,7 +7,7 @@ use chrono::{Datelike, TimeZone, Utc};
 use futures::TryFutureExt;
 use quick_xml::events::{Event};
 use shared::concat_string;
-use shared::error::{TuliproxError, TuliproxErrorKind};
+use shared::error::TuliproxError;
 use shared::model::{EpgChannel, EpgProgramme, InputFetchMethod};
 use shared::utils::{sanitize_sensitive_info, Internable};
 use std::collections::HashMap;
@@ -118,7 +118,7 @@ fn filter_channels_and_programmes(
 }
 
 pub async fn parse_xmltv_for_web_ui_from_file(path: &Path) -> Result<Vec<EpgChannel>, TuliproxError> {
-    let file = tokio::fs::File::open(path).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, err.to_string())).await?;
+    let file = tokio::fs::File::open(path).map_err(|err| TuliproxError::Io(err.to_string())).await?;
     parse_xmltv_for_web_ui(file).await
 }
 
@@ -145,10 +145,10 @@ pub async fn parse_xmltv_for_web_ui_from_url(app_state: &Arc<AppState>, url: &st
             Ok((stream, _url)) => {
                 parse_xmltv_for_web_ui(stream).await
             }
-            Err(err) => Err(TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to download: {} {err}", sanitize_sensitive_info(url))))
+            Err(err) => Err(TuliproxError::Download(format!("Failed to download: {} {err}", sanitize_sensitive_info(url))))
         }
     } else {
-        Err(TuliproxError::new(TuliproxErrorKind::Info, format!("Invalid url: {}", sanitize_sensitive_info(url))))
+        Err(TuliproxError::UrlParse(format!("Invalid url: {}", sanitize_sensitive_info(url))))
     }
 }
 
@@ -288,7 +288,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                 current_tag.clear();
             }
             Ok(Event::Eof) => break,
-            Err(err) => return Err(TuliproxError::new(TuliproxErrorKind::Info, err.to_string())),
+            Err(err) => return Err(TuliproxError::Parse(err.to_string())),
             _ => {}
         }
 

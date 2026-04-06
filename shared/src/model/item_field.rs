@@ -1,4 +1,4 @@
-use crate::{error::TuliproxError, info_err_res};
+use crate::error::TuliproxError;
 use enum_iterator::Sequence;
 use serde::{Deserialize, Deserializer};
 use std::{fmt::Display, str::FromStr};
@@ -87,7 +87,7 @@ impl FromStr for ItemField {
         } else if s.eq_ignore_ascii_case(Self::TYPE) {
             Ok(Self::Type)
         } else {
-            info_err_res!("Unknown ItemField: {}", s)
+            Err(TuliproxError::Config(format!("Unknown ItemField: {}", s)))
         }
     }
 }

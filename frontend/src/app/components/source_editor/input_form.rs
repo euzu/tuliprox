@@ -18,7 +18,6 @@ use crate::{
 use shared::{
     concat_string,
     error::TuliproxError,
-    info_err_res,
     model::{
         ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto,
         EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, StagedInputDto, XtreamLoginRequest,
@@ -112,7 +111,7 @@ impl FromStr for InputFormPage {
             Self::EPG => Ok(InputFormPage::Epg),
             Self::ALIAS => Ok(InputFormPage::Alias),
             Self::PROVIDER => Ok(InputFormPage::Provider),
-            _ => info_err_res!("Unknown input form page: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown input form page: {s}"))),
         }
     }
 }

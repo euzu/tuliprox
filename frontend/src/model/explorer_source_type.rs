@@ -1,4 +1,4 @@
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use std::{fmt, str::FromStr};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -16,7 +16,7 @@ impl FromStr for ExplorerSourceType {
             "hosted" => Ok(ExplorerSourceType::Hosted),
             "provider" => Ok(ExplorerSourceType::Provider),
             "custom" => Ok(ExplorerSourceType::Custom),
-            _ => info_err_res!("Unknown explorer source type: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown explorer source type: {s}"))),
         }
     }
 }

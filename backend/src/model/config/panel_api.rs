@@ -1,5 +1,5 @@
 use crate::model::macros;
-use shared::error::{TuliproxError, info_err_res};
+use shared::error::TuliproxError;
 use shared::model::{PanelApiAliasPoolDto, PanelApiAliasPoolSizeDto, PanelApiAliasPoolSizeValue, PanelApiConfigDto, PanelApiProvisioningDto, PanelApiQueryParamDto, PanelApiQueryParametersDto};
 use std::sync::Arc;
 use shared::utils::Internable;
@@ -73,18 +73,18 @@ impl PanelApiQueryParameters {
             .map(|p| p.value.trim().to_string());
         match typ {
             Some(v) if v.eq_ignore_ascii_case("m3u") => Ok(()),
-            Some(v) => info_err_res!("panel_api: unsupported type={v}, only m3u is supported"),
-            None => info_err_res!("panel_api: missing required query param 'type=m3u'"),
+            Some(v) => Err(TuliproxError::Config(format!("panel_api: unsupported type={v}, only m3u is supported"))),
+            None => Err(TuliproxError::Config("panel_api: missing required query param 'type=m3u'".to_string())),
         }
     }
 
     fn require_api_key_param(params: &[PanelApiQueryParam], section: &str) -> Result<(), TuliproxError> {
         let api_key = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("api_key"));
         let Some(api_key) = api_key else {
-            return info_err_res!("panel_api: {section} must contain query param 'api_key' (use value 'auto')");
+            return Err(TuliproxError::Config(format!("panel_api: {section} must contain query param 'api_key' (use value 'auto')")));
         };
         if api_key.value.trim().is_empty() {
-            return info_err_res!("panel_api: {section} query param 'api_key' must not be empty (use value 'auto')");
+            return Err(TuliproxError::Config(format!("panel_api: {section} query param 'api_key' must not be empty (use value 'auto')")));
         }
         Ok(())
     }
@@ -93,12 +93,12 @@ impl PanelApiQueryParameters {
         let username = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("username"));
         let password = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("password"));
         if username.is_none() || password.is_none() {
-            return info_err_res!("panel_api: {section} must contain query params 'username' and 'password' (use value 'auto')");
+            return Err(TuliproxError::Config(format!("panel_api: {section} must contain query params 'username' and 'password' (use value 'auto')")));
         }
         if !username.is_some_and(|p| p.value.trim().eq_ignore_ascii_case("auto"))
             || !password.is_some_and(|p| p.value.trim().eq_ignore_ascii_case("auto"))
         {
-            return info_err_res!("panel_api: {section} requires 'username: auto' and 'password: auto' (credentials must not be hardcoded)");
+            return Err(TuliproxError::Config(format!("panel_api: {section} requires 'username: auto' and 'password: auto' (credentials must not be hardcoded)")));
         }
         Ok(())
     }
@@ -113,7 +113,7 @@ impl PanelApiQueryParameters {
         Self::require_api_key_param(params, "query_parameter.client_new")?;
         Self::validate_type_is_m3u(params)?;
         if params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("user")) {
-            return info_err_res!("panel_api: client_new must not contain query param 'user'");
+            return Err(TuliproxError::Config("panel_api: client_new must not contain query param 'user'".to_string()));
         }
         Ok(())
     }
@@ -250,16 +250,18 @@ impl PanelApiConfig {
             return Ok(());
         }
         if self.url.trim().is_empty() {
-            return info_err_res!("panel_api: url is missing");
+            return Err(TuliproxError::Config("panel_api: url is missing".to_string()));
         }
         if self.api_key.as_ref().is_none_or(|k| k.trim().is_empty()) {
-            return info_err_res!("panel_api: api_key is missing");
+            return Err(TuliproxError::Config("panel_api: api_key is missing".to_string()));
         }
         if self.query_parameter.client_info.is_empty()
             || self.query_parameter.client_new.is_empty()
             || self.query_parameter.client_renew.is_empty()
         {
-            return info_err_res!("panel_api: query_parameter.client_info/client_new/client_renew must be configured");
+            return Err(TuliproxError::Config(
+                "panel_api: query_parameter.client_info/client_new/client_renew must be configured".to_string(),
+            ));
         }
         self.query_parameter.prepare()
     }

@@ -10,7 +10,7 @@ use crate::{
     services::DialogService,
 };
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{
         Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
         SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
@@ -80,7 +80,7 @@ impl FromStr for ExplorerAction {
         } else if s.eq(RECORD_ITEM) {
             Ok(Self::Record)
         } else {
-            info_err_res!("Unknown ExplorerAction: {}", s)
+            Err(TuliproxError::Config(format!("Unknown ExplorerAction: {}", s)))
         }
     }
 }
