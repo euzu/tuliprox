@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err_res,
     utils::{
         default_as_true, default_movie_category, default_series_category, default_storage_formats,
         default_supported_library_extensions, default_thumbnail_height, default_thumbnail_width,
@@ -187,13 +186,13 @@ impl LibraryConfigDto {
 
         // Validate enabled state
         if self.enabled && self.scan_directories.is_empty() {
-            return info_err_res!("Library enabled but no scan_directories configured");
+            return Err(TuliproxError::ConfigLibrary("Library enabled but no scan_directories configured".to_string()));
         }
 
         // Validate scan directories
         for dir in &self.scan_directories {
             if dir.path.is_empty() {
-                return info_err_res!("Library scan directory path cannot be empty");
+                return Err(TuliproxError::ConfigLibrary("Library scan directory path cannot be empty".to_string()));
             }
         }
 

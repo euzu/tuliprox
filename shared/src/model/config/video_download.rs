@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err_res,
     utils::{
         default_download_dir, default_episode_pattern, default_supported_video_extensions, is_blank_optional_str,
         is_blank_optional_string, is_blank_or_default_download_dir, is_blank_or_default_episode_pattern,
@@ -135,7 +134,7 @@ impl VideoConfigDto {
 
                 if let Some(episode_pattern) = &downl.episode_pattern {
                     if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(episode_pattern) {
-                        return info_err_res!("can't parse regex: {episode_pattern} {err}");
+                        return Err(TuliproxError::RegexCompile(format!("{episode_pattern} {err}")));
                     }
                 }
 

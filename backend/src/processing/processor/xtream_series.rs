@@ -649,7 +649,7 @@ pub async fn update_series_metadata(
     let storage_dir = &app_config.config.load().storage_dir;
     let storage_path = get_input_storage_path(&input.name, storage_dir)
         .await
-        .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
+        .map_err(|e| TuliproxError::Io(format!("Storage path error: {e}")))?;
 
     if input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
         return Ok(None);
@@ -734,12 +734,12 @@ pub async fn update_series_metadata(
         if let Some(series_id) = series_id_opt {
             // Fetch Info from Provider
             let info_url = xtream::get_xtream_player_api_info_url(input, XtreamCluster::Series, series_id)
-                .ok_or_else(|| shared::error::info_err!("Failed to build info URL"))?;
+                .ok_or_else(|| shared::error::TuliproxError::Config("Failed to build info URL".to_string()))?;
 
             let input_source = InputSource::from(input).with_url(info_url);
             let content = xtream::get_xtream_stream_info_content(app_config, client, &input_source, true)
                 .await
-                .map_err(|e| shared::error::info_err!("{e}"))?;
+                .map_err(|e| shared::error::TuliproxError::Config(format!("{e}")))?;
 
             if content.is_empty() {
                 debug!("Series {display_id}: provider returned empty content for info fetch");
@@ -763,16 +763,16 @@ pub async fn update_series_metadata(
                                 properties_updated = true;
                             }
                             Err(e) => {
-                                return Err(shared::error::info_err!(
+                                return Err(shared::error::TuliproxError::Config(format!(
                                     "Series {display_id}: failed to parse XtreamSeriesInfo: {e}. Raw response: {content}"
-                                ));
+                                )));
                             }
                         }
                     }
                     Err(e) => {
-                        return Err(shared::error::info_err!(
+                        return Err(shared::error::TuliproxError::Config(format!(
                             "Series {display_id}: failed to parse provider response as JSON: {e}. Raw response: {content}"
-                        ));
+                        )));
                     }
                 }
             }
@@ -789,12 +789,12 @@ pub async fn update_series_metadata(
             };
             props = Some(new_props);
         } else {
-            return Err(shared::error::info_err!("No Series properties available and no title found for {display_id}"));
+            return Err(shared::error::TuliproxError::Config(format!("No Series properties available and no title found for {display_id}")));
         }
     }
 
     let mut properties = props.ok_or_else(|| {
-        shared::error::info_err!("No Series properties available after fallback creation for {display_id}")
+        shared::error::TuliproxError::Config(format!("No Series properties available after fallback creation for {display_id}"))
     })?;
 
     let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
@@ -994,10 +994,10 @@ pub async fn update_series_metadata(
         if let Some(kind) = probe_failure {
             let err = match kind {
                 ProbeFailureKind::NotFound => {
-                    shared::error::info_err!("Probe failed with 404 Not Found for Series {display_id}")
+                    shared::error::TuliproxError::Config(format!("Probe failed with 404 Not Found for Series {display_id}"))
                 }
-                ProbeFailureKind::Other => shared::error::info_err!("Probe failed for Series {display_id}"),
-                ProbeFailureKind::Cancelled => shared::error::info_err!("Probe cancelled for Series {display_id}"),
+                ProbeFailureKind::Other => shared::error::TuliproxError::Config(format!("Probe failed for Series {display_id}")),
+                ProbeFailureKind::Cancelled => shared::error::TuliproxError::Config(format!("Probe cancelled for Series {display_id}")),
             };
             return Err(err);
         }
@@ -1016,7 +1016,7 @@ pub async fn update_series_metadata(
                     &properties,
                 )
                 .await
-                .map_err(|e| shared::error::info_err!("Persist error: {e}"))?;
+                .map_err(|e| shared::error::TuliproxError::Config(format!("Persist error: {e}")))?;
 
                 debug_if_enabled!("Successfully updated Series metadata for ID {}", series_id);
             }

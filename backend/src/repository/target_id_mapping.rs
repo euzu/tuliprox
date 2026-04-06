@@ -3,7 +3,6 @@ use chrono::Local;
 use log::error;
 use serde::{Deserialize, Serialize};
 use shared::error::TuliproxError;
-use shared::info_err;
 use shared::model::{PlaylistItemType};
 use shared::model::UUIDType;
 use std::cmp::max;
@@ -78,9 +77,9 @@ impl TargetIdMapping {
 
         // Ensure both tree files exist
         ensure_tree_file::<u32, VirtualIdRecord>(path)
-            .map_err(|e| info_err!("Failed to create primary tree at {}: {e}", path.display()))?;
+            .map_err(|e| TuliproxError::Config(format!("Failed to create primary tree at {}: {e}", path.display())))?;
         ensure_tree_file::<UUIDType, u32>(&uuid_index_path)
-            .map_err(|e| info_err!("Failed to create UUID index at {}: {e}", uuid_index_path.display()))?;
+            .map_err(|e| TuliproxError::Config(format!("Failed to create UUID index at {}: {e}", uuid_index_path.display())))?;
 
         // Open disk-based update handles
         let mut disk_by_virtual_id = match BPlusTreeUpdate::<u32, VirtualIdRecord>::try_new_with_backoff(path) {
@@ -89,7 +88,7 @@ impl TargetIdMapping {
                 error!("Failed to open primary tree at {}: {e}", path.display());
                 // Create fresh and try again
                 let _ = BPlusTree::<u32, VirtualIdRecord>::new().store(path);
-                BPlusTreeUpdate::try_new_with_backoff(path).map_err(|_| info_err!("Failed to create primary tree after retry"))?
+        BPlusTreeUpdate::try_new_with_backoff(path).map_err(|_| TuliproxError::Config("Failed to create primary tree after retry".to_string()))?
             }
         };
 
@@ -99,7 +98,7 @@ impl TargetIdMapping {
                 error!("Failed to open UUID index at {}: {e}", uuid_index_path.display());
                 // Create fresh and try again
                 let _ = BPlusTree::<UUIDType, u32>::new().store(&uuid_index_path);
-                BPlusTreeUpdate::try_new_with_backoff(&uuid_index_path).map_err(|_| info_err!("Failed to create UUID index after retry"))?
+        BPlusTreeUpdate::try_new_with_backoff(&uuid_index_path).map_err(|_| TuliproxError::Config("Failed to create UUID index after retry".to_string()))?
             }
         };
 
@@ -303,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_disk_only_mode() -> Result<(), TuliproxError> {
-        let dir = tempdir().map_err(|_| info_err!("Failed to create temp dir"))?;
+        let dir = tempdir().map_err(|_| TuliproxError::Config("Failed to create temp dir".to_string()))?;
         let path = dir.path().join("id_mapping.db");
 
         // Create mapping in disk-only mode
@@ -312,7 +311,7 @@ mod tests {
             let mut mapping = TargetIdMapping::new(&path, false)?;
             let vid1 = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Live, 0);
             assert_eq!(vid1, 1);
-            mapping.persist().map_err(|_| info_err!("Failed to persist mapping"))?;
+            mapping.persist().map_err(|_| TuliproxError::Config("Failed to persist mapping".to_string()))?;
         }
 
         // Reopen and verify persistence
@@ -327,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_memory_cache_mode() -> Result<(), TuliproxError> {
-        let dir = tempdir().map_err(|_| info_err!("Failed to create temp dir"))?;
+        let dir = tempdir().map_err(|_| TuliproxError::Config("Failed to create temp dir".to_string()))?;
         let path = dir.path().join("id_mapping_mem.db");
 
         let uuid1 = UUIDType::default();
@@ -335,7 +334,7 @@ mod tests {
             let mut mapping = TargetIdMapping::new(&path, false)?;
             let vid1 = mapping.get_and_update_virtual_id(&uuid1, 100, PlaylistItemType::Video, 0);
             assert_eq!(vid1, 1);
-            mapping.persist().map_err(|err| info_err!("{err}"))?;
+            mapping.persist().map_err(|err| TuliproxError::Config(err.to_string()))?;
         }
 
         // Reopen with memory cache and verify

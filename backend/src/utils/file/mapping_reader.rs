@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use crate::model::{Mappings};
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
 use log::{warn};
 use std::path::{Path, PathBuf};
-use shared::info_err;
 use shared::model::{MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate};
 
 fn read_mapping(mapping_file: &Path, resolve_var: bool) -> Result<Option<MappingsDto>, TuliproxError> {
@@ -14,7 +13,7 @@ fn read_mapping(mapping_file: &Path, resolve_var: bool) -> Result<Option<Mapping
         return match maybe_mapping {
             Ok(mapping) => Ok(Some(mapping)),
             Err(err) => {
-                info_err_res!("{err}")
+                Err(TuliproxError::Config(format!("{err}")))
             }
         };
     }
@@ -85,7 +84,7 @@ fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option
             }
         }
     };
-    traverse_dir(path, &mut visit).map_err(|err| info_err!("Failed to read mappings {err}"))?;
+    traverse_dir(path, &mut visit).map_err(|err| TuliproxError::Io(format!("Failed to read mappings {err}")))?;
 
     files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
@@ -98,7 +97,12 @@ fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option
                 mappings.push(mapping);
             },
             Ok(None) => {}
-            Err(err) => return info_err_res!("Failed to read mapping file {file_path:?}: {err:?}"),
+            Err(err) => {
+                return Err(TuliproxError::Io(format!(
+                    "Failed to read mapping file {}: {err}",
+                    file_path.display()
+                )))
+            }
         }
     }
 

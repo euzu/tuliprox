@@ -1,6 +1,6 @@
 use crate::model::AppConfig;
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery};
-use shared::error::{notify_err, TuliproxError};
+use shared::error::{ TuliproxError};
 use shared::model::{PlaylistGroup, PlaylistItem, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use std::path::Path;
 use std::sync::Arc;
@@ -53,10 +53,10 @@ pub async fn persist_input_library_playlist(
         tree
             .store(&library_path)
             .map(|_| ())
-            .map_err(|err| notify_err!("failed to write local library playlist: {} - {err}", library_path.display()))
+            .map_err(|err| TuliproxError::RepositoryLibrary(format!("failed to write local library playlist: {} - {err}", library_path.display())))
     })
     .await
-    .map_err(|err| notify_err!("failed to write local library playlist: {} - {err}", library_path_err.display()));
+    .map_err(|err| TuliproxError::RepositoryLibrary(format!("failed to write local library playlist: {} - {err}", library_path_err.display())));
 
     let playlist = match Arc::try_unwrap(playlist) {
         Ok(playlist) => playlist,
@@ -141,7 +141,7 @@ pub async fn load_input_local_library_playlist(app_config: &Arc<AppConfig>, lib_
             Ok(groups.into_values().collect())
         })
         .await
-        .map_err(|err| notify_err!("failed to read local library playlist: {} - {err}", lib_path_err.display()))??;
+        .map_err(|err| TuliproxError::RepositoryLibrary(format!("failed to read local library playlist: {} - {err}", lib_path_err.display())))??;
 
         return Ok(groups);
     }

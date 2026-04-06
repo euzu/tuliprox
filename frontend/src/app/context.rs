@@ -1,4 +1,4 @@
-use crate::app::components::{InputRow, PlaylistExplorerPage, UserlistPage};
+use crate::app::components::{InputRow, UserlistPage};
 use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigTargetDto, PlaylistRequest, ProxyUserCredentialsDto, SearchRequest,
     StatusCheck, SystemInfo, TargetUserDto, UiPlaylistCategories,
@@ -15,7 +15,6 @@ pub struct PlaylistContext {
 
 #[derive(Clone)]
 pub struct PlaylistExplorerContext {
-    pub active_page: UseStateHandle<PlaylistExplorerPage>,
     pub playlist: UseStateHandle<Option<Rc<UiPlaylistCategories>>>,
     pub playlist_request: UseStateHandle<Option<PlaylistRequest>>,
 }

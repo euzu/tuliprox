@@ -18,17 +18,18 @@ use crate::{
 use shared::{
     concat_string,
     error::TuliproxError,
-    info_err_res,
     model::{
         ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto,
         EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, StagedInputDto, XtreamLoginRequest,
     },
+    utils::Internable,
 };
 use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     rc::Rc,
     str::FromStr,
+    sync::Arc,
 };
 use web_sys::MouseEvent;
 use yew::{
@@ -112,7 +113,7 @@ impl FromStr for InputFormPage {
             Self::EPG => Ok(InputFormPage::Epg),
             Self::ALIAS => Ok(InputFormPage::Alias),
             Self::PROVIDER => Ok(InputFormPage::Provider),
-            _ => info_err_res!("Unknown input form page: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown input form page: {s}"))),
         }
     }
 }
@@ -131,6 +132,20 @@ impl Display for InputFormPage {
                 InputFormPage::Provider => Self::PROVIDER,
             }
         )
+    }
+}
+
+impl Internable for InputFormPage {
+    fn intern(self) -> Arc<str> {
+        match self {
+            Self::Main => Self::MAIN,
+            Self::Options => Self::OPTIONS,
+            Self::Staged => Self::STAGED,
+            Self::Epg => Self::EPG,
+            Self::Alias => Self::ALIAS,
+            Self::Provider => Self::PROVIDER,
+        }
+        .intern()
     }
 }
 
@@ -1483,26 +1498,26 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             <div class="tp__source-editor-form__body">
 
             <div class="tp__source-editor-form__body__pages">
-                <Panel value={InputFormPage::Main.to_string()} active={view_visible.to_string()}>
+                <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_input()}
                 </Panel>
                 { html_if!(!library_input, {
-                    <Panel value={InputFormPage::Alias.to_string()} active={view_visible.to_string()}>
+                    <Panel value={InputFormPage::Alias.intern()} active={view_visible.intern()}>
                     {render_alias()}
                     </Panel>
                 })}
                 { html_if!(!library_input, {
                  <>
-                  <Panel value={InputFormPage::Options.to_string()} active={view_visible.to_string()}>
+                  <Panel value={InputFormPage::Options.intern()} active={view_visible.intern()}>
                    {render_options()}
                   </Panel>
-                  <Panel value={InputFormPage::Provider.to_string()} active={view_visible.to_string()}>
+                  <Panel value={InputFormPage::Provider.intern()} active={view_visible.intern()}>
                    {render_provider()}
                    </Panel>
-                  <Panel value={InputFormPage::Epg.to_string()} active={view_visible.to_string()}>
+                  <Panel value={InputFormPage::Epg.intern()} active={view_visible.intern()}>
                    {render_epg()}
                   </Panel>
-                  <Panel value={InputFormPage::Staged.to_string()} active={view_visible.to_string()}>
+                  <Panel value={InputFormPage::Staged.intern()} active={view_visible.intern()}>
                    {render_staged()}
                    </Panel>
                     </>

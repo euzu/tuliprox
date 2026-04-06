@@ -52,7 +52,7 @@ pub async fn update_generic_stream_metadata(
 
     // Determine storage file path based on input type
     let storage_path = get_input_storage_path(&input.name, storage_dir).await
-        .map_err(|e| shared::error::info_err!("Storage path error: {e}"))?;
+        .map_err(|e| TuliproxError::Io(format!("Storage path error: {e}")))?;
 
     let (db_path, storage_kind) = match input.input_type {
         InputType::M3u | InputType::M3uBatch => (
@@ -82,7 +82,11 @@ pub async fn update_generic_stream_metadata(
     };
 
     if !db_path.exists() {
-        return Err(shared::error::info_err!("Playlist DB file not found for input {}: {}", input.name, db_path.display()));
+        return Err(shared::error::TuliproxError::Config(format!(
+            "Playlist DB file not found for input {input_name}: {db_path_display}",
+            input_name = input.name,
+            db_path_display = db_path.display()
+        )));
     }
 
     let needs_provider_connection = requires_provider_connection_for_generic_probe(input.input_type);
@@ -98,7 +102,7 @@ pub async fn update_generic_stream_metadata(
 
     if needs_provider_connection && active_handle.is_none() && acquired_handle.is_none() {
         warn!("Skipping probe for generic stream {unique_id} due to connection limits");
-        return Err(shared::error::info_err!("No connection available"));
+        return Err(TuliproxError::Probe(format!("Skipping probe for generic stream {unique_id} due to connection limits")));
     }
 
     let probe_url = stream_url.to_string();
@@ -143,7 +147,7 @@ pub async fn update_generic_stream_metadata(
         ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => (raw_video, raw_audio, stats),
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Probe target not found (404) for generic stream: {unique_id}");
-            return Err(shared::error::info_err!("Probe target returned 404 Not Found for stream {unique_id}"));
+            return Err(shared::error::TuliproxError::Probe(format!("Probe target returned 404 Not Found for stream {unique_id}")));
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed or timed out for generic stream: {unique_id}");
@@ -246,8 +250,8 @@ pub async fn update_generic_stream_metadata(
         Ok(updated)
     })
     .await
-    .map_err(|e| shared::error::info_err!("Failed to join generic probe DB update task: {e}"))?
-    .map_err(|e| shared::error::info_err!("{e}"))?;
+    .map_err(|e| shared::error::TuliproxError::Config(format!("Failed to join generic probe DB update task: {e}")))?
+    .map_err(shared::error::TuliproxError::Config)?;
 
     drop(file_lock);
     if updated {

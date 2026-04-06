@@ -1,7 +1,7 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     foundation::{get_filter, Filter},
-    handle_tuliprox_error_result_list, info_err_res,
+    handle_tuliprox_error_result_list,
     model::{
         ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
         ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
@@ -250,11 +250,11 @@ impl ConfigTargetDto {
     ) -> Result<(), TuliproxError> {
         self.id = id;
         if self.output.is_empty() {
-            return info_err_res!("Missing output format for {}", self.name);
+            return Err(TuliproxError::ConfigTarget(format!("Missing output format for {}", self.name)));
         }
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {
-            return info_err_res!("target name required");
+            return Err(TuliproxError::ConfigTarget("target name required".to_string()));
         }
 
         let mut m3u_cnt = 0;
@@ -274,7 +274,10 @@ impl ConfigTargetDto {
                 TargetOutputDto::Xtream(_) => {
                     xtream_cnt += 1;
                     if default_as_default().eq_ignore_ascii_case(&self.name) {
-                        return info_err_res!("unique target name is required for xtream type output: {}", self.name);
+                        return Err(TuliproxError::ConfigTarget(format!(
+                            "unique target name is required for xtream type output: {}",
+                            self.name
+                        )));
                     }
                 }
                 TargetOutputDto::M3u(m3u_output) => {
@@ -292,7 +295,10 @@ impl ConfigTargetDto {
                     strm_cnt += 1;
                     strm_output.directory = strm_output.directory.trim().to_string();
                     if strm_output.directory.trim().is_empty() {
-                        return info_err_res!("directory is required for strm type: {}", self.name);
+                        return Err(TuliproxError::ConfigTarget(format!(
+                            "directory is required for strm type: {}",
+                            self.name
+                        )));
                     }
                     if let Some(username) = &mut strm_output.username {
                         *username = username.trim().to_string();
@@ -303,11 +309,14 @@ impl ConfigTargetDto {
                         strm_needs_xtream = true;
                     }
                     // if strm_export_styles.contains(&strm_output.style) {
-                    //     return info_err_res!("strm outputs with same export style are not allowed: {}", self.name);
+                    //     return Err(TuliproxError::ConfigTarget(format!("strm outputs with same export style are not allowed: {}", self.name)));
                     // }
                     // strm_export_styles.push(strm_output.style);
                     if strm_directories.contains(&strm_output.directory.as_str()) {
-                        return info_err_res!("strm outputs with same export directory are not allowed: {}", self.name);
+                        return Err(TuliproxError::ConfigTarget(format!(
+                            "strm outputs with same export directory are not allowed: {}",
+                            self.name
+                        )));
                     }
                     strm_directories.push(strm_output.directory.as_str());
                 }
@@ -315,12 +324,18 @@ impl ConfigTargetDto {
                     hdhr_cnt += 1;
                     hdhomerun_output.username = hdhomerun_output.username.trim().to_string();
                     if hdhomerun_output.username.is_empty() {
-                        return info_err_res!("Username is required for HdHomeRun type: {}", self.name);
+                        return Err(TuliproxError::ConfigTarget(format!(
+                            "Username is required for HdHomeRun type: {}",
+                            self.name
+                        )));
                     }
 
                     hdhomerun_output.device = hdhomerun_output.device.trim().to_string();
                     if hdhomerun_output.device.is_empty() {
-                        return info_err_res!("Device is required for HdHomeRun type: {}", self.name);
+                        return Err(TuliproxError::ConfigTarget(format!(
+                            "Device is required for HdHomeRun type: {}",
+                            self.name
+                        )));
                     }
 
                     if let Some(use_output) = hdhomerun_output.use_output.as_ref() {
@@ -332,19 +347,19 @@ impl ConfigTargetDto {
                                 hdhomerun_needs_xtream = true;
                             }
                             _ => {
-                                return info_err_res!(
+                                return Err(TuliproxError::ConfigTarget(format!(
                                 "HdHomeRun output option `use_output` only accepts `m3u` or `xtream` for target: {}",
                                 self.name
-                            )
+                            )))
                             }
                         }
                     }
                     if let Some(hdhr_devices) = hdhr_config {
                         if !hdhr_devices.devices.contains(&hdhomerun_output.device) {
-                            return info_err_res!(
+                            return Err(TuliproxError::ConfigTarget(format!(
                                 "HdHomeRun output device is not defined: {}",
                                 hdhomerun_output.device
-                            );
+                            )));
                         }
                     }
                 }
@@ -352,34 +367,34 @@ impl ConfigTargetDto {
         }
 
         if m3u_cnt > 1 || xtream_cnt > 1 || hdhr_cnt > 1 {
-            return info_err_res!("Multiple output formats with same type : {}", self.name);
+            return Err(TuliproxError::ConfigTarget(format!("Multiple output formats with same type : {}", self.name)));
         }
 
         if strm_cnt > 0 && strm_needs_xtream && xtream_cnt == 0 {
-            return info_err_res!(
+            return Err(TuliproxError::ConfigTarget(format!(
                 "strm output with a username is only permitted when used in combination with xtream output: {}",
                 self.name
-            );
+            )));
         }
 
         if hdhr_cnt > 0 {
             if xtream_cnt == 0 && m3u_cnt == 0 {
-                return info_err_res!(
+                return Err(TuliproxError::ConfigTarget(format!(
                     "HdHomeRun output is only permitted when used in combination with xtream or m3u output: {}",
                     self.name
-                );
+                )));
             }
             if hdhomerun_needs_m3u && m3u_cnt == 0 {
-                return info_err_res!(
+                return Err(TuliproxError::ConfigTarget(format!(
                     "HdHomeRun output has `use_output=m3u` but no `m3u` output defined: {}",
                     self.name
-                );
+                )));
             }
             if hdhomerun_needs_xtream && xtream_cnt == 0 {
-                return info_err_res!(
+                return Err(TuliproxError::ConfigTarget(format!(
                     "HdHomeRun output has `use_output=xtream` but no `xtream` output defined: {}",
                     self.name
-                );
+                )));
             }
 
             if let Some(hdhr_devices) = hdhr_config {
@@ -398,7 +413,7 @@ impl ConfigTargetDto {
         if let Some(watch) = &self.watch {
             for pat in watch {
                 if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(pat) {
-                    return info_err_res!("Invalid watch regular expression: {}", err);
+                    return Err(TuliproxError::ConfigTarget(format!("Invalid watch regular expression: {}", err)));
                 }
             }
         }
@@ -408,10 +423,7 @@ impl ConfigTargetDto {
                 // debug!("Filter: {}", fltr);
                 self.t_filter = Some(fltr);
                 if let Some(renames) = self.rename.as_mut() {
-                    handle_tuliprox_error_result_list!(
-                        TuliproxErrorKind::Info,
-                        renames.iter_mut().map(|cr| cr.prepare(templates))
-                    );
+                    handle_tuliprox_error_result_list!(renames.iter_mut().map(|cr| cr.prepare(templates)));
                 }
                 if let Some(sort) = self.sort.as_mut() {
                     sort.prepare(templates)?;

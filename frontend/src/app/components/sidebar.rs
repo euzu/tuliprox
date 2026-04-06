@@ -28,6 +28,8 @@ pub struct SidebarProps {
     pub onview: Callback<ViewType>,
     #[prop_or_default]
     pub show_streams_page: bool,
+    #[prop_or_default]
+    pub active_page: ViewType,
 }
 
 fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
@@ -44,7 +46,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     let translate = use_translation();
     let collapsed = use_state(|| CollapseState::AutoExpanded);
     let is_mobile = use_state(|| false);
-    let active_menu = use_state(|| ViewType::Dashboard);
+    let active_menu = use_state(|| props.active_page);
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();

@@ -11,7 +11,7 @@ use crate::{
     services::DialogService,
 };
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{ConfigTargetDto, SortOrder},
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
@@ -239,7 +239,7 @@ impl FromStr for TargetTableAction {
             "edit" => Ok(Self::Edit),
             "refresh" => Ok(Self::Refresh),
             "delete" => Ok(Self::Delete),
-            _ => info_err_res!("Unknown Target Action: {}", s),
+            _ => Err(TuliproxError::Config(format!("Unknown Target Action: {}", s))),
         }
     }
 }

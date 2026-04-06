@@ -4,7 +4,7 @@ use crate::utils::request::DynReader;
 use crate::utils::xtream::get_xtream_stream_url_base;
 use indexmap::IndexMap;
 use serde::Deserializer;
-use shared::error::{notify_err, notify_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use shared::model::UUIDType;
 use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem,
                     PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
@@ -41,10 +41,10 @@ async fn map_to_xtream_category(categories: DynReader, input_name: &Arc<str>) ->
         match serde_json::from_reader::<_, Vec<XtreamCategory>>(reader) {
             Ok(xtream_categories) => Ok(xtream_categories),
             Err(err) => {
-                notify_err_res!("Failed to process categories input {input_name_clone}: {err}")
+                Err(TuliproxError::RepositoryXtream(format!("Failed to process categories input {input_name_clone}: {err}")))
             }
         }
-    }).await.map_err(|err| notify_err!("Mapping xtream categories failed for input {input_name}: {err}"))?
+    }).await.map_err(|err| TuliproxError::RepositoryXtream(format!("Mapping xtream categories failed for input {input_name}: {err}")))?
 }
 
 async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader, input_name: &Arc<str>) -> Result<Vec<StreamProperties>, TuliproxError> {
@@ -66,10 +66,10 @@ async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader
                 Ok(stream_list)
             }
             Err(err) => {
-                notify_err_res!("Failed to map to xtream streams {xtream_cluster} for input {input_name_clone}: {err}")
+                Err(TuliproxError::RepositoryXtream(format!("Failed to map to xtream streams {xtream_cluster} for input {input_name_clone}: {err}")))
             }
         }
-    }).await.map_err(|e| notify_err!("Mapping xtream streams failed for input {input_name}: {e}"))?
+    }).await.map_err(|e| TuliproxError::RepositoryXtream(format!("Mapping xtream streams failed for input {input_name}: {e}")))?
 }
 
 pub fn create_xtream_series_episode_url(url: &str, username: &str, password: &str, episode: &SeriesStreamDetailEpisodeProperties) -> Arc<str> {
@@ -318,7 +318,7 @@ where
                                         stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
-                deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
+                deserializer.deserialize_any(visitor).map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
             }
             XtreamCluster::Video => {
                 let mut on_stream = |stream: VideoStreamProperties| {
@@ -329,7 +329,7 @@ where
                                         stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
-                deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
+                deserializer.deserialize_any(visitor).map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
             }
             XtreamCluster::Series => {
                 let mut on_stream = |stream: SeriesStreamProperties| {
@@ -340,11 +340,11 @@ where
                                         stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
-                deserializer.deserialize_any(visitor).map_err(|e| notify_err!("JSON parse error: {e}"))?;
+                deserializer.deserialize_any(visitor).map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
             }
         }
         Ok(())
-    }).await.map_err(|e| notify_err!("Streaming parse failed: {e}"))??;
+    }).await.map_err(|e| TuliproxError::RepositoryXtream(format!("Streaming parse failed: {e}")))??;
 
     Ok(xtream_categories)
 }

@@ -10,7 +10,7 @@ use crate::{
     services::DialogService,
 };
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{ConfigInputAliasDto, ConfigInputDto, InputType, SortOrder},
     utils::unix_ts_to_str,
 };
@@ -313,7 +313,7 @@ impl FromStr for TableAction {
         } else if s.eq("delete") {
             Ok(Self::Delete)
         } else {
-            info_err_res!("Unknown TableAction: {}", s)
+            Err(TuliproxError::Config(format!("Unknown TableAction: {}", s)))
         }
     }
 }

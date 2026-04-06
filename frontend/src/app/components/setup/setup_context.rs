@@ -1,7 +1,28 @@
 use crate::app::components::config::{ConfigForm, ConfigFormSlots, ConfigPage};
-use shared::model::{SourcesConfigDto, TargetUserDto};
-use std::fmt;
+use shared::{
+    model::{SourcesConfigDto, TargetUserDto},
+    utils::Internable,
+};
+use std::{fmt, sync::Arc};
 use yew::UseStateHandle;
+
+const WELCOME: &str = "welcome";
+const API: &str = "api";
+const WEB_UI: &str = "web_ui";
+const MAIN: &str = "main";
+const LOG: &str = "log";
+const MESSAGING: &str = "messaging";
+const REVERSE_PROXY: &str = "reverse_proxy";
+const PROXY: &str = "proxy";
+const IPCHECK: &str = "ipcheck";
+const VIDEO: &str = "video";
+const METADATA_UPDATE: &str = "metadata_update";
+const HDHOMERUN: &str = "hdhomerun";
+const LIBRARY: &str = "library";
+const SOURCES: &str = "sources";
+const API_USERS: &str = "api_users";
+const SCHEDULES: &str = "schedules";
+const FINISH: &str = "finish";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum SetupStep {
@@ -158,29 +179,39 @@ impl SetupStep {
     }
 }
 
+impl SetupStep {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SetupStep::Welcome => WELCOME,
+            SetupStep::Api => API,
+            SetupStep::WebUi => WEB_UI,
+            SetupStep::Main => MAIN,
+            SetupStep::Log => LOG,
+            SetupStep::Messaging => MESSAGING,
+            SetupStep::ReverseProxy => REVERSE_PROXY,
+            SetupStep::Proxy => PROXY,
+            SetupStep::IpCheck => IPCHECK,
+            SetupStep::Video => VIDEO,
+            SetupStep::MetadataUpdate => METADATA_UPDATE,
+            SetupStep::HdHomerun => HDHOMERUN,
+            SetupStep::Library => LIBRARY,
+            SetupStep::Sources => SOURCES,
+            SetupStep::ApiUsers => API_USERS,
+            SetupStep::Schedules => SCHEDULES,
+            SetupStep::Finish => FINISH,
+        }
+    }
+}
+
 impl fmt::Display for SetupStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = match self {
-            SetupStep::Welcome => "welcome",
-            SetupStep::Api => "api",
-            SetupStep::WebUi => "web_ui",
-            SetupStep::Main => "main",
-            SetupStep::Log => "log",
-            SetupStep::Messaging => "messaging",
-            SetupStep::ReverseProxy => "reverse_proxy",
-            SetupStep::Proxy => "proxy",
-            SetupStep::IpCheck => "ipcheck",
-            SetupStep::Video => "video",
-            SetupStep::MetadataUpdate => "metadata_update",
-            SetupStep::HdHomerun => "hdhomerun",
-            SetupStep::Library => "library",
-            SetupStep::Sources => "sources",
-            SetupStep::ApiUsers => "api_users",
-            SetupStep::Schedules => "schedules",
-            SetupStep::Finish => "finish",
-        };
+        let value = self.as_str();
         write!(f, "{value}")
     }
+}
+
+impl Internable for SetupStep {
+    fn intern(self) -> Arc<str> { self.as_str().intern() }
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]

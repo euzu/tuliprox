@@ -5,7 +5,6 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    info_err_res,
     model::{PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto, SearchRequest, XtreamCluster},
 };
 use std::{
@@ -80,7 +79,7 @@ impl FromStr for FilterState {
             Self::ALL => Ok(Self::All),
             Self::SELECTED => Ok(Self::Selected),
             Self::DESELECTED => Ok(Self::Deselected),
-            _ => info_err_res!("Unknown FilterState: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown FilterState: {s}"))),
         }
     }
 }

@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err, info_err_res,
     utils::{CONSTANTS, DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY},
 };
 use std::{borrow::Cow, sync::atomic::Ordering};
@@ -162,9 +161,9 @@ pub fn concat_path_leading_slash(first: &str, second: &str) -> String {
 
 /// Internal helper to parse the provider URL into (host, path_and_query)
 pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str), TuliproxError> {
-    let rest = stream_url
-        .strip_prefix(PROVIDER_SCHEME_PREFIX)
-        .ok_or_else(|| info_err!("Not a provider URL: '{}'", sanitize_sensitive_info(stream_url)))?;
+    let rest = stream_url.strip_prefix(PROVIDER_SCHEME_PREFIX).ok_or_else(|| {
+        TuliproxError::Config(format!("Not a provider URL: '{}'", sanitize_sensitive_info(stream_url)))
+    })?;
 
     let (host, path) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
@@ -172,7 +171,10 @@ pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str),
     };
 
     if host.is_empty() {
-        return info_err_res!("Provider host is empty in URL: '{}'", sanitize_sensitive_info(stream_url));
+        return Err(TuliproxError::Config(format!(
+            "Provider host is empty in URL: '{}'",
+            sanitize_sensitive_info(stream_url)
+        )));
     }
 
     Ok((host, path))

@@ -1,6 +1,5 @@
 use crate::{
     error::TuliproxError,
-    info_err_res,
     utils::{
         arc_str_option_serde, arc_str_serde, default_as_true, default_panel_api_alias_pool_max,
         default_panel_api_alias_pool_min, default_panel_api_provision_cooldown_secs,
@@ -119,7 +118,7 @@ impl FromStr for PanelApiProvisioningMethod {
             "HEAD" => Ok(Self::Head),
             "GET" => Ok(Self::Get),
             "POST" => Ok(Self::Post),
-            _ => Err(format!("Unknown provisioning method: {s}")),
+            _ => Err("Unknown provisioning method: {s}".to_string()),
         }
     }
 }
@@ -223,7 +222,9 @@ impl PanelApiConfigDto {
                 let max = size.max.as_ref().and_then(PanelApiAliasPoolSizeValue::as_number);
                 if let (Some(min), Some(max)) = (min, max) {
                     if min > max {
-                        return info_err_res!("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max");
+                        return Err(TuliproxError::ConfigPanelApi(
+                            "panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max".to_string(),
+                        ));
                     }
                 }
 
@@ -234,7 +235,9 @@ impl PanelApiConfigDto {
             }
 
             if self.provisioning.probe_interval_sec == 0 {
-                return info_err_res!("panel_api.provisioning.probe_interval_sec must be greater than 0");
+                return Err(TuliproxError::ConfigPanelApi(
+                    "panel_api.provisioning.probe_interval_sec must be greater than 0".to_string(),
+                ));
             }
         }
         Ok(())

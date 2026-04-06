@@ -10,7 +10,7 @@ use crate::{
     model::DialogResult,
     services::{CreateGroupRequest, DialogService},
 };
-use shared::model::RbacGroupDto;
+use shared::{model::RbacGroupDto, utils::Internable};
 use std::{collections::HashSet, rc::Rc};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
@@ -379,12 +379,12 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
     let write_without_read_warnings = use_memo(perms_for_warnings, |perms| collect_write_without_read_warnings(perms));
 
     let is_builtin_selected = selected_group.as_ref().is_some_and(|g| g.builtin);
-    let active_panel = active_panel(&form_mode);
+    let active_panel = active_panel(&form_mode).intern();
     let is_edit = matches!(*form_mode, FormMode::Edit(_));
 
     html! {
         <Card>
-            <Panel value={GROUP_DISPLAY_PANEL.to_string()} active={active_panel.to_string()}>
+            <Panel value={GROUP_DISPLAY_PANEL.intern()} active={active_panel.clone()}>
                 <div class="tp__config-view__header">
                     <h2>{ translate.t("LABEL.RBAC_GROUP_MANAGEMENT") }</h2>
                     <TextButton class="primary" name="add_group"
@@ -396,7 +396,7 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                 <Table::<RbacGroupDto> definition={table_definition} />
             </Panel>
 
-            <Panel value={GROUP_EDIT_PANEL.to_string()} active={active_panel.to_string()}>
+            <Panel value={GROUP_EDIT_PANEL.intern()} active={active_panel}>
                 <div class="tp__form-page">
                     <h3>{
                         if is_edit {

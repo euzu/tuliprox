@@ -1,5 +1,5 @@
 use crate::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter, MapperScript},
     model::PatternTemplate,
 };
@@ -80,7 +80,7 @@ impl FromStr for CounterModifier {
         } else if s.eq("prefix") {
             Ok(Self::Prefix)
         } else {
-            info_err_res!("Unknown CounterModifier: {}", s)
+            Err(TuliproxError::Config(format!("Unknown CounterModifier: {}", s)))
         }
     }
 }
@@ -140,16 +140,16 @@ impl MapperOperation {
             | MapperOperation::Uppercase { ref field }
             | MapperOperation::Capitalize { ref field } => {
                 if !valid_property!(field.as_str(), MAPPER_FIELDS) {
-                    return info_err_res!("Invalid mapper attribute field {field}");
+                    return Err(TuliproxError::Mapper(format!("Invalid mapper attribute field {field}")));
                 }
             }
 
             MapperOperation::Copy { ref field, ref source } => {
                 if !valid_property!(field.as_str(), MAPPER_FIELDS) {
-                    return info_err_res!("Invalid mapper attribute field {field}");
+                    return Err(TuliproxError::Mapper(format!("Invalid mapper attribute field {field}")));
                 }
                 if !valid_property!(source.as_str(), MAPPER_FIELDS) {
-                    return info_err_res!("Invalid mapper source field {source}");
+                    return Err(TuliproxError::Mapper(format!("Invalid mapper source field {source}")));
                 }
             }
 
@@ -158,7 +158,7 @@ impl MapperOperation {
             | MapperOperation::Prefix { ref field, ref mut value }
             | MapperOperation::Set { ref field, ref mut value } => {
                 if !valid_property!(field.as_str(), MAPPER_FIELDS) {
-                    return info_err_res!("Invalid mapper attribute field {field}");
+                    return Err(TuliproxError::Mapper(format!("Invalid mapper attribute field {field}")));
                 }
 
                 if templates.is_some() {
@@ -224,7 +224,7 @@ impl MappingDto {
             let mut counters = vec![];
             for def in counter_def_list {
                 if !valid_property!(def.field.as_str(), COUNTER_FIELDS) {
-                    return info_err_res!("Invalid counter field {}", def.field);
+                    return Err(TuliproxError::Config(format!("Invalid counter field {}", def.field)));
                 }
                 match get_filter(&def.filter, templates) {
                     Ok(flt) => {
@@ -237,7 +237,7 @@ impl MappingDto {
                             padding: def.padding,
                         });
                     }
-                    Err(e) => return info_err_res!("Counter field error: {}", e.to_string()),
+                    Err(e) => return Err(e),
                 }
             }
             self.t_counter = Some(counters);

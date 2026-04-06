@@ -1,6 +1,5 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
-    info_err_res,
+    error::TuliproxError,
     model::{
         CacheConfigDto, GeoIpConfigDto, QosAggregationConfigDto, RateLimitConfigDto, StreamConfigDto,
         StreamHistoryConfigDto,
@@ -109,9 +108,11 @@ impl ReverseProxyConfigDto {
         self.rewrite_secret = self.rewrite_secret.trim().to_string();
         if !self.resource_rewrite_disabled {
             if self.rewrite_secret.is_empty() {
-                return info_err_res!("rewrite_secret is required when resource rewrite is enabled");
+                return Err(TuliproxError::ConfigReverseProxy(
+                    "rewrite_secret is required when resource rewrite is enabled".to_string(),
+                ));
             }
-            hex_to_u8_16(&self.rewrite_secret).map_err(|e| TuliproxError::new(TuliproxErrorKind::Info, e))?;
+            hex_to_u8_16(&self.rewrite_secret).map_err(TuliproxError::ConfigReverseProxy)?;
         }
 
         if let Some(stream) = self.stream.as_mut() {
@@ -190,7 +191,7 @@ impl ResourceRetryConfigDto {
         if let Some(failover_redirect_patterns) = self.failover_redirect_patterns.as_mut() {
             for pattern in failover_redirect_patterns {
                 if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(pattern) {
-                    return info_err_res!("Can't parse regex: {pattern} {err}");
+                    return Err(TuliproxError::RegexCompile(format!("{pattern} {err}")));
                 }
             }
         }

@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shared::{
     concat_string,
-    error::{info_err, info_err_res, TuliproxError},
+    error::{TuliproxError},
     model::{
         create_stream_channel_with_type, PlaylistEntry, PlaylistItemType, ProxyType, ShortEpgResultDto, TargetType,
         UserConnectionPermission, XtreamCluster, XtreamPlaylistItem,
@@ -113,7 +113,7 @@ impl FromStr for ApiStreamContext {
             Self::MOVIE => Ok(Self::Movie),
             Self::SERIES => Ok(Self::Series),
             Self::TIMESHIFT => Ok(Self::Timeshift),
-            _ => info_err_res!("Unknown ApiStreamContext: {}", s),
+            _ => Err(TuliproxError::ApiXtream(format!("Unknown ApiStreamContext: {s}"))),
         }
     }
 }
@@ -866,7 +866,7 @@ pub async fn xtream_get_stream_info_response(
         if pli.item_type.is_local() {
             let Ok(xtream_output) = target
                 .get_xtream_output()
-                .ok_or_else(|| info_err!("Unexpected: xtream output required for target {}", target.name))
+                .ok_or_else(|| TuliproxError::ApiXtream(format!("Unexpected: xtream output required for target {}", target.name)))
             else {
                 return try_unwrap_body!(empty_json_response_as_array());
             };
@@ -1311,7 +1311,10 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
                 xtream_load_rewrite_playlist(XtreamCluster::Series, app_state, &target, category_id, &user)
                     .await
             ),
-            _ => Some(info_err_res!("Unknown api call: {action} for target: {}", &target.name)),
+            _ => Some(Err(TuliproxError::ApiXtream(format!(
+                "Unknown api call: {action} for target: {}",
+                &target.name
+            )))),
         };
 
         match result {

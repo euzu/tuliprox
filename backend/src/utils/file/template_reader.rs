@@ -1,8 +1,7 @@
 use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
 use log::{debug, warn};
-use shared::error::{info_err_res, TuliproxError};
-use shared::info_err;
+use shared::error::TuliproxError;
 use shared::model::TemplateDefinitionDto;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -17,10 +16,10 @@ fn read_template_definition(
                 serde_saphyr::from_reader(config_file_reader(file, resolve_var));
             match maybe_definition {
                 Ok(definition) => Ok(Some(definition)),
-                Err(err) => info_err_res!(
+                Err(err) => Err(TuliproxError::Config(format!(
                     "Failed to parse template file {}: {err}",
                     template_file.to_string_lossy()
-                ),
+                ))),
             }
         }
         Err(err) => {
@@ -35,10 +34,10 @@ fn read_template_definition(
                     "Can't read template file {}: {err}",
                     template_file.to_str().unwrap_or("?")
                 );
-                info_err_res!(
+                Err(TuliproxError::Config(format!(
                     "Can't read template file {}: {err}",
                     template_file.to_string_lossy()
-                )
+                )))
             }
         }
     }
@@ -79,7 +78,7 @@ fn read_templates_from_directory(
             }
         }
     };
-    traverse_dir(path, &mut visit).map_err(|err| info_err!("Failed to read templates {err}"))?;
+    traverse_dir(path, &mut visit).map_err(|err| TuliproxError::Config(format!("Failed to read templates {err}")))?;
 
     files.sort();
 
@@ -92,7 +91,10 @@ fn read_templates_from_directory(
                 definitions.push(definition);
             }
             Ok(None) => {}
-            Err(err) => return info_err_res!("Failed to read template file {file_path:?}: {err:?}"),
+            Err(err) => return Err(TuliproxError::Config(format!(
+                "Failed to read template file {}: {err}",
+                file_path.display()
+            ))),
         }
     }
 
@@ -131,10 +133,10 @@ pub fn read_templates_file(
                     "Can't read template path metadata for {}: {err}",
                     path.to_string_lossy()
                 );
-                info_err_res!(
+                Err(TuliproxError::Config(format!(
                     "Can't read template path metadata for {}: {err}",
                     path.to_string_lossy()
-                )
+                )))
             }
         }
     }

@@ -8,7 +8,7 @@ use crate::{
     },
     i18n::use_translation,
 };
-use shared::model::TargetUserDto;
+use shared::{model::TargetUserDto, utils::Internable};
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -96,10 +96,10 @@ pub fn UserlistView(props: &UserlistViewProps) -> Html {
             <div class="tp__userlist-view tp__list-view">
                 <Breadcrumbs items={&*breadcrumbs} onclick={ handle_breadcrumb_select }/>
                 <div class="tp__userlist-view__body tp__list-view__body">
-                    <Panel value={UserlistPage::List.to_string()} active={active_page.to_string()}>
+                    <Panel value={UserlistPage::List.intern()} active={active_page.intern()}>
                         <UserlistList />
                     </Panel>
-                    <Panel value={UserlistPage::Edit.to_string()} active={active_page.to_string()}>
+                    <Panel value={UserlistPage::Edit.intern()} active={active_page.intern()}>
                         <UserEdit />
                     </Panel>
                 </div>

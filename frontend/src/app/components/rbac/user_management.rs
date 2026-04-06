@@ -10,7 +10,10 @@ use crate::{
     model::DialogResult,
     services::{CreateUserRequest, DialogService, UpdateUserRequest},
 };
-use shared::model::{permission::Permission, RbacGroupDto, WebUiUserDto};
+use shared::{
+    model::{permission::Permission, RbacGroupDto, WebUiUserDto},
+    utils::Internable,
+};
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use yew::{prelude::*, suspense::use_future};
@@ -405,12 +408,12 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
 
     let user_is_admin = form_state.form.groups.iter().any(|g| g == "admin");
     let is_self_selected = selected_user.as_ref().is_some_and(|u| u.username == current_username);
-    let active_panel = active_panel(&form_mode);
+    let active_panel = active_panel(&form_mode).intern();
     let is_edit = matches!(*form_mode, FormMode::Edit(_));
 
     html! {
      <>
-       <Panel value={USER_DISPLAY_PANEL.to_string()} active={active_panel.to_string()}>
+       <Panel value={USER_DISPLAY_PANEL.intern()} active={active_panel.clone()}>
            <Card class="tp__user-management__user-list">
                 <div class="tp__config-view__header">
                     <h2>{ translate.t("LABEL.RBAC_USERS") }</h2>
@@ -425,7 +428,7 @@ pub fn UserManagement(props: &UserManagementProps) -> Html {
                 <Table::<WebUiUserDto> definition={table_definition} />
            </Card>
        </Panel>
-        <Panel value={USER_EDIT_PANEL.to_string()} active={active_panel.to_string()}>
+        <Panel value={USER_EDIT_PANEL.intern()} active={active_panel}>
            <Card class="tp__user-management__user-edit">
                 <div class="tp__user-management__user-edit-form tp__form-page">
                     <h3>{

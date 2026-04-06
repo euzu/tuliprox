@@ -22,11 +22,11 @@ use indexmap::IndexMap;
 use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use shared::error::{info_err_res, notify_err, string_to_io_error, TuliproxError};
+use shared::error::{string_to_io_error, TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{arc_str_serde, get_u32_from_serde_value, Internable};
-use shared::{concat_string, notify_err_res};
+use shared::concat_string;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind};
@@ -37,11 +37,11 @@ use tokio_stream::wrappers::ReceiverStream;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
-        notify_err!(
+        TuliproxError::RepositoryXtream(format!(
             "failed to write xtream playlist: {} - {}",
             $path.display(),
             $err
-        )
+        ))
     };
 }
 
@@ -73,12 +73,12 @@ pub async fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Resu
                 "Failed to save xtream data, can't create directory {}",
                 &path.display()
             );
-            return notify_err_res!("{msg}");
+            return Err(TuliproxError::RepositoryXtream(msg));
         }
         Ok(path)
     } else {
         let msg = format!("Failed to save xtream data, can't create directory for target {target_name}");
-        notify_err_res!("{msg}")
+        Err(TuliproxError::RepositoryXtream(msg))
     }
 }
 
@@ -124,7 +124,7 @@ async fn write_playlists_to_file(
             Ok(())
         })
             .await
-            .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+            .map_err(|e| TuliproxError::RepositoryXtream(format!("Blocking task failed: {e}")))?
             .map_err(|err| cant_write_result!(&xtream_path, err))?;
     }
     Ok(())
@@ -142,12 +142,12 @@ pub async fn write_playlist_item_update(
     let xtream_path = xtream_get_file_path(&storage_path, pli.xtream_cluster);
 
     if !file_exists_async(&xtream_path).await {
-        return info_err_res!("BPlusTree file not found for update {}", xtream_path.display());
+        return Err(TuliproxError::RepositoryXtream(format!("BPlusTree file not found for update {}", xtream_path.display())));
     }
 
     // Prepare encoded payload before opening the writer lock.
     let prepared_items = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&[(&pli.virtual_id, pli)])
-        .map_err(|e| notify_err!("Failed to serialize value: {e}"))?;
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to serialize value: {e}")))?;
 
     // Keep FileLockManager lock for cross-operation coordination (e.g. swap + update).
     let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
@@ -160,7 +160,7 @@ pub async fn write_playlist_item_update(
         Ok(())
     })
         .await
-        .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("Blocking task failed: {e}")))?
         .map_err(|err| cant_write_result!(&xtream_path, err))?;
 
     Ok(())
@@ -183,7 +183,7 @@ pub async fn write_playlist_batch_item_upsert(
     let xtream_path = xtream_get_file_path(&storage_path, xtream_cluster);
 
     if !file_exists_async(&xtream_path).await {
-        return info_err_res!("BPlusTree file not found for upsert {}", xtream_path.display());
+        return Err(TuliproxError::RepositoryXtream(format!("BPlusTree file not found for upsert {}", xtream_path.display())));
     }
 
     // Prepare encoded payload before opening the writer lock.
@@ -192,7 +192,7 @@ pub async fn write_playlist_batch_item_upsert(
         .map(|pli| (&pli.virtual_id, pli))
         .collect();
     let prepared_items = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch_refs)
-        .map_err(|e| notify_err!("Failed to serialize value: {e}"))?;
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to serialize value: {e}")))?;
 
     // Keep FileLockManager lock for cross-operation coordination (e.g. swap + update).
     let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
@@ -205,7 +205,7 @@ pub async fn write_playlist_batch_item_upsert(
         Ok(())
     })
         .await
-        .map_err(|e| notify_err!("Blocking task failed: {e}"))?
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("Blocking task failed: {e}")))?
         .map_err(|err| cant_write_result!(&xtream_path, err))?;
 
     Ok(())
@@ -376,7 +376,7 @@ pub async fn xtream_write_playlist(
     }
 
     if !errors.is_empty() {
-        return info_err_res!("{}", errors.join("\n"));
+        return Err(TuliproxError::Config(errors.join("\n")));
     }
 
     Ok(())
@@ -791,7 +791,7 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
                             updates.push((new_item.provider_id, new_item));
                             if updates.len() >= BATCH_SIZE {
                                 let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
-                                new_tree.update_batch(&refs).map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
+                                new_tree.update_batch(&refs).map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to update tmp tree during merge: {e}")))?;
                                 updates.clear();
                             }
                         }
@@ -805,11 +805,11 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
         let refs: Vec<(&u32, &XtreamPlaylistItem)> =
             updates.iter().map(|(id, pli)| (id, pli)).collect();
         new_tree.update_batch(&refs)
-            .map_err(|e| notify_err!("Failed to update tmp tree during merge: {e}"))?;
+            .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to update tmp tree during merge: {e}")))?;
     }
 
     new_tree.commit()
-        .map_err(|e| notify_err!("Failed to commit tmp tree merge: {e}"))?;
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to commit tmp tree merge: {e}")))?;
 
     Ok(())
 }
@@ -847,7 +847,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                 // This is safe here because it runs within its own tokio::spawn task.
                 if let Err(e) = tx_for_closure.blocking_send(item) {
                     error!("Channel closed while processing {cluster} for item {item_id}: {e}");
-                    return notify_err_res!("Channel closed while processing {cluster}");
+                    return Err(TuliproxError::RepositoryXtream(format!("Channel closed while processing {cluster}")));
                 }
                 Ok(())
             },
@@ -872,13 +872,13 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                     "Failed to initialize ghost BPlusTree at {}: {e}",
                     tmp_xtream_path.display()
                 );
-                notify_err!("Init tree error {e}")
+                TuliproxError::RepositoryXtream(format!("Init tree error {e}"))
             })?;
 
         let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> =
             BPlusTreeUpdate::try_new_with_backoff(&tmp_xtream_path).map_err(|e| {
                 error!("Failed to open ghost tree at {}: {e}", tmp_xtream_path.display());
-                notify_err!("Failed to open tree {e}")
+                TuliproxError::RepositoryXtream(format!("Failed to open tree {e}"))
             })?;
         tree.set_flush_policy(FlushPolicy::Batch);
 
@@ -893,11 +893,11 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                 let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
                     .map_err(|e| {
                         error!("Batch prepare failed for cluster {cluster}: {e}");
-                        notify_err!("Prepare failed {e}")
+                        TuliproxError::RepositoryXtream(format!("Prepare failed {e}"))
                     })?;
                 tree.upsert_batch_encoded(prepared).map_err(|e| {
                     error!("Batch upsert failed for cluster {cluster}: {e}");
-                    notify_err!("Upsert failed {e}")
+                    TuliproxError::RepositoryXtream(format!("Upsert failed {e}"))
                 })?;
                 buffer.clear();
             }
@@ -910,17 +910,17 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
             let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
                 .map_err(|e| {
                     error!("Final batch prepare failed for cluster {cluster}: {e}");
-                    notify_err!("Prepare failed {e}")
+                    TuliproxError::RepositoryXtream(format!("Prepare failed {e}"))
                 })?;
             tree.upsert_batch_encoded(prepared).map_err(|e| {
                 error!("Final batch upsert failed for cluster {cluster}: {e}");
-                notify_err!("Upsert failed {e}")
+                TuliproxError::RepositoryXtream(format!("Upsert failed {e}"))
             })?;
         }
 
         tree.commit().map_err(|e| {
             error!("Commit failed for cluster {cluster}: {e}");
-            notify_err!("Commit failed {e}")
+            TuliproxError::RepositoryXtream(format!("Commit failed {e}"))
         })?;
         Ok::<(), TuliproxError>(())
     });
@@ -928,7 +928,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
     // 3. Robust Joining of both tasks
     // try_join! returns immediately if any task returns an error or panics.
     let (parse_res, consumer_res) = tokio::try_join!(parse_task, consumer_task)
-        .map_err(|e| notify_err!("Task join error during cluster {cluster} update: {e}"))?;
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("Task join error during cluster {cluster} update: {e}")))?;
 
     // Handle internal errors from the tasks
     let parsed_categories = parse_res?;
@@ -957,7 +957,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
         let new_tmp_path = tmp_xtream_path.clone();
         tokio::task::spawn_blocking(move || preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &new_tmp_path))
             .await
-            .map_err(|e| notify_err!("Merge task join error during cluster {cluster} update: {e}"))??;
+            .map_err(|e| TuliproxError::RepositoryXtream(format!("Merge task join error during cluster {cluster} update: {e}")))??;
     }
 
     // Optional compaction to optimize the newly created database file.
@@ -993,7 +993,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
             tmp_xtream_path.display(),
             xtream_path.display()
         );
-        return notify_err_res!("Failed to swap database: {e}");
+        return Err(TuliproxError::RepositoryXtream(format!("Failed to swap database: {e}")));
     }
 
     // Atomic Swap: Replace old categories with new ones
@@ -1003,7 +1003,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
             tmp_col_path.display(),
             col_path.display()
         );
-        return notify_err_res!("Failed to swap categories: {e}");
+        return Err(TuliproxError::RepositoryXtream(format!("Failed to swap categories: {e}")));
     }
 
     // Cleanup: Remove temporary files if they still exist (defensive)
@@ -1041,16 +1041,16 @@ async fn save_xtream_categories_to_file(
             }
             serde_json::to_writer(&file, &cat_entries).map_err(|e| {
                 error!("Failed to write categories to file {}: {e}", col_path_buf.display());
-                notify_err!("Write failed: {e}")
+                TuliproxError::RepositoryXtream(format!("Write failed: {e}"))
             })?;
             let _ = file.unlock();
         } else {
-            return notify_err_res!("Failed to create category file {}", col_path_buf.display());
+            return Err(TuliproxError::RepositoryXtream(format!("Failed to create category file {}", col_path_buf.display())));
         }
         Ok(())
     })
         .await
-        .map_err(|e| notify_err!("Spawn error {e}"))?
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("Spawn error {e}")))?
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1188,7 +1188,7 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
     let err = if errors.is_empty() {
         None
     } else {
-        Some(notify_err!("{}", errors.join("\n")))
+        Some(TuliproxError::RepositoryXtream(errors.join("\n")))
     };
 
     (result, err)
@@ -1482,7 +1482,9 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
                 Ok(items)
             })
                 .await
-                .map_err(|err| notify_err!("failed to read xtream playlist: {} - {err}", xtream_display))??;
+            .map_err(|err| TuliproxError::RepositoryXtream(format!(
+                "failed to read xtream playlist: {xtream_display} - {err}"
+            )))??;
 
             for item in items {
                 let cat_id = item.category_id;

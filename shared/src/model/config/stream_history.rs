@@ -1,5 +1,5 @@
 use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     utils::{
         default_stream_history_batch_size, default_stream_history_retention_days, is_blank_stream_history_directory,
         is_default_stream_history_batch_size, is_default_stream_history_retention_days, is_false,
@@ -52,14 +52,12 @@ impl StreamHistoryConfigDto {
         }
 
         if self.stream_history_batch_size == 0 {
-            return Err(TuliproxError::new(
-                TuliproxErrorKind::Info,
+            return Err(TuliproxError::ConfigStreamHistory(
                 "`stream_history_batch_size` must be > 0 when stream history is enabled".to_string(),
             ));
         }
         if self.stream_history_retention_days == 0 {
-            return Err(TuliproxError::new(
-                TuliproxErrorKind::Info,
+            return Err(TuliproxError::ConfigStreamHistory(
                 "`stream_history_retention_days` must be > 0 when stream history is enabled".to_string(),
             ));
         }

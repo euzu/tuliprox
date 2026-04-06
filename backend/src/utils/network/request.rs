@@ -18,8 +18,9 @@ use reqwest::{
     redirect::Policy,
     StatusCode,
 };
+use shared::utils::DEFAULT_USER_AGENT;
 use shared::{
-    error::{notify_err_res, string_to_io_error, TuliproxError},
+    error::{string_to_io_error, TuliproxError},
     model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy},
     utils::{
         filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
@@ -42,7 +43,6 @@ use tokio::{
 };
 use tokio_util::io::StreamReader;
 use url::Url;
-use shared::utils::DEFAULT_USER_AGENT;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
 
@@ -607,7 +607,12 @@ pub async fn get_input_epg_content_as_file(
                     sanitize_sensitive_info(url_str),
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                notify_err_res!("Failed to download")
+                Err(TuliproxError::RepositoryNetwork(format!(
+                    "can't download input {} epg url: {}  => {}",
+                    input.name,
+                    sanitize_sensitive_info(url_str),
+                    sanitize_sensitive_info(e.to_string().as_str())
+                )))
             }
         }
     } else {
@@ -616,12 +621,15 @@ pub async fn get_input_epg_content_as_file(
                 if filepath.exists() {
                     if let Err(e) = tokio::fs::copy(&filepath, persist_filepath).await {
                         error!("can't persist to: {}  => {}", persist_filepath.display(), e);
-                        return notify_err_res!("Failed to persist: {}  => {}", persist_filepath.display(), e);
+                        return Err(TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {}", persist_filepath.display(), e)));
                     }
                     if filepath.exists() {
                         Some(filepath)
                     } else {
-                        return notify_err_res!("Failed: file does not exists {filepath:?}");
+                        return Err(TuliproxError::RepositoryNetwork(format!(
+                            "Failed: file does not exists {}",
+                            filepath.display()
+                        )));
                     }
                 } else {
                     None
@@ -634,7 +642,7 @@ pub async fn get_input_epg_content_as_file(
             || {
                 let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
                 error!("{msg}");
-                notify_err_res!("{msg}")
+                Err(TuliproxError::RepositoryNetwork(msg))
             },
             Ok,
         )
@@ -663,7 +671,11 @@ pub async fn get_input_text_content(
                     &input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                notify_err_res!("Failed to download")
+                Err(TuliproxError::RepositoryNetwork(format!(
+                    "Failed to download input '{}': {}",
+                    &input.name,
+                    sanitize_sensitive_info(e.to_string().as_str())
+                )))
             }
         }
     } else {
@@ -674,14 +686,14 @@ pub async fn get_input_text_content(
                         let to_file = &persist_file_value;
                         if let Err(e) = tokio::fs::copy(&filepath, to_file).await {
                             error!("can't persist to: {}  => {}", to_file.to_str().unwrap_or("?"), e);
-                            return notify_err_res!("Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e);
+                            return Err(TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e)));
                         }
                     }
 
                     match get_local_file_content(&filepath).await {
                         Ok(content) => Some(content),
                         Err(err) => {
-                            return notify_err_res!("Failed : {}", err);
+                            return Err(TuliproxError::RepositoryNetwork(format!("Failed : {err}")));
                         }
                     }
                 } else {
@@ -694,7 +706,7 @@ pub async fn get_input_text_content(
             || {
                 let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
                 error!("{msg}");
-                notify_err_res!("{msg}")
+                Err(TuliproxError::RepositoryNetwork(msg))
             },
             Ok,
         )
@@ -723,7 +735,11 @@ pub async fn get_input_text_content_as_stream(
                     &input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                notify_err_res!("Failed to download")
+                Err(TuliproxError::RepositoryNetwork(format!(
+                    "Failed to download input '{}': {}",
+                    &input.name,
+                    sanitize_sensitive_info(e.to_string().as_str())
+                )))
             }
         }
     } else {
@@ -740,14 +756,14 @@ pub async fn get_input_text_content_as_stream(
                                         debug_if_enabled!("Persisted {} bytes", human_readable_byte_size(size as u64));
                                     })),
                                 )
-                                .await;
+                                    .await;
                                 Some(tee)
                             } else {
                                 Some(content)
                             }
                         }
                         Err(err) => {
-                            return notify_err_res!("Failed : {}", err);
+                            return Err(TuliproxError::RepositoryNetwork(format!("Failed : {err}")));
                         }
                     }
                 } else {
@@ -760,7 +776,7 @@ pub async fn get_input_text_content_as_stream(
             || {
                 let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
                 error!("{msg}");
-                notify_err_res!("{msg}")
+                Err(TuliproxError::RepositoryNetwork(msg))
             },
             Ok,
         )
@@ -951,7 +967,7 @@ pub async fn get_remote_content_as_file(
             default_user_agent.as_deref(),
         )
     })
-    .await?;
+        .await?;
 
     let start_time = tokio::time::Instant::now();
     let mut writer = async_file_writer(File::create(file_path).await?);
@@ -1073,7 +1089,7 @@ pub async fn get_remote_content_as_stream(
             default_user_agent.as_deref(),
         )
     })
-    .await?;
+        .await?;
 
     let response_url = response.url().to_string();
 
@@ -1143,7 +1159,7 @@ async fn get_remote_content_with_manual_redirects(
                     default_user_agent.as_deref(),
                 )
             })
-            .await?;
+                .await?;
         let response_base_url = response.url().clone();
 
         if response.status().is_redirection() {
@@ -1359,7 +1375,7 @@ pub async fn download_text_content_as_stream(
                             debug!("Persisted {size} bytes");
                         })),
                     )
-                    .await;
+                        .await;
                     Ok((tee_reader, response_url))
                 } else {
                     Ok((content, response_url))
@@ -1398,11 +1414,11 @@ pub async fn get_input_json_content(
 ) -> Result<serde_json::Value, TuliproxError> {
     match download_json_content(app_config, client, input, persist_filepath, trace_log).await {
         Ok(content) => Ok(content),
-        Err(e) => notify_err_res!(
-            "can't download input {}, => {}",
-            input.name,
-            sanitize_sensitive_info(e.to_string().as_str())
-        ),
+        Err(e) => Err(TuliproxError::RepositoryNetwork(format!(
+            "can't download input {input} => {sanitized}",
+            input = input.name,
+            sanitized = sanitize_sensitive_info(e.to_string().as_str())
+        ))),
     }
 }
 
@@ -1427,11 +1443,11 @@ pub async fn get_input_json_content_as_stream(
 ) -> Result<DynReader, TuliproxError> {
     match download_json_content_as_stream(app_config, client, input, persist_filepath).await {
         Ok(stream) => Ok(stream),
-        Err(e) => notify_err_res!(
-            "can't download input {} => {}",
-            input.name,
-            sanitize_sensitive_info(e.to_string().as_str())
-        ),
+        Err(e) => Err(TuliproxError::RepositoryNetwork(format!(
+            "can't download input {input} => {sanitized}",
+            input = input.name,
+            sanitized = sanitize_sensitive_info(e.to_string().as_str())
+        ))),
     }
 }
 
@@ -1562,7 +1578,7 @@ mod tests {
     };
     use crate::{
         model::{AppConfig, Config, ConfigProvider, MediaToolCapabilities, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
-        utils::{FileLockManager, DEFAULT_USER_AGENT}
+        utils::{FileLockManager, DEFAULT_USER_AGENT},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
@@ -1663,7 +1679,7 @@ mod tests {
 
     #[test]
     fn test_get_request_headers_prioritization() {
-        use super::{get_request_headers};
+        use super::get_request_headers;
         use axum::http::header::USER_AGENT;
 
         // Case 1: No headers provided -> Default UA
@@ -1851,7 +1867,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_connect_error_try_next_ip_before_provider_rotation() {
-
         let (addr, accepted, server_handle) = match start_plain_http_server().await {
             Ok(server) => server,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -1895,7 +1910,7 @@ mod tests {
         let result_rotate = send_with_retry_and_provider(&app_config, &url, Some(&provider_rotate), false, |resolved_url| {
             client.get(resolved_url.clone())
         })
-        .await;
+            .await;
         assert!(result_rotate.is_err(), "without try_next_ip policy the request should fail");
 
         let provider_try_next =
@@ -1904,7 +1919,7 @@ mod tests {
             send_with_retry_and_provider(&app_config, &url, Some(&provider_try_next), false, |resolved_url| {
                 client.get(resolved_url.clone())
             })
-            .await;
+                .await;
         assert!(result_try_next.is_ok(), "try_next_ip should succeed by trying the second IP");
         assert_eq!(accepted.load(Ordering::SeqCst), 1, "server should be reached exactly once");
 

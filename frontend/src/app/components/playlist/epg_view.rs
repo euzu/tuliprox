@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{Breadcrumbs, EpgSourceSelector, NoContent, Search},
+    app::components::{EpgSourceSelector, NoContent, Search},
     hooks::use_service_context,
     i18n::use_translation,
     model::{BusyStatus, EventMessage},
@@ -35,7 +35,6 @@ pub fn EpgView() -> Html {
     let services = use_service_context();
     let translate = use_translation();
     let epg = use_state::<Option<EpgTv>, _>(|| None);
-    let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.PLAYLIST_EPG")]));
     let container_ref = use_node_ref();
     let now_line_ref = use_node_ref();
 
@@ -223,7 +222,6 @@ pub fn EpgView() -> Html {
 
     html! {
         <div class="tp__epg tp__list-view">
-            <Breadcrumbs items={&*breadcrumbs}/>
             <div class="tp__epg__header">
                 <h1>{translate.t("LABEL.PLAYLIST_EPG")}</h1>
                 <div class="tp__epg__header-toolbar">

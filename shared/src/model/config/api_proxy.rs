@@ -1,5 +1,5 @@
 use crate::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::ProxyUserCredentialsDto,
     utils::{default_auth_error_status, is_blank_optional_string, is_default_auth_error_status, is_false},
 };
@@ -54,22 +54,22 @@ impl ApiProxyServerInfoDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.name = self.name.trim().to_string();
         if self.name.is_empty() {
-            return info_err_res!("Server info name is empty ");
+            return Err(TuliproxError::ConfigApiProxy("Server info name is empty ".to_string()));
         }
         self.protocol = self.protocol.trim().to_string();
         if self.protocol.is_empty() {
-            return info_err_res!("protocol can't be empty for api server config");
+            return Err(TuliproxError::ConfigApiProxy("protocol can't be empty for api server config".to_string()));
         }
         self.host = self.host.trim().to_string();
         if self.host.is_empty() {
-            return info_err_res!("host can't be empty for api server config");
+            return Err(TuliproxError::ConfigApiProxy("host can't be empty for api server config".to_string()));
         }
         if let Some(port) = self.port.as_ref() {
             let port = port.trim().to_string();
             if port.is_empty() {
                 self.port = None;
             } else if port.parse::<u16>().is_err() {
-                return info_err_res!("invalid port for api server config");
+                return Err(TuliproxError::ConfigApiProxy("invalid port for api server config".to_string()));
             } else {
                 self.port = Some(port);
             }
@@ -165,7 +165,7 @@ impl ApiProxyConfigDto {
         if errors.is_empty() {
             Ok(())
         } else {
-            info_err_res!("{}", errors.join("\n"))
+            Err(TuliproxError::ConfigApiProxy(errors.join("\n")))
         }
     }
 }

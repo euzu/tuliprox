@@ -6,8 +6,8 @@ use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
 use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto, XtreamCluster};
 use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
-use shared::{check_input_connections, info_err_res, write_if_some};
-use shared::{check_input_credentials, concat_string, info_err};
+use shared::{check_input_connections, write_if_some};
+use shared::{check_input_credentials, concat_string };
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -264,18 +264,18 @@ pub struct ConfigInput {
 impl ConfigInput {
     fn resolve_provider_config(url: &str, provider_configs: &[Arc<ConfigProvider>]) -> Result<Arc<ConfigProvider>, TuliproxError> {
         let (host, _path) = parse_provider_scheme_url_parts(url).map_err(|err| {
-            info_err!(
+            TuliproxError::ConfigInput(format!(
                 "Malformed provider URL {}: {}",
                 sanitize_sensitive_info(url),
                 sanitize_sensitive_info(err.to_string().as_str())
-            )
+            ))
         })?;
 
         provider_configs
             .iter()
             .find(|p| p.name.as_ref() == host)
             .cloned()
-            .ok_or_else(|| info_err!("Failed to resolve provider config for {}", sanitize_sensitive_info(url)))
+            .ok_or_else(|| TuliproxError::ConfigInput(format!("Failed to resolve provider config for {}", sanitize_sensitive_info(url))))
     }
 
     fn prepare_staged_input(
@@ -296,11 +296,11 @@ impl ConfigInput {
 
                 check_input_credentials!(staged_input, staged_input.input_type, false, true);
                 if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                    return info_err_res!(
+                    return Err(TuliproxError::ConfigInput(format!(
                         "Staged input can only be from type m3u or xtream (input: {}, staged: {})",
                         self.name,
                         staged_input.name
-                    );
+                    )));
                 }
 
                 if self.input_type.is_xtream() {
@@ -309,19 +309,19 @@ impl ConfigInput {
                     let series_uses_staged = matches!(staged_input.series_source, ClusterSource::Staged) && !skip_series;
 
                     if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged' (input: {}, staged: {})",
                             self.name,
                             staged_input.name
-                        );
+                        )));
                     }
 
                     if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
-                        return info_err_res!(
+                        return Err(TuliproxError::ConfigInput(format!(
                             "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip' (input: {}, staged: {})",
                             self.name,
                             staged_input.name
-                        );
+                        )));
                     }
                 }
 
@@ -598,7 +598,7 @@ impl ConfigInput {
             let (_, resolved) = resolve_provider_scheme_url_with_provider(url, Some(provider))?;
             Ok(resolved)
         } else {
-            info_err_res!("Provider config for '{}' not found in input '{}'", host, self.name)
+            Err(TuliproxError::ConfigInput(format!("Provider config for '{}' not found in input '{}'", host, self.name)))
         }
     }
 
@@ -702,7 +702,7 @@ pub fn resolve_provider_scheme_url_with_provider(
     let (_host, path_and_query) = parse_provider_scheme_url_parts(stream_url)?;
 
     let provider = provider_config.ok_or_else(|| {
-        info_err!("Provider config missing for resolution of: '{}'", sanitize_sensitive_info(stream_url))
+        TuliproxError::ConfigInput(format!("Provider config missing for resolution of: '{}'", sanitize_sensitive_info(stream_url)))
     })?;
 
     let final_url = assemble_provider_url(&provider, path_and_query)?;
@@ -712,7 +712,7 @@ pub fn resolve_provider_scheme_url_with_provider(
 /// Internal helper to build the final URL string
 fn assemble_provider_url(provider: &ConfigProvider, path_and_query: &str) -> Result<String, TuliproxError> {
     let base = provider.get_current_url()
-        .ok_or_else(|| info_err!("Provider '{}' has no URLs available", provider.name))?;
+        .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider '{}' has no URLs available", provider.name)))?;
 
     // Add http:// scheme if no scheme is present
     let base_with_scheme = if base.contains("://") {

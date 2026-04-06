@@ -14,7 +14,7 @@ use notify::{
     recommended_watcher, EventKind, RecursiveMode, Watcher,
 };
 use shared::{
-    error::{TuliproxError, TuliproxErrorKind},
+    error::TuliproxError,
     model::ConfigPaths,
 };
 use std::{
@@ -57,10 +57,10 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     });
 
     let mut watcher = recommended_watcher(std_tx).map_err(|err| {
-        TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to init config file watcher {err}"))
+        TuliproxError::Io(format!("Failed to init config file watcher {err}"))
     })?;
     watcher.watch(path, recursive_mode).map_err(|err| {
-        TuliproxError::new(TuliproxErrorKind::Info, format!("Failed to start config file watcher {err}"))
+        TuliproxError::Io(format!("Failed to start config file watcher {err}"))
     })?;
     info!("Watching config file changes {}", path.display());
 

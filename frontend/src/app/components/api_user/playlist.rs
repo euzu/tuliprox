@@ -8,11 +8,15 @@ use crate::{
     model::{BusyStatus, EventMessage},
 };
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{PlaylistBouquetDto, PlaylistCategoriesDto, PlaylistClusterBouquetDto},
+    utils::Internable,
 };
-use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc, str::FromStr};
+use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc, str::FromStr, sync::Arc};
 use yew::prelude::*;
+
+const XTREAM: &str = "xtream";
+const M3U: &str = "m3u";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum ApiUserPlaylistPage {
@@ -20,26 +24,36 @@ enum ApiUserPlaylistPage {
     M3u,
 }
 
+impl ApiUserPlaylistPage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApiUserPlaylistPage::Xtream => XTREAM,
+            ApiUserPlaylistPage::M3u => M3U,
+        }
+    }
+}
+
 impl FromStr for ApiUserPlaylistPage {
     type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
         match s.to_lowercase().as_str() {
-            "xtream" => Ok(ApiUserPlaylistPage::Xtream),
-            "m3u" => Ok(ApiUserPlaylistPage::M3u),
-            _ => info_err_res!("Unknown api user playlist type: {s}"),
+            XTREAM => Ok(ApiUserPlaylistPage::Xtream),
+            M3U => Ok(ApiUserPlaylistPage::M3u),
+            _ => Err(TuliproxError::Config(format!("Unknown api user playlist type: {s}"))),
         }
     }
 }
 
 impl fmt::Display for ApiUserPlaylistPage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            ApiUserPlaylistPage::Xtream => "xtream",
-            ApiUserPlaylistPage::M3u => "m3u",
-        };
+        let s = self.as_str();
         write!(f, "{s}")
     }
+}
+
+impl Internable for ApiUserPlaylistPage {
+    fn intern(self) -> Arc<str> { self.as_str().intern() }
 }
 
 fn to_playlist_cluster(
@@ -201,6 +215,7 @@ pub fn ApiUserPlaylist() -> Html {
         })
     };
 
+    let active_page = active_tab.intern();
     html! {
         <div class="tp__api-user-playlist">
             <div class="tp__api-user-playlist__header tp__list-list__header">
@@ -222,14 +237,14 @@ pub fn ApiUserPlaylist() -> Html {
                 </div>
 
                 <div class="tp__api-user-playlist__content-panels">
-                    <Panel value={ApiUserPlaylistPage::Xtream.to_string()} active={active_tab.to_string()}>
+                    <Panel value={ApiUserPlaylistPage::Xtream.intern()} active={active_page.clone()}>
                         <UserTargetPlaylist
                             categories={categories.as_ref().and_then(|c| c.xtream.clone())}
                             bouquet={bouquets.as_ref().and_then(|b| b.xtream.as_ref().cloned())}
                             on_change={handle_xtream_change.clone()}
                             ></UserTargetPlaylist>
                     </Panel>
-                    <Panel value={ApiUserPlaylistPage::M3u.to_string()} active={active_tab.to_string()}>
+                    <Panel value={ApiUserPlaylistPage::M3u.intern()} active={active_page}>
                        <UserTargetPlaylist
                             categories={categories.as_ref().and_then(|c| c.m3u.clone())}
                             bouquet={bouquets.as_ref().and_then(|b| b.m3u.as_ref().cloned())}

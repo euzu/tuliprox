@@ -6,6 +6,7 @@ use crate::{
     app::{components::Panel, ConfigContext},
     i18n::use_translation,
 };
+use shared::utils::Internable;
 use yew::prelude::*;
 
 #[component]
@@ -74,7 +75,7 @@ pub fn Setup() -> Html {
     };
 
     let step = *active_step;
-    let value = step.to_string();
+    let value = step.intern();
     let active_panel = match step {
         SetupStep::Welcome => html! {
             <Panel value={value.clone()} active={value.clone()}>

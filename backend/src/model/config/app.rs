@@ -8,8 +8,7 @@ use crate::utils;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, warn};
 use rand::Rng;
-use shared::error::{TuliproxError, TuliproxErrorKind};
-use shared::info_err_res;
+use shared::error::TuliproxError;
 use shared::model::ConfigPaths;
 use shared::utils::{
     CHANNEL_UNAVAILABLE, LOW_PRIORITY_PREEMPTED, PANEL_API_PROVISIONING, PROVIDER_CONNECTIONS_EXHAUSTED,
@@ -84,10 +83,10 @@ impl AppConfig {
         if let Some(username) = output_username {
             if let Some((_, config_target)) = self.get_target_for_username(username) {
                 if config_target.name != target_name {
-                    return info_err_res!("User:{username} does not belong to target: {}", target_name);
+                    return Err(TuliproxError::Config(format!("User:{username} does not belong to target: {target_name}")));
                 }
             } else {
-                return info_err_res!("User: {username} does not exist");
+                return Err(TuliproxError::Config(format!("User: {username} does not exist")));
             }
             Ok(())
         } else {
@@ -264,20 +263,20 @@ impl AppConfig {
         for input in &sources.inputs {
             let input_name = input.name.trim();
             if input_name.is_empty() {
-                return info_err_res!("input name required");
+                return Err(TuliproxError::Config("input name required".to_string()));
             }
             if seen_names.contains(input_name) {
-                return info_err_res!("input names should be unique: {}", input_name);
+                return Err(TuliproxError::Config(format!("input names should be unique: {input_name}")));
             }
             seen_names.insert(input_name.to_string());
             if let Some(aliases) = &input.aliases {
                 for alias in aliases {
                     let input_name = alias.name.trim().to_string();
                     if input_name.is_empty() {
-                        return info_err_res!("input name required");
+                        return Err(TuliproxError::Config("input name required".to_string()));
                     }
                     if seen_names.contains(&input_name) {
-                        return info_err_res!("input and alias names should be unique: {}", input_name);
+                        return Err(TuliproxError::Config(format!("input and alias names should be unique: {input_name}")));
                     }
                     seen_names.insert(input_name.clone());
                 }
@@ -295,7 +294,7 @@ impl AppConfig {
                 if let Some(targets) = &schedule.targets {
                     for target_name in targets {
                         if !target_names.contains(target_name.as_str()) {
-                            return info_err_res!("Unknown target name in scheduler: {}", target_name);
+                        return Err(TuliproxError::Config(format!("Unknown target name in scheduler: {target_name}")));
                         }
                     }
                 }
@@ -310,7 +309,7 @@ impl AppConfig {
     pub fn prepare(&mut self, include_computed: bool) -> Result<(), TuliproxError> {
         if include_computed {
             self.access_token_secret = generate_secret();
-            self.encrypt_secret = <&[u8] as TryInto<[u8; 16]>>::try_into(&generate_secret()[0..16]).map_err(|err| TuliproxError::new(TuliproxErrorKind::Info, err.to_string()))?;
+            self.encrypt_secret = <&[u8] as TryInto<[u8; 16]>>::try_into(&generate_secret()[0..16]).map_err(|err| TuliproxError::Crypto(err.to_string()))?;
             self.prepare_paths();
         } else {
             self.prepare_mapping_path();
@@ -445,9 +444,7 @@ impl AppConfig {
     /// Will panic if default server invalid
     pub fn get_server_info(&self, server_info_name: &str) -> ApiProxyServerInfo {
         let guard = self.api_proxy.load();
-        if let Ok(api_proxy) = guard.as_ref().ok_or_else(|| {
-            TuliproxError::new(TuliproxErrorKind::Info, "API proxy config not loaded".to_string())
-        }) {
+        if let Some(api_proxy) = guard.as_ref() {
             let server_info_list = api_proxy.server.clone();
             server_info_list.iter().find(|c| c.name.eq(server_info_name))
                 .map_or_else(|| server_info_list.first().unwrap().clone(), Clone::clone)

@@ -3,7 +3,7 @@ use crate::model::{Epg};
 use crate::repository::{m3u_get_epg_file_path_for_target, BPlusTree};
 use crate::repository::{xtream_get_epg_file_path_for_target, xtream_get_storage_path};
 use crate::utils::{debug_if_enabled};
-use shared::error::{notify_err, TuliproxError};
+use shared::error::{ TuliproxError};
 use shared::model::{EpgChannel, PlaylistGroup};
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,11 +18,11 @@ pub const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 //
 // // XML Header via events (DO NOT USE, kept for documentation):
 // writer.write_event_async(quick_xml::events::Event::Decl(quick_xml::events::BytesDecl::new("1.0", Some("utf-8"), None)))
-//     .await.map_err(|e| notify_err!("failed to write XML header: {}", e))?;
+//     .await.map_err(|e| TuliproxError::RepositoryEpg(format!("failed to write XML header: {}", e)))?;
 //
 // // DOCTYPE via events (DO NOT USE):
 // writer.write_event_async(quick_xml::events::Event::DocType(quick_xml::events::BytesText::new(r#"tv SYSTEM "xmltv.dtd""#)))
-//     .await.map_err(|e| notify_err!("failed to write doctype: {}", e))?;
+//     .await.map_err(|e| TuliproxError::RepositoryEpg(format!("failed to write doctype: {}", e)))?;
 pub fn epg_write_file<S: std::hash::BuildHasher>(
     target_name: &str,
     epg: &Epg,
@@ -45,7 +45,7 @@ pub fn epg_write_file<S: std::hash::BuildHasher>(
         }
     }
 
-    tree.store(path).map_err(|err| notify_err!("Failed to write epg for target {}: {} - {err}", target_name, path.display()))?;
+    tree.store(path).map_err(|err| TuliproxError::RepositoryEpg(format!("Failed to write epg for target {}: {} - {err}", target_name, path.display())))?;
 
     debug_if_enabled!("Epg for target {} written to {}", target_name, path.display());
     Ok(())
@@ -88,9 +88,16 @@ pub async fn epg_write_for_target(cfg: &Config, target: &ConfigTarget, target_pa
                             epg_write_file(&target_name, &epg_data, &epg_path, &rename_map)
                         })
                         .await
-                        .map_err(|err| notify_err!("Failed to write epg for target {}: {err}", target_name_err))??;
+                        .map_err(|err| TuliproxError::RepositoryEpg(format!(
+                            "Failed to write epg for target {target_name_err}: {err}"
+                        )))??;
                     }
-                    None => return Err(notify_err!("failed to write epg for target: {}, storage path not found", target.name)),
+                    None => {
+                        return Err(TuliproxError::RepositoryEpg(format!(
+                            "failed to write epg for target: {}, storage path not found",
+                            target.name
+                        )))
+                    }
                 }
             }
             TargetOutput::M3u(_) => {
@@ -105,7 +112,9 @@ pub async fn epg_write_for_target(cfg: &Config, target: &ConfigTarget, target_pa
                     epg_write_file(&target_name, &epg_data, &path, &rename_map)
                 })
                 .await
-                .map_err(|err| notify_err!("Failed to write epg for target {}: {err}", target_name_err))??;
+                .map_err(|err| TuliproxError::RepositoryEpg(format!(
+                    "Failed to write epg for target {target_name_err}: {err}"
+                )))??;
             }
             TargetOutput::Strm(_) | TargetOutput::HdHomeRun(_) => {}
         }

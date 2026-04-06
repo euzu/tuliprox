@@ -21,7 +21,6 @@ use serde_json::json;
 use shared::{
     error::TuliproxError,
     foundation::prepare_templates,
-    info_err,
     model::{
         ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, PatternTemplate,
         SourcesConfigDto, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
@@ -898,7 +897,7 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
     let draft = build_initial_draft(paths).await;
     let (host, port, web_root) = setup_bind_values(&draft, paths.home_path.as_str());
     let web_dir = resolve_setup_web_dir(&web_root, paths.home_path.as_str())
-        .ok_or_else(|| info_err!("Setup mode requires a web directory. Tried '{}'", web_root.display(),))?;
+        .ok_or_else(|| TuliproxError::Server(format!("Setup mode requires a web directory. Tried '{}'", web_root.display())))?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let state = Arc::new(SetupModeState {
@@ -949,14 +948,14 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
 
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
         .await
-        .map_err(|err| info_err!("Failed to bind setup server to {host}:{port}: {err}"))?;
+        .map_err(|err| TuliproxError::Server(format!("Failed to bind setup server to {host}:{port}: {err}")))?;
 
     axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;
         })
         .await
-        .map_err(|err| info_err!("Setup server error: {err}"))?;
+        .map_err(|err| TuliproxError::Server(format!("Setup server error: {err}")))?;
     Ok(())
 }
 

@@ -128,6 +128,7 @@ body {
   --theme-palette-surface-showcase: var(--theme-palette-neutral-surface-560);
   --theme-palette-surface-toolbar: var(--theme-palette-neutral-surface-540);
   --theme-palette-surface-toolbar-alt: var(--theme-palette-neutral-surface-520);
+  --theme-palette-surface-table: var(--theme-palette-neutral-surface-550);
   --theme-palette-surface-card-gradient: var(--theme-palette-neutral-surface-700);
   --theme-palette-surface-input: var(--theme-palette-neutral-surface-700);
   --theme-palette-surface-option-active: var(--theme-palette-state-surface-option-active);
@@ -222,6 +223,7 @@ body {
   --theme-brand-surface-breadcrumb: var(--theme-palette-surface-breadcrumb);
   --theme-brand-surface-showcase: var(--theme-palette-surface-showcase);
   --theme-brand-surface-toolbar: var(--theme-palette-surface-toolbar);
+  --theme-brand-surface-table: var(--theme-palette-surface-table);
   --theme-brand-surface-toolbar-alt: var(--theme-palette-surface-toolbar-alt);
   --theme-brand-surface-card-gradient: var(--theme-palette-surface-card-gradient);
   --theme-brand-surface-input: var(--theme-palette-surface-input);
@@ -419,7 +421,7 @@ body {
   --menu-button-warn-color: var(--theme-brand-text-menu-warn);
   --menu-button-warn-hover-color: var(--theme-brand-text-menu-warn-strong);
   --app-header-color: var(--theme-brand-text-header);
-  --table-header-background-color: rgb(var(--theme-brand-surface-toolbar));
+  --table-header-background-color: var(--theme-brand-surface-table);
   --table-card-background-color: var(--theme-brand-surface-muted);
   --table-alternate-background-color: var(--theme-brand-surface-toolbar);
   --table-border-color: var(--theme-brand-border-table);

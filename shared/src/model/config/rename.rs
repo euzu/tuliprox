@@ -1,5 +1,5 @@
 use crate::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     foundation::apply_templates_to_pattern_single,
     model::{ItemField, PatternTemplate},
 };
@@ -35,7 +35,7 @@ impl ConfigRenameDto {
         }
         let resolved_pattern = apply_templates_to_pattern_single(&self.pattern, templates)?;
         if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(&resolved_pattern) {
-            return info_err_res!("can't parse regex: {} {err}", &resolved_pattern);
+            return Err(TuliproxError::RegexCompile(format!("{} {err}", &resolved_pattern)));
         }
         self.t_pattern = Some(resolved_pattern);
         Ok(())

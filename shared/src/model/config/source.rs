@@ -1,7 +1,6 @@
 use crate::{
     error::TuliproxError,
     foundation::prepare_templates,
-    info_err_res,
     model::{
         config::target::ConfigTargetDto, ConfigInputDto, ConfigProviderDto, HdHomeRunDeviceOverview, PatternTemplate,
     },
@@ -23,7 +22,9 @@ impl ConfigSourceDto {
     pub fn prepare(&mut self, index: u16, _include_computed: bool) -> Result<u16, TuliproxError> {
         let current_index = index;
         if self.inputs.is_empty() {
-            return info_err_res!("At least one input should be defined at source: {index}");
+            return Err(TuliproxError::ConfigSource(format!(
+                "At least one input should be defined at source: {index}"
+            )));
         }
         // Trim all input names
         for input in &mut self.inputs {
@@ -66,7 +67,10 @@ impl SourcesConfigDto {
             for provider in providers {
                 provider.prepare()?;
                 if names.contains(provider.name.as_ref()) {
-                    return info_err_res!("Provider names should be unique: {}", provider.name);
+                    return Err(TuliproxError::ConfigSource(format!(
+                        "Provider names should be unique: {}",
+                        provider.name
+                    )));
                 }
                 names.insert(provider.name.to_string());
             }
@@ -114,7 +118,7 @@ impl SourcesConfigDto {
             // Validate referenced inputs
             for name in &source.inputs {
                 if !self.inputs.iter().any(|i| &i.name == name) {
-                    return info_err_res!("Source references unknown input: '{name}'");
+                    return Err(TuliproxError::ConfigSource(format!("Source references unknown input: '{name}'")));
                 }
             }
 
@@ -145,7 +149,9 @@ impl SourcesConfigDto {
                 let target_name = target.name.as_str();
                 if !default_target_name.eq_ignore_ascii_case(target_name) {
                     if seen_names.contains(target_name) {
-                        return info_err_res!("target names should be unique: {target_name}");
+                        return Err(TuliproxError::ConfigSource(format!(
+                            "target names should be unique: {target_name}"
+                        )));
                     }
                     seen_names.insert(target_name);
                 }

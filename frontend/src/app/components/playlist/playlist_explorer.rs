@@ -10,12 +10,12 @@ use crate::{
     services::DialogService,
 };
 use shared::{
-    error::{info_err_res, TuliproxError},
+    error::TuliproxError,
     model::{
         Permission, PlaylistRequest, PlaylistUrlResolveRequest, SearchRequest, SeriesStreamDetailEpisodeProperties,
         SeriesStreamProperties, UiPlaylistGroup, UiPlaylistItem, VirtualId, XtreamCluster,
     },
-    utils::format_float_localized,
+    utils::{format_float_localized, Internable},
 };
 use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use wasm_bindgen::JsCast;
@@ -80,7 +80,7 @@ impl FromStr for ExplorerAction {
         } else if s.eq(RECORD_ITEM) {
             Ok(Self::Record)
         } else {
-            info_err_res!("Unknown ExplorerAction: {}", s)
+            Err(TuliproxError::Config(format!("Unknown ExplorerAction: {}", s)))
         }
     }
 }
@@ -817,6 +817,7 @@ pub fn PlaylistExplorer() -> Html {
                 <NoContent text={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_TO_VIEW_CONTENT")} />
             }
         } else {
+            let active_cluster = cluster_visible.intern();
             html! {
             <div class="tp__playlist-explorer__categories">
                 <div class="tp__playlist-explorer__categories-sidebar tp__app-sidebar__content">
@@ -825,7 +826,7 @@ pub fn PlaylistExplorer() -> Html {
                     <IconButton class={format!("tp__app-sidebar-menu--{}{}", XtreamCluster::Series, if *cluster_visible == XtreamCluster::Series { " active" } else {""})} icon="Series" name={XtreamCluster::Series.to_string()} onclick={&handle_cluster_change}></IconButton>
                 </div>
                 <div class="tp__playlist-explorer__categories-content">
-                    <Panel class="tp__full-width" value={XtreamCluster::Live.to_string()} active={cluster_visible.to_string()}>
+                    <Panel class="tp__full-width" value={XtreamCluster::Live.intern()} active={active_cluster.clone()}>
                         <div class="tp__playlist-explorer__categories-list">
                             { playlist.as_ref()
                                 .and_then(|response| response.live.as_ref())
@@ -834,7 +835,7 @@ pub fn PlaylistExplorer() -> Html {
                             }
                             </div>
                     </Panel>
-                    <Panel class="tp__full-width" value={XtreamCluster::Video.to_string()} active={cluster_visible.to_string()}>
+                    <Panel class="tp__full-width" value={XtreamCluster::Video.intern()} active={active_cluster.clone()}>
                         <div class="tp__playlist-explorer__categories-list">
                             { playlist.as_ref()
                                 .and_then(|response| response.vod.as_ref())
@@ -843,7 +844,7 @@ pub fn PlaylistExplorer() -> Html {
                             }
                             </div>
                     </Panel>
-                    <Panel class="tp__full-width" value={XtreamCluster::Series.to_string()} active={cluster_visible.to_string()}>
+                    <Panel class="tp__full-width" value={XtreamCluster::Series.intern()} active={active_cluster}>
                         <div class="tp__playlist-explorer__categories-list">
                             { playlist.as_ref()
                                 .and_then(|response| response.series.as_ref())

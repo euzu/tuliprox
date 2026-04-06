@@ -20,7 +20,6 @@ use crate::{
 use shared::{
     concat_string,
     error::TuliproxError,
-    info_err_res,
     model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder},
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
@@ -71,7 +70,7 @@ impl FromStr for ServerTableAction {
         } else if s.eq("Edit") {
             Ok(Self::Edit)
         } else {
-            info_err_res!("Unknown Server Action: {}", s)
+            Err(TuliproxError::Config(format!("Unknown Server Action: {}", s)))
         }
     }
 }

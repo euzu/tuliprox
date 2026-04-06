@@ -33,6 +33,7 @@ mod transfer;
 mod ui_playlist_item;
 mod user_command;
 mod uuidtype;
+pub mod view_type;
 mod web_socket;
 mod xtream;
 pub mod xtream_const;

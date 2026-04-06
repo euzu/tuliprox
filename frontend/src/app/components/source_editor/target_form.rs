@@ -9,10 +9,10 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    info_err_res,
     model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder},
+    utils::Internable,
 };
-use std::{fmt::Display, rc::Rc, str::FromStr};
+use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
 use yew::{
     component, html, use_context, use_effect_with, use_memo, use_reducer, use_state, Callback, Html, Properties,
     UseReducerHandle,
@@ -52,7 +52,7 @@ impl FromStr for TargetFormPage {
         match s {
             Self::MAIN => Ok(TargetFormPage::Main),
             Self::OPTIONS => Ok(TargetFormPage::Options),
-            _ => info_err_res!("Unknown target form page: {s}"),
+            _ => Err(TuliproxError::Config(format!("Unknown target form page: {s}"))),
         }
     }
 }
@@ -60,9 +60,19 @@ impl FromStr for TargetFormPage {
 impl Display for TargetFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
-            TargetFormPage::Main => write!(f, "Main"),
-            TargetFormPage::Options => write!(f, "Options"),
+            TargetFormPage::Main => write!(f, "{}", TargetFormPage::MAIN),
+            TargetFormPage::Options => write!(f, "{}", TargetFormPage::OPTIONS),
         }
+    }
+}
+
+impl Internable for TargetFormPage {
+    fn intern(self) -> Arc<str> {
+        match self {
+            Self::Main => TargetFormPage::MAIN,
+            Self::Options => TargetFormPage::OPTIONS,
+        }
+        .intern()
     }
 }
 
@@ -275,10 +285,10 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         html! {
             <div class="tp__source-editor-form__body">
             <div class="tp__source-editor-form__body__pages">
-                <Panel value={TargetFormPage::Main.to_string()} active={view_visible.to_string()}>
+                <Panel value={TargetFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_target()}
                 </Panel>
-                <Panel value={TargetFormPage::Options.to_string()} active={view_visible.to_string()}>
+                <Panel value={TargetFormPage::Options.intern()} active={view_visible.intern()}>
                 {render_options()}
                 </Panel>
             </div>

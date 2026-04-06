@@ -15,7 +15,7 @@ use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
-use shared::error::{info_err, info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use shared::foundation::prepare_templates;
 use shared::model::{
     ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
@@ -95,19 +95,19 @@ async fn parse_sources_file_from_path(
                 serde_saphyr::from_reader(config_file_reader(file, resolve_env));
             match maybe_sources {
                 Ok(sources) => Ok(sources),
-                Err(err) => info_err_res!(
+                Err(err) => Err(TuliproxError::ConfigSource(format!(
                     "Can't read the sources-config file: {}: {err}",
                     sources_file.display()
-                ),
+                ))),
             }
         }
-        Err(err) => info_err_res!(
+        Err(err) => Err(TuliproxError::ConfigSource(format!(
             "Can't read the sources-config file: {}: {err}",
             sources_file.display()
-        ),
+        ))),
     })
     .await
-    .map_err(|join_err| info_err!("Failed to read sources-config file: {join_err}"))?
+    .map_err(|join_err| TuliproxError::ConfigSource(format!("Failed to read sources-config file: {join_err}")))?
 }
 
 pub fn resolve_template_and_mapping_paths(
@@ -136,10 +136,10 @@ pub async fn read_sources_file_from_path_with_templates(
     let mut sources = parse_sources_file_from_path(sources_file, resolve_env).await?;
     if resolve_env {
         if let Err(err) = sources.prepare(include_computed, hdhr_config, prepared_templates) {
-            return info_err_res!(
+            return Err(TuliproxError::Config(format!(
                 "Can't read the sources-config file: {}: {err}",
                 sources_file.display()
-            );
+            )));
         }
     }
     Ok(sources)
@@ -180,10 +180,10 @@ pub fn read_config_file(
                     }
                     Ok(config)
                 }
-                Err(err) => info_err_res!("Can't read the config file: {config_file}: {err}"),
+                Err(err) => Err(TuliproxError::Config(format!("Can't read the config file: {config_file}: {err}"))),
             }
         }
-        Err(err) => info_err_res!("Can't read the config file: {config_file}: {err}"),
+        Err(err) => Err(TuliproxError::Config(format!("Can't read the config file: {config_file}: {err}"))),
     }
 }
 
@@ -281,10 +281,10 @@ pub(crate) fn read_templates(
         .collect::<Vec<String>>();
     if !duplicate_templates.is_empty() {
         duplicate_templates.sort();
-        return info_err_res!(
+        return Err(TuliproxError::Config(format!(
             "Duplicate template names found across merged template sources: {}",
             duplicate_templates.join("; ")
-        );
+        )));
     }
 
     let files_used = if loaded_template_files.is_empty() {
@@ -450,16 +450,16 @@ pub async fn get_batch_aliases(
 ) -> Result<Option<(PathBuf, Vec<ConfigInputAliasDto>)>, TuliproxError> {
     if input_type == InputType::M3uBatch || input_type == InputType::XtreamBatch {
         if url.starts_with(PROVIDER_SCHEME_PREFIX) {
-            return info_err_res!(
+            return Err(TuliproxError::Config(format!(
                 "Batch input type '{input_type}' does not support provider:// URLs. \
 Use a batch:// URL or a local CSV path (absolute/relative)."
-            );
+            )));
         }
 
         return match csv_read_inputs(input_type, url).await {
             Ok((file_path, batch_aliases)) => Ok(Some((file_path, batch_aliases))),
             Err(err) => {
-                info_err_res!("{err}")
+                Err(TuliproxError::Config(format!("{err}")))
             }
         };
     }
@@ -634,7 +634,7 @@ pub fn read_api_proxy_file(
                 Ok(Some(api_proxy_dto))
             }
             Err(err) => {
-                info_err_res!("can't read api-proxy-config file: {err}")
+                Err(TuliproxError::Config(format!("can't read api-proxy-config file: {err}")))
             }
         }
     })
@@ -682,7 +682,7 @@ where
         ..Default::default()
     };
     serde_saphyr::to_fmt_writer_with_options(&mut serialized, &config, options)
-        .map_err(|err| info_err!("Could not serialize config: {}", err))?;
+        .map_err(|err| TuliproxError::Config(format!("Could not serialize config: {err}")))?;
 
     if file_exists_async(&path).await {
         if let Ok(existing) = fs::read_to_string(&path).await {
@@ -705,7 +705,7 @@ where
         info!("Saving file to {}", &path.to_str().unwrap_or("?"));
     }
 
-    let parent_dir = path.parent().ok_or_else(|| { info_err!("Could not write file {}: missing parent directory", &path.to_str().unwrap_or("?"))})?;
+    let parent_dir = path.parent().ok_or_else(|| { TuliproxError::Config(format!("Could not write file {}: missing parent directory", &path.to_str().unwrap_or("?")))})?;
 
     let dest_file_name = path
         .file_name()
@@ -715,7 +715,7 @@ where
     let mut tmp_path = parent_dir.to_path_buf();
     tmp_path.push(format!(".{dest_file_name}.tmp-{}-{}", std::process::id(), Local::now().timestamp_nanos_opt().unwrap_or_default()));
 
-    fs::write(&tmp_path, serialized).await.map_err(|err| { info_err!("Could not write temp file {}: {err}", &tmp_path.to_str().unwrap_or("?"))})?;
+    fs::write(&tmp_path, serialized).await.map_err(|err| { TuliproxError::Config(format!("Could not write temp file {}: {err}", &tmp_path.to_str().unwrap_or("?")))})?;
 
     match fs::rename(&tmp_path, &path).await {
         Ok(()) => Ok(()),
@@ -732,11 +732,11 @@ where
 
             // Best-effort cleanup; if the temp file can't be removed, ignore it.
             let _ = fs::remove_file(&tmp_path).await;
-            Err(info_err!(
+            Err(TuliproxError::Config(format!(
                 "Could not replace file {} with {}: {err}",
                 &path.to_str().unwrap_or("?"),
                 &tmp_path.to_str().unwrap_or("?")
-            ))
+            )))
         }
     }
 }
@@ -1008,7 +1008,7 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
     if !file_exists_async(templates_dir).await {
         tokio::fs::create_dir_all(templates_dir)
             .await
-            .map_err(|e| info_err!("Messaging templates dir: failed to create dir: {} {e}", templates_dir.display()))?;
+            .map_err(|e| TuliproxError::Config(format!("Messaging templates dir: failed to create dir: {} {e}", templates_dir.display())))?;
     }
 
     let filename = if let Some(k) = kind {
@@ -1018,11 +1018,11 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
     };
 
     let file_path = templates_dir.join(filename);
-    fs::write(&file_path, template).await.map_err(|e| info_err!("Failed to write template file: {e}"))?;
+    fs::write(&file_path, template).await.map_err(|e| TuliproxError::Config(format!("Failed to write template file: {e}")))?;
 
     Url::from_file_path(&file_path)
         .map(|u| u.to_string())
-        .map_err(|()| info_err!("Failed to convert persisted path to file URL: {}", file_path.display()))
+        .map_err(|()| TuliproxError::Config(format!("Failed to convert persisted path to file URL: {}", file_path.display())))
 }
 
 

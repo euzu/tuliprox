@@ -1,4 +1,5 @@
 use crate::app::components::{IconButton, Panel, TextButton};
+use shared::utils::Internable;
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -111,7 +112,7 @@ pub fn TabSet(props: &TabSetProps) -> Html {
 
     let render_tab_content = {
         let tabs = props.tabs.clone();
-        let active_tab_id = (*active_tab).clone();
+        let active_tab_id = (*active_tab).clone().intern();
 
         html! {
             <div class="tp__tab-set__body">
@@ -119,7 +120,7 @@ pub fn TabSet(props: &TabSetProps) -> Html {
                     <Panel
                         key={tab.id.clone()}
                         class="tp__tab-set__panel"
-                        value={tab.id.clone()}
+                        value={tab.id.clone().intern()}
                         active={active_tab_id.clone()}
                     >
                         { tab.children.clone() }

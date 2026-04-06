@@ -7,7 +7,7 @@ use crate::{
     i18n::use_translation,
     model::ExplorerSourceType,
 };
-use shared::model::PlaylistEpgRequest;
+use shared::{model::PlaylistEpgRequest, utils::Internable};
 use std::{rc::Rc, str::FromStr};
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
@@ -182,6 +182,7 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
         }
     };
 
+    let active_source_interned = (*active_source).intern();
     html! {
       <div class="tp__playlist-source-selector tp__list-list">
         <div class="tp__playlist-source-selector__body tp__list-list__body">
@@ -195,17 +196,17 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
                 </div>
                 <div class="tp__playlist-source-selector__source-picker__body">
                     { html_if!(source_types.contains(&ExplorerSourceType::Hosted.to_string()), {
-                        <Panel value={ExplorerSourceType::Hosted.to_string()} active={active_source.to_string()}>
+                        <Panel value={ExplorerSourceType::Hosted.intern()} active={active_source_interned.clone()}>
                             { render_hosted() }
                         </Panel>
                     })}
                     { html_if!(source_types.contains(&ExplorerSourceType::Provider.to_string()), {
-                        <Panel value={ExplorerSourceType::Provider.to_string()} active={active_source.to_string()}>
+                        <Panel value={ExplorerSourceType::Provider.intern()} active={active_source_interned}>
                             { render_provider() }
                         </Panel>
                     })}
                     { html_if!(source_types.contains(&ExplorerSourceType::Custom.to_string()), {
-                        <Panel value={ExplorerSourceType::Custom.to_string()} active={active_source.to_string()}>
+                        <Panel value={ExplorerSourceType::Custom.intern()} active={active_source.intern()}>
                             { render_custom() }
                         </Panel>
                     })}

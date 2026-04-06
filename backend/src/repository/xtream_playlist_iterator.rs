@@ -5,7 +5,7 @@ use crate::repository::user_get_bouquet_filter;
 use crate::repository::{xtream_get_file_path, xtream_get_storage_path};
 use futures::Stream;
 use log::error;
-use shared::error::{TuliproxError, info_err, info_err_res};
+use shared::error::TuliproxError;
 use shared::model::{PlaylistItemType, TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem};
 use std::collections::HashSet;
 use crate::repository::get_file_path_for_db_index;
@@ -36,7 +36,7 @@ impl XtreamPlaylistIterator {
         if let Some(storage_path) = xtream_get_storage_path(&config, target.name.as_str()) {
             let xtream_path = xtream_get_file_path(&storage_path, cluster);
             if !xtream_path.exists() {
-                return info_err_res!("No {cluster} entries found for target {}", &target.name);
+                return Err(TuliproxError::Config(format!("No {cluster} entries found for target {}", &target.name)));
             }
             // Hold iter_lock for the stream lifetime (LockedReceiverStream), and bg_lock for the background reader.
             let iter_lock = app_config.file_locks.read_lock(&xtream_path).await;
@@ -113,7 +113,7 @@ impl XtreamPlaylistIterator {
                 inner: LockedReceiverStream::new(rx, iter_lock),
             })
         } else {
-            info_err_res!("Failed to find xtream storage for target {}", &target.name)
+            Err(TuliproxError::Config(format!("Failed to find xtream storage for target {}", &target.name)))
         }
     }
 
@@ -157,7 +157,7 @@ impl XtreamPlaylistJsonIterator {
         category_id: Option<u32>,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
-        let xtream_output = target.get_xtream_output().ok_or_else(|| info_err!("Unexpected: xtream output required for target {}", target.name))?;
+        let xtream_output = target.get_xtream_output().ok_or_else(|| TuliproxError::Config(format!("Unexpected: xtream output required for target {}", target.name)))?;
         let encrypt_secret = app_state.get_encrypt_secret();
         let options = xtream_mapping_option_from_target_options(
             target,

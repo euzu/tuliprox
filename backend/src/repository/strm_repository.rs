@@ -8,7 +8,7 @@ use chrono::Datelike;
 use filetime::{set_file_times, FileTime};
 use log::{error, trace};
 use serde::Serialize;
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use shared::model::{ClusterFlags, MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle};
 use shared::utils::{arc_str_option_serde, arc_str_serde, clean_playlist_title, extract_extension_from_url, hash_bytes,
                     hash_string_as_hex, is_blank_optional_arc_str, truncate_string, ExportStyleConfig, CONSTANTS};
@@ -260,7 +260,7 @@ async fn prepare_strm_output_directory(path: &Path) -> Result<(), TuliproxError>
     // Ensure the directory exists
     if let Err(e) = tokio::fs::create_dir_all(path).await {
         error!("Failed to create directory {}: {e}", path.display());
-        return info_err_res!("Error creating STRM directory: {e}");
+        return Err(TuliproxError::Config(format!("Error creating STRM directory: {e}")));
     }
     Ok(())
 }
@@ -853,7 +853,7 @@ pub async fn write_strm_playlist(
         &config.storage_dir,
         Some(std::path::PathBuf::from(&target_output.directory)),
     ) else {
-        return info_err_res!("Failed to get file path for {}",target_output.directory);
+        return Err(TuliproxError::Config(format!("Failed to get file path for {}",target_output.directory)));
     };
 
     let user_and_server_info = get_credentials_and_server_info(app_config, target_output.username.as_deref());
@@ -963,7 +963,7 @@ pub async fn write_strm_playlist(
     if failed.is_empty() {
         Ok(())
     } else {
-        info_err_res!("{}", failed.join(", "))
+        Err(TuliproxError::Config(failed.join(", ")))
     }
 }
 async fn write_strm_index_file(

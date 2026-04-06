@@ -1,7 +1,7 @@
 use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
 use indexmap::IndexMap;
 use parking_lot::RwLock;
-use shared::error::{info_err_res, TuliproxError};
+use shared::error::TuliproxError;
 use shared::model::{
     ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme, OnConnectErrorPolicy, OnResolveErrorPolicy, PatternTemplate,
     SourcesConfigDto,
@@ -414,7 +414,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
             // Validate that all input references exist
             for input_name in &source_dto.inputs {
                 if !input_names.contains(input_name) {
-                    return info_err_res!("Source references unknown input: {input_name}");
+                    return Err(TuliproxError::ConfigSource(format!("Source references unknown input: {input_name}")));
                 }
             }
             sources.push(ConfigSource::from(source_dto));
@@ -488,7 +488,7 @@ impl SourcesConfig {
 
             let missing_targets: Vec<String> = check_targets.iter().filter(|&(_, v)| *v == 0).map(|(k, _)| k.clone()).collect();
             if !missing_targets.is_empty() {
-                return info_err_res!("No target found for {}", missing_targets.join(", "));
+                return Err(TuliproxError::ConfigSource(format!("No target found for {}", missing_targets.join(", "))));
             }
             // let processing_targets: Vec<String> = check_targets.iter().filter(|&(_, v)| *v != 0).map(|(k, _)| k.to_string()).collect();
             // info!("Processing targets {}", processing_targets.join(", "));

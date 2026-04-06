@@ -1,7 +1,4 @@
-use crate::{
-    error::{TuliproxError, TuliproxErrorKind},
-    utils::is_false,
-};
+use crate::{error::TuliproxError, utils::is_false};
 
 const fn default_qos_aggregation_interval_secs() -> u64 { 300 }
 const fn is_default_qos_aggregation_interval_secs(value: &u64) -> bool {
@@ -33,8 +30,7 @@ impl QosAggregationConfigDto {
             return Ok(());
         }
         if self.enabled && self.interval_secs == 0 {
-            return Err(TuliproxError::new(
-                TuliproxErrorKind::Info,
+            return Err(TuliproxError::ConfigQosAggregation(
                 "`qos_aggregation.interval_secs` must be > 0 when qos_aggregation is enabled".to_string(),
             ));
         }
