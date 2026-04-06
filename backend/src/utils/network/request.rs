@@ -18,6 +18,7 @@ use reqwest::{
     redirect::Policy,
     StatusCode,
 };
+use shared::utils::DEFAULT_USER_AGENT;
 use shared::{
     error::{string_to_io_error, TuliproxError},
     model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy},
@@ -42,7 +43,6 @@ use tokio::{
 };
 use tokio_util::io::StreamReader;
 use url::Url;
-use shared::utils::DEFAULT_USER_AGENT;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
 
@@ -607,7 +607,12 @@ pub async fn get_input_epg_content_as_file(
                     sanitize_sensitive_info(url_str),
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                Err(TuliproxError::RepositoryNetwork("Failed to download".to_string()))
+                Err(TuliproxError::RepositoryNetwork(format!(
+                    "can't download input {} epg url: {}  => {}",
+                    input.name,
+                    sanitize_sensitive_info(url_str),
+                    sanitize_sensitive_info(e.to_string().as_str())
+                )))
             }
         }
     } else {
@@ -666,7 +671,11 @@ pub async fn get_input_text_content(
                     &input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                Err(TuliproxError::RepositoryNetwork("Failed to download".to_string()))
+                Err(TuliproxError::RepositoryNetwork(format!(
+                    "Failed to download input '{}': {}",
+                    &input.name,
+                    sanitize_sensitive_info(e.to_string().as_str())
+                )))
             }
         }
     } else {
@@ -726,7 +735,11 @@ pub async fn get_input_text_content_as_stream(
                     &input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
-                Err(TuliproxError::RepositoryNetwork("Failed to download".to_string()))
+                Err(TuliproxError::RepositoryNetwork(format!(
+                    "Failed to download input '{}': {}",
+                    &input.name,
+                    sanitize_sensitive_info(e.to_string().as_str())
+                )))
             }
         }
     } else {
@@ -743,7 +756,7 @@ pub async fn get_input_text_content_as_stream(
                                         debug_if_enabled!("Persisted {} bytes", human_readable_byte_size(size as u64));
                                     })),
                                 )
-                                .await;
+                                    .await;
                                 Some(tee)
                             } else {
                                 Some(content)
@@ -954,7 +967,7 @@ pub async fn get_remote_content_as_file(
             default_user_agent.as_deref(),
         )
     })
-    .await?;
+        .await?;
 
     let start_time = tokio::time::Instant::now();
     let mut writer = async_file_writer(File::create(file_path).await?);
@@ -1076,7 +1089,7 @@ pub async fn get_remote_content_as_stream(
             default_user_agent.as_deref(),
         )
     })
-    .await?;
+        .await?;
 
     let response_url = response.url().to_string();
 
@@ -1146,7 +1159,7 @@ async fn get_remote_content_with_manual_redirects(
                     default_user_agent.as_deref(),
                 )
             })
-            .await?;
+                .await?;
         let response_base_url = response.url().clone();
 
         if response.status().is_redirection() {
@@ -1362,7 +1375,7 @@ pub async fn download_text_content_as_stream(
                             debug!("Persisted {size} bytes");
                         })),
                     )
-                    .await;
+                        .await;
                     Ok((tee_reader, response_url))
                 } else {
                     Ok((content, response_url))
@@ -1565,7 +1578,7 @@ mod tests {
     };
     use crate::{
         model::{AppConfig, Config, ConfigProvider, MediaToolCapabilities, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
-        utils::{FileLockManager, DEFAULT_USER_AGENT}
+        utils::{FileLockManager, DEFAULT_USER_AGENT},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
@@ -1666,7 +1679,7 @@ mod tests {
 
     #[test]
     fn test_get_request_headers_prioritization() {
-        use super::{get_request_headers};
+        use super::get_request_headers;
         use axum::http::header::USER_AGENT;
 
         // Case 1: No headers provided -> Default UA
@@ -1854,7 +1867,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_connect_error_try_next_ip_before_provider_rotation() {
-
         let (addr, accepted, server_handle) = match start_plain_http_server().await {
             Ok(server) => server,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -1898,7 +1910,7 @@ mod tests {
         let result_rotate = send_with_retry_and_provider(&app_config, &url, Some(&provider_rotate), false, |resolved_url| {
             client.get(resolved_url.clone())
         })
-        .await;
+            .await;
         assert!(result_rotate.is_err(), "without try_next_ip policy the request should fail");
 
         let provider_try_next =
@@ -1907,7 +1919,7 @@ mod tests {
             send_with_retry_and_provider(&app_config, &url, Some(&provider_try_next), false, |resolved_url| {
                 client.get(resolved_url.clone())
             })
-            .await;
+                .await;
         assert!(result_try_next.is_ok(), "try_next_ip should succeed by trying the second IP");
         assert_eq!(accepted.load(Ordering::SeqCst), 1, "server should be reached exactly once");
 

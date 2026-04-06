@@ -142,7 +142,7 @@ pub async fn write_playlist_item_update(
     let xtream_path = xtream_get_file_path(&storage_path, pli.xtream_cluster);
 
     if !file_exists_async(&xtream_path).await {
-        return Err(TuliproxError::Config(format!("BPlusTree file not found for update {}", xtream_path.display())));
+        return Err(TuliproxError::RepositoryXtream(format!("BPlusTree file not found for update {}", xtream_path.display())));
     }
 
     // Prepare encoded payload before opening the writer lock.
@@ -183,7 +183,7 @@ pub async fn write_playlist_batch_item_upsert(
     let xtream_path = xtream_get_file_path(&storage_path, xtream_cluster);
 
     if !file_exists_async(&xtream_path).await {
-        return Err(TuliproxError::Config(format!("BPlusTree file not found for upsert {}", xtream_path.display())));
+        return Err(TuliproxError::RepositoryXtream(format!("BPlusTree file not found for upsert {}", xtream_path.display())));
     }
 
     // Prepare encoded payload before opening the writer lock.

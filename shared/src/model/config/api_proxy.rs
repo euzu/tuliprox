@@ -165,7 +165,7 @@ impl ApiProxyConfigDto {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(TuliproxError::ConfigApiProxy(errors.join("\n").to_string()))
+            Err(TuliproxError::ConfigApiProxy(errors.join("\n")))
         }
     }
 }

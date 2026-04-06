@@ -102,7 +102,7 @@ pub async fn update_generic_stream_metadata(
 
     if needs_provider_connection && active_handle.is_none() && acquired_handle.is_none() {
         warn!("Skipping probe for generic stream {unique_id} due to connection limits");
-        return Err(shared::error::TuliproxError::Config("No connection available".to_string()));
+        return Err(shared::error::TuliproxError::Probe("No connection available".to_string()));
     }
 
     let probe_url = stream_url.to_string();
@@ -147,7 +147,7 @@ pub async fn update_generic_stream_metadata(
         ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => (raw_video, raw_audio, stats),
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Probe target not found (404) for generic stream: {unique_id}");
-            return Err(shared::error::TuliproxError::Config(format!("Probe target returned 404 Not Found for stream {unique_id}")));
+            return Err(shared::error::TuliproxError::Probe(format!("Probe target returned 404 Not Found for stream {unique_id}")));
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed or timed out for generic stream: {unique_id}");

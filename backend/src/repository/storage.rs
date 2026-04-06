@@ -12,10 +12,12 @@ pub fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
 
 pub async fn ensure_target_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
     if let Some(path) = get_target_storage_path(cfg, target_name) {
-        if tokio::fs::create_dir_all(&path).await.is_err() {
-            let msg = format!("Failed to save target data, can't create directory {}", path.display());
-            return Err(TuliproxError::RepositoryStorage(msg));
-        }
+            tokio::fs::create_dir_all(&path).await.map_err(|err| {
+                TuliproxError::RepositoryStorage(format!(
+                    "Failed to save target data, can't create directory {}: {err}",
+                    path.display()
+                ))
+            })?;
         Ok(path)
     } else {
         let msg = format!("Failed to save target data, can't create directory for target {target_name}");

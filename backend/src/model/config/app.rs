@@ -444,9 +444,7 @@ impl AppConfig {
     /// Will panic if default server invalid
     pub fn get_server_info(&self, server_info_name: &str) -> ApiProxyServerInfo {
         let guard = self.api_proxy.load();
-        if let Ok(api_proxy) = guard.as_ref().ok_or_else(|| {
-            TuliproxError::Config("API proxy config not loaded".to_string())
-        }) {
+        if let Some(api_proxy) = guard.as_ref() {
             let server_info_list = api_proxy.server.clone();
             server_info_list.iter().find(|c| c.name.eq(server_info_name))
                 .map_or_else(|| server_info_list.first().unwrap().clone(), Clone::clone)

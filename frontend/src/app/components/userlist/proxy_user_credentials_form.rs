@@ -69,12 +69,10 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
 
     let proxy_user_status = use_memo(form_state.data().status, |status| {
         enum_iterator::all::<ProxyUserStatus>()
-            .collect::<Vec<_>>()
-            .iter()
             .map(|s| DropDownOption {
                 id: s.to_string(),
-                label: html! { <UserStatus status={Some(*s)} /> },
-                selected: status.as_ref() == Some(s),
+                label: html! { <UserStatus status={Some(s)} /> },
+                selected: status.as_ref() == Some(&s),
             })
             .collect::<Vec<DropDownOption>>()
     });

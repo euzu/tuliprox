@@ -237,7 +237,7 @@ impl MappingDto {
                             padding: def.padding,
                         });
                     }
-                    Err(e) => return Err(TuliproxError::Config(format!("Counter field error: {}", e))),
+                    Err(e) => return Err(e),
                 }
             }
             self.t_counter = Some(counters);

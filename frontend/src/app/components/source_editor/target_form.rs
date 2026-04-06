@@ -60,8 +60,8 @@ impl FromStr for TargetFormPage {
 impl Display for TargetFormPage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
-            TargetFormPage::Main => write!(f, "Main"),
-            TargetFormPage::Options => write!(f, "Options"),
+            TargetFormPage::Main => write!(f, "{}", TargetFormPage::MAIN),
+            TargetFormPage::Options => write!(f, "{}", TargetFormPage::OPTIONS),
         }
     }
 }
@@ -69,8 +69,8 @@ impl Display for TargetFormPage {
 impl Internable for TargetFormPage {
     fn intern(self) -> Arc<str> {
         match self {
-            Self::Main => "Main",
-            Self::Options => "Options",
+            Self::Main => TargetFormPage::MAIN,
+            Self::Options => TargetFormPage::OPTIONS,
         }
         .intern()
     }

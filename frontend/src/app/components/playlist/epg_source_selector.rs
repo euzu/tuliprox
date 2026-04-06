@@ -182,6 +182,7 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
         }
     };
 
+    let active_source_interned = (*active_source).intern();
     html! {
       <div class="tp__playlist-source-selector tp__list-list">
         <div class="tp__playlist-source-selector__body tp__list-list__body">
@@ -195,12 +196,12 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
                 </div>
                 <div class="tp__playlist-source-selector__source-picker__body">
                     { html_if!(source_types.contains(&ExplorerSourceType::Hosted.to_string()), {
-                        <Panel value={ExplorerSourceType::Hosted.intern()} active={active_source.intern()}>
+                        <Panel value={ExplorerSourceType::Hosted.intern()} active={active_source_interned.clone()}>
                             { render_hosted() }
                         </Panel>
                     })}
                     { html_if!(source_types.contains(&ExplorerSourceType::Provider.to_string()), {
-                        <Panel value={ExplorerSourceType::Provider.intern()} active={active_source.intern()}>
+                        <Panel value={ExplorerSourceType::Provider.intern()} active={active_source_interned}>
                             { render_provider() }
                         </Panel>
                     })}

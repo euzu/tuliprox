@@ -409,9 +409,7 @@ impl FfprobeConfigDto {
 
         let probe_size_bytes = parse_size_base_2(&self.probe_size)
             .map_err(|err| {
-                crate::error::TuliproxError::ConfigMetadataUpdate(format!(
-                    "Invalid size for `ffprobe.probe_size`: {err}"
-                ))
+                TuliproxError::ConfigMetadataUpdate(format!("Invalid size for `ffprobe.probe_size`: {err}"))
             })?
             .max(1);
         self.probe_size = MetadataUpdateConfigDto::canonicalize_size_bytes(probe_size_bytes);
@@ -425,9 +423,7 @@ impl FfprobeConfigDto {
 
         let live_probe_size_bytes = parse_size_base_2(&self.live_probe_size)
             .map_err(|err| {
-                crate::error::TuliproxError::ConfigMetadataUpdate(format!(
-                    "Invalid size for `ffprobe.live_probe_size`: {err}"
-                ))
+                TuliproxError::ConfigMetadataUpdate(format!("Invalid size for `ffprobe.live_probe_size`: {err}"))
             })?
             .max(1);
         self.live_probe_size = MetadataUpdateConfigDto::canonicalize_size_bytes(live_probe_size_bytes);

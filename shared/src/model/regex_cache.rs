@@ -22,7 +22,7 @@ impl RegexCache {
             return Ok(cached.clone());
         }
         // Compile outside the lock
-        let regex = Regex::new(pattern).map_err(|e| TuliproxError::RegexCompile(format!("{pattern} {e}")))?;
+        let regex = Regex::new(pattern).map_err(|e| TuliproxError::RegexCompile(format!("{pattern}: {e}")))?;
         let arc_regex = Arc::new(regex);
         // Use entry API to avoid overwriting if another thread inserted
         Ok(self.cache.entry(pattern.to_owned()).or_insert(arc_regex).clone())

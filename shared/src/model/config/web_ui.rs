@@ -120,6 +120,7 @@ impl WebUiConfigDto {
         self.enabled == empty.enabled
             && self.user_ui_enabled == empty.user_ui_enabled
             && !self.combine_views_stats_streams
+            && self.landing_page == ViewType::default()
             && is_blank_or_default_web_ui_path(&self.path)
             && is_blank_optional_str(self.player_server.as_deref())
             && self.kick_secs == default_kick_secs()

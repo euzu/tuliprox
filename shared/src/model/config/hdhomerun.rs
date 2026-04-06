@@ -177,7 +177,7 @@ impl HdHomeRunConfigDto {
 
                 device.port = current_port;
                 ports.insert(current_port);
-                current_port += 1;
+                current_port = current_port.wrapping_add(1);
             }
         }
         Ok(())

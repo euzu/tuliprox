@@ -35,7 +35,7 @@ macro_rules! handle_tuliprox_error_result_list {
         let errors = $result
             .filter_map(|result| if let Err(err) = result { Some(err.to_string()) } else { None })
             .collect::<Vec<String>>();
-        if !&errors.is_empty() {
+        if !errors.is_empty() {
             return Err($crate::error::TuliproxError::Errors(errors.join("\n")));
         }
     };
@@ -249,8 +249,8 @@ impl TuliproxError {
             | Self::ProxyUser(msg)
             | Self::Repository(msg)
             | Self::Download(msg)
-            | Self::ProviderConnection(msg) => msg,
-            Self::ApiXtream(msg) => msg,
+            | Self::ProviderConnection(msg)
+            | Self::ApiXtream(msg) => msg,
         }
     }
 

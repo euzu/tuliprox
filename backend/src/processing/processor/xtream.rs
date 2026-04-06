@@ -175,16 +175,16 @@ pub async fn update_live_stream_metadata(
         if let Some(stream_id) = stream_id_opt {
             persist_input_live_info(app_config, &storage_path, XtreamCluster::Live, &input.name, stream_id, &properties)
                 .await
-                .map_err(|e| shared::error::TuliproxError::Config(format!("Persist error: {e}")))?;
+                .map_err(|e| shared::error::TuliproxError::Io(format!("Persist error: {e}")))?;
         }
     }
     
     if !success {
         if not_found {
-            return Err(shared::error::TuliproxError::Config(format!("Probe failed with 404 Not Found for stream {display_id}")));
+            return Err(shared::error::TuliproxError::Probe(format!("Probe failed with 404 Not Found for stream {display_id}")));
         }
         // Return error to propagate failure up to task manager/logs
-        return Err(shared::error::TuliproxError::Config(format!("Probe failed for stream {display_id}")));
+        return Err(shared::error::TuliproxError::Probe(format!("Probe failed for stream {display_id}")));
     }
     
     Ok(Some(properties))
