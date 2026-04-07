@@ -64,20 +64,20 @@ impl Internable for ApiUserPlaylistPage {
 }
 
 fn selected_categories_or_none(map: &HashMap<String, bool>, available: Option<&Vec<String>>) -> Option<Vec<String>> {
-    let mut selected: Vec<String> =
-        map.iter().filter(|(_, &is_selected)| is_selected).map(|(category, _)| category.clone()).collect();
-    if selected.is_empty() {
-        return None;
-    }
-    selected.sort();
+    let available_set: HashSet<String> =
+        available.map(|categories| categories.iter().cloned().collect()).unwrap_or_default();
+    let mut filtered: Vec<String> = map
+        .iter()
+        .filter(|(category, is_selected)| **is_selected && (available.is_none() || available_set.contains(*category)))
+        .map(|(category, _)| category.clone())
+        .collect();
 
-    let available_unique_count =
-        available.map(|categories| categories.iter().collect::<HashSet<_>>().len()).unwrap_or_default();
+    filtered.sort();
 
-    if selected.len() == available_unique_count {
+    if filtered.is_empty() || (!available_set.is_empty() && filtered.len() == available_set.len()) {
         None
     } else {
-        Some(selected)
+        Some(filtered)
     }
 }
 
@@ -276,5 +276,40 @@ mod tests {
             selected_categories_or_none(&selections, Some(&categories)),
             Some(vec!["Movies".to_string(), "Sport".to_string()])
         );
+    }
+
+    #[test]
+    fn selected_categories_or_none_returns_none_for_empty_selection_map() {
+        let categories = vec!["Sport".to_string(), "News".to_string()];
+        let selections = HashMap::new();
+
+        assert_eq!(selected_categories_or_none(&selections, Some(&categories)), None);
+    }
+
+    #[test]
+    fn selected_categories_or_none_returns_none_when_all_selections_are_false() {
+        let categories = vec!["Sport".to_string(), "News".to_string()];
+        let selections = HashMap::from([("Sport".to_string(), false), ("News".to_string(), false)]);
+
+        assert_eq!(selected_categories_or_none(&selections, Some(&categories)), None);
+    }
+
+    #[test]
+    fn selected_categories_or_none_returns_sorted_selected_values_when_available_is_none() {
+        let selections = HashMap::from([("Sport".to_string(), true), ("Movies".to_string(), true)]);
+
+        assert_eq!(
+            selected_categories_or_none(&selections, None),
+            Some(vec!["Movies".to_string(), "Sport".to_string()])
+        );
+    }
+
+    #[test]
+    fn selected_categories_or_none_ignores_stale_selected_categories_not_in_available_list() {
+        let categories = vec!["Sport".to_string(), "News".to_string()];
+        let selections =
+            HashMap::from([("Sport".to_string(), true), ("News".to_string(), true), ("Old".to_string(), true)]);
+
+        assert_eq!(selected_categories_or_none(&selections, Some(&categories)), None);
     }
 }

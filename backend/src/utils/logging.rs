@@ -106,16 +106,18 @@ fn apply_level_spec(log_builder: &mut Builder, log_level: &str) -> (LevelFilter,
                     effective_max_level = effective_max_level.max(module_level);
                 }
             } else {
-                let level = get_log_level(pair);
+                let token = pair.trim();
+                let level = get_log_level(token);
                 log_levels.push(level.to_string());
                 log_builder.filter_level(level);
                 effective_max_level = effective_max_level.max(level);
             }
         }
     } else {
-        effective_max_level = get_log_level(log_level);
+        let token = log_level.trim();
+        effective_max_level = get_log_level(token);
         log_builder.filter_level(effective_max_level);
-        log_levels.push(log_level.to_string());
+        log_levels.push(token.to_string());
     }
 
     if effective_max_level == LevelFilter::Off {
@@ -126,7 +128,7 @@ fn apply_level_spec(log_builder: &mut Builder, log_level: &str) -> (LevelFilter,
 }
 
 fn build_logger(log_level: &str) -> (Logger, LevelFilter, Vec<String>) {
-    let mut log_builder = Builder::from_default_env();
+    let mut log_builder = Builder::new();
     configure_format(&mut log_builder);
 
     let (effective_max_level, log_levels) = apply_level_spec(&mut log_builder, log_level);
