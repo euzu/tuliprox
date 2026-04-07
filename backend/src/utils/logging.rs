@@ -96,18 +96,22 @@ fn apply_level_spec(log_builder: &mut Builder, log_level: &str) -> (LevelFilter,
     let mut effective_max_level = LevelFilter::Off;
 
     if log_level.contains('=') {
-        for pair in log_level.split(',') {
-            if pair.contains('=') {
-                let mut kv_iter = pair.split('=').map(str::trim);
-                if let (Some(module), Some(level)) = (kv_iter.next(), kv_iter.next()) {
-                    let module_level = get_log_level(level);
-                    log_levels.push(format!("{module}={module_level}"));
-                    log_builder.filter_module(module, module_level);
-                    effective_max_level = effective_max_level.max(module_level);
+        for pair in log_level.split(',').map(str::trim) {
+            if pair.is_empty() {
+                continue;
+            }
+            if let Some((module, level)) = pair.split_once('=') {
+                let module = module.trim();
+                let level = level.trim();
+                if module.is_empty() || level.is_empty() {
+                    continue;
                 }
+                let module_level = get_log_level(level);
+                log_levels.push(format!("{module}={module_level}"));
+                log_builder.filter_module(module, module_level);
+                effective_max_level = effective_max_level.max(module_level);
             } else {
-                let token = pair.trim();
-                let level = get_log_level(token);
+                let level = get_log_level(pair);
                 log_levels.push(level.to_string());
                 log_builder.filter_level(level);
                 effective_max_level = effective_max_level.max(level);
@@ -209,6 +213,15 @@ mod tests {
 
         assert_eq!(max_level, LevelFilter::Trace);
         assert_eq!(log_levels, vec!["backend=DEBUG".to_string(), "shared=TRACE".to_string()]);
+    }
+
+    #[test]
+    fn apply_level_spec_ignores_empty_directives_after_trailing_comma() {
+        let mut builder = Builder::new();
+        let (max_level, log_levels) = apply_level_spec(&mut builder, "backend=debug,");
+
+        assert_eq!(max_level, LevelFilter::Debug);
+        assert_eq!(log_levels, vec!["backend=DEBUG".to_string()]);
     }
 
     #[test]
