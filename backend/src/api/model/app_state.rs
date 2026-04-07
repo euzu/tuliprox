@@ -18,6 +18,7 @@ use crate::{
     },
     repository::{get_geoip_path, load_target_into_memory_cache},
     utils::{
+        reload_logger,
         request::{create_client, create_client_with_redirect},
         GeoIp,
     },
@@ -417,6 +418,7 @@ impl AppState {
     pub(in crate::api::model) async fn set_config(&self, config: Config) -> Result<UpdateChanges, TuliproxError> {
         let old_storage_dir = self.app_config.config.load().storage_dir.clone();
         let changes = self.detect_changes_for_config(&config);
+        let config_log_level = config.log.as_ref().and_then(|log| log.log_level.clone());
         config.update_runtime();
 
         let use_geoip = config.is_geoip_enabled();
@@ -424,6 +426,7 @@ impl AppState {
 
         self.active_users.update_config(&config);
         self.app_config.set_config(config)?;
+        reload_logger(config_log_level.as_deref());
         self.active_provider.update_config(&self.app_config).await;
         self.update_config().await?;
 
