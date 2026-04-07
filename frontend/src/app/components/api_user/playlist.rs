@@ -9,10 +9,17 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    model::{PlaylistBouquetDto, PlaylistCategoriesDto, PlaylistClusterBouquetDto},
+    model::{PlaylistBouquetDto, PlaylistCategoriesDto, PlaylistClusterBouquetDto, PlaylistClusterCategoriesDto},
     utils::Internable,
 };
-use std::{cell::RefCell, collections::HashMap, fmt, rc::Rc, str::FromStr, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    fmt,
+    rc::Rc,
+    str::FromStr,
+    sync::Arc,
+};
 use yew::prelude::*;
 
 const XTREAM: &str = "xtream";
@@ -56,25 +63,34 @@ impl Internable for ApiUserPlaylistPage {
     fn intern(self) -> Arc<str> { self.as_str().intern() }
 }
 
+fn selected_categories_or_none(map: &HashMap<String, bool>, available: Option<&Vec<String>>) -> Option<Vec<String>> {
+    let available_set: HashSet<String> =
+        available.map(|categories| categories.iter().cloned().collect()).unwrap_or_default();
+    let mut filtered: Vec<String> = map
+        .iter()
+        .filter(|(category, is_selected)| **is_selected && (available.is_none() || available_set.contains(*category)))
+        .map(|(category, _)| category.clone())
+        .collect();
+
+    filtered.sort();
+
+    if filtered.is_empty() || (!available_set.is_empty() && filtered.len() == available_set.len()) {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
 fn to_playlist_cluster(
-    count: (usize, usize, usize),
+    categories: Option<&PlaylistClusterCategoriesDto>,
     bouquet: Option<&Rc<RefCell<BouquetSelection>>>,
 ) -> Option<PlaylistClusterBouquetDto> {
     if let Some(bouq) = bouquet {
         let selections = bouq.borrow();
-
-        let selected_vec = |map: &HashMap<String, bool>| {
-            let v: Vec<String> = map.iter().filter(|(_, &selected)| selected).map(|(c, _)| c.clone()).collect();
-            if v.is_empty() {
-                None
-            } else {
-                Some(v)
-            }
-        };
-
-        let live = selected_vec(&selections.live).filter(|v| v.len() != count.0);
-        let vod = selected_vec(&selections.vod).filter(|v| v.len() != count.1);
-        let series = selected_vec(&selections.series).filter(|v| v.len() != count.2);
+        let live = selected_categories_or_none(&selections.live, categories.and_then(|value| value.live.as_ref()));
+        let vod = selected_categories_or_none(&selections.vod, categories.and_then(|value| value.vod.as_ref()));
+        let series =
+            selected_categories_or_none(&selections.series, categories.and_then(|value| value.series.as_ref()));
 
         // if all three are None, return None
         if live.is_none() && vod.is_none() && series.is_none() {
@@ -156,38 +172,19 @@ pub fn ApiUserPlaylist() -> Html {
             let selections = selections.clone();
             let services = services.clone();
             let translate = translate.clone();
-            let categories_xtream_count = categories
-                .as_ref()
-                .and_then(|plc| {
-                    plc.xtream.as_ref().map(|x| {
-                        (
-                            x.live.as_ref().map(|v| v.len()).unwrap_or(0),
-                            x.vod.as_ref().map(|v| v.len()).unwrap_or(0),
-                            x.series.as_ref().map(|v| v.len()).unwrap_or(0),
-                        )
-                    })
-                })
-                .unwrap_or((0, 0, 0));
-            let categories_m3u_count = categories
-                .as_ref()
-                .and_then(|plc| {
-                    plc.m3u.as_ref().map(|x| {
-                        (
-                            x.live.as_ref().map(|v| v.len()).unwrap_or(0),
-                            x.vod.as_ref().map(|v| v.len()).unwrap_or(0),
-                            x.series.as_ref().map(|v| v.len()).unwrap_or(0),
-                        )
-                    })
-                })
-                .unwrap_or((0, 0, 0));
+            let xtream_categories = categories.as_ref().and_then(|plc| plc.xtream.as_ref().cloned());
+            let m3u_categories = categories.as_ref().and_then(|plc| plc.m3u.as_ref().cloned());
 
             wasm_bindgen_futures::spawn_local(async move {
                 services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
                 let result = {
                     let selects = selections.borrow();
                     PlaylistBouquetDto {
-                        xtream: to_playlist_cluster(categories_xtream_count, selects.get(&ApiUserPlaylistPage::Xtream)),
-                        m3u: to_playlist_cluster(categories_m3u_count, selects.get(&ApiUserPlaylistPage::M3u)),
+                        xtream: to_playlist_cluster(
+                            xtream_categories.as_ref(),
+                            selects.get(&ApiUserPlaylistPage::Xtream),
+                        ),
+                        m3u: to_playlist_cluster(m3u_categories.as_ref(), selects.get(&ApiUserPlaylistPage::M3u)),
                     }
                 };
 
@@ -254,5 +251,65 @@ pub fn ApiUserPlaylist() -> Html {
                 </div>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_categories_or_none_returns_none_when_all_unique_categories_are_selected() {
+        let categories = vec!["Sport".to_string(), "News".to_string(), "Sport".to_string()];
+        let selections = HashMap::from([("Sport".to_string(), true), ("News".to_string(), true)]);
+
+        assert_eq!(selected_categories_or_none(&selections, Some(&categories)), None);
+    }
+
+    #[test]
+    fn selected_categories_or_none_returns_selected_values_when_not_all_categories_are_selected() {
+        let categories = vec!["Sport".to_string(), "News".to_string(), "Movies".to_string()];
+        let selections =
+            HashMap::from([("Sport".to_string(), true), ("News".to_string(), false), ("Movies".to_string(), true)]);
+
+        assert_eq!(
+            selected_categories_or_none(&selections, Some(&categories)),
+            Some(vec!["Movies".to_string(), "Sport".to_string()])
+        );
+    }
+
+    #[test]
+    fn selected_categories_or_none_returns_none_for_empty_selection_map() {
+        let categories = vec!["Sport".to_string(), "News".to_string()];
+        let selections = HashMap::new();
+
+        assert_eq!(selected_categories_or_none(&selections, Some(&categories)), None);
+    }
+
+    #[test]
+    fn selected_categories_or_none_returns_none_when_all_selections_are_false() {
+        let categories = vec!["Sport".to_string(), "News".to_string()];
+        let selections = HashMap::from([("Sport".to_string(), false), ("News".to_string(), false)]);
+
+        assert_eq!(selected_categories_or_none(&selections, Some(&categories)), None);
+    }
+
+    #[test]
+    fn selected_categories_or_none_returns_sorted_selected_values_when_available_is_none() {
+        let selections = HashMap::from([("Sport".to_string(), true), ("Movies".to_string(), true)]);
+
+        assert_eq!(
+            selected_categories_or_none(&selections, None),
+            Some(vec!["Movies".to_string(), "Sport".to_string()])
+        );
+    }
+
+    #[test]
+    fn selected_categories_or_none_ignores_stale_selected_categories_not_in_available_list() {
+        let categories = vec!["Sport".to_string(), "News".to_string()];
+        let selections =
+            HashMap::from([("Sport".to_string(), true), ("News".to_string(), true), ("Old".to_string(), true)]);
+
+        assert_eq!(selected_categories_or_none(&selections, Some(&categories)), None);
     }
 }

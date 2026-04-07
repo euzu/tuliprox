@@ -205,15 +205,25 @@ async fn save_xtream_user_bouquet_for_target(config: &Config, target_name: &str,
         XtreamCluster::Series => user_get_series_bouquet_path(storage_path, TargetType::Xtream),
     };
 
-    if let Some(bouquet_categories) = bouquet {
-        if let Some(xtream_categories) = xtream_get_playlist_categories(config, target_name, cluster).await {
-            let filtered: Vec<PlaylistXtreamCategory> = xtream_categories.iter().filter(|p| bouquet_categories.contains(&p.name)).cloned().collect();
-            if filtered.is_empty() {
-                if file_exists_async(&bouquet_path).await {
-                    tokio::fs::remove_file(bouquet_path).await?;
+    match bouquet {
+        Some(bouquet_categories) => {
+            if let Some(xtream_categories) = xtream_get_playlist_categories(config, target_name, cluster).await {
+                let filtered: Vec<PlaylistXtreamCategory> =
+                    xtream_categories.iter().filter(|p| bouquet_categories.contains(&p.name)).cloned().collect();
+                if filtered.is_empty() {
+                    if file_exists_async(&bouquet_path).await {
+                        tokio::fs::remove_file(bouquet_path).await?;
+                    }
+                } else {
+                    json_write_documents_to_file(&bouquet_path, &filtered)
+                        .await
+                        .map_err(|err| Error::other(format!("Failed to write xtream bouquet file: {err}")))?;
                 }
-            } else {
-                json_write_documents_to_file(&bouquet_path, &filtered).await.map_err(|err| Error::other(format!("Failed to write xtream bouquet file: {err}")))?;
+            }
+        }
+        None => {
+            if file_exists_async(&bouquet_path).await {
+                tokio::fs::remove_file(bouquet_path).await?;
             }
         }
     }
@@ -379,6 +389,7 @@ mod tests {
     use arc_swap::{ArcSwap, ArcSwapAny};
     use shared::model::{ConfigPaths, ProxyType, ProxyUserStatus};
     use std::env::temp_dir;
+    use tempfile::tempdir;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -503,5 +514,21 @@ mod tests {
         assert_eq!(test4.priority, -10);
         assert_eq!(test4.soft_connections, 2);
         assert_eq!(test4.soft_priority, -3);
+    }
+
+    #[tokio::test]
+    async fn save_xtream_user_bouquet_removes_existing_file_when_selection_is_none() {
+        let dir = tempdir().expect("tempdir should succeed");
+        let bouquet_path = user_get_live_bouquet_path(dir.path(), TargetType::Xtream);
+        tokio::fs::write(&bouquet_path, "[]").await.expect("test bouquet file should be created");
+
+        save_xtream_user_bouquet_for_target(&Config::default(), "target", dir.path(), XtreamCluster::Live, None)
+            .await
+            .expect("saving empty xtream bouquet should succeed");
+
+        assert!(
+            !file_exists_async(&bouquet_path).await,
+            "xtream bouquet file should be removed when no explicit selection is stored"
+        );
     }
 }

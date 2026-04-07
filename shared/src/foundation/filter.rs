@@ -232,10 +232,9 @@ fn get_parser_item_field(expr: &Pair<Rule>) -> Result<ItemField, TuliproxError> 
 
 fn get_parser_regexp(expr: &Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<CompiledRegex, TuliproxError> {
     if expr.as_rule() == Rule::regexp {
-        let mut parsed_text = String::from(expr.as_str());
-        parsed_text.pop();
-        parsed_text.remove(0);
-        let regstr = apply_templates_to_pattern_single(&parsed_text, templates)?;
+        let full_str = expr.as_str();
+        let parsed_text = &full_str[1..full_str.len() - 1];
+        let regstr = apply_templates_to_pattern_single(parsed_text, templates)?;
         let re = crate::model::REGEX_CACHE.get_or_compile(regstr.as_str());
         if re.is_err() {
             return Err(TuliproxError::RegexCompile(regstr));
