@@ -13,12 +13,12 @@ FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
 # -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
-FROM rust:bookworm AS rust-build
+FROM rust:trixie AS rust-build
 
 # Get target architecture from build argument
 ARG RUST_TARGET=x86_64-unknown-linux-musl
 
-# Install build dependencies for Debian (bookworm)
+# Install build dependencies for Debian (trixie)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     pkg-config libssl-dev musl-tools && \
     apt-get clean && \
@@ -51,7 +51,7 @@ RUN cargo build -p tuliprox --target ${RUST_TARGET} --release
 # -----------------------------------------------------------------
 # Stage 2: Build the rust frontend
 # -----------------------------------------------------------------
-FROM rust:bookworm AS trunk-build
+FROM rust:trixie AS trunk-build
 
 # Install dependencies for Trunk and WebAssembly
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
