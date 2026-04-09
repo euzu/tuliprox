@@ -218,7 +218,11 @@ impl From<&ConfigProviderDto> for ConfigProvider {
 impl ConfigProvider {
     /// Gets the current URL from the provider
     pub fn get_current_url(&self) -> Option<&Arc<str>> {
-        let index = self.current_url_index.load(Ordering::Relaxed);
+        let len = self.urls.len();
+        if len == 0 {
+            return None;
+        }
+        let index = self.current_url_index.load(Ordering::Relaxed) % len;
         self.urls.get(index)
     }
 
@@ -230,7 +234,18 @@ impl ConfigProvider {
     /// Gets the current URL index
     #[inline]
     pub fn get_current_index(&self) -> usize {
-        self.current_url_index.load(Ordering::Relaxed)
+        let len = self.urls.len();
+        if len == 0 {
+            0
+        } else {
+            self.current_url_index.load(Ordering::Relaxed) % len
+        }
+    }
+
+    /// Sets the preferred URL index for future requests.
+    pub fn set_current_index(&self, index: usize) {
+        let normalized = if self.urls.is_empty() { 0 } else { index % self.urls.len() };
+        self.current_url_index.store(normalized, Ordering::Relaxed);
     }
 
     pub fn get_dns_config(&self) -> Option<&ProviderDnsConfig> { self.dns.as_ref() }
