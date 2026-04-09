@@ -1,7 +1,7 @@
 use crate::{
     api::model::{persist_pipe_stream::tee_dyn_reader, AppState, STREAM_IDLE_TIMEOUT},
     model::{
-        resolve_provider_scheme_url_with_provider, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
+        resolve_provider_scheme_url_with_provider_index, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
         ResourceRetryConfig, ReverseProxyDisabledHeaderConfig,
     },
     utils::{
@@ -141,12 +141,16 @@ pub fn content_type_from_ext(ext: &str) -> &'static str {
     }
 }
 
-fn resolve_provider_url_for_attempt(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> Url {
+fn resolve_provider_url_for_attempt(
+    url: &Url,
+    provider: Option<&Arc<ConfigProvider>>,
+    provider_url_index: usize,
+) -> Url {
     let Some(provider) = provider else {
         return url.clone();
     };
 
-    match resolve_provider_scheme_url_with_provider(url.as_str(), Some(provider.clone())) {
+    match resolve_provider_scheme_url_with_provider_index(url.as_str(), Some(provider.clone()), provider_url_index) {
         Ok((_provider, resolved)) => {
             if resolved.as_ref() == url.as_str() {
                 return url.clone();
@@ -205,8 +209,9 @@ fn resolve_attempt_target_with_dns_mode(
     url: &Url,
     provider: Option<&Arc<ConfigProvider>>,
     preview_dns_selection: bool,
+    provider_url_index: usize,
 ) -> AttemptTarget {
-    let resolved_url = resolve_provider_url_for_attempt(url, provider);
+    let resolved_url = resolve_provider_url_for_attempt(url, provider, provider_url_index);
     let Some(provider) = provider else {
         return AttemptTarget::new(resolved_url);
     };
@@ -258,12 +263,75 @@ fn resolve_attempt_target_with_dns_mode(
     target
 }
 
+#[cfg(test)]
 fn resolve_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> AttemptTarget {
-    resolve_attempt_target_with_dns_mode(url, provider, false)
+    resolve_attempt_target_with_dns_mode(url, provider, false, 0)
+}
+
+fn resolve_attempt_target_at_provider_index(
+    url: &Url,
+    provider: Option<&Arc<ConfigProvider>>,
+    provider_url_index: usize,
+) -> AttemptTarget {
+    resolve_attempt_target_with_dns_mode(url, provider, false, provider_url_index)
 }
 
 fn preview_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> AttemptTarget {
-    resolve_attempt_target_with_dns_mode(url, provider, true)
+    resolve_attempt_target_with_dns_mode(url, provider, true, provider_start_index(provider))
+}
+
+fn provider_start_index(provider: Option<&Arc<ConfigProvider>>) -> usize {
+    provider.map_or(0, |provider| provider.get_current_index())
+}
+
+fn next_provider_url_index(current_index: usize, provider_url_count: usize, start_index: usize) -> Option<usize> {
+    if provider_url_count <= 1 {
+        return None;
+    }
+
+    let next_index = (current_index + 1) % provider_url_count;
+    (next_index != start_index).then_some(next_index)
+}
+
+fn provider_cycle_exhausted(provider: &ConfigProvider, current_index: usize, start_index: usize) -> bool {
+    next_provider_url_index(current_index, provider.urls.len(), start_index).is_none()
+}
+
+fn log_provider_cycle_exhausted(
+    provider: &ConfigProvider,
+    start_index: usize,
+    current_index: usize,
+    last_failure: &str,
+) {
+    error!(
+        "Provider '{}' exhausted all {} URL(s) after one full cycle starting at preferred index {} and ending at index {}: {}",
+        provider.name,
+        provider.urls.len(),
+        start_index,
+        current_index,
+        sanitize_sensitive_info(last_failure)
+    );
+}
+
+fn rotate_to_next_provider_url(
+    provider: &ConfigProvider,
+    provider_url_index: &mut usize,
+    start_provider_index: usize,
+    reason: &str,
+) -> bool {
+    let Some(next_index) = next_provider_url_index(*provider_url_index, provider.urls.len(), start_provider_index) else {
+        return false;
+    };
+
+    warn!(
+        "Provider '{}' failover: {} -> switching from URL index {} to {}",
+        provider.name,
+        sanitize_sensitive_info(reason),
+        *provider_url_index,
+        next_index
+    );
+    *provider_url_index = next_index;
+    true
 }
 
 fn format_request_target_for_logging(target: &AttemptTarget) -> String {
@@ -422,11 +490,10 @@ pub async fn send_with_retry_and_provider(
     let idle = sleep(idle_timeout);
     tokio::pin!(idle);
 
-    // Record the starting URL index for full-cycle detection.
-    // This allows us to try all URLs even when starting from a non-zero index.
-    let (start_index, max_provider_attempts) =
-        provider.as_ref().map_or((0, 0), |p| (p.get_current_index(), p.urls.len()));
-    let mut provider_attempts = usize::from(max_provider_attempts > 0);
+    let max_provider_attempts = provider.as_ref().map_or(0, |p| p.urls.len());
+    let start_provider_index = provider_start_index(provider);
+    let mut provider_url_index = start_provider_index;
+    let mut last_provider_failure: Option<String> = None;
 
     'provider_loop: loop {
         // 2. Retry loop for the current URL
@@ -434,7 +501,19 @@ pub async fn send_with_retry_and_provider(
             let mut attempted_dns_ips = HashSet::new();
 
             'ip_loop: loop {
-                let attempt_target = resolve_attempt_target(url, provider);
+                let attempt_target = resolve_attempt_target_at_provider_index(url, provider, provider_url_index);
+                if log_enabled!(Level::Debug) {
+                    if let Some(current_provider) = provider {
+                        let attempt_target_log = format_request_target_for_logging(&attempt_target);
+                        debug!(
+                            "Provider '{}' attempting URL index {} of {}: {}",
+                            current_provider.name,
+                            provider_url_index,
+                            max_provider_attempts,
+                            sanitize_sensitive_info(attempt_target_log.as_str())
+                        );
+                    }
+                }
                 // Reset the idle timer for a new attempt
                 idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
 
@@ -448,16 +527,23 @@ pub async fn send_with_retry_and_provider(
                 tokio::select! {
                     () = &mut idle => {
                         warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
+                        last_provider_failure = Some(format!(
+                            "idle timeout while trying {}",
+                            sanitize_sensitive_info(attempt_target.request_url.as_str())
+                        ));
                         // 1. Try Provider Failover first
-                        if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
-                            if let Some(p) = provider {
-                                if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                                    provider_attempts += 1;
-                                    let current_index = p.get_current_index();
-                                    warn!("Provider '{}' idle timeout -> switching to index {}", p.name, current_index);
-                                    continue 'provider_loop;
-                                }
+                        let mut provider_failover_exhausted = false;
+                        if let Some(current_provider) = provider {
+                            if rotate_to_next_provider_url(
+                                current_provider.as_ref(),
+                                &mut provider_url_index,
+                                start_provider_index,
+                                "idle timeout",
+                            ) {
+                                continue 'provider_loop;
                             }
+                            provider_failover_exhausted =
+                                max_provider_attempts > 0 && provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index);
                         }
 
                         // 2. If no provider or rotation failed, check if we can retry the same URL
@@ -468,6 +554,17 @@ pub async fn send_with_retry_and_provider(
                             continue 'attempt_loop;
                         }
 
+                        if provider_failover_exhausted {
+                            if let Some(current_provider) = provider {
+                                log_provider_cycle_exhausted(
+                                    current_provider.as_ref(),
+                                    start_provider_index,
+                                    provider_url_index,
+                                    last_provider_failure.as_deref().unwrap_or("idle timeout"),
+                                );
+                            }
+                        }
+
                         return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
                     }
 
@@ -476,24 +573,39 @@ pub async fn send_with_retry_and_provider(
                             Ok(response) => {
                                 let status = response.status();
                                 if allow_redirects && status.is_redirection() {
+                                    if let Some(current_provider) = provider {
+                                        current_provider.set_current_index(provider_url_index);
+                                    }
                                     return Ok(response);
                                 }
                                 let is_failover = is_failover_redirect(response.url(), &failover_patterns);
                                 if !is_failover && status.is_success() {
+                                    if let Some(current_provider) = provider {
+                                        current_provider.set_current_index(provider_url_index);
+                                    }
                                     return Ok(response);
                                 }
 
+                                last_provider_failure = Some(format!(
+                                    "status {} while trying {}",
+                                    format_http_status(status),
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str())
+                                ));
+
                                 // Failover check: Should we switch to the next provider URL?
-                                if (is_failover || should_trigger_failover(status))
-                                    && max_provider_attempts > 1
-                                    && provider_attempts < max_provider_attempts
-                                {
-                                    if let Some(p) = provider {
-                                        if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                                            provider_attempts += 1;
-                                            let current_index = p.get_current_index();
-                                            warn!("Provider '{}' failover: status {} -> switching to URL index {current_index}",
-                                                p.name, format_http_status(status));
+                                let provider_failover_exhausted = (is_failover || should_trigger_failover(status))
+                                    && provider.is_some_and(|current_provider| {
+                                        provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index)
+                                    });
+                                if is_failover || should_trigger_failover(status) {
+                                    if let Some(current_provider) = provider {
+                                        let reason = format!("status {}", format_http_status(status));
+                                        if rotate_to_next_provider_url(
+                                            current_provider.as_ref(),
+                                            &mut provider_url_index,
+                                            start_provider_index,
+                                            reason.as_str(),
+                                        ) {
                                             continue 'provider_loop;
                                         }
                                     }
@@ -508,6 +620,17 @@ pub async fn send_with_retry_and_provider(
                                     continue 'attempt_loop;
                                 }
 
+                                if provider_failover_exhausted {
+                                    if let Some(current_provider) = provider {
+                                        log_provider_cycle_exhausted(
+                                            current_provider.as_ref(),
+                                            start_provider_index,
+                                            provider_url_index,
+                                            last_provider_failure.as_deref().unwrap_or("request failed"),
+                                        );
+                                    }
+                                }
+
                                 return Err(string_to_io_error(format!("Request failed ({}): {}",
                                     format_http_status(status), sanitize_sensitive_info(url.as_str()))));
                             }
@@ -520,16 +643,25 @@ pub async fn send_with_retry_and_provider(
                                     continue 'ip_loop;
                                 }
 
+                                last_provider_failure = Some(format!(
+                                    "connection error while trying {}: {}",
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str()),
+                                    sanitize_sensitive_info(err.to_string().as_str())
+                                ));
+
                                 // Connection errors (Timeout/Connect) trigger failover if provider exists
-                                if (err.is_timeout() || err.is_connect())
-                                    && max_provider_attempts > 1
-                                    && provider_attempts < max_provider_attempts
-                                {
-                                    if let Some(p) = provider {
-                                        if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                                            provider_attempts += 1;
-                                            let current_index = p.get_current_index();
-                                            warn!("Provider '{}' failover: connection error -> switching to index {}", p.name, current_index);
+                                let provider_failover_exhausted = (err.is_timeout() || err.is_connect())
+                                    && provider.is_some_and(|current_provider| {
+                                        provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index)
+                                    });
+                                if err.is_timeout() || err.is_connect() {
+                                    if let Some(current_provider) = provider {
+                                        if rotate_to_next_provider_url(
+                                            current_provider.as_ref(),
+                                            &mut provider_url_index,
+                                            start_provider_index,
+                                            "connection error",
+                                        ) {
                                             continue 'provider_loop;
                                         }
                                     }
@@ -542,6 +674,17 @@ pub async fn send_with_retry_and_provider(
                                     continue 'attempt_loop;
                                 }
 
+                                if provider_failover_exhausted {
+                                    if let Some(current_provider) = provider {
+                                        log_provider_cycle_exhausted(
+                                            current_provider.as_ref(),
+                                            start_provider_index,
+                                            provider_url_index,
+                                            last_provider_failure.as_deref().unwrap_or("request error"),
+                                        );
+                                    }
+                                }
+
                                 return Err(string_to_io_error(format!("Request error: {}", sanitize_sensitive_info(err.to_string().as_str()))));
                             }
                         }
@@ -551,12 +694,24 @@ pub async fn send_with_retry_and_provider(
         }
 
         // 2. If per-URL retries are exhausted, try next provider URL as a last resort
-        if max_provider_attempts > 1 && provider_attempts < max_provider_attempts {
-            if let Some(p) = provider {
-                if p.rotate_to_next_url_with_cycle_check(start_index).is_some() {
-                    provider_attempts += 1;
-                    continue 'provider_loop;
-                }
+        if let Some(current_provider) = provider {
+            if rotate_to_next_provider_url(
+                current_provider.as_ref(),
+                &mut provider_url_index,
+                start_provider_index,
+                "retries exhausted for current URL",
+            ) {
+                continue 'provider_loop;
+            }
+
+            if max_provider_attempts > 0 {
+                let last_failure = last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
+                log_provider_cycle_exhausted(
+                    current_provider.as_ref(),
+                    start_provider_index,
+                    provider_url_index,
+                    last_failure,
+                );
             }
         }
 
@@ -1572,8 +1727,8 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        preview_request_diagnostics_for_logging, preview_request_target_for_logging, resolve_attempt_target, same_origin,
-        send_with_retry_and_provider, should_try_next_ip_on_connect_error,
+        next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
+        resolve_attempt_target, same_origin, send_with_retry_and_provider, should_try_next_ip_on_connect_error,
         strip_sensitive_headers_for_cross_origin_redirect,
     };
     use crate::{
@@ -1839,11 +1994,32 @@ mod tests {
         assert_eq!(https_second.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.11".to_string()));
     }
 
-    async fn start_plain_http_server() -> std::io::Result<(SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+    #[test]
+    fn test_preview_request_target_for_logging_uses_preferred_provider_index() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "provider-a".into(),
+            urls: vec![
+                "http://provider-a.example".into(),
+                "http://provider-b.example".into(),
+            ],
+            dns: None,
+        }));
+        provider.set_current_index(1);
+
+        let url = Url::parse("provider://provider-a/live").expect("provider url should parse");
+        let preview = preview_request_target_for_logging(&url, Some(&provider));
+
+        assert_eq!(preview, "http://provider-b.example/live");
+    }
+
+    async fn start_plain_http_server_with_body(
+        body: &'static [u8],
+    ) -> std::io::Result<(SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let accepted = Arc::new(AtomicUsize::new(0));
         let accepted_clone = Arc::clone(&accepted);
+        let content_length = body.len();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -1851,18 +2027,108 @@ mod tests {
                     continue;
                 };
                 accepted_clone.fetch_add(1, Ordering::SeqCst);
+                let body = body;
                 tokio::spawn(async move {
                     let mut buf = vec![0_u8; 2048];
                     let _ = socket.read(&mut buf).await;
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                        .await;
+                    let response_head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(response_head.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
                     let _ = socket.shutdown().await;
                 });
             }
         });
 
         Ok((addr, accepted, handle))
+    }
+
+    async fn start_plain_http_server() -> std::io::Result<(SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        start_plain_http_server_with_body(b"ok").await
+    }
+
+    #[tokio::test]
+    async fn test_provider_request_chain_starts_from_last_successful_url() {
+        let (addr_b, accepted_b, handle_b) = match start_plain_http_server_with_body(b"b").await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping test_provider_request_chain_starts_from_last_successful_url: {err}"
+                );
+                return;
+            }
+            Err(err) => panic!("failed to start test http server: {err}"),
+        };
+
+        let mut cfg = Config {
+            connect_timeout_secs: 1,
+            ..Config::default()
+        };
+        cfg.accept_insecure_ssl_certificates = true;
+        cfg.reverse_proxy = Some(ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: ResourceRetryConfig {
+                max_attempts: 1,
+                ..ResourceRetryConfig::default()
+            },
+            disabled_header: None,
+            stream: None,
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+        });
+        let app_config = make_test_app_config(cfg);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(400))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http client should build");
+        let dead_addr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "provider-a".into(),
+            urls: vec![
+                format!("http://127.0.0.1:{}", dead_addr.port()).into(),
+                format!("http://127.0.0.1:{}", addr_b.port()).into(),
+            ],
+            dns: None,
+        }));
+
+        let url = Url::parse("provider://provider-a/live").expect("provider url should parse");
+        let first_response = send_with_retry_and_provider(&app_config, &url, Some(&provider), false, |resolved_url| {
+            client.get(resolved_url.clone())
+        })
+        .await
+        .expect("request should fail over to the second provider url");
+        let first_body = first_response.text().await.expect("response body should be readable");
+
+        assert_eq!(first_body, "b");
+        assert_eq!(provider.get_current_index(), 1);
+
+        let second_response = send_with_retry_and_provider(&app_config, &url, Some(&provider), false, |resolved_url| {
+            client.get(resolved_url.clone())
+        })
+        .await
+        .expect("next request should start from the last successful provider url");
+        let second_body = second_response.text().await.expect("response body should be readable");
+
+        assert_eq!(second_body, "b");
+        assert_eq!(accepted_b.load(Ordering::SeqCst), 2);
+
+        handle_b.abort();
+    }
+
+    #[test]
+    fn test_next_provider_url_index_wraps_once_then_stops() {
+        assert_eq!(next_provider_url_index(2, 4, 2), Some(3));
+        assert_eq!(next_provider_url_index(3, 4, 2), Some(0));
+        assert_eq!(next_provider_url_index(0, 4, 2), Some(1));
+        assert_eq!(next_provider_url_index(1, 4, 2), None);
+        assert_eq!(next_provider_url_index(0, 1, 0), None);
     }
 
     #[tokio::test]

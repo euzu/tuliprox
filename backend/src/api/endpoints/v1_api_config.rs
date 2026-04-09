@@ -19,7 +19,8 @@ use shared::{
     model::permission::{Permission, PermissionSet},
     model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto, XtreamLoginRequest},
     utils::{
-        HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION, HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH,
+        parse_provider_scheme_url_parts, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
+        HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, PROVIDER_SCHEME_PREFIX,
     },
 };
 use shared::model::InputFetchMethod;
@@ -583,15 +584,16 @@ async fn get_xtream_login_info(
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Password is required"}))).into_response();
     }
 
-    let base_url = get_xtream_stream_url_base(&request.url, &request.username, &request.password);
-    let input_source = InputSource {
-        name: "xtream_login".into(),
-        url: base_url,
-        provider: None,
-        username: Some(request.username.clone()),
-        password: Some(request.password.clone()),
-        method: InputFetchMethod::GET,
-        headers: HashMap::new(),
+    let providers = {
+        let sources = app_state.app_config.sources.load();
+        sources.provider.clone()
+    };
+    let input_source = match build_xtream_login_input_source(&request, &providers) {
+        Ok(input_source) => input_source,
+        Err(err) => {
+            error!("Failed to prepare xtream login request: {err}");
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
+        }
     };
     let http_client = app_state.http_client.load();
     match xtream_login(&app_state.app_config, &http_client, &input_source, &request.username).await {
@@ -605,6 +607,35 @@ async fn get_xtream_login_info(
                 .into_response()
         }
     }
+}
+
+fn build_xtream_login_input_source(
+    request: &XtreamLoginRequest,
+    providers: &[Arc<crate::model::ConfigProvider>],
+) -> Result<InputSource, TuliproxError> {
+    let url = request.url.trim();
+    let provider = if url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        let (provider_name, _) = parse_provider_scheme_url_parts(url)?;
+        Some(
+            providers
+                .iter()
+                .find(|provider| provider.name.as_ref() == provider_name)
+                .cloned()
+                .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider config for '{provider_name}' not found")))?,
+        )
+    } else {
+        None
+    };
+
+    Ok(InputSource {
+        name: "xtream_login".into(),
+        url: get_xtream_stream_url_base(url, &request.username, &request.password),
+        provider,
+        username: Some(request.username.clone()),
+        password: Some(request.password.clone()),
+        method: InputFetchMethod::GET,
+        headers: HashMap::new(),
+    })
 }
 
 pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
@@ -645,15 +676,20 @@ pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Rou
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_api_proxy_by_permissions, filter_app_config_by_permissions, require_matching_revision};
+    use super::{
+        build_xtream_login_input_source, filter_api_proxy_by_permissions, filter_app_config_by_permissions,
+        require_matching_revision,
+    };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use crate::model::ConfigProvider;
     use shared::{
         model::{
-            ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigDto, Permission, PermissionSet, SourcesConfigDto,
-            TargetUserDto,
+            ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigDto, ConfigProviderDto, Permission,
+            PermissionSet, SourcesConfigDto, TargetUserDto, XtreamLoginRequest,
         },
         utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH},
     };
+    use std::sync::Arc;
 
     #[test]
     fn require_matching_revision_rejects_missing_if_match_header() {
@@ -757,5 +793,25 @@ mod tests {
         assert!(api_proxy.server.is_empty());
         assert_eq!(api_proxy.user.len(), 1);
         assert!(api_proxy.use_user_db);
+    }
+
+    #[test]
+    fn build_xtream_login_input_source_preserves_provider_context_for_provider_urls() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "b1g".into(),
+            urls: vec!["http://48392071.xyz".into(), "http://48392244.xyz".into()],
+            dns: None,
+        }));
+        let request = XtreamLoginRequest {
+            url: "provider://b1g".to_string(),
+            username: "demo".to_string(),
+            password: "secret".to_string(),
+        };
+
+        let input_source = build_xtream_login_input_source(&request, &[provider.clone()])
+            .expect("provider url should resolve against runtime providers");
+
+        assert_eq!(input_source.url, "provider://b1g/player_api.php?username=demo&password=secret");
+        assert_eq!(input_source.provider.as_ref().map(|provider| provider.name.as_ref()), Some("b1g"));
     }
 }
