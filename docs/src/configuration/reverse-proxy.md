@@ -13,6 +13,26 @@ It also contains the optional telemetry pipeline for stream reliability analysis
 * `qos_aggregation` periodically condenses those raw events into compact QoS snapshots.
 * The Web UI can then inspect both the raw history view and the aggregated QoS summaries.
 
+## Read This First: Connection Handling Handbook
+
+The `reverse_proxy.stream` block now interacts with a broader connection-handling model:
+
+* user limits
+* soft connections
+* priorities
+* admission strategies
+* grace periods
+* HLS and catchup sessions
+* shared streams
+* provider-side preemption
+
+If you want to understand why a stream starts, waits, gets reused, gets preempted, or is rejected, read these pages first:
+
+* [Connection Handling](./connection-handling.md)
+* [Connection Handling: Priorities, Soft Connections and Preemption](./connection-handling-priorities-and-preemption.md)
+* [Connection Handling: Sessions, HLS, Catchup and Reconnects](./connection-handling-sessions-and-reconnects.md)
+* [Connection Handling: Failures and User-Visible Behavior](./connection-handling-failures-and-user-visible-behavior.md)
+
 ## Top-level entries
 
 ```yaml

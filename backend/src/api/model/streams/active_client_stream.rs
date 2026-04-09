@@ -932,8 +932,6 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
         None
     };
 
-    trace!("grace hold stream {hold_stream}");
-
     if provider_grace_check.is_some() || user_grace_check.is_some() {
         let stream_strategy_flag = Arc::new(AtomicU8::new(
             if hold_stream { StreamMode::GracePending as u8 } else { StreamMode::Inner as u8 },

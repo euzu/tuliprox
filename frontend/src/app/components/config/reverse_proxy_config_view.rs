@@ -188,7 +188,7 @@ fn displayed_admission_strategy_tags(state: &AdmissionStrategiesDto, stream: &St
     })
 }
 
-fn available_admission_strategies(selected_tags: &[String]) -> Vec<AdmissionStrategyDto> {
+fn available_admission_strategies(selected_tags: &[String], grace_period_millis: u64) -> Vec<AdmissionStrategyDto> {
     let has_grace = selected_tags.iter().filter_map(|tag| parse_admission_strategy_tag(tag)).any(is_grace_strategy);
 
     [
@@ -200,7 +200,10 @@ fn available_admission_strategies(selected_tags: &[String]) -> Vec<AdmissionStra
     .into_iter()
     .filter(|strategy| {
         let tag = admission_strategy_tag(*strategy);
-        !selected_tags.iter().any(|selected| selected == tag) && (!has_grace || !is_grace_strategy(*strategy))
+        let grace_available = grace_period_millis > 0 || !is_grace_strategy(*strategy);
+        !selected_tags.iter().any(|selected| selected == tag)
+            && grace_available
+            && (!has_grace || !is_grace_strategy(*strategy))
     })
     .collect()
 }
@@ -848,7 +851,8 @@ pub fn ReverseProxyConfigView() -> Html {
 
     let render_stream_edit = || {
         let strategy_tags = displayed_admission_strategy_tags(&admission_strategies_state.form, &stream_state.form);
-        let available_strategies = available_admission_strategies(&strategy_tags);
+        let available_strategies =
+            available_admission_strategies(&strategy_tags, stream_state.form.grace_period_millis);
         html! {
             <>
             <Card class="tp__config-view__card">
@@ -1097,9 +1101,18 @@ mod tests {
 
     #[test]
     fn available_admission_strategies_hide_second_grace_option() {
-        let available = available_admission_strategies(&["grace_hold_stream".to_string()]);
+        let available = available_admission_strategies(&["grace_hold_stream".to_string()], 2_000);
         assert!(!available.contains(&AdmissionStrategyDto::GraceInstantStream));
         assert!(!available.contains(&AdmissionStrategyDto::GraceHoldStream));
         assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpOldest));
+    }
+
+    #[test]
+    fn available_admission_strategies_hide_grace_when_disabled() {
+        let available = available_admission_strategies(&[], 0);
+        assert!(!available.contains(&AdmissionStrategyDto::GraceInstantStream));
+        assert!(!available.contains(&AdmissionStrategyDto::GraceHoldStream));
+        assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpOldest));
+        assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpLatest));
     }
 }

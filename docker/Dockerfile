@@ -13,7 +13,7 @@ FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
 # -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
-FROM rust:trixie AS rust-build
+FROM rust@sha256:e8e2bb5ff27ad3b369a4f667392464e6ec399cfe81c1230ae78edb1036b9bd74 AS rust-build
 
 # Get target architecture from build argument
 ARG RUST_TARGET=x86_64-unknown-linux-musl
@@ -51,7 +51,7 @@ RUN cargo build -p tuliprox --target ${RUST_TARGET} --release
 # -----------------------------------------------------------------
 # Stage 2: Build the rust frontend
 # -----------------------------------------------------------------
-FROM rust:trixie AS trunk-build
+FROM rust@sha256:e8e2bb5ff27ad3b369a4f667392464e6ec399cfe81c1230ae78edb1036b9bd74 AS trunk-build
 
 # Install dependencies for Trunk and WebAssembly
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
