@@ -21,6 +21,8 @@ use yew::prelude::*;
 use yew_hooks::{use_async_with_options, UseAsyncOptions};
 use yew_router::prelude::*;
 
+const STATIC_ASSET_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// App routes
 #[derive(Routable, Debug, Clone, PartialEq, Eq)]
 pub enum AppRoute {
@@ -41,6 +43,13 @@ pub fn switch(route: AppRoute) -> Html {
     }
 }
 
+fn versioned_static_asset_url(path: &str) -> String {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{separator}v={STATIC_ASSET_VERSION}")
+}
+
+fn versioned_config_url() -> String { versioned_static_asset_url("config.json") }
+
 #[component]
 pub fn App() -> Html {
     let supported_languages = vec!["en"];
@@ -56,7 +65,7 @@ pub fn App() -> Html {
                 let futures = languages
                     .iter()
                     .map(|lang| async move {
-                        let url = format!("assets/i18n/{lang}.json");
+                        let url = versioned_static_asset_url(&format!("assets/i18n/{lang}.json"));
                         let result: Result<Option<Value>, Error> = request_get(&url, None, None).await;
                         (lang.to_string(), result)
                     })
@@ -79,7 +88,8 @@ pub fn App() -> Html {
         let config_state = configuration_state.clone();
         use_async_with_options::<_, (), Error>(
             async move {
-                match request_get::<WebConfig>("config.json", None, None).await {
+                let config_url = versioned_config_url();
+                match request_get::<WebConfig>(&config_url, None, None).await {
                     Ok(Some(cfg)) => {
                         if let Some(tab_title) = cfg.tab_title.as_deref() {
                             if let Some(win) = window() {
@@ -108,7 +118,8 @@ pub fn App() -> Html {
         let icon_state = icon_state.clone();
         use_async_with_options::<_, (), Error>(
             async move {
-                match request_get("assets/icons.json", None, None).await {
+                let icons_url = versioned_static_asset_url("assets/icons.json");
+                match request_get(&icons_url, None, None).await {
                     Ok(Some(icons)) => icon_state.set(Some(icons)),
                     Ok(None) => icon_state.set(Some(Vec::new())),
                     Err(err) => {
@@ -149,4 +160,30 @@ pub fn App() -> Html {
 #[derive(Clone, PartialEq)]
 pub(in crate::app) struct CardContext {
     pub custom_class: UseStateHandle<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versioned_static_asset_url_appends_release_version() {
+        assert_eq!(
+            versioned_static_asset_url("assets/i18n/en.json"),
+            format!("assets/i18n/en.json?v={}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn versioned_static_asset_url_keeps_existing_query_params() {
+        assert_eq!(
+            versioned_static_asset_url("assets/i18n/en.json?lang=en"),
+            format!("assets/i18n/en.json?lang=en&v={}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn versioned_config_url_uses_release_version() {
+        assert_eq!(versioned_config_url(), format!("config.json?v={}", env!("CARGO_PKG_VERSION")));
+    }
 }

@@ -608,6 +608,7 @@
       "URL": "Target URL that receives the notification webhook."
     },
     "REVERSE_PROXY_CONFIG": {
+      "ADMISSION_STRATEGIES": "Defines what Tuliprox may still try after the normal user admission is already exhausted.\n\nUse this to control short transition grace during switching or to evict an existing same-IP stream instead of rejecting the new request immediately.\n\nStrategies are evaluated from top to bottom.\n\nGrace strategies only work when `grace_period_millis` is greater than 0. Only one grace strategy can be active at a time.",
       "FAILOVER_REDIRECT_PATTERNS": "Regex patterns determining which HTTP error responses trigger an automatic failover rotation.",
       "RESOURCE_REWRITE_DISABLED": "If enabled, URL rewriting for logos and EPG is disabled (also disables caching).",
       "REWRITE_SECRET": "Persistent secret for stable resource URLs across restarts. \nExample:\n```\nreverse_proxy:\n  rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90\n```",
@@ -802,6 +803,10 @@
     "ADD_TRAKT_LIST": "Add a Trakt list",
     "ADD_URL": "Add Url",
     "ADD_WATCH": "Add Watch",
+    "ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST": "Evict same-IP latest stream",
+    "ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST": "Evict same-IP oldest stream",
+    "ADMISSION_STRATEGY_GRACE_HOLD_STREAM": "Grace hold stream",
+    "ADMISSION_STRATEGY_GRACE_INSTANT_STREAM": "Grace instant stream",
     "ADVANCED": "Advanced",
     "ALIAS": "Alias",
     "ALIASES": "Aliases",
@@ -1379,7 +1384,8 @@
     "VIEW_TYPE_PLAYLIST_SETTINGS": "Playlist Settings",
     "VIEW_TYPE_PLAYLIST_EXPLORER":  "Playlist Explorer",
     "VIEW_TYPE_PLAYLIST_EPG": "Playlist EPG",
-    "VIEW_TYPE_RBAC":  "WebUI Users"
+    "VIEW_TYPE_RBAC":  "WebUI Users",
+    "ADMISSION_STRATEGIES": "Admission Strategies"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

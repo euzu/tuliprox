@@ -15,7 +15,8 @@ use crate::{
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
     edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u16,
     edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
-    i18n::use_translation,
+    i18n::{use_translation, YewI18n},
+    utils::t_safe,
 };
 use shared::{
     model::{
@@ -31,7 +32,6 @@ const LABEL_CACHE: &str = "LABEL.CACHE";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SIZE: &str = "LABEL.SIZE";
 const LABEL_DIRECTORY: &str = "LABEL.DIRECTORY";
-
 const LABEL_STREAM: &str = "LABEL.STREAM";
 const LABEL_STREAM_GRACE: &str = "LABEL.STREAM_GRACE";
 const LABEL_STREAM_SESSION: &str = "LABEL.STREAM_SESSION";
@@ -80,6 +80,10 @@ const LABEL_STREAM_HISTORY_RETENTION_DAYS: &str = "LABEL.STREAM_HISTORY_RETENTIO
 const LABEL_QOS_AGGREGATION: &str = "LABEL.QOS_AGGREGATION";
 const LABEL_QOS_AGGREGATION_ENABLED: &str = "LABEL.QOS_AGGREGATION_ENABLED";
 const LABEL_INTERVAL_SECS: &str = "LABEL.INTERVAL_SECS";
+const LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST: &str = "LABEL.ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST";
+const LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST: &str = "LABEL.ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST";
+const LABEL_ADMISSION_STRATEGY_GRACE_INSTANT_STREAM: &str = "LABEL.ADMISSION_STRATEGY_GRACE_INSTANT_STREAM";
+const LABEL_ADMISSION_STRATEGY_GRACE_HOLD_STREAM: &str = "LABEL.ADMISSION_STRATEGY_GRACE_HOLD_STREAM";
 
 generate_form_reducer!(
     state: CacheConfigFormState { form: CacheConfigDto },
@@ -145,10 +149,31 @@ fn parse_admission_strategy_tag(tag: &str) -> Option<AdmissionStrategyDto> {
     }
 }
 
-fn admission_strategy_label(strategy: AdmissionStrategyDto) -> String { admission_strategy_tag(strategy).to_string() }
+fn admission_strategy_label_key(strategy: AdmissionStrategyDto) -> &'static str {
+    match strategy {
+        AdmissionStrategyDto::EvictUserSameIpOldest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST,
+        AdmissionStrategyDto::EvictUserSameIpLatest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST,
+        AdmissionStrategyDto::GraceInstantStream => LABEL_ADMISSION_STRATEGY_GRACE_INSTANT_STREAM,
+        AdmissionStrategyDto::GraceHoldStream => LABEL_ADMISSION_STRATEGY_GRACE_HOLD_STREAM,
+    }
+}
+
+fn admission_strategy_label(translate: &YewI18n, strategy: AdmissionStrategyDto) -> String {
+    t_safe(translate, admission_strategy_label_key(strategy)).unwrap_or_else(|| match strategy {
+        AdmissionStrategyDto::EvictUserSameIpOldest => "Evict same-IP oldest stream".to_string(),
+        AdmissionStrategyDto::EvictUserSameIpLatest => "Evict same-IP latest stream".to_string(),
+        AdmissionStrategyDto::GraceInstantStream => "Grace instant stream".to_string(),
+        AdmissionStrategyDto::GraceHoldStream => "Grace hold stream".to_string(),
+    })
+}
 
 fn is_grace_strategy(strategy: AdmissionStrategyDto) -> bool {
     matches!(strategy, AdmissionStrategyDto::GraceInstantStream | AdmissionStrategyDto::GraceHoldStream)
+}
+
+fn is_grace_strategy_tag(tag: &str) -> bool {
+    let tag = tag.trim();
+    tag.starts_with("grace_") || parse_admission_strategy_tag(tag).is_some_and(is_grace_strategy)
 }
 
 fn admission_strategy_tags(strategies: Option<&Vec<AdmissionStrategyDto>>) -> Option<Vec<String>> {
@@ -168,6 +193,33 @@ fn parse_admission_strategy_tags(tags: Option<&[String]>) -> Option<Vec<Admissio
     Some(parsed)
 }
 
+fn filter_disabled_grace_strategy_tags(tags: Vec<String>, grace_period_millis: u64) -> Vec<String> {
+    if grace_period_millis == 0 {
+        tags.into_iter().filter(|tag| !is_grace_strategy_tag(tag)).collect()
+    } else {
+        tags
+    }
+}
+
+fn filter_disabled_grace_strategies(
+    strategies: Option<Vec<AdmissionStrategyDto>>,
+    grace_period_millis: u64,
+) -> Option<Vec<AdmissionStrategyDto>> {
+    strategies.map(|entries| {
+        if grace_period_millis == 0 {
+            entries.into_iter().filter(|strategy| !is_grace_strategy(*strategy)).collect()
+        } else {
+            entries
+        }
+    })
+}
+
+fn admission_strategy_tag_label(translate: &YewI18n, tag: &str) -> String {
+    parse_admission_strategy_tag(tag)
+        .map(|strategy| admission_strategy_label(translate, strategy))
+        .unwrap_or_else(|| tag.to_string())
+}
+
 fn legacy_admission_strategy_tags(stream: &StreamConfigDto) -> Vec<String> {
     if stream.grace_period_millis == 0 {
         Vec::new()
@@ -182,10 +234,13 @@ fn legacy_admission_strategy_tags(stream: &StreamConfigDto) -> Vec<String> {
 }
 
 fn displayed_admission_strategy_tags(state: &AdmissionStrategiesDto, stream: &StreamConfigDto) -> Vec<String> {
-    state.strategies.clone().unwrap_or_else(|| {
-        admission_strategy_tags(stream.admission_strategies.as_ref())
-            .unwrap_or_else(|| legacy_admission_strategy_tags(stream))
-    })
+    filter_disabled_grace_strategy_tags(
+        state.strategies.clone().unwrap_or_else(|| {
+            admission_strategy_tags(stream.admission_strategies.as_ref())
+                .unwrap_or_else(|| legacy_admission_strategy_tags(stream))
+        }),
+        stream.grace_period_millis,
+    )
 }
 
 fn available_admission_strategies(selected_tags: &[String], grace_period_millis: u64) -> Vec<AdmissionStrategyDto> {
@@ -447,8 +502,10 @@ pub fn ReverseProxyConfigView() -> Html {
                 let mut form = rp.clone();
                 let mut stream_form = stream.clone();
                 stream_form.buffer = if stream_buffer.is_empty() { None } else { Some(stream_buffer.clone()) };
-                stream_form.admission_strategies =
-                    parse_admission_strategy_tags(admission_strategies.strategies.as_deref());
+                stream_form.admission_strategies = filter_disabled_grace_strategies(
+                    parse_admission_strategy_tags(admission_strategies.strategies.as_deref()),
+                    stream_form.grace_period_millis,
+                );
 
                 form.cache = Some(cache.clone());
                 form.rate_limit = Some(rl.clone());
@@ -688,7 +745,9 @@ pub fn ReverseProxyConfigView() -> Html {
                         if strategy_tags.is_empty() {
                             <Chip label="-" />
                         } else {
-                            { for strategy_tags.iter().map(|strategy| html! { <Chip label={strategy.clone()} /> }) }
+                            { for strategy_tags.iter().map(|strategy| {
+                                html! { <Chip label={admission_strategy_tag_label(&translate, strategy)} /> }
+                            }) }
                         }
                         </div>
                     }
@@ -887,12 +946,12 @@ pub fn ReverseProxyConfigView() -> Html {
                         let move_up_tags = strategy_tags.clone();
                         let move_down_state = admission_strategies_state.clone();
                         let move_down_tags = strategy_tags.clone();
+                        let label = admission_strategy_tag_label(&translate, strategy);
                         html! {
                             <div class="tp__inline-toolbar">
-                                <Chip label={strategy.clone()} />
+                                <Chip label={label} />
                                 if index > 0 {
                                     <IconButton
-                                        class="secondary"
                                         name={format!("move_up_{index}")}
                                         icon="ChevronUp"
                                         hint="Move up"
@@ -905,7 +964,6 @@ pub fn ReverseProxyConfigView() -> Html {
                                 }
                                 if index + 1 < strategy_tags.len() {
                                     <IconButton
-                                        class="secondary"
                                         name={format!("move_down_{index}")}
                                         icon="ChevronDown"
                                         hint="Move down"
@@ -932,15 +990,15 @@ pub fn ReverseProxyConfigView() -> Html {
                     }) }
                 }
                 </div>
-                <div class="tp__inline-toolbar">
+                <div class="tp__toolbar">
                 {
                     for available_strategies.into_iter().map(|strategy| {
                         let add_state = admission_strategies_state.clone();
                         let add_tags = strategy_tags.clone();
-                        let strategy_name = admission_strategy_label(strategy);
+                        let strategy_name = admission_strategy_label(&translate, strategy);
                         html! {
                             <TextButton
-                                class="secondary"
+                                class="primary"
                                 name={strategy_name.clone()}
                                 icon="Add"
                                 title={strategy_name}
@@ -1114,5 +1172,26 @@ mod tests {
         assert!(!available.contains(&AdmissionStrategyDto::GraceHoldStream));
         assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpOldest));
         assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpLatest));
+    }
+
+    #[test]
+    fn displayed_admission_strategies_hide_disabled_grace_tags() {
+        let state = AdmissionStrategiesDto { strategies: Some(vec!["grace_hold_stream".to_string()]) };
+        let stream = StreamConfigDto { grace_period_millis: 0, ..StreamConfigDto::default() };
+
+        assert_eq!(displayed_admission_strategy_tags(&state, &stream), Vec::<String>::new());
+    }
+
+    #[test]
+    fn filtered_admission_strategies_drop_grace_when_disabled() {
+        let parsed = parse_admission_strategy_tags(Some(&[
+            "evict_user_same_ip_oldest".to_string(),
+            "grace_hold_stream".to_string(),
+        ]));
+
+        assert_eq!(
+            filter_disabled_grace_strategies(parsed, 0),
+            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest])
+        );
     }
 }
