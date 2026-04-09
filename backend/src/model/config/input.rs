@@ -695,6 +695,14 @@ pub fn resolve_provider_scheme_url_with_provider(
     stream_url: &str,
     provider_config: Option<Arc<ConfigProvider>>,
 ) -> Result<(Option<Arc<ConfigProvider>>, Cow<'_, str>), TuliproxError> {
+    resolve_provider_scheme_url_with_provider_index(stream_url, provider_config, 0)
+}
+
+pub fn resolve_provider_scheme_url_with_provider_index(
+    stream_url: &str,
+    provider_config: Option<Arc<ConfigProvider>>,
+    provider_url_index: usize,
+) -> Result<(Option<Arc<ConfigProvider>>, Cow<'_, str>), TuliproxError> {
     if !stream_url.starts_with(PROVIDER_SCHEME_PREFIX) {
         return Ok((None, Cow::Borrowed(stream_url)));
     }
@@ -705,13 +713,19 @@ pub fn resolve_provider_scheme_url_with_provider(
         TuliproxError::ConfigInput(format!("Provider config missing for resolution of: '{}'", sanitize_sensitive_info(stream_url)))
     })?;
 
-    let final_url = assemble_provider_url(&provider, path_and_query)?;
+    let final_url = assemble_provider_url_at_index(&provider, path_and_query, provider_url_index)?;
     Ok((Some(provider), Cow::Owned(final_url)))
 }
 
-/// Internal helper to build the final URL string
-fn assemble_provider_url(provider: &ConfigProvider, path_and_query: &str) -> Result<String, TuliproxError> {
-    let base = provider.get_current_url()
+fn assemble_provider_url_at_index(
+    provider: &ConfigProvider,
+    path_and_query: &str,
+    provider_url_index: usize,
+) -> Result<String, TuliproxError> {
+    let base = provider
+        .urls
+        .get(provider_url_index)
+        .or_else(|| provider.urls.first())
         .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider '{}' has no URLs available", provider.name)))?;
 
     // Add http:// scheme if no scheme is present
@@ -763,6 +777,23 @@ mod tests {
         let resolved = input.resolve_url("provider://myprovider/stream").unwrap();
         assert_eq!(resolved, "http://provider.com/stream");
         assert!(matches!(resolved, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn test_resolve_provider_scheme_url_starts_from_first_url_for_new_resolution() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "myprovider".into(),
+            urls: vec!["http://provider-a.example".into(), "http://provider-b.example".into()],
+            dns: None,
+        }));
+        let _ = provider.rotate_to_next_url_with_cycle_check(0);
+        assert_eq!(provider.get_current_index(), 1);
+
+        let (_provider, resolved) =
+            resolve_provider_scheme_url_with_provider("provider://myprovider/stream", Some(Arc::clone(&provider)))
+                .expect("provider url should resolve");
+
+        assert_eq!(resolved, "http://provider-a.example/stream");
     }
 
     #[test]
