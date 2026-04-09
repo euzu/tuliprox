@@ -16,7 +16,7 @@ use crate::{
 use axum::http::{header::USER_AGENT, HeaderMap};
 use bytes::Bytes;
 use futures::{task::AtomicWaker, Future, Stream, StreamExt};
-use log::{error, info, trace};
+use log::{error, info};
 use shared::{
     model::{StreamChannel, UserConnectionPermission, VirtualId},
     utils::sanitize_sensitive_info,
