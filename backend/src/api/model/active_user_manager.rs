@@ -489,7 +489,7 @@ impl ActiveUserManager {
         removed_stream
     }
 
-    pub async fn release_connection(&self, addr: &SocketAddr) -> ReleasedConnection {
+    async fn release_connection_inner(&self, addr: &SocketAddr, preserve_session_streams: bool) -> ReleasedConnection {
         let (addr_removed, disconnected_user, removed_streams, expiry_entries, promotions) = {
             let mut user_connections = self.connections.write().await;
 
@@ -503,7 +503,7 @@ impl ActiveUserManager {
                     let mut released_kinds = Vec::new();
                     for mut stream_info in connection_data.streams.drain(..) {
                         if stream_info.addr == *addr {
-                            if Self::should_preserve_session_stream(&stream_info) {
+                            if preserve_session_streams && Self::should_preserve_session_stream(&stream_info) {
                                 if let Some(entry) =
                                     self.build_preserved_stream_expiry(&username, &stream_info, &connection_data.sessions)
                                 {
@@ -574,6 +574,14 @@ impl ActiveUserManager {
         ReleasedConnection { addr_removed, removed_streams }
     }
 
+    pub async fn release_connection(&self, addr: &SocketAddr) -> ReleasedConnection {
+        self.release_connection_inner(addr, true).await
+    }
+
+    pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) -> ReleasedConnection {
+        self.release_connection_inner(addr, false).await
+    }
+
     pub fn update_config(&self, config: &Config) {
         let log_active_user = config.log.as_ref().is_some_and(|l| l.log_active_user);
         let (grace_period_millis, grace_period_timeout_secs) = get_grace_options(config);
@@ -596,7 +604,6 @@ impl ActiveUserManager {
         username: &str,
         connection_data: &mut UserConnectionData,
     ) -> ConnectionAdmission {
-        let current_connections = connection_data.connections;
         let selected_kind = decide_connection_kind(
             connection_data.counts,
             connection_data.max_connections,
@@ -616,7 +623,7 @@ impl ActiveUserManager {
         let now = get_current_timestamp();
         // Check if user already used a grace period
         if connection_data.granted_grace {
-            if current_connections > connection_data.max_connections
+            if connection_data.connections > connection_data.max_connections
                 && now - connection_data.grace_ts <= self.grace_period_timeout_secs.load(Ordering::Relaxed)
             {
                 // Grace timeout, still active, deny connection
@@ -631,22 +638,6 @@ impl ActiveUserManager {
             connection_data.grace_ts = 0;
         }
 
-        if self.grace_period_millis.load(Ordering::Relaxed) > 0 && current_connections == connection_data.max_connections {
-            // Intentional asymmetry: grace is granted when current == max (AT limit), while
-            // Exhausted is returned when current > max (OVER limit after the grace window).
-            // This allows exactly one extra connection during the grace window — the new
-            // connection is accepted now, and a background check evicts it if the count is
-            // still over max after the grace period elapses.
-            connection_data.granted_grace = true;
-            connection_data.grace_ts = now;
-            debug!("Granted a grace period for user access: {username}");
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::GracePeriod,
-                kind: Some(ConnectionKind::Normal),
-            };
-        }
-
-        // Too many connections, no grace allowed
         debug!("User access denied, too many connections: {username}");
         ConnectionAdmission {
             permission: UserConnectionPermission::Exhausted,
@@ -743,6 +734,66 @@ impl ActiveUserManager {
         self.connection_admission_for_session(username, max_connections, soft_connections, session_token)
             .await
             .permission
+    }
+
+    pub(crate) async fn get_eviction_candidates(
+        &self,
+        username: &str,
+        client_ip: &str,
+    ) -> Vec<crate::api::model::EvictionCandidate> {
+        let connections = self.connections.read().await;
+        let Some(connection_data) = connections.by_key.get(username) else {
+            return Vec::new();
+        };
+        let mut addr_counts = HashMap::new();
+        for stream in connection_data.streams.iter().filter(|stream| !stream.preserved) {
+            addr_counts
+                .entry(stream.addr)
+                .and_modify(|count: &mut u8| *count = count.saturating_add(1))
+                .or_insert(1_u8);
+        }
+        connection_data
+            .streams
+            .iter()
+            .filter(|stream| !stream.preserved && stream.client_ip == client_ip)
+            .filter(|stream| matches!(addr_counts.get(&stream.addr), Some(1)))
+            .map(|s| crate::api::model::EvictionCandidate {
+                addr: s.addr,
+                client_ip: s.client_ip.clone(),
+                ts: s.ts,
+            })
+            .collect()
+    }
+
+    pub(crate) async fn grant_grace(&self, username: &str) -> bool {
+        if self.grace_period_millis.load(Ordering::Relaxed) == 0 {
+            debug!("Grace grant denied, grace_period_millis is zero for {username}");
+            return false;
+        }
+        let mut connections = self.connections.write().await;
+        if let Some(connection_data) = connections.by_key.get_mut(username) {
+            let now = get_current_timestamp();
+            if connection_data.connections != connection_data.max_connections {
+                debug!(
+                    "Grace grant denied for {username}, expected connections == max_connections but got {}/{}",
+                    connection_data.connections,
+                    connection_data.max_connections
+                );
+                return false;
+            }
+            if connection_data.granted_grace
+                && connection_data.connections > connection_data.max_connections
+                && now - connection_data.grace_ts <= self.grace_period_timeout_secs.load(Ordering::Relaxed)
+            {
+                debug!("Grace grant denied, still within active grace timeout for {username}");
+                return false;
+            }
+            connection_data.granted_grace = true;
+            connection_data.grace_ts = now;
+            debug!("Granted a grace period for user access: {username}");
+            return true;
+        }
+        false
     }
 
     pub async fn active_users_and_connections(&self) -> (usize, usize) {
@@ -1529,6 +1580,13 @@ mod tests {
         }
     }
 
+    fn test_adaptive_channel(virtual_id: u32) -> StreamChannel {
+        StreamChannel {
+            item_type: PlaylistItemType::LiveHls,
+            ..test_channel(virtual_id)
+        }
+    }
+
     #[tokio::test]
     async fn test_multi_session_same_addr_counts_and_releases_individually() {
         let config = Config::default();
@@ -1563,7 +1621,7 @@ mod tests {
         assert_eq!(manager.user_connections(username).await, 1);
         assert_eq!(
             manager.connection_permission(username, 1, 0).await,
-            UserConnectionPermission::GracePeriod
+            UserConnectionPermission::Exhausted
         );
 
         let second = manager
@@ -1591,6 +1649,189 @@ mod tests {
 
         assert!(manager.release_stream(&addr).await.is_some());
         assert_eq!(manager.user_connections(username).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_grant_grace_only_at_limit() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let at_limit_addr: SocketAddr = "127.0.0.1:55011".parse().unwrap();
+        let at_limit_fingerprint = Fingerprint::new("fp-limit".to_string(), "127.0.0.1".to_string(), at_limit_addr);
+        let over_limit_addr: SocketAddr = "127.0.0.1:55012".parse().unwrap();
+        let over_limit_fingerprint = Fingerprint::new("fp-over".to_string(), "127.0.0.1".to_string(), over_limit_addr);
+
+        manager.add_connection(&at_limit_addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 10,
+                meter_uid: 0,
+                username: "at-limit",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &at_limit_fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_channel(1010),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-limit"),
+            })
+            .await;
+
+        assert!(manager.grant_grace("at-limit").await);
+
+        manager.add_connection(&over_limit_addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 11,
+                meter_uid: 0,
+                username: "over-limit",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &over_limit_fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_channel(1011),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-over-1"),
+            })
+            .await;
+        manager.add_connection(&"127.0.0.1:55013".parse().unwrap()).await;
+        let second_fingerprint =
+            Fingerprint::new("fp-over-2".to_string(), "127.0.0.1".to_string(), "127.0.0.1:55013".parse().unwrap());
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 12,
+                meter_uid: 0,
+                username: "over-limit",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &second_fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_channel(1012),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-over-2"),
+            })
+            .await;
+
+        assert!(!manager.grant_grace("over-limit").await);
+    }
+
+    #[tokio::test]
+    async fn eviction_candidates_ignore_ambiguous_socket_addrs() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let shared_addr: SocketAddr = "127.0.0.1:55031".parse().unwrap();
+        let unique_addr: SocketAddr = "127.0.0.1:55032".parse().unwrap();
+        let shared_fp = Fingerprint::new("fp-shared".to_string(), "127.0.0.1".to_string(), shared_addr);
+        let unique_fp = Fingerprint::new("fp-unique".to_string(), "127.0.0.1".to_string(), unique_addr);
+
+        manager.add_connection(&shared_addr).await;
+        manager.add_connection(&unique_addr).await;
+
+        for (uid, token, channel_id) in [(31, "tok-31", 1031), (32, "tok-32", 1032)] {
+            manager
+                .update_connection(ActiveUserConnectionParams {
+                    uid,
+                    meter_uid: 0,
+                    username: "same-user",
+                    max_connections: 3,
+                    soft_connections: 0,
+                    connection_kind: ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &shared_fp,
+                    provider: "provider-a",
+                    stream_channel: &test_channel(channel_id),
+                    user_agent: Cow::Borrowed("ua"),
+                    session_token: Some(token),
+                })
+                .await;
+        }
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 33,
+                meter_uid: 0,
+                username: "same-user",
+                max_connections: 3,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &unique_fp,
+                provider: "provider-a",
+                stream_channel: &test_channel(1033),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-33"),
+            })
+            .await;
+
+        let candidates = manager.get_eviction_candidates("same-user", "127.0.0.1").await;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].addr, unique_addr);
+    }
+
+    #[tokio::test]
+    async fn test_kicked_release_does_not_preserve_adaptive_stream() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55014".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-adaptive".to_string(), "127.0.0.1".to_string(), addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user-adaptive");
+        user.max_connections = 1;
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-adaptive",
+                virtual_id: 2014,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 14,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_adaptive_channel(2014),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-adaptive"),
+            })
+            .await;
+
+        let removed = manager.release_connection_as_kicked(&addr).await;
+        assert!(removed.addr_removed);
+        assert_eq!(removed.removed_streams.len(), 1);
+        assert!(manager.active_streams().await.is_empty());
     }
 
     #[tokio::test]

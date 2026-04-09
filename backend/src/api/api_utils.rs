@@ -452,6 +452,106 @@ pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOpt
     StreamOptions { stream_retry, buffer_enabled, buffer_size, pipe_provider_stream }
 }
 
+pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppState>) -> Vec<crate::model::AdmissionStrategy> {
+    use crate::model::AdmissionStrategy;
+    let config = app_state.app_config.config.load();
+    let stream_config = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref());
+    match stream_config {
+        Some(sc) if sc.admission_strategies.is_some() => sc.admission_strategies.clone().unwrap_or_default(),
+        Some(sc) if sc.grace_period_millis > 0 => {
+            vec![if sc.grace_period_hold_stream {
+                AdmissionStrategy::GraceHoldStream
+            } else {
+                AdmissionStrategy::GraceInstantStream
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::api) async fn resolve_admission_with_strategies(
+    app_state: &Arc<AppState>,
+    username: &str,
+    max_connections: u32,
+    soft_connections: u16,
+    client_ip: &str,
+    _fingerprint: &Fingerprint,
+    is_session_request: bool,
+    session_token: Option<&str>,
+) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>) {
+    use crate::api::model::{AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext, evaluate_strategy};
+    use shared::model::UserConnectionPermission;
+
+    let admission = if is_session_request {
+        app_state.get_connection_admission_for_session(
+            username, max_connections, soft_connections, session_token.unwrap_or_default(),
+        ).await
+    } else {
+        app_state.get_connection_admission(username, max_connections, soft_connections).await
+    };
+
+    if admission.permission != UserConnectionPermission::Exhausted {
+        return (admission, None);
+    }
+
+    let strategies = get_effective_admission_strategies(app_state);
+    if strategies.is_empty() {
+        debug!("No admission strategies configured, denying request for user {username}");
+        return (admission, None);
+    }
+
+    let mut candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
+    let ctx = StrategyContext { username, client_ip, strategies: &strategies };
+    for strategy in &strategies {
+        match evaluate_strategy(*strategy, &ctx, &candidates) {
+            AdmissionDecision::NoMatch => {}
+            AdmissionDecision::Grace(mode) => {
+                if app_state.active_users.grant_grace(username).await {
+                    return (
+                        ConnectionAdmission {
+                            permission: UserConnectionPermission::GracePeriod,
+                            kind: Some(ConnectionKind::Normal),
+                        },
+                        Some(mode),
+                    );
+                }
+                debug!("Grace grant rejected for user {username}, continuing with later strategies");
+            }
+            AdmissionDecision::Evict(target) => {
+                debug!("Evicting connection {} for user {username}", target.addr);
+                app_state.connection_manager.release_connection_as_kicked(&target.addr).await;
+                let retry_admission = if is_session_request {
+                    app_state
+                        .get_connection_admission_for_session(
+                            username,
+                            max_connections,
+                            soft_connections,
+                            session_token.unwrap_or_default(),
+                        )
+                        .await
+                } else {
+                    app_state
+                        .get_connection_admission(username, max_connections, soft_connections)
+                        .await
+                };
+                if retry_admission.permission == UserConnectionPermission::Allowed {
+                    return (retry_admission, None);
+                }
+                debug!("Admission still denied after eviction for user {username}, continuing with later strategies");
+                candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
+            }
+            AdmissionDecision::Deny => {
+                debug!("Admission strategy denied for user {username}");
+                return (admission, None);
+            }
+        }
+    }
+
+    debug!("No admission strategy could admit user {username}");
+    (admission, None)
+}
+
 pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> String {
     let Some(input_user_info) = input.get_user_info() else {
         return stream_url.to_string();
@@ -654,6 +754,7 @@ async fn create_stream_response_details(
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
     session_owner: Option<&str>,
+    grace_hold_override: Option<bool>,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy = resolve_streaming_strategy(
         app_state,
@@ -675,6 +776,9 @@ async fn create_stream_response_details(
         &streaming_strategy.provider_stream_state,
         grace_period_options.period_millis,
     );
+    if let Some(hold) = grace_hold_override {
+        grace_period_options.hold_stream = hold;
+    }
     let provider_grace_active = matches!(
         streaming_strategy.provider_stream_state,
         ProviderStreamState::GracePeriod(_, _)
@@ -971,6 +1075,7 @@ pub async fn force_provider_stream_response(
     user_session: &UserSession,
     mut stream_channel: StreamChannel,
     ctx: ForceStreamRequestContext<'_>,
+    grace_mode: Option<crate::api::model::GraceMode>,
 ) -> impl IntoResponse + Send {
     let stream_options = get_stream_options(app_state);
     let share_stream = false;
@@ -1009,6 +1114,7 @@ pub async fn force_provider_stream_response(
         connection_priority_for_kind(ctx.user, connection_kind),
         connection_kind,
         Some(user_session.token.as_str()),
+        grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
     )
     .await
     {
@@ -1112,6 +1218,7 @@ pub async fn stream_response(
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
     allow_exhausted_shared_reconnect: bool,
+    grace_mode: Option<crate::api::model::GraceMode>,
 ) -> impl IntoResponse + Send {
     let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
     if log_enabled!(log::Level::Trace) {
@@ -1209,6 +1316,7 @@ pub async fn stream_response(
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
         Some(session_token),
+        grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
     )
     .await
     {
@@ -2556,6 +2664,26 @@ mod tests {
         Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
     }
 
+    fn create_test_app_state_with_stream_config(stream: crate::model::StreamConfig) -> Arc<AppState> {
+        let mut config = Config::default();
+        config.reverse_proxy = Some(crate::model::ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: crate::model::ResourceRetryConfig::default(),
+            disabled_header: None,
+            stream: Some(stream),
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+        });
+
+        let mut app_cfg = create_test_app_config();
+        app_cfg.config = Arc::new(ArcSwap::from_pointee(config));
+        create_test_app_state_for_config(Arc::new(app_cfg))
+    }
+
     fn create_test_local_channel(url: &str) -> StreamChannel {
         StreamChannel {
             target_id: 1,
@@ -2629,6 +2757,132 @@ mod tests {
             Some(CustomVideoStreamType::ProviderConnectionsExhausted)
         ));
         assert!(admission_failure_video_type(ConnectFailureReason::ProviderError).is_none());
+    }
+
+    #[tokio::test]
+    async fn effective_admission_strategies_use_legacy_grace_when_field_missing() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: None,
+        });
+
+        assert_eq!(
+            get_effective_admission_strategies(&app_state),
+            vec![crate::model::AdmissionStrategy::GraceHoldStream]
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_admission_strategies_respect_explicit_empty_list() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![]),
+        });
+
+        assert!(get_effective_admission_strategies(&app_state).is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_admission_with_strategies_falls_through_after_failed_grace_grant() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                crate::model::AdmissionStrategy::GraceHoldStream,
+                crate::model::AdmissionStrategy::EvictUserSameIpOldest,
+            ]),
+        });
+
+        let first_addr: std::net::SocketAddr = "127.0.0.1:55151".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: std::net::SocketAddr = "127.0.0.1:55152".parse().unwrap_or_else(|_| unreachable!());
+        let first_fingerprint = create_test_fingerprint(first_addr);
+        let second_fingerprint = create_test_fingerprint(second_addr);
+
+        app_state.connection_manager.add_connection(&first_addr).await;
+        app_state.connection_manager.add_connection(&second_addr).await;
+
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: "fallthrough",
+                max_connections: 1,
+                soft_connections: 1,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &first_fingerprint,
+                provider: "provider-a",
+                stream_channel: &create_test_live_channel("http://provider-1.example/live/1.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some("tok-first"),
+            })
+            .await;
+
+        assert!(app_state.active_users.grant_grace("fallthrough").await);
+
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 2,
+                username: "fallthrough",
+                max_connections: 1,
+                soft_connections: 1,
+                connection_kind: crate::api::model::ConnectionKind::Soft,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &second_fingerprint,
+                provider: "provider-a",
+                stream_channel: &create_test_live_channel("http://provider-1.example/live/2.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some("tok-second"),
+            })
+            .await;
+
+        let (admission, grace_mode) = resolve_admission_with_strategies(
+            &app_state,
+            "fallthrough",
+            1,
+            1,
+            "127.0.0.1",
+            &create_test_fingerprint("127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!())),
+            true,
+            Some("tok-third"),
+        )
+        .await;
+
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+        assert_eq!(grace_mode, None);
     }
 
     #[tokio::test]
@@ -2765,6 +3019,7 @@ mod tests {
             admission.permission,
             admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
             false,
+            None,
         )
         .await
         .into_response();

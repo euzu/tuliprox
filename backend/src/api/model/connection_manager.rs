@@ -139,7 +139,11 @@ async fn release_connection_parts(
     reason: &DisconnectReason,
     send_shared_stop_signal: bool,
 ) {
-    let removed = user_manager.release_connection(addr).await;
+    let removed = if matches!(reason, DisconnectReason::ClientKicked) {
+        user_manager.release_connection_as_kicked(addr).await
+    } else {
+        user_manager.release_connection(addr).await
+    };
     for stream_info in &removed.removed_streams {
         let (bytes_sent, first_byte_latency_ms) = event_manager.read_meter_qos(stream_info.meter_uid).await;
         event_manager.unregister_meter_client(stream_info.uid).await;
@@ -675,6 +679,7 @@ impl ConnectionManager {
     }
 
     pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) {
+        let _ = self.close_connection_with_reason(addr, DisconnectReason::ClientKicked);
         release_connection_with_reason(self, addr, &DisconnectReason::ClientKicked, true).await;
     }
 
@@ -1019,6 +1024,22 @@ mod tests {
         assert!(manager.kick_connection(&addr, 1, 0).await);
         assert_eq!(
             rx.recv().await.ok(),
+            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked))
+        );
+    }
+
+    #[tokio::test]
+    async fn release_connection_as_kicked_sends_kick_close_signal() {
+        let manager = create_test_connection_manager();
+        let mut rx = manager.get_close_connection_channel();
+        let addr: SocketAddr = "127.0.0.1:2234".parse().unwrap_or_else(|_| unreachable!());
+
+        manager.release_connection_as_kicked(&addr).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .ok()
+                .and_then(Result::ok),
             Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked))
         );
     }

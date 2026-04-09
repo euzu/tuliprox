@@ -1,5 +1,6 @@
 mod active_provider_manager;
 mod active_user_manager;
+mod admission_strategy;
 mod app_state;
 mod connection_manager;
 mod download;
@@ -27,6 +28,9 @@ pub use self::{
 pub(in crate::api) use self::{
     active_user_manager::*, download::*, model_utils::*, provider_config::*, qos_aggregation_manager::*,
     recording_worker::*, request::*, stream_error::*, xtream::*,
+};
+pub(in crate::api) use self::admission_strategy::{
+    AdmissionDecision, EvictionCandidate, GraceMode, StrategyContext, evaluate_strategy,
 };
 mod batch_result_collector;
 pub use self::batch_result_collector::*;
