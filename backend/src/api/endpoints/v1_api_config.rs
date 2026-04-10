@@ -843,4 +843,35 @@ mod tests {
         assert_eq!(input_source.url, "provider://strong/player_api.php?username=bubble&password=gum");
         assert_eq!(input_source.provider.as_ref().map(|provider| provider.name.as_ref()), Some("strong"));
     }
+
+    #[test]
+    fn build_xtream_login_input_source_prefers_request_provider_when_names_collide() {
+        let runtime_provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "strong".into(),
+            urls: vec!["http://runtime.example".into()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
+            dns: None,
+        }));
+        let request = XtreamLoginRequest {
+            url: "provider://strong".to_string(),
+            username: "bubble".to_string(),
+            password: "gum".to_string(),
+            providers: Some(vec![ConfigProviderDto {
+                name: "strong".into(),
+                urls: vec!["http://request.example".into()],
+                provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
+                dns: None,
+            }]),
+        };
+
+        let input_source = build_xtream_login_input_source(&request, &[runtime_provider])
+            .expect("request-scoped provider should take precedence over runtime provider");
+
+        assert_eq!(input_source.url, "provider://strong/player_api.php?username=bubble&password=gum");
+        assert_eq!(input_source.provider.as_ref().map(|provider| provider.name.as_ref()), Some("strong"));
+        assert_eq!(
+            input_source.provider.as_ref().and_then(|provider| provider.urls.first()).map(|url| url.as_ref()),
+            Some("http://request.example")
+        );
+    }
 }

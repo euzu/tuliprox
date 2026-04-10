@@ -48,6 +48,7 @@ const LABEL_USERNAME: &str = "LABEL.USERNAME";
 const LABEL_PASSWORD: &str = "LABEL.PASSWORD";
 const LABEL_PERSIST: &str = "LABEL.PERSIST";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
+const LABEL_DISABLED: &str = "LABEL.DISABLED";
 const LABEL_ALIASES: &str = "LABEL.ALIASES";
 const LABEL_PRIORITY: &str = "LABEL.PRIORITY";
 const LABEL_MAX_CONNECTIONS: &str = "LABEL.MAX_CONNECTIONS";
@@ -57,6 +58,8 @@ const LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING: &str = "LABEL.PROVIDER_U
 const LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST: &str = "LABEL.PROVIDER_URL_SELECTION_RESTART_FROM_FIRST";
 const LABEL_PROVIDER_DNS: &str = "LABEL.PROVIDER_DNS";
 const LABEL_DNS_ON_CONNECT_ERROR: &str = "LABEL.DNS_ON_CONNECT_ERROR";
+const LABEL_DNS_CONNECT_TRY_NEXT_IP: &str = "LABEL.DNS_CONNECT_TRY_NEXT_IP";
+const LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL: &str = "LABEL.DNS_CONNECT_ROTATE_PROVIDER_URL";
 const LABEL_DNS_REFRESH_SECS: &str = "LABEL.DNS_REFRESH_SECS";
 const LABEL_ADD_EPG_SOURCE: &str = "LABEL.ADD_EPG_SOURCE";
 const LABEL_ADD_ALIAS: &str = "LABEL.ADD_ALIAS";
@@ -95,16 +98,16 @@ fn provider_url_selection_policy_label_key(policy: ProviderUrlSelectionPolicy) -
 
 fn provider_dns_enabled_text(provider: &ConfigProviderDto) -> &'static str {
     if provider.dns.as_ref().is_some_and(|dns| dns.enabled) {
-        "enabled"
+        LABEL_ENABLED
     } else {
-        "disabled"
+        LABEL_DISABLED
     }
 }
 
 fn provider_on_connect_error_text(provider: &ConfigProviderDto) -> &'static str {
     provider.dns.as_ref().filter(|dns| dns.enabled).map_or("-", |dns| match dns.on_connect_error {
-        OnConnectErrorPolicy::TryNextIp => "try_next_ip",
-        OnConnectErrorPolicy::RotateProviderUrl => "rotate_provider_url",
+        OnConnectErrorPolicy::TryNextIp => LABEL_DNS_CONNECT_TRY_NEXT_IP,
+        OnConnectErrorPolicy::RotateProviderUrl => LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL,
     })
 }
 
@@ -1338,13 +1341,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                                     <div class="tp__provider-list-item__meta-row">
                                                         <span class="tp__provider-list-item__meta-label">{format!("{}: ", translate.t(LABEL_PROVIDER_DNS))}</span>
                                                         <span class="tp__provider-list-item__meta-value">
-                                                            {provider_dns_enabled_text(provider)}
+                                                            {translate.t(provider_dns_enabled_text(provider))}
                                                         </span>
                                                     </div>
                                                     <div class="tp__provider-list-item__meta-row">
                                                         <span class="tp__provider-list-item__meta-label">{format!("{}: ", translate.t(LABEL_DNS_ON_CONNECT_ERROR))}</span>
                                                         <span class="tp__provider-list-item__meta-value">
-                                                            {provider_on_connect_error_text(provider)}
+                                                            {
+                                                                if provider_on_connect_error_text(provider) == "-" {
+                                                                    "-".into()
+                                                                } else {
+                                                                    translate.t(provider_on_connect_error_text(provider))
+                                                                }
+                                                            }
                                                         </span>
                                                     </div>
                                                     <div class="tp__provider-list-item__meta-row">
