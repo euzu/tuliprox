@@ -1,3 +1,4 @@
+use crate::api::api_utils::resource_response;
 use crate::{api::{
     api_utils::{create_api_proxy_user, json_or_bin_response},
     endpoints::{
@@ -11,6 +12,7 @@ use crate::{api::{
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
+use shared::utils::deobfuscate_text;
 use shared::{
     model::{
         permission::Permission, EpgChannel, EpgProgramme,
@@ -21,8 +23,6 @@ use shared::{
 };
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 use url::Url;
-use shared::utils::deobfuscate_text;
-use crate::api::api_utils::resource_response;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
     ConfigInput {
@@ -204,7 +204,11 @@ async fn load_epg_channels_for_input(
         let raw_epg_path = match get_input_raw_epg_file_path(&resolved_url, input, &storage_dir).await {
             Ok(path) => path,
             Err(err) => {
-                debug!("Skipping EPG source {}: {err}", sanitize_sensitive_info(resolved_url.as_str()));
+                debug!(
+                    "Skipping EPG source {}: {}",
+                    sanitize_sensitive_info(resolved_url.as_str()),
+                    sanitize_sensitive_info(&err.to_string())
+                );
                 failed_sources += 1;
                 continue;
             }
@@ -221,7 +225,9 @@ async fn load_epg_channels_for_input(
                     match parse_xmltv_for_web_ui_from_url(app_state, &resolved_url).await {
                         Ok(ch) => ch,
                         Err(url_err) => {
-                            debug!("EPG url also failed {}: {url_err}", sanitize_sensitive_info(resolved_url.as_str()));
+                            debug!("EPG url also failed {}: {}",
+                                sanitize_sensitive_info(resolved_url.as_str()),
+                                sanitize_sensitive_info(&url_err.to_string()));
                             failed_sources += 1;
                             continue;
                         }
@@ -232,7 +238,9 @@ async fn load_epg_channels_for_input(
             match parse_xmltv_for_web_ui_from_url(app_state, &resolved_url).await {
                 Ok(ch) => ch,
                 Err(err) => {
-                    debug!("Skipping EPG url {}: {err}", sanitize_sensitive_info(resolved_url.as_str()));
+                    debug!("Skipping EPG url {}: {}",
+                        sanitize_sensitive_info(resolved_url.as_str()),
+                        sanitize_sensitive_info(&err.to_string()));
                     failed_sources += 1;
                     continue;
                 }
@@ -300,16 +308,16 @@ async fn playlist_content(
             cluster,
             accept.as_deref(),
         )
-        .await
-        .into_response(),
+            .await
+            .into_response(),
         PlaylistRequest::Input(input_name) => get_playlist_for_input(
             app_state.app_config.get_input_by_name(&input_name.intern()).as_ref(),
             app_state,
             cluster,
             accept.as_deref(),
         )
-        .await
-        .into_response(),
+            .await
+            .into_response(),
         PlaylistRequest::CustomXtream(xtream) => match Url::parse(&xtream.url) {
             Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
                 let input = Arc::new(create_config_input_for_xtream(&xtream.username, &xtream.password, &xtream.url));
@@ -320,8 +328,8 @@ async fn playlist_content(
                     cluster,
                     accept.as_deref(),
                 )
-                .await
-                .into_response()
+                    .await
+                    .into_response()
             }
             _ => (
                 axum::http::StatusCode::BAD_REQUEST,
@@ -339,8 +347,8 @@ async fn playlist_content(
                     cluster,
                     accept.as_deref(),
                 )
-                .await
-                .into_response()
+                    .await
+                    .into_response()
             }
             _ => (
                 axum::http::StatusCode::BAD_REQUEST,
@@ -385,8 +393,8 @@ async fn playlist_series_info(
                         &virtual_id,
                         XtreamCluster::Series,
                     )
-                    .await
-                    .into_response();
+                        .await
+                        .into_response();
                 }
             }
         }
@@ -456,9 +464,10 @@ async fn playlist_epg(
                     }
                     Ok(None) => return axum::http::StatusCode::NO_CONTENT.into_response(),
                     Err(err) => {
+                        error!("Failed to load input EPG for '{}': {}", input.name, sanitize_sensitive_info(err.to_string().as_str()));
                         return (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(serde_json::json!({"error": err.to_string()})),
+                            axum::Json(serde_json::json!({"error": "Failed to load EPG"})),
                         )
                             .into_response();
                     }
@@ -479,9 +488,10 @@ async fn playlist_epg(
                     return json_or_bin_response(accept.as_deref(), &epg).into_response();
                 }
                 Err(err) => {
+                    error!("Failed to load custom EPG: {}", sanitize_sensitive_info(err.to_string().as_str()));
                     return (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(serde_json::json!({"error": err.to_string()})),
+                        axum::Json(serde_json::json!({"error": "Failed to load EPG"})),
                     )
                         .into_response();
                 }
@@ -516,7 +526,7 @@ async fn playlist_resolve_url(
                 virtual_id,
                 cluster,
             )
-            .into_response()
+                .into_response()
         }
         PlaylistUrlResolveRequest::Provider { playlist_request, url } => {
             resolve_provider_url_for_request(&app_state.app_config, &playlist_request, &url).into_response()
@@ -546,7 +556,6 @@ pub fn v1_api_playlist_register_with_permissions(
     router: Router<Arc<AppState>>,
     app_state: &Arc<AppState>,
 ) -> axum::Router<Arc<AppState>> {
-
     let read_routes = Router::new()
         .route("/live", axum::routing::post(playlist_content_live))
         .route("/vod", axum::routing::post(playlist_content_vod))
@@ -567,7 +576,7 @@ pub fn v1_api_playlist_register_with_permissions(
     router.nest("/playlist",
                 read_routes
                     .merge(write_routes)
-                    .merge(epg_routes)
+                    .merge(epg_routes),
     )
 }
 
@@ -597,8 +606,8 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
-    use tower::ServiceExt;
     use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
 
     fn test_app_config(input: Arc<ConfigInput>, source: ConfigSource) -> AppConfig {
         let sources = SourcesConfig {
@@ -1008,8 +1017,8 @@ mod tests {
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-        .await
-        .expect("epg path");
+            .await
+            .expect("epg path");
         if let Some(parent) = raw_epg_path.parent() {
             tokio::fs::create_dir_all(parent).await.expect("epg dir");
         }
@@ -1025,8 +1034,8 @@ mod tests {
   </programme>
 </tv>"#,
         )
-        .await
-        .expect("write epg");
+            .await
+            .expect("write epg");
 
         let app_state = test_app_state(Arc::new(app_config));
         let channels = super::load_epg_channels_for_input(&app_state, input.as_ref())
@@ -1085,8 +1094,8 @@ mod tests {
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-        .await
-        .expect("epg path");
+            .await
+            .expect("epg path");
         if let Some(parent) = raw_epg_path.parent() {
             tokio::fs::create_dir_all(parent).await.expect("epg dir");
         }
@@ -1102,8 +1111,8 @@ mod tests {
   </programme>
 </tv>"#,
         )
-        .await
-        .expect("write epg");
+            .await
+            .expect("write epg");
 
         let app_state = test_app_state(Arc::new(app_config));
         let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
@@ -1224,22 +1233,22 @@ mod tests {
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-        .await
-        .expect("primary epg path");
+            .await
+            .expect("primary epg path");
         let secondary_path = get_input_raw_epg_file_path(
             "http://provider.example/xmltv-secondary.php?username=user&password=pass",
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-        .await
-        .expect("secondary epg path");
+            .await
+            .expect("secondary epg path");
         let same_priority_path = get_input_raw_epg_file_path(
             "http://provider.example/xmltv-same-priority.php?username=user&password=pass",
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-        .await
-        .expect("same priority epg path");
+            .await
+            .expect("same priority epg path");
 
         for path in [&primary_path, &secondary_path, &same_priority_path] {
             if let Some(parent) = path.parent() {
@@ -1260,8 +1269,8 @@ mod tests {
   </programme>
 </tv>"#,
         )
-        .await
-        .expect("write secondary epg");
+            .await
+            .expect("write secondary epg");
         tokio::fs::write(
             &primary_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
@@ -1275,8 +1284,8 @@ mod tests {
   </programme>
 </tv>"#,
         )
-        .await
-        .expect("write primary epg");
+            .await
+            .expect("write primary epg");
         tokio::fs::write(
             &same_priority_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
@@ -1293,8 +1302,8 @@ mod tests {
   </programme>
 </tv>"#,
         )
-        .await
-        .expect("write same priority epg");
+            .await
+            .expect("write same priority epg");
 
         let app_state = test_app_state(Arc::new(app_config));
         let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
