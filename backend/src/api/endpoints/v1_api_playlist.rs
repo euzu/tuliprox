@@ -406,7 +406,32 @@ async fn playlist_epg(
         }
         PlaylistEpgRequest::Input(input_name) => {
             if let Some(input) = app_state.app_config.get_input_by_name(&input_name.intern()) {
-                if let Ok(Some(epg)) = load_epg_channels_for_input(&app_state, input.as_ref()).await {
+                match load_epg_channels_for_input(&app_state, input.as_ref()).await {
+                    Ok(Some(epg)) => {
+                        let config = app_state.app_config.config.load();
+                        let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
+                        let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+                        let encrypt_secret = app_state.get_encrypt_secret();
+                        let epg = epg
+                            .into_iter()
+                            .map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel))
+                            .collect::<Vec<_>>();
+                        return json_or_bin_response(accept.as_deref(), &epg).into_response();
+                    }
+                    Ok(None) => return axum::http::StatusCode::NO_CONTENT.into_response(),
+                    Err(err) => {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({"error": err.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+        PlaylistEpgRequest::Custom(url) => {
+            match parse_xmltv_for_web_ui_from_url(&app_state, &url).await {
+                Ok(epg) => {
                     let config = app_state.app_config.config.load();
                     let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
                     let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
@@ -417,19 +442,13 @@ async fn playlist_epg(
                         .collect::<Vec<_>>();
                     return json_or_bin_response(accept.as_deref(), &epg).into_response();
                 }
-            }
-        }
-        PlaylistEpgRequest::Custom(url) => {
-            if let Ok(epg) = parse_xmltv_for_web_ui_from_url(&app_state, &url).await {
-                let config = app_state.app_config.config.load();
-                let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
-                let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
-                let encrypt_secret = app_state.get_encrypt_secret();
-                let epg = epg
-                    .into_iter()
-                    .map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel))
-                    .collect::<Vec<_>>();
-                return json_or_bin_response(accept.as_deref(), &epg).into_response();
+                Err(err) => {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(serde_json::json!({"error": err.to_string()})),
+                    )
+                        .into_response();
+                }
             }
         }
     }

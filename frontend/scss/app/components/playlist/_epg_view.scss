@@ -79,6 +79,12 @@ $epg-border-size: 4px;
     z-index: 10;
     background-color: var(--background-color);
     touch-action: none;
+    cursor: grab;
+
+    &-panning {
+      cursor: grabbing;
+      user-select: none;
+    }
   }
 
   &__channels {
@@ -105,6 +111,10 @@ $epg-border-size: 4px;
     min-width: 100%;
     height: fit-content;
     position: relative;
+
+    &-panning {
+      touch-action: none;
+    }
   }
 
   &__program-grid {
