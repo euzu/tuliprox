@@ -21,7 +21,7 @@ use reqwest::{
 use shared::utils::DEFAULT_USER_AGENT;
 use shared::{
     error::{string_to_io_error, TuliproxError},
-    model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy},
+    model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy, ProviderUrlSelectionPolicy},
     utils::{
         filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
         ENCODING_GZIP,
@@ -281,7 +281,10 @@ fn preview_attempt_target(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> 
 }
 
 fn provider_start_index(provider: Option<&Arc<ConfigProvider>>) -> usize {
-    provider.map_or(0, |provider| provider.get_current_index())
+    provider.map_or(0, |provider| match provider.provider_url_selection_policy() {
+        ProviderUrlSelectionPolicy::ResumeLastWorking => provider.get_current_index(),
+        ProviderUrlSelectionPolicy::RestartFromFirst => 0,
+    })
 }
 
 fn next_provider_url_index(current_index: usize, provider_url_count: usize, start_index: usize) -> Option<usize> {
@@ -1737,7 +1740,7 @@ mod tests {
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
-        ConfigPaths, ConfigProviderDto, DnsScheme, OnConnectErrorPolicy, ProviderDnsDto,
+        ConfigPaths, ConfigProviderDto, DnsScheme, OnConnectErrorPolicy, ProviderDnsDto, ProviderUrlSelectionPolicy,
     };
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
     use std::{
@@ -1790,6 +1793,7 @@ mod tests {
         let dto = ConfigProviderDto {
             name: "provider-a".into(),
             urls: vec!["http://example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
             dns: Some(ProviderDnsDto {
                 enabled: true,
                 schemes: Some(vec![DnsScheme::Http, DnsScheme::Https]),
@@ -2002,6 +2006,7 @@ mod tests {
                 "http://provider-a.example".into(),
                 "http://provider-b.example".into(),
             ],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
             dns: None,
         }));
         provider.set_current_index(1);
@@ -2095,6 +2100,7 @@ mod tests {
                 format!("http://127.0.0.1:{}", dead_addr.port()).into(),
                 format!("http://127.0.0.1:{}", addr_b.port()).into(),
             ],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
             dns: None,
         }));
 
@@ -2117,6 +2123,82 @@ mod tests {
         let second_body = second_response.text().await.expect("response body should be readable");
 
         assert_eq!(second_body, "b");
+        assert_eq!(accepted_b.load(Ordering::SeqCst), 2);
+
+        handle_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_provider_request_chain_restarts_from_first_url_when_policy_requests_it() {
+        let (addr_b, accepted_b, handle_b) = match start_plain_http_server_with_body(b"b").await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping test_provider_request_chain_restarts_from_first_url_when_policy_requests_it: {err}"
+                );
+                return;
+            }
+            Err(err) => panic!("failed to start test http server: {err}"),
+        };
+
+        let mut cfg = Config {
+            connect_timeout_secs: 1,
+            ..Config::default()
+        };
+        cfg.accept_insecure_ssl_certificates = true;
+        cfg.reverse_proxy = Some(ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: ResourceRetryConfig {
+                max_attempts: 1,
+                ..ResourceRetryConfig::default()
+            },
+            disabled_header: None,
+            stream: None,
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+        });
+        let app_config = make_test_app_config(cfg);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(400))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http client should build");
+        let dead_addr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "provider-a".into(),
+            urls: vec![
+                format!("http://127.0.0.1:{}", dead_addr.port()).into(),
+                format!("http://127.0.0.1:{}", addr_b.port()).into(),
+            ],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        }));
+
+        let url = Url::parse("provider://provider-a/live").expect("provider url should parse");
+        let first_response = send_with_retry_and_provider(&app_config, &url, Some(&provider), false, |resolved_url| {
+            client.get(resolved_url.clone())
+        })
+        .await
+        .expect("request should fail over to the second provider url");
+        let first_body = first_response.text().await.expect("response body should be readable");
+
+        assert_eq!(first_body, "b");
+        assert_eq!(provider.get_current_index(), 1);
+
+        let second_response = send_with_retry_and_provider(&app_config, &url, Some(&provider), false, |resolved_url| {
+            client.get(resolved_url.clone())
+        })
+        .await
+        .expect("next request should restart from the first provider url and fail over again");
+        let second_body = second_response.text().await.expect("response body should be readable");
+
+        assert_eq!(second_body, "b");
+        assert_eq!(provider.get_current_index(), 1);
         assert_eq!(accepted_b.load(Ordering::SeqCst), 2);
 
         handle_b.abort();

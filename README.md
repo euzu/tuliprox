@@ -68,6 +68,8 @@ Generate all four formats simultaneously from the same source — one setup, eve
 ### 5. Provider Failover & DNS Rotation — Maximum Availability
 
 - **Provider URL Failover**: Automatic rotation on errors (5xx, timeout) — seamless switching, no viewer disruption
+- **Configurable Provider URL Start Policy**: Per provider, choose whether new requests resume from the last working URL or  
+  always restart from the first URL
 - **`provider://` URL Scheme**: Reference providers by name — Tuliprox resolves to the active URL automatically
 - **DNS-Aware Connection Routing**: Provider DNS resolved asynchronously and cached
 - **Resolved DNS Persistence**: Resolved IPs persisted separately — no source config overwrite during hot reloads

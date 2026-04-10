@@ -201,19 +201,39 @@ impl EventManager {
             return;
         }
 
-        let mut registry = self.meter_registry.write().await;
-        if let Some(old_meter_uid) = registry.client_to_meter.insert(client_uid, meter_uid) {
-            if let Some(client_uids) = registry.meter_to_clients.get_mut(&old_meter_uid) {
-                client_uids.retain(|uid| *uid != client_uid);
-                if client_uids.is_empty() {
-                    registry.meter_to_clients.remove(&old_meter_uid);
+        let carried_entry = {
+            let mut registry = self.meter_registry.write().await;
+            let mut carried_entry = None;
+
+            if let Some(old_meter_uid) = registry.client_to_meter.insert(client_uid, meter_uid) {
+                if old_meter_uid != meter_uid {
+                    let previous_client_uids = registry.meter_to_clients.get(&old_meter_uid).cloned().unwrap_or_default();
+                    if previous_client_uids.len() == 1 && previous_client_uids[0] == client_uid {
+                        carried_entry = registry
+                            .meters
+                            .get(&old_meter_uid)
+                            .and_then(|meter| build_meter_entry(meter.snapshot(), vec![client_uid]));
+                    }
+                }
+
+                if let Some(client_uids) = registry.meter_to_clients.get_mut(&old_meter_uid) {
+                    client_uids.retain(|uid| *uid != client_uid);
+                    if client_uids.is_empty() {
+                        registry.meter_to_clients.remove(&old_meter_uid);
+                    }
                 }
             }
-        }
 
-        let client_uids = registry.meter_to_clients.entry(meter_uid).or_default();
-        if !client_uids.contains(&client_uid) {
-            client_uids.push(client_uid);
+            let client_uids = registry.meter_to_clients.entry(meter_uid).or_default();
+            if !client_uids.contains(&client_uid) {
+                client_uids.push(client_uid);
+            }
+
+            carried_entry
+        };
+
+        if let Some(entry) = carried_entry {
+            self.send_meter_batch(vec![entry]);
         }
     }
 
@@ -406,5 +426,47 @@ mod tests {
         assert_eq!(entries[0].meter_uid, 12);
         assert_eq!(entries[0].uids, vec![91]);
         assert_eq!(entries[0].total_kb, 2);
+    }
+
+    #[tokio::test]
+    async fn reassigning_meter_client_emits_old_meter_totals_for_single_client_streams() {
+        let manager = Arc::new(EventManager::new());
+        let old_meter = Arc::new(StreamMeterHandle::new(21, Arc::downgrade(&manager)));
+        let new_meter = Arc::new(StreamMeterHandle::new(22, Arc::downgrade(&manager)));
+        manager.register_meter(Arc::clone(&old_meter)).await;
+        manager.register_meter(Arc::clone(&new_meter)).await;
+        manager.register_meter_client(91, 21).await;
+        manager.stream_meter_subscriber_connected();
+        let mut meter_events = manager.get_meter_channel();
+
+        old_meter.record_bytes(3072);
+        manager.register_meter_client(91, 22).await;
+
+        let entries = meter_events.recv().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].meter_uid, 21);
+        assert_eq!(entries[0].uids, vec![91]);
+        assert_eq!(entries[0].total_kb, 3);
+    }
+
+    #[tokio::test]
+    async fn reassigning_meter_client_does_not_emit_old_meter_totals_for_shared_streams() {
+        let manager = Arc::new(EventManager::new());
+        let old_meter = Arc::new(StreamMeterHandle::new(31, Arc::downgrade(&manager)));
+        let new_meter = Arc::new(StreamMeterHandle::new(32, Arc::downgrade(&manager)));
+        manager.register_meter(Arc::clone(&old_meter)).await;
+        manager.register_meter(Arc::clone(&new_meter)).await;
+        manager.register_meter_client(91, 31).await;
+        manager.register_meter_client(92, 31).await;
+        manager.stream_meter_subscriber_connected();
+        let mut meter_events = manager.get_meter_channel();
+
+        old_meter.record_bytes(4096);
+        manager.register_meter_client(91, 32).await;
+
+        assert!(
+            meter_events.try_recv().is_err(),
+            "shared meters must not emit carried totals during reassignment"
+        );
     }
 }

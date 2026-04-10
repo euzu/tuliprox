@@ -1,5 +1,5 @@
 use crate::{
-    model::ProxyUserStatus,
+    model::{ConfigProviderDto, ProxyUserStatus},
     utils::{
         arc_str_option_null_if_empty_serde, arc_str_option_serde, arc_str_serde, deserialize_as_string_array,
         deserialize_json_as_opt_string, deserialize_number_from_string, deserialize_number_from_string_or_zero,
@@ -21,6 +21,8 @@ pub struct XtreamLoginRequest {
     pub url: String,
     pub username: String,
     pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<ConfigProviderDto>>,
 }
 
 impl fmt::Debug for XtreamLoginRequest {

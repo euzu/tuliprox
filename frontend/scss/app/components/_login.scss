@@ -5,7 +5,7 @@
   flex-flow: column;
   gap: 8px;
   margin: auto;
-  overflow: visible;
+  overflow: hidden;
   position: relative;
   z-index: 1;
   padding: 40px 20px;
@@ -114,6 +114,9 @@
     z-index: 1;
 
     .tp__input-wrapper {
+      display: flex;
+      flex-flow: row nowrap;
+      box-sizing: border-box;
       max-height: 3rem;
       height: 3rem;
       border: 1px solid var(--glass-input-border-color);

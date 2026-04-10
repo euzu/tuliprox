@@ -20,9 +20,10 @@ use shared::{
     error::TuliproxError,
     model::{
         ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto,
-        EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, StagedInputDto, XtreamLoginRequest,
+        EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, OnConnectErrorPolicy,
+        ProviderUrlSelectionPolicy, StagedInputDto, XtreamLoginRequest,
     },
-    utils::Internable,
+    utils::{Internable, BATCH_SCHEME_PREFIX},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -47,10 +48,19 @@ const LABEL_USERNAME: &str = "LABEL.USERNAME";
 const LABEL_PASSWORD: &str = "LABEL.PASSWORD";
 const LABEL_PERSIST: &str = "LABEL.PERSIST";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
+const LABEL_DISABLED: &str = "LABEL.DISABLED";
 const LABEL_ALIASES: &str = "LABEL.ALIASES";
 const LABEL_PRIORITY: &str = "LABEL.PRIORITY";
 const LABEL_MAX_CONNECTIONS: &str = "LABEL.MAX_CONNECTIONS";
 const LABEL_EXP_DATE: &str = "LABEL.EXP_DATE";
+const LABEL_SELECTION_POLICY: &str = "LABEL.SELECTION_POLICY";
+const LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING: &str = "LABEL.PROVIDER_URL_SELECTION_RESUME_LAST_WORKING";
+const LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST: &str = "LABEL.PROVIDER_URL_SELECTION_RESTART_FROM_FIRST";
+const LABEL_PROVIDER_DNS: &str = "LABEL.PROVIDER_DNS";
+const LABEL_DNS_ON_CONNECT_ERROR: &str = "LABEL.DNS_ON_CONNECT_ERROR";
+const LABEL_DNS_CONNECT_TRY_NEXT_IP: &str = "LABEL.DNS_CONNECT_TRY_NEXT_IP";
+const LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL: &str = "LABEL.DNS_CONNECT_ROTATE_PROVIDER_URL";
+const LABEL_DNS_REFRESH_SECS: &str = "LABEL.DNS_REFRESH_SECS";
 const LABEL_ADD_EPG_SOURCE: &str = "LABEL.ADD_EPG_SOURCE";
 const LABEL_ADD_ALIAS: &str = "LABEL.ADD_ALIAS";
 const LABEL_ADD_PROVIDER: &str = "LABEL.ADD_PROVIDER";
@@ -78,6 +88,32 @@ const LABEL_VOD_SOURCE: &str = "LABEL.VOD_SOURCE";
 const LABEL_SERIES_SOURCE: &str = "LABEL.SERIES_SOURCE";
 const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+
+fn provider_url_selection_policy_label_key(policy: ProviderUrlSelectionPolicy) -> &'static str {
+    match policy {
+        ProviderUrlSelectionPolicy::ResumeLastWorking => LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING,
+        ProviderUrlSelectionPolicy::RestartFromFirst => LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST,
+    }
+}
+
+fn provider_dns_enabled_text(provider: &ConfigProviderDto) -> &'static str {
+    if provider.dns.as_ref().is_some_and(|dns| dns.enabled) {
+        LABEL_ENABLED
+    } else {
+        LABEL_DISABLED
+    }
+}
+
+fn provider_on_connect_error_text(provider: &ConfigProviderDto) -> &'static str {
+    provider.dns.as_ref().filter(|dns| dns.enabled).map_or("-", |dns| match dns.on_connect_error {
+        OnConnectErrorPolicy::TryNextIp => LABEL_DNS_CONNECT_TRY_NEXT_IP,
+        OnConnectErrorPolicy::RotateProviderUrl => LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL,
+    })
+}
+
+fn provider_refresh_secs_text(provider: &ConfigProviderDto) -> String {
+    provider.dns.as_ref().filter(|dns| dns.enabled).map_or_else(|| "-".to_string(), |dns| dns.refresh_secs.to_string())
+}
 const LABEL_PROVIDER: &str = "LABEL.PROVIDER";
 const LABEL_LIVE_STREAMS: &str = "LABEL.LIVE_STREAMS";
 const LABEL_EPG_SMART_MATCH: &str = "LABEL.EPG_SMART_MATCH";
@@ -395,6 +431,28 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             }
             || ()
         });
+    }
+
+    {
+        let input_form_state = input_form_state.clone();
+        use_effect_with(
+            (
+                input_form_state.form.url.clone(),
+                input_form_state.form.username.clone(),
+                input_form_state.form.password.clone(),
+            ),
+            move |(url, username, password)| {
+                if url.starts_with(BATCH_SCHEME_PREFIX) {
+                    if username.is_some() {
+                        input_form_state.dispatch(ConfigInputFormAction::Username(None));
+                    }
+                    if password.is_some() {
+                        input_form_state.dispatch(ConfigInputFormAction::Password(None));
+                    }
+                }
+                || ()
+            },
+        );
     }
 
     let handle_add_epg_item = {
@@ -968,7 +1026,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     };
 
     let render_input = || {
+        let providers_state = providers_state.clone();
         let input_method_selection = Rc::new(vec![input_form_state.form.method.to_string()]);
+        let is_csv_batch = input_form_state.form.url.starts_with(BATCH_SCHEME_PREFIX);
         let input_form_state_disp = input_form_state.clone();
         let exp_date_tool_action = if input_form_state.form.input_type.is_xtream() {
             let services = services.clone();
@@ -1011,7 +1071,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     let exp_date_loading = exp_date_loading.clone();
                     let exp_date_request_in_flight = exp_date_request_in_flight.clone();
                     let exp_date_request_token = exp_date_request_token.clone();
-                    let request = XtreamLoginRequest { url, username, password };
+                    let providers = (!(*providers_state).is_empty()).then_some((*providers_state).clone());
+                    let request = XtreamLoginRequest { url, username, password, providers };
 
                     spawn_local(async move {
                         let current_snapshot = || {
@@ -1063,15 +1124,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     <>
                      { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
                      <div class="tp__config-view__cols-2">
-                     { html_if!(xtream_input, {
+                     { html_if!(xtream_input && !is_csv_batch, {
                        <>
                        { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
                        { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
                        </>
                      })}
-                     { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
-                     { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
-                     { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
+                     { html_if!(!is_csv_batch, {
+                         <>
+                         { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
+                         { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
+                         { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
+                         </>
+                     })}
                      { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
                      { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
                      </div>
@@ -1091,15 +1156,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <>
                  { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
                  <div class="tp__config-view__cols-2">
-                 { html_if!(xtream_input, {
+                 { html_if!(xtream_input && !is_csv_batch, {
                    <>
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
                    </>
                  })}
-                 { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-                 { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                 { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
+                 { html_if!(!is_csv_batch, {
+                   <>
+                   { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
+                   { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
+                   { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
+                   </>
+                 })}
                  { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
                  { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
                    html! {
@@ -1132,6 +1201,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
               if *show_alias_form {
                     <AliasItemForm
                         input_type={input_form_state.form.input_type}
+                        providers={(*providers_state).clone()}
                         initial={(*edit_alias).clone()}
                         on_submit={handle_add_alias_item}
                         on_cancel={handle_close_add_alias_item}
@@ -1238,7 +1308,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                             {
                                 for (*provider_list).iter().enumerate().map(|(idx, provider)| {
                                     html! {
-                                        <div class="tp__form-list__item" key={format!("provider-{idx}")}>
+                                        <div class="tp__form-list__item tp__provider-list-item" key={format!("provider-{idx}")}>
                                             <div class="tp__form-list__item-toolbar">
                                                 <IconButton
                                                     name={idx.to_string()}
@@ -1254,9 +1324,45 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                                 }
                                             </div>
                                             <div class="tp__form-list__item-content">
-                                                <span>
+                                                <span class="tp__provider-list-item__name">
                                                     <strong>{provider.name.as_ref()}</strong>
                                                 </span>
+                                                <div class="tp__provider-list-item__meta">
+                                                    <div class="tp__provider-list-item__meta-row">
+                                                        <span class="tp__provider-list-item__meta-label">{"URLs: "}</span>
+                                                        <span class="tp__provider-list-item__meta-value">{provider.urls.len()}</span>
+                                                    </div>
+                                                    <div class="tp__provider-list-item__meta-row">
+                                                        <span class="tp__provider-list-item__meta-label">{format!("{}: ", translate.t(LABEL_SELECTION_POLICY))}</span>
+                                                        <span class="tp__provider-list-item__meta-value">
+                                                            {translate.t(provider_url_selection_policy_label_key(provider.provider_url_selection_policy))}
+                                                        </span>
+                                                    </div>
+                                                    <div class="tp__provider-list-item__meta-row">
+                                                        <span class="tp__provider-list-item__meta-label">{format!("{}: ", translate.t(LABEL_PROVIDER_DNS))}</span>
+                                                        <span class="tp__provider-list-item__meta-value">
+                                                            {translate.t(provider_dns_enabled_text(provider))}
+                                                        </span>
+                                                    </div>
+                                                    <div class="tp__provider-list-item__meta-row">
+                                                        <span class="tp__provider-list-item__meta-label">{format!("{}: ", translate.t(LABEL_DNS_ON_CONNECT_ERROR))}</span>
+                                                        <span class="tp__provider-list-item__meta-value">
+                                                            {
+                                                                if provider_on_connect_error_text(provider) == "-" {
+                                                                    "-".into()
+                                                                } else {
+                                                                    translate.t(provider_on_connect_error_text(provider))
+                                                                }
+                                                            }
+                                                        </span>
+                                                    </div>
+                                                    <div class="tp__provider-list-item__meta-row">
+                                                        <span class="tp__provider-list-item__meta-label">{format!("{}: ", translate.t(LABEL_DNS_REFRESH_SECS))}</span>
+                                                        <span class="tp__provider-list-item__meta-value">
+                                                            {provider_refresh_secs_text(provider)}
+                                                        </span>
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                     }
