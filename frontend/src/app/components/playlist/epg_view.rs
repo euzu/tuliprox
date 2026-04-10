@@ -19,9 +19,8 @@ use yew::{
     Callback, Html,
 };
 
-const TIME_BLOCK_WIDTH: f64 = 210.0;
 const TIME_BLOCK_MINS: i64 = 30;
-const DEFAULT_PIXELS_PER_MIN: f64 = TIME_BLOCK_WIDTH / TIME_BLOCK_MINS as f64;
+const DEFAULT_PIXELS_PER_MIN: f64 = 7.0; // 210px / 30min
 const MIN_PIXELS_PER_MIN: f64 = 2.0;
 const MAX_PIXELS_PER_MIN: f64 = 28.0;
 const WHEEL_ZOOM_FACTOR_IN: f64 = 1.1;
@@ -31,11 +30,15 @@ const ZOOM_EQUALITY_TOLERANCE: f64 = 0.01;
 #[derive(Clone, Copy)]
 struct TimelineZoom(f64);
 
+impl TimelineZoom {
+    fn new(pixels_per_min: f64) -> Self { Self(pixels_per_min.clamp(MIN_PIXELS_PER_MIN, MAX_PIXELS_PER_MIN)) }
+
+    fn value(self) -> f64 { self.0 }
+}
+
 impl PartialEq for TimelineZoom {
     fn eq(&self, other: &Self) -> bool { (self.0 - other.0).abs() < ZOOM_EQUALITY_TOLERANCE }
 }
-
-fn clamp_timeline_zoom(pixels_per_min: f64) -> f64 { pixels_per_min.clamp(MIN_PIXELS_PER_MIN, MAX_PIXELS_PER_MIN) }
 
 fn compute_zoomed_scroll_left(
     scroll_left: f64,
@@ -62,12 +65,13 @@ fn get_pos(secs: i64, start_mins: i64, pixels_per_min: f64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_timeline_zoom, compute_panned_scroll, compute_zoomed_scroll_left};
+    use super::{compute_panned_scroll, compute_zoomed_scroll_left, TimelineZoom};
 
     #[test]
-    fn clamp_timeline_zoom_respects_bounds() {
-        assert_eq!(clamp_timeline_zoom(0.5), 2.0);
-        assert_eq!(clamp_timeline_zoom(999.0), 28.0);
+    fn timeline_zoom_new_clamps_bounds() {
+        assert_eq!(TimelineZoom::new(0.5).value(), 2.0);
+        assert_eq!(TimelineZoom::new(999.0).value(), 28.0);
+        assert_eq!(TimelineZoom::new(7.0).value(), 7.0);
     }
 
     #[test]
@@ -105,6 +109,40 @@ type OnScrollHandle = Rc<RefCell<Option<Closure<dyn FnMut(web_sys::Event)>>>>;
 type MouseMoveHandle = Rc<RefCell<Option<Closure<dyn FnMut(MouseEvent)>>>>;
 type MouseUpHandle = Rc<RefCell<Option<Closure<dyn FnMut(MouseEvent)>>>>;
 type RafClosure = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
+
+fn register_mouse_pan(
+    is_active: bool,
+    on_move: Box<dyn FnMut(MouseEvent)>,
+    on_up: Box<dyn FnMut(MouseEvent)>,
+) -> (Option<MouseMoveHandle>, Option<MouseUpHandle>) {
+    if !is_active {
+        return (None, None);
+    }
+    let Some(win) = window() else { return (None, None) };
+    let move_handle: MouseMoveHandle = Rc::new(RefCell::new(None));
+    let up_handle: MouseUpHandle = Rc::new(RefCell::new(None));
+
+    let mouse_move = Closure::wrap(on_move);
+    let _ = win.add_event_listener_with_callback("mousemove", mouse_move.as_ref().unchecked_ref());
+    *move_handle.borrow_mut() = Some(mouse_move);
+
+    let mouse_up = Closure::wrap(on_up);
+    let _ = win.add_event_listener_with_callback("mouseup", mouse_up.as_ref().unchecked_ref());
+    *up_handle.borrow_mut() = Some(mouse_up);
+
+    (Some(move_handle), Some(up_handle))
+}
+
+fn unregister_mouse_pan(move_handle: MouseMoveHandle, up_handle: MouseUpHandle) {
+    if let Some(win) = window() {
+        if let Some(mouse_move) = move_handle.borrow_mut().take() {
+            let _ = win.remove_event_listener_with_callback("mousemove", mouse_move.as_ref().unchecked_ref());
+        }
+        if let Some(mouse_up) = up_handle.borrow_mut().take() {
+            let _ = win.remove_event_listener_with_callback("mouseup", mouse_up.as_ref().unchecked_ref());
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct TimelinePinchState {
@@ -163,13 +201,14 @@ pub fn EpgView() -> Html {
     let container_ref = use_node_ref();
     let now_line_ref = use_node_ref();
     let timeline_ref = use_node_ref();
-    let pixels_per_min = use_state(|| TimelineZoom(DEFAULT_PIXELS_PER_MIN));
+    let pixels_per_min = use_state(|| TimelineZoom::new(DEFAULT_PIXELS_PER_MIN));
     // pending_scroll_left is mutated via use_mut_ref (no re-render).
     // It is read inside a use_effect_with triggered by pixels_per_min changes.
     let pending_scroll_left = use_mut_ref(|| None::<i32>);
     let pending_zoom = use_mut_ref(|| None::<(f64, f64)>);
     let raf_id = use_mut_ref(|| None::<i32>);
     let raf_closure = RafClosure::new(RefCell::new(None));
+    let epg_request_token = use_mut_ref(|| 0u32);
     let pinch_state = use_mut_ref(|| None::<TimelinePinchState>);
     let program_pan_state = use_mut_ref(|| None::<ProgramPanState>);
     let timeline_pan_state = use_mut_ref(|| None::<TimelinePanState>);
@@ -204,11 +243,12 @@ pub fn EpgView() -> Html {
         let pending_zoom = pending_zoom.clone();
         let raf_id = raf_id.clone();
         let raf_closure = raf_closure.clone();
+        let epg_request_token = epg_request_token.clone();
         Callback::from(move |req: PlaylistEpgRequest| {
             epg_set.set(None);
             search_filter.set(SearchRequest::Clear);
             visible_range.set((0, 20));
-            pixels_per_min.set(TimelineZoom(DEFAULT_PIXELS_PER_MIN));
+            pixels_per_min.set(TimelineZoom::new(DEFAULT_PIXELS_PER_MIN));
             *pending_scroll_left.borrow_mut() = Some(0);
             *pending_zoom.borrow_mut() = None;
             if let Some(id) = raf_id.borrow_mut().take() {
@@ -221,14 +261,23 @@ pub fn EpgView() -> Html {
                 el.set_scroll_top(0);
                 el.set_scroll_left(0);
             }
+            let token = {
+                let mut t = epg_request_token.borrow_mut();
+                *t = t.wrapping_add(1);
+                *t
+            };
             let service_ctx = service_ctx.clone();
             let epg_set = epg_set.clone();
+            let epg_request_token = epg_request_token.clone();
             service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Show));
             spawn_local(async move {
                 let playlist_epg = service_ctx.playlist.get_playlist_epg(req).await;
-                service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
+                if token != *epg_request_token.borrow() {
+                    return;
+                }
                 set_timeout(
                     move || {
+                        service_ctx.event.broadcast(EventMessage::Busy(BusyStatus::Hide));
                         epg_set.set(playlist_epg);
                     },
                     16,
@@ -238,7 +287,7 @@ pub fn EpgView() -> Html {
     };
 
     let epg_window = (*epg).as_ref().map(|tv| (tv.start, tv.stop));
-    let timeline_zoom = pixels_per_min.0;
+    let timeline_zoom = pixels_per_min.value();
 
     let timeline_layout = use_memo((epg_window, timeline_zoom), |(epg_window, timeline_zoom)| {
         let Some((start, stop)) = *epg_window else {
@@ -257,42 +306,44 @@ pub fn EpgView() -> Html {
     });
 
     // Memoized timeline — only rebuilt when EPG data changes, not on every scroll
-    let timeline_html = use_memo((epg_window, timeline_zoom), |(epg_window, timeline_zoom)| {
-        let Some((start, stop)) = *epg_window else { return html! {} };
-        let start_window_secs = (start / (TIME_BLOCK_MINS * 60)) * (TIME_BLOCK_MINS * 60);
-        let start_window = (start_window_secs / 60).max(0);
-        let end_window = (stop / 60).max(0);
-        let window_duration = (end_window - start_window).max(0);
-        let num_blocks = (window_duration + TIME_BLOCK_MINS - 1) / TIME_BLOCK_MINS;
-        let block_width = timeline_zoom * TIME_BLOCK_MINS as f64;
-        let block_style = format!("width:{block_width}px; min-width:{block_width}px; max-width:{block_width}px");
-        html! {
-            <div class="tp__epg__timeline">
-                { for (0..num_blocks).map(|i| {
-                    let block_start = start_window + i * TIME_BLOCK_MINS;
-                    let block_secs = block_start.saturating_mul(60);
-                    if let Some(start_time_utc) = Utc.timestamp_opt(block_secs, 0).single() {
-                        let start_time_local = start_time_utc.with_timezone(&Local);
-                        let hour_min = start_time_local.format("%H:%M").to_string();
-                        let day_month = format!("{:02}.{:02}", start_time_local.day(), start_time_local.month());
-                        html! {
-                            <div class="tp__epg__timeline-block" style={block_style.clone()}>
-                                <div class="tp__epg__timeline-block-time">{ hour_min }</div>
-                                <div class="tp__epg__timeline-block-date">{ day_month }</div>
-                            </div>
+    let timeline_html = use_memo(
+        (epg_window, timeline_zoom, timeline_layout.clone()),
+        |(epg_window, timeline_zoom, timeline_layout)| {
+            let (start_window, num_blocks, _) = **timeline_layout;
+            let Some((_, _)) = *epg_window else { return html! {} };
+            if num_blocks == 0 {
+                return html! {};
+            }
+            let block_width = timeline_zoom * TIME_BLOCK_MINS as f64;
+            let block_style = format!("width:{block_width}px; min-width:{block_width}px; max-width:{block_width}px");
+            html! {
+                <div class="tp__epg__timeline">
+                    { for (0..num_blocks).map(|i| {
+                        let block_start = start_window + i * TIME_BLOCK_MINS;
+                        let block_secs = block_start.saturating_mul(60);
+                        if let Some(start_time_utc) = Utc.timestamp_opt(block_secs, 0).single() {
+                            let start_time_local = start_time_utc.with_timezone(&Local);
+                            let hour_min = start_time_local.format("%H:%M").to_string();
+                            let day_month = format!("{:02}.{:02}", start_time_local.day(), start_time_local.month());
+                            html! {
+                                <div class="tp__epg__timeline-block" style={block_style.clone()}>
+                                    <div class="tp__epg__timeline-block-time">{ hour_min }</div>
+                                    <div class="tp__epg__timeline-block-date">{ day_month }</div>
+                                </div>
+                            }
+                        } else {
+                            html!{ <div class="tp__epg__timeline-block" style={block_style.clone()}></div> }
                         }
-                    } else {
-                        html!{ <div class="tp__epg__timeline-block" style={block_style.clone()}></div> }
-                    }
-                }) }
-            </div>
-        }
-    });
+                    }) }
+                </div>
+            }
+        },
+    );
 
     {
         let container_ref = container_ref.clone();
         let pending_scroll_left = pending_scroll_left.clone();
-        use_effect_with(pixels_per_min.0, move |_| {
+        use_effect_with(pixels_per_min.value(), move |_| {
             if let Some(scroll_left) = pending_scroll_left.borrow_mut().take() {
                 if let Some(container) = container_ref.cast::<HtmlElement>() {
                     container.set_scroll_left(scroll_left);
@@ -320,7 +371,7 @@ pub fn EpgView() -> Html {
     {
         let container_ref = container_ref.clone();
         let now_line_ref = now_line_ref.clone();
-        use_effect_with((epg_window, pixels_per_min.0), move |(epg_window, pixels_per_min)| {
+        use_effect_with((epg_window, pixels_per_min.value()), move |(epg_window, pixels_per_min)| {
             let epg_window_clone = *epg_window;
             let pixels_per_min = *pixels_per_min;
             let update_position = Rc::new(move |epg_window: &Option<(i64, i64)>| {
@@ -341,7 +392,7 @@ pub fn EpgView() -> Html {
         let now_line_ref = now_line_ref.clone();
         let pixels_per_min = pixels_per_min.clone();
         use_effect_with(epg_window, move |epg_window| {
-            update_now_line(&container_ref, &now_line_ref, epg_window, pixels_per_min.0, true);
+            update_now_line(&container_ref, &now_line_ref, epg_window, pixels_per_min.value(), true);
             || ()
         });
     }
@@ -354,7 +405,7 @@ pub fn EpgView() -> Html {
         let container_ref = container_ref.clone();
         let pending_scroll_left = pending_scroll_left.clone();
         Callback::from(move |(next_pixels_per_min, anchor_x): (f64, f64)| {
-            let next_pixels_per_min = clamp_timeline_zoom(next_pixels_per_min);
+            let next_pixels_per_min = TimelineZoom::new(next_pixels_per_min).value();
             *pending_zoom.borrow_mut() = Some((next_pixels_per_min, anchor_x));
 
             // If RAF already scheduled, it will pick up the latest pending_zoom
@@ -382,7 +433,7 @@ pub fn EpgView() -> Html {
                 let scroll_left = container_ref_r.cast::<HtmlElement>().map_or(0.0, |c| f64::from(c.scroll_left()));
                 let next_scroll = compute_zoomed_scroll_left(scroll_left, anchor_x.max(0.0), current_ppm, next_ppm);
                 *pending_scroll_left_r.borrow_mut() = Some(next_scroll.round() as i32);
-                pixels_per_min_r.set(TimelineZoom(next_ppm));
+                pixels_per_min_r.set(TimelineZoom::new(next_ppm));
             }) as Box<dyn FnMut(f64)>);
 
             if let Ok(id) = win.request_animation_frame(closure.as_ref().unchecked_ref()) {
@@ -403,9 +454,9 @@ pub fn EpgView() -> Html {
                 let rect = timeline.get_bounding_client_rect();
                 let anchor_x = f64::from(e.client_x()) - rect.left();
                 let next_pixels_per_min = if e.delta_y() < 0.0 {
-                    pixels_per_min.0 * WHEEL_ZOOM_FACTOR_IN
+                    pixels_per_min.value() * WHEEL_ZOOM_FACTOR_IN
                 } else {
-                    pixels_per_min.0 * WHEEL_ZOOM_FACTOR_OUT
+                    pixels_per_min.value() * WHEEL_ZOOM_FACTOR_OUT
                 };
                 apply_timeline_zoom.emit((next_pixels_per_min, anchor_x));
             }
@@ -447,7 +498,7 @@ pub fn EpgView() -> Html {
                 *pinch_state.borrow_mut() = Some(TimelinePinchState {
                     distance,
                     anchor_x: midpoint_x - rect.left(),
-                    pixels_per_min: pixels_per_min.0,
+                    pixels_per_min: pixels_per_min.value(),
                 });
             } else if touch_count == 1 {
                 let Some(container) = container_ref.cast::<HtmlElement>() else {
@@ -550,49 +601,30 @@ pub fn EpgView() -> Html {
         let timeline_pan_state = timeline_pan_state.clone();
         let is_timeline_panning_handle = is_timeline_panning.clone();
         use_effect_with(*is_timeline_panning, move |is_timeline_panning| {
-            let move_handle: MouseMoveHandle = Rc::new(RefCell::new(None));
-            let up_handle: MouseUpHandle = Rc::new(RefCell::new(None));
-            if *is_timeline_panning {
-                if let Some(win) = window() {
-                    let container_ref_for_move = container_ref.clone();
-                    let timeline_pan_state_for_move = timeline_pan_state.clone();
-                    let mouse_move = Closure::wrap(Box::new(move |e: MouseEvent| {
-                        let Some(pan_state) = *timeline_pan_state_for_move.borrow() else {
-                            return;
-                        };
-                        let Some(container) = container_ref_for_move.cast::<HtmlElement>() else {
-                            return;
-                        };
-                        e.prevent_default();
-                        container.set_scroll_left(compute_panned_scroll(
-                            pan_state.scroll_left,
-                            pan_state.pointer_x,
-                            e.client_x(),
-                        ));
-                    }) as Box<dyn FnMut(_)>);
-                    let _ = win.add_event_listener_with_callback("mousemove", mouse_move.as_ref().unchecked_ref());
-                    *move_handle.borrow_mut() = Some(mouse_move);
-
-                    let timeline_pan_state_for_up = timeline_pan_state.clone();
-                    let is_timeline_panning_for_up = is_timeline_panning_handle.clone();
-                    let mouse_up = Closure::wrap(Box::new(move |_e: MouseEvent| {
-                        *timeline_pan_state_for_up.borrow_mut() = None;
-                        is_timeline_panning_for_up.set(false);
-                    }) as Box<dyn FnMut(_)>);
-                    let _ = win.add_event_listener_with_callback("mouseup", mouse_up.as_ref().unchecked_ref());
-                    *up_handle.borrow_mut() = Some(mouse_up);
-                }
-            }
-
+            let container_ref_m = container_ref.clone();
+            let timeline_pan_state_m = timeline_pan_state.clone();
+            let timeline_pan_state_u = timeline_pan_state.clone();
+            let is_timeline_panning_u = is_timeline_panning_handle.clone();
+            let (move_handle, up_handle) = register_mouse_pan(
+                *is_timeline_panning,
+                Box::new(move |e: MouseEvent| {
+                    let Some(pan_state) = *timeline_pan_state_m.borrow() else { return };
+                    let Some(container) = container_ref_m.cast::<HtmlElement>() else { return };
+                    e.prevent_default();
+                    container.set_scroll_left(compute_panned_scroll(
+                        pan_state.scroll_left,
+                        pan_state.pointer_x,
+                        e.client_x(),
+                    ));
+                }),
+                Box::new(move |_e: MouseEvent| {
+                    *timeline_pan_state_u.borrow_mut() = None;
+                    is_timeline_panning_u.set(false);
+                }),
+            );
             move || {
-                if let Some(win) = window() {
-                    if let Some(mouse_move) = move_handle.borrow_mut().take() {
-                        let _ =
-                            win.remove_event_listener_with_callback("mousemove", mouse_move.as_ref().unchecked_ref());
-                    }
-                    if let Some(mouse_up) = up_handle.borrow_mut().take() {
-                        let _ = win.remove_event_listener_with_callback("mouseup", mouse_up.as_ref().unchecked_ref());
-                    }
+                if let (Some(mh), Some(uh)) = (move_handle, up_handle) {
+                    unregister_mouse_pan(mh, uh);
                 }
             }
         });
@@ -626,54 +658,35 @@ pub fn EpgView() -> Html {
         let program_pan_state = program_pan_state.clone();
         let is_program_panning_handle = is_program_panning.clone();
         use_effect_with(*is_program_panning, move |is_program_panning| {
-            let move_handle: MouseMoveHandle = Rc::new(RefCell::new(None));
-            let up_handle: MouseUpHandle = Rc::new(RefCell::new(None));
-            if *is_program_panning {
-                if let Some(win) = window() {
-                    let container_ref_for_move = container_ref.clone();
-                    let program_pan_state_for_move = program_pan_state.clone();
-                    let mouse_move = Closure::wrap(Box::new(move |e: MouseEvent| {
-                        let Some(pan_state) = *program_pan_state_for_move.borrow() else {
-                            return;
-                        };
-                        let Some(container) = container_ref_for_move.cast::<HtmlElement>() else {
-                            return;
-                        };
-                        e.prevent_default();
-                        container.set_scroll_left(compute_panned_scroll(
-                            pan_state.scroll_left,
-                            pan_state.pointer_x,
-                            e.client_x(),
-                        ));
-                        container.set_scroll_top(compute_panned_scroll(
-                            pan_state.scroll_top,
-                            pan_state.pointer_y,
-                            e.client_y(),
-                        ));
-                    }) as Box<dyn FnMut(_)>);
-                    let _ = win.add_event_listener_with_callback("mousemove", mouse_move.as_ref().unchecked_ref());
-                    *move_handle.borrow_mut() = Some(mouse_move);
-
-                    let program_pan_state_for_up = program_pan_state.clone();
-                    let is_program_panning_for_up = is_program_panning_handle.clone();
-                    let mouse_up = Closure::wrap(Box::new(move |_e: MouseEvent| {
-                        *program_pan_state_for_up.borrow_mut() = None;
-                        is_program_panning_for_up.set(false);
-                    }) as Box<dyn FnMut(_)>);
-                    let _ = win.add_event_listener_with_callback("mouseup", mouse_up.as_ref().unchecked_ref());
-                    *up_handle.borrow_mut() = Some(mouse_up);
-                }
-            }
-
+            let container_ref_m = container_ref.clone();
+            let program_pan_state_m = program_pan_state.clone();
+            let program_pan_state_u = program_pan_state.clone();
+            let is_program_panning_u = is_program_panning_handle.clone();
+            let (move_handle, up_handle) = register_mouse_pan(
+                *is_program_panning,
+                Box::new(move |e: MouseEvent| {
+                    let Some(pan_state) = *program_pan_state_m.borrow() else { return };
+                    let Some(container) = container_ref_m.cast::<HtmlElement>() else { return };
+                    e.prevent_default();
+                    container.set_scroll_left(compute_panned_scroll(
+                        pan_state.scroll_left,
+                        pan_state.pointer_x,
+                        e.client_x(),
+                    ));
+                    container.set_scroll_top(compute_panned_scroll(
+                        pan_state.scroll_top,
+                        pan_state.pointer_y,
+                        e.client_y(),
+                    ));
+                }),
+                Box::new(move |_e: MouseEvent| {
+                    *program_pan_state_u.borrow_mut() = None;
+                    is_program_panning_u.set(false);
+                }),
+            );
             move || {
-                if let Some(win) = window() {
-                    if let Some(mouse_move) = move_handle.borrow_mut().take() {
-                        let _ =
-                            win.remove_event_listener_with_callback("mousemove", mouse_move.as_ref().unchecked_ref());
-                    }
-                    if let Some(mouse_up) = up_handle.borrow_mut().take() {
-                        let _ = win.remove_event_listener_with_callback("mouseup", mouse_up.as_ref().unchecked_ref());
-                    }
+                if let (Some(mh), Some(uh)) = (move_handle, up_handle) {
+                    unregister_mouse_pan(mh, uh);
                 }
             }
         });
@@ -905,8 +918,8 @@ pub fn EpgView() -> Html {
                                       <div key={i} class="tp__epg__channel-programs" style={row_style}>
                                         { for ch.programmes.iter().map(|p| {
                                             let is_active = now >= p.start && now < p.stop;
-                                            let left = get_pos(p.start, *start_window, pixels_per_min.0);
-                                            let right = get_pos(p.stop, *start_window, pixels_per_min.0);
+                                            let left = get_pos(p.start, *start_window, pixels_per_min.value());
+                                            let right = get_pos(p.stop, *start_window, pixels_per_min.value());
                                             let width = (right - left).max(0);
 
                                             if let (Some(pstart_time), Some(pend_time)) = (

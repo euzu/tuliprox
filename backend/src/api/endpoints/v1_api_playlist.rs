@@ -200,14 +200,30 @@ async fn load_epg_channels_for_input(
 
     for epg_source in &epg_config.sources {
         let resolved_url = resolve_provider_url_with_input(input, &epg_source.url);
-        let raw_epg_path = get_input_raw_epg_file_path(&resolved_url, input, &storage_dir)
-            .await
-            .map_err(|err| shared::error::TuliproxError::Io(format!("Could not access epg file download directory: {err}")))?;
+        let raw_epg_path = match get_input_raw_epg_file_path(&resolved_url, input, &storage_dir).await {
+            Ok(path) => path,
+            Err(err) => {
+                debug!("Skipping EPG source {}: {err}", sanitize_sensitive_info(resolved_url.as_str()));
+                continue;
+            }
+        };
 
         let source_channels = if file_exists_async(&raw_epg_path).await {
-            parse_xmltv_for_web_ui_from_file(&raw_epg_path).await?
+            match parse_xmltv_for_web_ui_from_file(&raw_epg_path).await {
+                Ok(ch) => ch,
+                Err(err) => {
+                    debug!("Skipping EPG file {}: {err}", sanitize_sensitive_info(raw_epg_path.to_str().unwrap_or_default()));
+                    continue;
+                }
+            }
         } else {
-            parse_xmltv_for_web_ui_from_url(app_state, &resolved_url).await?
+            match parse_xmltv_for_web_ui_from_url(app_state, &resolved_url).await {
+                Ok(ch) => ch,
+                Err(err) => {
+                    debug!("Skipping EPG url {}: {err}", sanitize_sensitive_info(resolved_url.as_str()));
+                    continue;
+                }
+            }
         };
         channels_by_source.push((epg_source.priority, source_channels));
     }
