@@ -197,6 +197,7 @@ async fn load_epg_channels_for_input(
 
     let storage_dir = app_state.app_config.config.load().storage_dir.clone();
     let mut channels_by_source = Vec::new();
+    let mut failed_sources = 0usize;
 
     for epg_source in &epg_config.sources {
         let resolved_url = resolve_provider_url_with_input(input, &epg_source.url);
@@ -204,6 +205,7 @@ async fn load_epg_channels_for_input(
             Ok(path) => path,
             Err(err) => {
                 debug!("Skipping EPG source {}: {err}", sanitize_sensitive_info(resolved_url.as_str()));
+                failed_sources += 1;
                 continue;
             }
         };
@@ -211,9 +213,19 @@ async fn load_epg_channels_for_input(
         let source_channels = if file_exists_async(&raw_epg_path).await {
             match parse_xmltv_for_web_ui_from_file(&raw_epg_path).await {
                 Ok(ch) => ch,
-                Err(err) => {
-                    debug!("Skipping EPG file {}: {err}", sanitize_sensitive_info(raw_epg_path.to_str().unwrap_or_default()));
-                    continue;
+                Err(file_err) => {
+                    debug!(
+                        "EPG file parse failed {}, trying upstream: {file_err}",
+                        sanitize_sensitive_info(raw_epg_path.to_str().unwrap_or_default())
+                    );
+                    match parse_xmltv_for_web_ui_from_url(app_state, &resolved_url).await {
+                        Ok(ch) => ch,
+                        Err(url_err) => {
+                            debug!("EPG url also failed {}: {url_err}", sanitize_sensitive_info(resolved_url.as_str()));
+                            failed_sources += 1;
+                            continue;
+                        }
+                    }
                 }
             }
         } else {
@@ -221,6 +233,7 @@ async fn load_epg_channels_for_input(
                 Ok(ch) => ch,
                 Err(err) => {
                     debug!("Skipping EPG url {}: {err}", sanitize_sensitive_info(resolved_url.as_str()));
+                    failed_sources += 1;
                     continue;
                 }
             }
@@ -229,7 +242,14 @@ async fn load_epg_channels_for_input(
     }
 
     if channels_by_source.is_empty() {
-        Ok(None)
+        if failed_sources > 0 {
+            Err(shared::error::TuliproxError::Config(format!(
+                "All {failed_sources} EPG source(s) failed for input '{}'",
+                input.name
+            )))
+        } else {
+            Ok(None)
+        }
     } else {
         Ok(Some(merge_epg_channels(channels_by_source)))
     }
