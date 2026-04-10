@@ -104,6 +104,7 @@ mod tests {
 type OnScrollHandle = Rc<RefCell<Option<Closure<dyn FnMut(web_sys::Event)>>>>;
 type MouseMoveHandle = Rc<RefCell<Option<Closure<dyn FnMut(MouseEvent)>>>>;
 type MouseUpHandle = Rc<RefCell<Option<Closure<dyn FnMut(MouseEvent)>>>>;
+type RafClosure = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
 
 #[derive(Clone, Copy)]
 struct TimelinePinchState {
@@ -166,6 +167,9 @@ pub fn EpgView() -> Html {
     // pending_scroll_left is mutated via use_mut_ref (no re-render).
     // It is read inside a use_effect_with triggered by pixels_per_min changes.
     let pending_scroll_left = use_mut_ref(|| None::<i32>);
+    let pending_zoom = use_mut_ref(|| None::<(f64, f64)>);
+    let raf_id = use_mut_ref(|| None::<i32>);
+    let raf_closure = RafClosure::new(RefCell::new(None));
     let pinch_state = use_mut_ref(|| None::<TimelinePinchState>);
     let program_pan_state = use_mut_ref(|| None::<ProgramPanState>);
     let timeline_pan_state = use_mut_ref(|| None::<TimelinePanState>);
@@ -197,12 +201,22 @@ pub fn EpgView() -> Html {
         let container_ref = container_ref.clone();
         let pixels_per_min = pixels_per_min.clone();
         let pending_scroll_left = pending_scroll_left.clone();
+        let pending_zoom = pending_zoom.clone();
+        let raf_id = raf_id.clone();
+        let raf_closure = raf_closure.clone();
         Callback::from(move |req: PlaylistEpgRequest| {
             epg_set.set(None);
             search_filter.set(SearchRequest::Clear);
             visible_range.set((0, 20));
             pixels_per_min.set(TimelineZoom(DEFAULT_PIXELS_PER_MIN));
             *pending_scroll_left.borrow_mut() = Some(0);
+            *pending_zoom.borrow_mut() = None;
+            if let Some(id) = raf_id.borrow_mut().take() {
+                if let Some(win) = window() {
+                    let _ = win.cancel_animation_frame(id);
+                }
+            }
+            *raf_closure.borrow_mut() = None;
             if let Some(el) = container_ref.cast::<HtmlElement>() {
                 el.set_scroll_top(0);
                 el.set_scroll_left(0);
@@ -289,6 +303,21 @@ pub fn EpgView() -> Html {
     }
 
     {
+        let raf_id = raf_id.clone();
+        let raf_closure = raf_closure.clone();
+        use_effect_with((), move |_| {
+            move || {
+                if let Some(id) = raf_id.borrow_mut().take() {
+                    if let Some(win) = window() {
+                        let _ = win.cancel_animation_frame(id);
+                    }
+                }
+                *raf_closure.borrow_mut() = None;
+            }
+        });
+    }
+
+    {
         let container_ref = container_ref.clone();
         let now_line_ref = now_line_ref.clone();
         use_effect_with((epg_window, pixels_per_min.0), move |(epg_window, pixels_per_min)| {
@@ -318,22 +347,48 @@ pub fn EpgView() -> Html {
     }
 
     let apply_timeline_zoom = {
+        let pending_zoom = pending_zoom.clone();
+        let raf_id = raf_id.clone();
+        let raf_closure = raf_closure.clone();
+        let pixels_per_min = pixels_per_min.clone();
         let container_ref = container_ref.clone();
         let pending_scroll_left = pending_scroll_left.clone();
-        let pixels_per_min = pixels_per_min.clone();
         Callback::from(move |(next_pixels_per_min, anchor_x): (f64, f64)| {
-            let current_pixels_per_min = pixels_per_min.0;
             let next_pixels_per_min = clamp_timeline_zoom(next_pixels_per_min);
-            if (next_pixels_per_min - current_pixels_per_min).abs() < ZOOM_EQUALITY_TOLERANCE {
+            *pending_zoom.borrow_mut() = Some((next_pixels_per_min, anchor_x));
+
+            // If RAF already scheduled, it will pick up the latest pending_zoom
+            if raf_id.borrow().is_some() {
                 return;
             }
 
-            let scroll_left =
-                container_ref.cast::<HtmlElement>().map_or(0.0, |container| f64::from(container.scroll_left()));
-            let next_scroll_left =
-                compute_zoomed_scroll_left(scroll_left, anchor_x.max(0.0), current_pixels_per_min, next_pixels_per_min);
-            *pending_scroll_left.borrow_mut() = Some(next_scroll_left.round() as i32);
-            pixels_per_min.set(TimelineZoom(next_pixels_per_min));
+            let Some(win) = window() else { return };
+
+            let pending_zoom_r = pending_zoom.clone();
+            let raf_id_r = raf_id.clone();
+            let pixels_per_min_r = pixels_per_min.clone();
+            let container_ref_r = container_ref.clone();
+            let pending_scroll_left_r = pending_scroll_left.clone();
+
+            let closure = Closure::wrap(Box::new(move |_ts: f64| {
+                *raf_id_r.borrow_mut() = None;
+                let Some((next_ppm, anchor_x)) = pending_zoom_r.borrow_mut().take() else {
+                    return;
+                };
+                let current_ppm = pixels_per_min_r.0;
+                if (next_ppm - current_ppm).abs() < ZOOM_EQUALITY_TOLERANCE {
+                    return;
+                }
+                let scroll_left = container_ref_r.cast::<HtmlElement>().map_or(0.0, |c| f64::from(c.scroll_left()));
+                let next_scroll = compute_zoomed_scroll_left(scroll_left, anchor_x.max(0.0), current_ppm, next_ppm);
+                *pending_scroll_left_r.borrow_mut() = Some(next_scroll.round() as i32);
+                pixels_per_min_r.set(TimelineZoom(next_ppm));
+            }) as Box<dyn FnMut(f64)>);
+
+            if let Ok(id) = win.request_animation_frame(closure.as_ref().unchecked_ref()) {
+                *raf_id.borrow_mut() = Some(id);
+                *raf_closure.borrow_mut() = Some(closure);
+            }
         })
     };
 
