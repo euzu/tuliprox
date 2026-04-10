@@ -1,7 +1,8 @@
 use crate::{
     app::{
         components::{
-            input::Input, Card, CollapsePanel, InputRow, Panel, PlaylistContext, RadioButtonGroup, TextButton,
+            collect_provider_buttons, input::Input, Card, CollapsePanel, Panel, PlaylistContext, RadioButtonGroup,
+            TextButton,
         },
         context::PlaylistExplorerContext,
     },
@@ -191,30 +192,18 @@ pub fn PlaylistSourceSelector(props: &PlaylistSourceSelectorProps) -> Html {
                 if let Some(data) = playlist_ctx_clone.sources.as_ref() {
                     html! {
                         <div class="tp__playlist-source-selector__source-list">
-                            { for data.iter().flat_map(|(inputs, _targets)| inputs)
-                                .map(Rc::clone)
-                                .map(|provider| {
-                                    let handle_click = handle_defined_source.clone();
-                                    let result = match &*provider {
-                                        InputRow::Input(input) => {
-                                            if matches!(input.input_type, InputType::M3uBatch | InputType::XtreamBatch) {
-                                                None
-                                            } else {
-                                                Some((input.name.clone(), input.id))
-                                            }
-                                        },
-                                        InputRow::Alias(alias, _input) => {
-                                            Some((alias.name.clone(), alias.id))
-                                        }
-                                    };
-                                    if let Some((name, id)) = result {
-                                        html! {
-                                        <TextButton name={name.to_string()} title={name.to_string()} icon={"CloudDownload"}
-                                        onclick={move |_| handle_click.emit(PlaylistRequest::Input(id))}/>
-                                        }
-                                    } else {
-                                        html!{}
-                                    }
+                            { for collect_provider_buttons(data.as_ref()).into_iter().map(|(name, id)| {
+                                let handle_click = handle_defined_source.clone();
+                                let input_name = name.to_string();
+                                html! {
+                                    <TextButton
+                                        key={id}
+                                        name={name.to_string()}
+                                        title={name.to_string()}
+                                        icon={"CloudDownload"}
+                                        onclick={move |_| handle_click.emit(PlaylistRequest::Input(input_name.clone()))}
+                                    />
+                                }
                             })}
                         </div>
                     }

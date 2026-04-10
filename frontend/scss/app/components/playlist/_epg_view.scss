@@ -55,6 +55,7 @@ $epg-border-size: 4px;
   &__timeline {
     display: flex;
     flex-flow: row;
+
     &-block {
       display: flex;
       flex-flow: column;
@@ -69,6 +70,20 @@ $epg-border-size: 4px;
       &-date {
         color: var(--modest-text-color);
       }
+    }
+  }
+
+  &__timeline-shell {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: var(--background-color);
+    touch-action: none;
+    cursor: grab;
+
+    &-panning {
+      cursor: grabbing;
+      user-select: none;
     }
   }
 
@@ -96,6 +111,21 @@ $epg-border-size: 4px;
     min-width: 100%;
     height: fit-content;
     position: relative;
+
+    &-panning {
+      touch-action: none;
+    }
+  }
+
+  &__program-grid {
+    position: relative;
+    cursor: grab;
+    touch-action: none;
+
+    &-panning {
+      cursor: grabbing;
+      user-select: none;
+    }
   }
 
   &__channel {

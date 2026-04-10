@@ -1,10 +1,10 @@
 use crate::{
     app::{
         components::{
-            config::ConfigView, loading_indicator::BusyIndicator, theme::Theme, AppIcon, DashboardView, DownloadsView,
-            EpgView, IconButton, InputRow, NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView,
-            PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor, StatsView,
-            StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
+            config::ConfigView, loading_indicator::BusyIndicator, map_sources_to_playlist_rows, theme::Theme, AppIcon,
+            DashboardView, DownloadsView, EpgView, IconButton, NoAccess, Panel, ParticleFlowBackground,
+            PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor,
+            StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -18,12 +18,11 @@ use crate::{
 use shared::{
     model::{
         permission::{Permission, PERM_ALL},
-        ApiProxyConfigDto, AppConfigDto, ConfigInputDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck,
-        SystemInfo,
+        ApiProxyConfigDto, AppConfigDto, LibraryScanSummaryStatus, PlaylistUpdateState, StatusCheck, SystemInfo,
     },
     utils::Internable,
 };
-use std::{collections::HashMap, future, rc::Rc, sync::Arc};
+use std::{future, rc::Rc};
 use yew::{prelude::*, suspense::use_future};
 
 #[component]
@@ -140,37 +139,7 @@ pub fn Home() -> Html {
     }
 
     let sources = use_memo((*config).clone(), |config_ctx| {
-        if let Some(cfg) = config_ctx.as_ref() {
-            let mut sources = vec![];
-            // Create a map for a faster lookup of global inputs by name
-            let inputs_map: HashMap<Arc<str>, &ConfigInputDto> =
-                cfg.sources.inputs.iter().map(|i| (i.name.clone(), i)).collect();
-
-            for source in &cfg.sources.sources {
-                let mut inputs = vec![];
-                for input_name in &source.inputs {
-                    if let Some(input_cfg) = inputs_map.get(input_name) {
-                        let input = Rc::new((*input_cfg).clone());
-                        inputs.push(Rc::new(InputRow::Input(Rc::clone(&input))));
-                        if let Some(aliases) = input_cfg.aliases.as_ref() {
-                            for alias in aliases {
-                                inputs.push(Rc::new(InputRow::Alias(Rc::new(alias.clone()), Rc::clone(&input))));
-                            }
-                        }
-                    } else {
-                        log::error!("Input '{}' not found in global inputs", input_name);
-                    }
-                }
-                let mut targets = vec![];
-                for target in &source.targets {
-                    targets.push(Rc::new(target.clone()));
-                }
-                sources.push((inputs, targets));
-            }
-            Some(Rc::new(sources))
-        } else {
-            None
-        }
+        config_ctx.as_ref().map(|cfg| map_sources_to_playlist_rows(&cfg.sources))
     });
 
     let config_context = ConfigContext { config: (*config).clone(), api_proxy: (*api_proxy_config).clone() };
