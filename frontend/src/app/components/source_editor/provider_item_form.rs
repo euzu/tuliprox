@@ -5,7 +5,10 @@ use crate::{
     i18n::use_translation,
 };
 use shared::{
-    model::{ConfigProviderDto, DnsPrefer, DnsScheme, OnConnectErrorPolicy, OnResolveErrorPolicy, ProviderDnsDto},
+    model::{
+        ConfigProviderDto, DnsPrefer, DnsScheme, OnConnectErrorPolicy, OnResolveErrorPolicy, ProviderDnsDto,
+        ProviderUrlSelectionPolicy,
+    },
     utils::Internable,
 };
 use std::{collections::HashSet, rc::Rc, sync::Arc};
@@ -13,6 +16,7 @@ use yew::{component, html, use_effect_with, use_reducer, use_state, Callback, Ht
 
 const LABEL_PROVIDER_NAME: &str = "LABEL.PROVIDER_NAME";
 const LABEL_PROVIDER_URLS: &str = "LABEL.PROVIDER_URLS";
+const LABEL_PROVIDER_URL_SELECTION_POLICY: &str = "LABEL.PROVIDER_URL_SELECTION_POLICY";
 const LABEL_ADD_URL: &str = "LABEL.ADD_URL";
 const LABEL_PROVIDER_DNS: &str = "LABEL.PROVIDER_DNS";
 const LABEL_DNS_ENABLED: &str = "LABEL.DNS_ENABLED";
@@ -32,6 +36,8 @@ const LABEL_DNS_RESOLVE_KEEP_LAST_GOOD: &str = "LABEL.DNS_RESOLVE_KEEP_LAST_GOOD
 const LABEL_DNS_RESOLVE_FALLBACK_TO_HOSTNAME: &str = "LABEL.DNS_RESOLVE_FALLBACK_TO_HOSTNAME";
 const LABEL_DNS_CONNECT_TRY_NEXT_IP: &str = "LABEL.DNS_CONNECT_TRY_NEXT_IP";
 const LABEL_DNS_CONNECT_ROTATE_PROVIDER_URL: &str = "LABEL.DNS_CONNECT_ROTATE_PROVIDER_URL";
+const LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING: &str = "LABEL.PROVIDER_URL_SELECTION_RESUME_LAST_WORKING";
+const LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST: &str = "LABEL.PROVIDER_URL_SELECTION_RESTART_FROM_FIRST";
 const VALIDATION_PROVIDER_REQUIRED: &str = "Provider name and at least one URL are required.";
 
 const DNS_PREFER_IPV4: &str = "ipv4";
@@ -43,12 +49,15 @@ const DNS_RESOLVE_KEEP_LAST_GOOD: &str = "keep_last_good";
 const DNS_RESOLVE_FALLBACK_TO_HOSTNAME: &str = "fallback_to_hostname";
 const DNS_CONNECT_TRY_NEXT_IP: &str = "try_next_ip";
 const DNS_CONNECT_ROTATE_PROVIDER_URL: &str = "rotate_provider_url";
+const PROVIDER_URL_SELECTION_RESUME_LAST_WORKING: &str = "resume_last_working";
+const PROVIDER_URL_SELECTION_RESTART_FROM_FIRST: &str = "restart_from_first";
 
 generate_form_reducer!(
     state: ProviderFormState { form: ConfigProviderDto },
     action_name: ProviderFormAction,
     fields {
         Name => name: Arc<str>,
+        ProviderUrlSelectionPolicy => provider_url_selection_policy: ProviderUrlSelectionPolicy,
     }
 );
 
@@ -111,6 +120,20 @@ fn on_connect_error_from_id(id: &str) -> OnConnectErrorPolicy {
     }
 }
 
+fn provider_url_selection_policy_to_id(policy: ProviderUrlSelectionPolicy) -> &'static str {
+    match policy {
+        ProviderUrlSelectionPolicy::ResumeLastWorking => PROVIDER_URL_SELECTION_RESUME_LAST_WORKING,
+        ProviderUrlSelectionPolicy::RestartFromFirst => PROVIDER_URL_SELECTION_RESTART_FROM_FIRST,
+    }
+}
+
+fn provider_url_selection_policy_from_id(id: &str) -> ProviderUrlSelectionPolicy {
+    match id {
+        PROVIDER_URL_SELECTION_RESTART_FROM_FIRST => ProviderUrlSelectionPolicy::RestartFromFirst,
+        _ => ProviderUrlSelectionPolicy::ResumeLastWorking,
+    }
+}
+
 fn scheme_to_id(scheme: DnsScheme) -> &'static str {
     match scheme {
         DnsScheme::Http => DNS_SCHEME_HTTP,
@@ -160,8 +183,12 @@ pub struct ProviderItemFormProps {
 pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     let translate = use_translation();
 
-    let initial =
-        props.initial.clone().unwrap_or_else(|| ConfigProviderDto { name: "".intern(), urls: Vec::new(), dns: None });
+    let initial = props.initial.clone().unwrap_or_else(|| ConfigProviderDto {
+        name: "".intern(),
+        urls: Vec::new(),
+        provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+        dns: None,
+    });
 
     let form_state: UseReducerHandle<ProviderFormState> =
         use_reducer(|| ProviderFormState { form: initial.clone(), modified: false });
@@ -179,8 +206,12 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
         let urls_state = urls_state.clone();
         let validation_error = validation_error.clone();
         use_effect_with(props.initial.clone(), move |initial| {
-            let initial =
-                initial.clone().unwrap_or_else(|| ConfigProviderDto { name: "".intern(), urls: Vec::new(), dns: None });
+            let initial = initial.clone().unwrap_or_else(|| ConfigProviderDto {
+                name: "".intern(),
+                urls: Vec::new(),
+                provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+                dns: None,
+            });
             form_state.dispatch(ProviderFormAction::SetAll(initial.clone()));
             dns_state.dispatch(ProviderDnsFormAction::SetAll(initial.dns.clone().unwrap_or_default()));
             urls_state.set(
@@ -337,6 +368,32 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
         dns_on_connect_error_state.dispatch(ProviderDnsFormAction::OnConnectError(policy));
     });
 
+    let provider_url_selection_policy_options = Rc::new(vec![
+        DropDownOption::new(
+            PROVIDER_URL_SELECTION_RESUME_LAST_WORKING,
+            html! { { translate.t(LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING) } },
+            provider_url_selection_policy_to_id(form_state.form.provider_url_selection_policy)
+                == PROVIDER_URL_SELECTION_RESUME_LAST_WORKING,
+        ),
+        DropDownOption::new(
+            PROVIDER_URL_SELECTION_RESTART_FROM_FIRST,
+            html! { { translate.t(LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST) } },
+            provider_url_selection_policy_to_id(form_state.form.provider_url_selection_policy)
+                == PROVIDER_URL_SELECTION_RESTART_FROM_FIRST,
+        ),
+    ]);
+    let provider_policy_state = form_state.clone();
+    let handle_provider_policy_select = Callback::from(move |(_, selection): (String, DropDownSelection)| {
+        let policy = match selection {
+            DropDownSelection::Single(id) => provider_url_selection_policy_from_id(&id),
+            DropDownSelection::Multi(ids) => ids
+                .first()
+                .map_or(ProviderUrlSelectionPolicy::default(), |id| provider_url_selection_policy_from_id(id)),
+            DropDownSelection::Empty => ProviderUrlSelectionPolicy::default(),
+        };
+        provider_policy_state.dispatch(ProviderFormAction::ProviderUrlSelectionPolicy(policy));
+    });
+
     html! {
         <Card class="tp__config-view__card tp__item-form">
             if props.readonly {
@@ -354,6 +411,23 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                     />
                 }
             })}
+            if props.readonly {
+                { config_field_custom!(
+                    translate.t(LABEL_PROVIDER_URL_SELECTION_POLICY),
+                    provider_url_selection_policy_to_id(form_state.form.provider_url_selection_policy).to_string()
+                ) }
+            } else {
+                { config_field_child!(translate.t(LABEL_PROVIDER_URL_SELECTION_POLICY), "PROVIDER_FORM.URL_SELECTION_POLICY", {
+                    html! {
+                        <Select
+                            name={"provider_url_selection_policy"}
+                            multi_select={false}
+                            on_select={handle_provider_policy_select}
+                            options={provider_url_selection_policy_options}
+                        />
+                    }
+                })}
+            }
             if let Some(validation_error) = &*validation_error {
                 <div class="tp__form-field">
                     <small>{ validation_error.clone() }</small>

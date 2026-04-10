@@ -130,7 +130,7 @@ impl Theme {
         Theme::BananaYellow,
         Theme::SunWashedSoft,
         Theme::VintageNeutral,
-        Theme::CvdFriendlyBright
+        Theme::CvdFriendlyBright,
     ];
 
     pub const fn all() -> &'static [Self] { &Self::ALL }

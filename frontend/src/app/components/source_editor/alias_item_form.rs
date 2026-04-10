@@ -7,7 +7,7 @@ use crate::{
     i18n::use_translation,
 };
 use shared::{
-    model::{ConfigInputAliasDto, InputType, XtreamLoginRequest},
+    model::{ConfigInputAliasDto, ConfigProviderDto, InputType, XtreamLoginRequest},
     utils::Internable,
 };
 use std::sync::Arc;
@@ -42,6 +42,8 @@ pub struct AliasItemFormProps {
     pub on_submit: Callback<ConfigInputAliasDto>,
     pub on_cancel: Callback<()>,
     pub input_type: InputType,
+    #[prop_or_default]
+    pub providers: Vec<ConfigProviderDto>,
     #[prop_or_default]
     pub initial: Option<ConfigInputAliasDto>,
     #[prop_or(false)]
@@ -95,6 +97,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
         let exp_date_loading = exp_date_loading.clone();
         let exp_date_request_in_flight = exp_date_request_in_flight.clone();
         let exp_date_request_token = exp_date_request_token.clone();
+        let providers = props.providers.clone();
         let translate = translate.clone();
 
         Some(ToolAction {
@@ -128,7 +131,12 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                 let exp_date_loading = exp_date_loading.clone();
                 let exp_date_request_in_flight = exp_date_request_in_flight.clone();
                 let exp_date_request_token = exp_date_request_token.clone();
-                let request = XtreamLoginRequest { url, username, password };
+                let request = XtreamLoginRequest {
+                    url,
+                    username,
+                    password,
+                    providers: (!providers.is_empty()).then_some(providers.clone()),
+                };
 
                 spawn_local(async move {
                     let current_snapshot = || {

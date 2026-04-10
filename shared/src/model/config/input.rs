@@ -803,6 +803,8 @@ pub struct ConfigProviderDto {
     pub name: Arc<str>,
     #[serde(with = "arc_str_vec_serde")]
     pub urls: Vec<Arc<str>>,
+    #[serde(default, skip_serializing_if = "is_default_provider_url_selection_policy")]
+    pub provider_url_selection_policy: ProviderUrlSelectionPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<ProviderDnsDto>,
 }
@@ -826,9 +828,21 @@ impl ConfigProviderDto {
 
 pub const fn default_provider_dns_refresh_secs() -> u64 { 300 }
 pub const fn is_default_provider_dns_refresh_secs(v: &u64) -> bool { *v == default_provider_dns_refresh_secs() }
+pub fn is_default_provider_url_selection_policy(v: &ProviderUrlSelectionPolicy) -> bool {
+    *v == ProviderUrlSelectionPolicy::default()
+}
 pub fn is_default_dns_prefer(v: &DnsPrefer) -> bool { *v == DnsPrefer::default() }
 pub fn is_default_on_resolve_error(v: &OnResolveErrorPolicy) -> bool { *v == OnResolveErrorPolicy::default() }
 pub fn is_default_on_connect_error(v: &OnConnectErrorPolicy) -> bool { *v == OnConnectErrorPolicy::default() }
+
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+pub enum ProviderUrlSelectionPolicy {
+    #[serde(rename = "resume_last_working")]
+    #[default]
+    ResumeLastWorking,
+    #[serde(rename = "restart_from_first")]
+    RestartFromFirst,
+}
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum DnsPrefer {
@@ -1080,6 +1094,30 @@ mod tests {
         assert_eq!(dns.on_resolve_error, OnResolveErrorPolicy::KeepLastGood);
         assert_eq!(dns.on_connect_error, OnConnectErrorPolicy::TryNextIp);
         assert!(dns.schemes.is_none());
+    }
+
+    #[test]
+    fn test_provider_url_selection_policy_defaults_to_resume_last_working() {
+        let provider = ConfigProviderDto {
+            name: "provider-a".intern(),
+            urls: vec!["http://primary.example.com".intern()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+            dns: None,
+        };
+
+        assert_eq!(provider.provider_url_selection_policy, ProviderUrlSelectionPolicy::ResumeLastWorking);
+    }
+
+    #[test]
+    fn test_provider_url_selection_policy_can_be_set_to_restart_from_first() {
+        let provider = ConfigProviderDto {
+            name: "provider-a".intern(),
+            urls: vec!["http://primary.example.com".intern()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        };
+
+        assert_eq!(provider.provider_url_selection_policy, ProviderUrlSelectionPolicy::RestartFromFirst);
     }
 
     #[test]

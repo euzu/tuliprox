@@ -614,11 +614,17 @@ fn build_xtream_login_input_source(
     providers: &[Arc<crate::model::ConfigProvider>],
 ) -> Result<InputSource, TuliproxError> {
     let url = request.url.trim();
+    let request_providers: Vec<Arc<crate::model::ConfigProvider>> = request
+        .providers
+        .as_ref()
+        .map(|providers| providers.iter().map(crate::model::ConfigProvider::from).map(Arc::new).collect())
+        .unwrap_or_default();
     let provider = if url.starts_with(PROVIDER_SCHEME_PREFIX) {
         let (provider_name, _) = parse_provider_scheme_url_parts(url)?;
         Some(
-            providers
+            request_providers
                 .iter()
+                .chain(providers.iter())
                 .find(|provider| provider.name.as_ref() == provider_name)
                 .cloned()
                 .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider config for '{provider_name}' not found")))?,
@@ -800,12 +806,14 @@ mod tests {
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "b1g".into(),
             urls: vec!["http://48392071.xyz".into(), "http://48392244.xyz".into()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         }));
         let request = XtreamLoginRequest {
             url: "provider://b1g".to_string(),
             username: "demo".to_string(),
             password: "secret".to_string(),
+            providers: None,
         };
 
         let input_source = build_xtream_login_input_source(&request, &[provider.clone()])
@@ -813,5 +821,26 @@ mod tests {
 
         assert_eq!(input_source.url, "provider://b1g/player_api.php?username=demo&password=secret");
         assert_eq!(input_source.provider.as_ref().map(|provider| provider.name.as_ref()), Some("b1g"));
+    }
+
+    #[test]
+    fn build_xtream_login_input_source_uses_request_providers_when_runtime_providers_are_missing() {
+        let request = XtreamLoginRequest {
+            url: "provider://strong".to_string(),
+            username: "bubble".to_string(),
+            password: "gum".to_string(),
+            providers: Some(vec![ConfigProviderDto {
+                name: "strong".into(),
+                urls: vec!["http://strong.example".into()],
+                provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
+                dns: None,
+            }]),
+        };
+
+        let input_source =
+            build_xtream_login_input_source(&request, &[]).expect("request-scoped provider should resolve");
+
+        assert_eq!(input_source.url, "provider://strong/player_api.php?username=bubble&password=gum");
+        assert_eq!(input_source.provider.as_ref().map(|provider| provider.name.as_ref()), Some("strong"));
     }
 }

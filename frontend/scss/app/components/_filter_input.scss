@@ -7,6 +7,7 @@
     height: 2.5rem;
     padding: 0 var(--padding-mini);
     display: flex;
+    flex-flow: row nowrap;
     align-items: center;
     justify-content: space-between;
   }

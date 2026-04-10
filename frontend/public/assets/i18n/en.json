@@ -544,6 +544,7 @@
       "USER": "Pushover user key identifying the notification recipient."
     },
     "PROVIDER_FORM": {
+      "URL_SELECTION_POLICY": "Controls how each new request chooses its starting provider URL. `resume_last_working` starts with the last successful URL. `restart_from_first` always begins again at the first configured URL and only fails over if that request encounters an error.",
       "URLS": "List of base URLs for this provider. They are used in order and rotated when failover is triggered.",
       "DNS": {
         "ON_CONNECT_ERROR": "Defines connect-error behavior: try the next resolved IP first, or rotate directly to the next provider URL.",
@@ -1140,6 +1141,10 @@
     "PROVIDER": "Provider",
     "PROVIDER_DNS": "Provider DNS",
     "PROVIDER_NAME": "Provider Name",
+    "PROVIDER_URL_SELECTION_POLICY": "Provider URL Selection Policy",
+    "PROVIDER_URL_SELECTION_RESUME_LAST_WORKING": "Resume Last Working",
+    "PROVIDER_URL_SELECTION_RESTART_FROM_FIRST": "Restart From First",
+    "SELECTION_POLICY": "Selection Policy",
     "PROVIDER_URLS": "Provider URLs",
     "PROXY": "Proxy",
     "PROXY_CONFIG": "Proxy",

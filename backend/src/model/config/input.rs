@@ -766,6 +766,7 @@ mod tests {
         let provider = ConfigProvider::from(&ConfigProviderDto {
             name: "myprovider".into(),
             urls: vec!["http://provider.com".into()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
         let input = ConfigInput {
@@ -784,6 +785,7 @@ mod tests {
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "myprovider".into(),
             urls: vec!["http://provider-a.example".into(), "http://provider-b.example".into()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         }));
         let _ = provider.rotate_to_next_url_with_cycle_check(0);
