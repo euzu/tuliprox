@@ -214,7 +214,7 @@ async fn main() {
     let app_config = utils::read_initial_app_config(&mut config_paths, true, true, args.server)
         .await
         .unwrap_or_else(|err| exit!("{err}"));
-    print_info(&app_config);
+    print_info(&app_config).await;
 
     let sources = <Arc<ArcSwap<SourcesConfig>> as Access<SourcesConfig>>::load(&app_config.sources);
     let targets = sources.validate_targets(args.target.as_ref()).unwrap_or_else(|err| exit!("{err}"));
@@ -226,7 +226,7 @@ async fn main() {
     }
 }
 
-fn print_info(app_config: &AppConfig) {
+async fn print_info(app_config: &AppConfig) {
     let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_config.config);
     let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_config.paths);
     info!("Current time: {}", chrono::offset::Local::now().format("%Y-%m-%d %H:%M:%S"));
@@ -262,6 +262,7 @@ fn print_info(app_config: &AppConfig) {
     if let Some(metadata_update) = config.metadata_update.as_ref() {
         info!("Metadata path: {}", metadata_update.cache_path);
     }
+    runtime_config_report::log_runtime_config_report(app_config).await;
 }
 
 fn get_file_paths(args: &Args) -> ConfigPaths {

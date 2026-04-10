@@ -63,11 +63,10 @@
 .tp__field-label {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--gap-mini);
 
   label {
-    @include tp-field-label-base(1);
+    @include tp-field-label-base(0);
   }
 
   &__help {

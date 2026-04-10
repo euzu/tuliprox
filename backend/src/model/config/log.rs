@@ -1,4 +1,4 @@
-use shared::model::LogConfigDto;
+use shared::model::{LogConfigDto, RuntimeConfigReportFormat};
 use shared::utils::default_as_true;
 use crate::model::macros;
 // We need serde for these structs to read them during
@@ -16,6 +16,10 @@ pub struct LogConfig {
     pub log_active_user: bool,
     #[serde(default)]
     pub log_level: Option<String>,
+    #[serde(default)]
+    pub runtime_config_report_enabled: bool,
+    #[serde(default)]
+    pub runtime_config_report_format: RuntimeConfigReportFormat,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -31,6 +35,8 @@ impl From<&LogConfigDto> for LogConfig {
             sanitize_sensitive_info: dto.sanitize_sensitive_info,
             log_active_user: dto.log_active_user,
             log_level: dto.log_level.clone(),
+            runtime_config_report_enabled: dto.runtime_config_report_enabled,
+            runtime_config_report_format: dto.runtime_config_report_format,
         }
     }
 }
@@ -40,6 +46,8 @@ impl From<&LogConfig> for LogConfigDto {
             sanitize_sensitive_info: instance.sanitize_sensitive_info,
             log_active_user: instance.log_active_user,
             log_level: instance.log_level.clone(),
+            runtime_config_report_enabled: instance.runtime_config_report_enabled,
+            runtime_config_report_format: instance.runtime_config_report_format,
         }
     }
 }

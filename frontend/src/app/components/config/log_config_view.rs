@@ -13,13 +13,15 @@ use crate::{
     config_field_bool, config_field_child, edit_field_bool, generate_form_reducer,
     i18n::use_translation,
 };
-use shared::model::LogConfigDto;
-use std::rc::Rc;
+use shared::model::{LogConfigDto, RuntimeConfigReportFormat};
+use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
 
 const LABEL_LOG_LEVEL: &str = "LABEL.LOG_LEVEL";
 const LABEL_LOG_ACTIVE_USER: &str = "LABEL.LOG_ACTIVE_USER";
 const LABEL_LOG_SANITIZE_SENSITIVE_INFO: &str = "LABEL.SANITIZE_SENSITIVE_INFO";
+const LABEL_RUNTIME_CONFIG_REPORT: &str = "LABEL.RUNTIME_CONFIG_REPORT";
+const LABEL_RUNTIME_CONFIG_REPORT_FORMAT: &str = "LABEL.RUNTIME_CONFIG_REPORT_FORMAT";
 
 const LOG_LEVELS: [&str; 5] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
 
@@ -30,6 +32,8 @@ generate_form_reducer!(
         LogLevel => log_level: Option<String>,
         SanitizeSensitiveInfo => sanitize_sensitive_info: bool,
         LogActiveUser => log_active_user: bool,
+        RuntimeConfigReportEnabled => runtime_config_report_enabled: bool,
+        RuntimeConfigReportFormat => runtime_config_report_format: RuntimeConfigReportFormat,
     }
 );
 
@@ -40,6 +44,13 @@ pub fn LogConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
     let log_level_options = use_memo((), |_| LOG_LEVELS.iter().map(ToString::to_string).collect::<Vec<String>>());
+    let runtime_report_format_options = use_memo((), |_| {
+        enum_iterator::all::<RuntimeConfigReportFormat>()
+            .collect::<Vec<_>>()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>()
+    });
 
     let form_state: UseReducerHandle<LogConfigFormState> =
         use_reducer(|| LogConfigFormState { form: LogConfigDto::default(), modified: false });
@@ -69,6 +80,14 @@ pub fn LogConfigView() -> Html {
             <Card class="tp__config-view__card">
             { config_field_bool!(log_state.form, translate.t(LABEL_LOG_ACTIVE_USER),  log_active_user) }
             { config_field_bool!(log_state.form, translate.t(LABEL_LOG_SANITIZE_SENSITIVE_INFO),  sanitize_sensitive_info) }
+            { config_field_bool!(log_state.form, translate.t(LABEL_RUNTIME_CONFIG_REPORT), runtime_config_report_enabled) }
+            <div class="tp__log-config-view__header tp__config-view-page__header">
+              { config_field_child!(translate.t(LABEL_RUNTIME_CONFIG_REPORT_FORMAT), "LOG_CONFIG.RUNTIME_CONFIG_REPORT_FORMAT", {
+                html! {
+                    <div><Chip label={log_state.form.runtime_config_report_format.to_string()} /></div>
+                }
+              })}
+            </div>
            </Card>
             <Card class="tp__config-view__card">
             <div class="tp__log-config-view__header tp__config-view-page__header">
@@ -86,13 +105,30 @@ pub fn LogConfigView() -> Html {
 
     let render_edit_mode = || {
         let forms = form_state.clone();
+        let forms_clone = form_state.clone();
         let log_level_selection =
             Rc::new(forms.form.log_level.as_ref().map_or_else(Vec::new, |l| vec![l.to_uppercase()]));
+        let runtime_report_format_selection = Rc::new(vec![forms.form.runtime_config_report_format.to_string()]);
         html! {
             <>
             <Card class="tp__config-view__card">
             { edit_field_bool!(form_state, translate.t(LABEL_LOG_ACTIVE_USER), log_active_user, LogConfigFormAction::LogActiveUser) }
             { edit_field_bool!(form_state, translate.t(LABEL_LOG_SANITIZE_SENSITIVE_INFO),  sanitize_sensitive_info, LogConfigFormAction::SanitizeSensitiveInfo) }
+            { edit_field_bool!(form_state, translate.t(LABEL_RUNTIME_CONFIG_REPORT), runtime_config_report_enabled, LogConfigFormAction::RuntimeConfigReportEnabled) }
+                { config_field_child!(translate.t(LABEL_RUNTIME_CONFIG_REPORT_FORMAT), "LOG_CONFIG.RUNTIME_CONFIG_REPORT_FORMAT", {
+                   html! { <RadioButtonGroup
+                        multi_select={false} none_allowed={true}
+                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
+                            if let Some(frmt) = selections.first() {
+                               if let Ok(format) = RuntimeConfigReportFormat::from_str(frmt) {
+                                    forms_clone.dispatch(LogConfigFormAction::RuntimeConfigReportFormat(format));
+                               }
+                            }
+                        })}
+                        options={runtime_report_format_options.clone()}
+                        selected={runtime_report_format_selection}
+                    />
+            }})}
             </Card>
             <Card class="tp__config-view__card">
             { config_field_child!(translate.t(LABEL_LOG_LEVEL), "LOG_CONFIG.LOG_LEVEL", {

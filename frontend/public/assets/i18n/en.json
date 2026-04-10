@@ -467,7 +467,9 @@
     "LOG_CONFIG": {
       "LOG_ACTIVE_USER": "If enabled, the number of active reverse proxy clients is logged regularly.",
       "LOG_LEVEL": "Sets the verbosity of application logs (e.g. info, debug, error).",
-      "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs."
+      "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs.",
+      "RUNTIME_CONFIG_REPORT_ENABLED": "If enabled, the runtime configuration is printed to the log on startup.",
+      "RUNTIME_CONFIG_REPORT_FORMAT": "Defines the format of the runtime configuration report is printed to the log."
     },
     "M3U_TARGET_OUTPUT": {
       "FILENAME": "The name of the generated M3U file (e.g. playlist.m3u).",
@@ -1384,7 +1386,9 @@
     "VIEW_TYPE_PLAYLIST_SETTINGS": "Playlist Settings",
     "VIEW_TYPE_PLAYLIST_EXPLORER":  "Playlist Explorer",
     "VIEW_TYPE_PLAYLIST_EPG": "Playlist EPG",
-    "VIEW_TYPE_RBAC":  "WebUI Users"
+    "VIEW_TYPE_RBAC":  "WebUI Users",
+    "RUNTIME_CONFIG_REPORT": "Runtime Config Report",
+    "RUNTIME_CONFIG_REPORT_FORMAT": "Runtime Config Report Format"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
