@@ -16,6 +16,8 @@
 @use './themes/theme-vintage-neutral';
 @use './themes/theme-dracula';
 @use './themes/theme-nord';
+@use './themes/theme-cvd-friendly-dark';
+@use './themes/theme-cvd-friendly-bright';
 
 
 :root,
@@ -580,6 +582,10 @@ body {
   --warn-background-color: var(--theme-brand-warning-background);
   --active-color: var(--theme-brand-active);
   --ok-color: var(--theme-brand-positive);
+  --success-color: var(--theme-brand-positive-text);
+  --success-background-color: var(--theme-brand-positive-soft);
+  --error-color: var(--theme-brand-danger);
+  --error-background-color: color-mix(in srgb, var(--theme-brand-danger-strong) 18%, transparent);
   --output-xtream-color: var(--theme-brand-info);
   --output-m3u-color: var(--theme-brand-success-alt);
   --output-hdhomerun-color: var(--theme-brand-quaternary);

@@ -25,6 +25,8 @@ const THEME_VINTAGE_NEUTRAL: &str = "vintage-neutral";
 const THEME_DRACULA: &str = "dracula";
 const THEME_NORD: &str = "nord";
 const THEME_GRAPEROOT_DARK: &str = "graperoot-dark";
+const THEME_CVD_FRIENDLY_DARK: &str = "cvd-friendly-dark";
+const THEME_CVD_FRIENDLY_BRIGHT: &str = "cvd-friendly-bright";
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum Theme {
@@ -45,6 +47,8 @@ pub enum Theme {
     BananaYellow,
     SunWashedSoft,
     VintageNeutral,
+    CvdFriendlyDark,
+    CvdFriendlyBright,
 }
 
 impl Display for Theme {
@@ -70,6 +74,8 @@ impl Display for Theme {
                 Theme::BananaYellow => THEME_BANANA_YELLOW,
                 Theme::SunWashedSoft => THEME_SUN_WASHED_SOFT,
                 Theme::VintageNeutral => THEME_VINTAGE_NEUTRAL,
+                Theme::CvdFriendlyDark => THEME_CVD_FRIENDLY_DARK,
+                Theme::CvdFriendlyBright => THEME_CVD_FRIENDLY_BRIGHT,
             }
         )
     }
@@ -97,13 +103,15 @@ impl FromStr for Theme {
             THEME_BANANA_YELLOW => Ok(Theme::BananaYellow),
             THEME_SUN_WASHED_SOFT => Ok(Theme::SunWashedSoft),
             THEME_VINTAGE_NEUTRAL => Ok(Theme::VintageNeutral),
+            THEME_CVD_FRIENDLY_DARK => Ok(Theme::CvdFriendlyDark),
+            THEME_CVD_FRIENDLY_BRIGHT => Ok(Theme::CvdFriendlyBright),
             _ => Err(TuliproxError::Config(format!("Unknown theme: {s}"))),
         }
     }
 }
 
 impl Theme {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Theme::Dark,
         Theme::RefinedDark,
         Theme::GraperootDark,
@@ -114,6 +122,7 @@ impl Theme {
         Theme::Dopamine,
         Theme::Mermaidcore,
         Theme::ClubroomContrast,
+        Theme::CvdFriendlyDark,
         Theme::Bright,
         Theme::Paper,
         Theme::NaturePure,
@@ -121,6 +130,7 @@ impl Theme {
         Theme::BananaYellow,
         Theme::SunWashedSoft,
         Theme::VintageNeutral,
+        Theme::CvdFriendlyBright
     ];
 
     pub const fn all() -> &'static [Self] { &Self::ALL }
@@ -144,6 +154,8 @@ impl Theme {
             Theme::BananaYellow => "Banana Yellow",
             Theme::SunWashedSoft => "Sun-Washed Soft",
             Theme::VintageNeutral => "Vintage Neutral",
+            Theme::CvdFriendlyDark => "CVD Friendly Dark",
+            Theme::CvdFriendlyBright => "CVD Friendly Bright",
         }
     }
 
@@ -157,6 +169,7 @@ impl Theme {
                 | Theme::BananaYellow
                 | Theme::SunWashedSoft
                 | Theme::VintageNeutral
+                | Theme::CvdFriendlyBright
         )
     }
 
@@ -188,6 +201,8 @@ impl Theme {
             | Theme::CoolElegance
             | Theme::BananaYellow
             | Theme::ClubroomContrast
+            | Theme::CvdFriendlyDark
+            | Theme::CvdFriendlyBright
             | Theme::SunWashedSoft
             | Theme::VintageNeutral
             | Theme::Bright => set_local_storage_item(TP_THEME_KEY, &self.to_string()),
