@@ -1,5 +1,8 @@
 use crate::{
-    model::{ConfigTargetOptions, LibraryMetadataFormat, MetadataUpdateConfigDto, ProcessingOrder, VideoConfigDto},
+    model::{
+        ConfigTargetOptions, LibraryMetadataFormat, MetadataUpdateConfigDto, ProcessingOrder,
+        RuntimeConfigReportFormat, VideoConfigDto,
+    },
     utils::{
         CONFIG_PATH, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_DOWNLOAD_DIR,
         DEFAULT_EPG_NORMALIZE_REGEX, DEFAULT_EPISODE_PATTERN, DEFAULT_STORAGE_DIR, DEFAULT_USER_AGENT,
@@ -26,6 +29,11 @@ pub fn is_blank_optional_arc_str(s: &Option<Arc<str>>) -> bool {
 pub fn is_empty_optional_vec<T>(s: &Option<Vec<T>>) -> bool { s.as_ref().is_none_or(|v| v.is_empty()) }
 
 pub fn default_as_default() -> String { "default".into() }
+
+pub const fn is_default_runtime_config_report_format(value: &RuntimeConfigReportFormat) -> bool {
+    matches!(value, RuntimeConfigReportFormat::Yaml)
+}
+
 // Default delay values for resolving VOD or Series requests,
 // used to prevent frequent requests that could trigger a provider ban.
 pub const fn default_resolve_delay_secs() -> u16 { 2 }
