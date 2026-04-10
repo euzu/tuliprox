@@ -12,6 +12,18 @@ use crate::{
 const STREAM_QUEUE_SIZE: usize = 1024; // mpsc channel holding messages. with 8192byte chunks and 2Mbit/s approx 8MB
 const MIN_SHARED_BURST_BUFFER_MB: u64 = 1;
 
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+pub enum AdmissionStrategyDto {
+    #[serde(rename = "evict_user_same_ip_oldest")]
+    EvictUserSameIpOldest,
+    #[serde(rename = "evict_user_same_ip_latest")]
+    EvictUserSameIpLatest,
+    #[serde(rename = "grace_instant_stream")]
+    GraceInstantStream,
+    #[serde(rename = "grace_hold_stream")]
+    GraceHoldStream,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StreamBufferConfigDto {
@@ -59,6 +71,8 @@ pub struct StreamConfigDto {
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
     pub shared_burst_buffer_mb: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_strategies: Option<Vec<AdmissionStrategyDto>>,
 }
 
 impl Default for StreamConfigDto {
@@ -75,6 +89,7 @@ impl Default for StreamConfigDto {
             grace_period_hold_stream: true,
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
+            admission_strategies: None,
         }
     }
 }
@@ -92,6 +107,7 @@ impl StreamConfigDto {
             && self.grace_period_hold_stream
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
+            && self.admission_strategies.is_none()
     }
 
     pub(crate) fn prepare(&mut self) -> Result<(), TuliproxError> {
@@ -122,6 +138,131 @@ impl StreamConfigDto {
             )));
         }
 
+        if let Some(strategies) = &self.admission_strategies {
+            if let Err(err) = validate_admission_strategies(strategies, self.grace_period_millis) {
+                return Err(TuliproxError::ConfigStream(err));
+            }
+        }
+
         Ok(())
+    }
+}
+
+fn validate_admission_strategies(strategies: &[AdmissionStrategyDto], grace_period_millis: u64) -> Result<(), String> {
+    use std::collections::HashSet;
+    use AdmissionStrategyDto::*;
+
+    let mut seen = HashSet::new();
+    for s in strategies {
+        if !seen.insert(*s) {
+            return Err(format!(
+                "Duplicate admission strategy: {}",
+                serde_json::to_string(s).unwrap_or_default().trim_matches('"')
+            ));
+        }
+    }
+
+    let has_instant = strategies.iter().any(|s| matches!(s, GraceInstantStream));
+    let has_hold = strategies.iter().any(|s| matches!(s, GraceHoldStream));
+    if has_instant && has_hold {
+        return Err("admission_strategies: grace_instant_stream and grace_hold_stream are mutually exclusive".into());
+    }
+
+    if grace_period_millis == 0 && (has_instant || has_hold) {
+        return Err("admission_strategies: grace strategies require grace_period_millis > 0".into());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_list_accepted() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies = Some(vec![]);
+        assert!(dto.prepare().is_ok());
+    }
+
+    #[test]
+    fn test_none_strategies_accepted() {
+        let mut dto = StreamConfigDto::default();
+        assert!(dto.prepare().is_ok());
+    }
+
+    #[test]
+    fn test_duplicate_rejected() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest, AdmissionStrategyDto::EvictUserSameIpOldest]);
+        let err = dto.prepare().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Duplicate admission strategy"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_mutually_exclusive_grace_rejected() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::GraceInstantStream, AdmissionStrategyDto::GraceHoldStream]);
+        let err = dto.prepare().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("mutually exclusive"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_valid_ordered_subset_accepted() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest, AdmissionStrategyDto::GraceHoldStream]);
+        assert!(dto.prepare().is_ok());
+    }
+
+    #[test]
+    fn test_grace_strategy_requires_positive_grace_period() {
+        let mut dto = StreamConfigDto::default();
+        dto.grace_period_millis = 0;
+        dto.admission_strategies = Some(vec![AdmissionStrategyDto::GraceHoldStream]);
+        let err = dto.prepare().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("grace_period_millis"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_single_strategy_accepted() {
+        for s in [
+            AdmissionStrategyDto::EvictUserSameIpOldest,
+            AdmissionStrategyDto::EvictUserSameIpLatest,
+            AdmissionStrategyDto::GraceInstantStream,
+            AdmissionStrategyDto::GraceHoldStream,
+        ] {
+            let mut dto = StreamConfigDto::default();
+            dto.admission_strategies = Some(vec![s]);
+            assert!(dto.prepare().is_ok(), "Failed for {s:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_empty_with_strategies() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies = Some(vec![AdmissionStrategyDto::GraceInstantStream]);
+        assert!(!dto.is_empty());
+    }
+
+    #[test]
+    fn test_is_empty_with_explicit_empty_strategy_list() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies = Some(vec![]);
+        assert!(!dto.is_empty());
+    }
+
+    #[test]
+    fn test_explicit_empty_strategy_list_serializes() {
+        let dto = StreamConfigDto { admission_strategies: Some(vec![]), ..StreamConfigDto::default() };
+
+        let serialized = serde_json::to_string(&dto).unwrap_or_default();
+        assert!(serialized.contains("admission_strategies"), "serialized: {serialized}");
     }
 }

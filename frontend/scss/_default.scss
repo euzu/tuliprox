@@ -148,6 +148,20 @@ li {
   }
 }
 
+.tp__toolbar {
+  display: flex;
+  flex-flow: row wrap;
+  gap: var(--gap-small);
+  box-sizing: border-box;
+
+  .tp__icon-button {
+    &:hover {
+      background-color: var(--icon-button-hover-background-color);
+      border-radius: 50%;
+    }
+  }
+}
+
 ::selection {
   background-color: #0078d4;
   color: #ffffff;

@@ -132,10 +132,30 @@ async fn m3u_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let admission = app_state
-            .get_connection_admission(&user.username, user.max_connections, user.soft_connections)
-            .await;
         let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+        let (admission, _grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
+            && app_state.app_config.config.load().user_access_control
+        {
+            crate::api::api_utils::resolve_admission_with_strategies(
+                app_state,
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                &fingerprint.client_ip,
+                fingerprint,
+                true,
+                Some(playback_session_token.as_str()),
+            )
+            .await
+        } else {
+            (
+                crate::api::model::ConnectionAdmission {
+                    permission: UserConnectionPermission::Allowed,
+                    kind: Some(crate::api::model::ConnectionKind::Normal),
+                },
+                None,
+            )
+        };
         return local_stream_response(
             fingerprint,
             app_state,
@@ -202,6 +222,7 @@ async fn m3u_api_stream(
                     user: &user,
                     session_reservation_ttl_secs: get_session_reservation_ttl_secs(app_state, pli.item_type),
                 },
+                None,
             )
             .await
             .into_response();
@@ -211,22 +232,28 @@ async fn m3u_api_stream(
         pli.url.clone()
     };
 
-    let connection_admission = if (user.max_connections > 0 || user.soft_connections > 0)
+    let (connection_admission, grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
         && app_state.app_config.config.load().user_access_control
     {
-        app_state
-            .get_connection_admission_for_session(
-                &user.username,
-                user.max_connections,
-                user.soft_connections,
-                &session_key,
-            )
-            .await
+        crate::api::api_utils::resolve_admission_with_strategies(
+            app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &fingerprint.client_ip,
+            fingerprint,
+            true,
+            Some(&session_key),
+        )
+        .await
     } else {
-        crate::api::model::ConnectionAdmission {
-            permission: UserConnectionPermission::Allowed,
-            kind: user_session.as_ref().and_then(|session| session.connection_kind),
-        }
+        (
+            crate::api::model::ConnectionAdmission {
+                permission: UserConnectionPermission::Allowed,
+                kind: user_session.as_ref().and_then(|session| session.connection_kind),
+            },
+            None,
+        )
     };
     let connection_permission = connection_admission.permission;
     let connection_kind = connection_admission
@@ -306,6 +333,7 @@ async fn m3u_api_stream(
         connection_permission,
         connection_kind,
         allow_exhausted_shared_reconnect,
+        grace_mode,
     )
     .await
     .into_response()

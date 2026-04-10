@@ -454,6 +454,7 @@ async fn hls_api_stream(
                         user: &user,
                         session_reservation_ttl_secs: get_hls_session_ttl_secs(&app_state),
                     },
+                    None,
                 )
                 .await
                 .into_response();
@@ -462,22 +463,28 @@ async fn hls_api_stream(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
 
-        let connection_admission = if (user.max_connections > 0 || user.soft_connections > 0)
+        let (connection_admission, grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
             && app_state.app_config.config.load().user_access_control
         {
-            app_state
-                .get_connection_admission_for_session(
-                    &user.username,
-                    user.max_connections,
-                    user.soft_connections,
-                    &session.token,
-                )
-                .await
+            crate::api::api_utils::resolve_admission_with_strategies(
+                &app_state,
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                &fingerprint.client_ip,
+                &fingerprint,
+                true,
+                Some(&session.token),
+            )
+            .await
         } else {
-            crate::api::model::ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: session.connection_kind,
-            }
+            (
+                crate::api::model::ConnectionAdmission {
+                    permission: UserConnectionPermission::Allowed,
+                    kind: session.connection_kind,
+                },
+                None,
+            )
         };
         let connection_permission = connection_admission.permission;
         let connection_kind = connection_admission
@@ -545,6 +552,7 @@ async fn hls_api_stream(
                 user: &user,
                 session_reservation_ttl_secs: get_hls_session_ttl_secs(&app_state),
             },
+            grace_mode,
         )
             .await
             .into_response()
