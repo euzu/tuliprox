@@ -117,7 +117,7 @@ pub fn LogConfigView() -> Html {
             { edit_field_bool!(form_state, translate.t(LABEL_RUNTIME_CONFIG_REPORT), runtime_config_report_enabled, LogConfigFormAction::RuntimeConfigReportEnabled) }
                 { config_field_child!(translate.t(LABEL_RUNTIME_CONFIG_REPORT_FORMAT), "LOG_CONFIG.RUNTIME_CONFIG_REPORT_FORMAT", {
                    html! { <RadioButtonGroup
-                        multi_select={false} none_allowed={true}
+                        multi_select={false} none_allowed={false}
                         on_select={Callback::from(move |selections: Rc<Vec<String>>| {
                             if let Some(frmt) = selections.first() {
                                if let Ok(format) = RuntimeConfigReportFormat::from_str(frmt) {

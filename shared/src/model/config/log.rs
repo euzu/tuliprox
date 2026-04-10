@@ -24,8 +24,8 @@ impl RuntimeConfigReportFormat {
 impl Display for RuntimeConfigReportFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let str = match self {
-            RuntimeConfigReportFormat::Yaml => RuntimeConfigReportFormat::YAML.to_string(),
-            RuntimeConfigReportFormat::Json => RuntimeConfigReportFormat::JSON.to_string(),
+            RuntimeConfigReportFormat::Yaml => RuntimeConfigReportFormat::YAML,
+            RuntimeConfigReportFormat::Json => RuntimeConfigReportFormat::JSON,
         };
         write!(f, "{str}")
     }
@@ -91,10 +91,10 @@ mod tests {
     use super::LogConfigDto;
 
     #[test]
-    fn runtime_config_report_defaults_to_disabled_json() {
+    fn runtime_config_report_defaults_to_disabled_yaml() {
         let cfg = LogConfigDto::default();
         assert!(!cfg.runtime_config_report_enabled);
-        assert_eq!(cfg.runtime_config_report_format, super::RuntimeConfigReportFormat::Json);
+        assert_eq!(cfg.runtime_config_report_format, super::RuntimeConfigReportFormat::Yaml);
     }
 
     #[test]

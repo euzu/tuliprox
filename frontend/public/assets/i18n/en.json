@@ -469,7 +469,7 @@
       "LOG_LEVEL": "Sets the verbosity of application logs (e.g. info, debug, error).",
       "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs.",
       "RUNTIME_CONFIG_REPORT_ENABLED": "If enabled, the runtime configuration is printed to the log on startup.",
-      "RUNTIME_CONFIG_REPORT_FORMAT": "Defines the format of the runtime configuration report is printed to the log."
+      "RUNTIME_CONFIG_REPORT_FORMAT": "Defines the format in\nwhich the runtime configuration report is printed to the log."
     },
     "M3U_TARGET_OUTPUT": {
       "FILENAME": "The name of the generated M3U file (e.g. playlist.m3u).",
