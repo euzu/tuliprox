@@ -615,18 +615,22 @@ fn build_xtream_login_input_source(
 ) -> Result<InputSource, TuliproxError> {
     let url = request.url.trim();
     let provider = if url.starts_with(PROVIDER_SCHEME_PREFIX) {
-        let request_providers: Vec<Arc<crate::model::ConfigProvider>> = request
+        let (provider_name, _) = parse_provider_scheme_url_parts(url)?;
+        let request_provider = request
             .providers
             .as_ref()
-            .map(|providers| providers.iter().map(crate::model::ConfigProvider::from).map(Arc::new).collect())
-            .unwrap_or_default();
-        let (provider_name, _) = parse_provider_scheme_url_parts(url)?;
+            .and_then(|request_providers| {
+                request_providers
+                    .iter()
+                    .find(|provider| provider.name.as_ref() == provider_name)
+                    .map(crate::model::ConfigProvider::from)
+                    .map(Arc::new)
+            });
         Some(
-            request_providers
-                .iter()
-                .chain(providers.iter())
+            request_provider
+                .into_iter()
+                .chain(providers.iter().cloned())
                 .find(|provider| provider.name.as_ref() == provider_name)
-                .cloned()
                 .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider config for '{provider_name}' not found")))?,
         )
     } else {
