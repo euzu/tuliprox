@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 use shared::error::TuliproxError;
 use shared::model::{
     ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme, OnConnectErrorPolicy, OnResolveErrorPolicy, PatternTemplate,
-    SourcesConfigDto,
+    ProviderUrlSelectionPolicy, SourcesConfigDto,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -182,6 +182,7 @@ impl ProviderDnsCache {
 pub struct ConfigProvider {
     pub name: Arc<str>,
     pub urls: Vec<Arc<str>>,
+    pub provider_url_selection_policy: ProviderUrlSelectionPolicy,
     pub current_url_index: AtomicUsize,
     pub dns: Option<ProviderDnsConfig>,
     pub dns_cache: Arc<ProviderDnsCache>,
@@ -192,6 +193,7 @@ impl Clone for ConfigProvider {
         Self {
             name: self.name.clone(),
             urls: self.urls.clone(),
+            provider_url_selection_policy: self.provider_url_selection_policy,
             current_url_index: AtomicUsize::new(self.current_url_index.load(Ordering::Relaxed)),
             dns: self.dns.clone(),
             dns_cache: Arc::clone(&self.dns_cache),
@@ -208,6 +210,7 @@ impl From<&ConfigProviderDto> for ConfigProvider {
         Self {
             name: dto.name.clone(),
             urls: dto.urls.clone(),
+            provider_url_selection_policy: dto.provider_url_selection_policy,
             current_url_index: AtomicUsize::new(0),
             dns: dns_cfg,
             dns_cache,
@@ -246,6 +249,10 @@ impl ConfigProvider {
     pub fn set_current_index(&self, index: usize) {
         let normalized = if self.urls.is_empty() { 0 } else { index % self.urls.len() };
         self.current_url_index.store(normalized, Ordering::Relaxed);
+    }
+
+    pub const fn provider_url_selection_policy(&self) -> ProviderUrlSelectionPolicy {
+        self.provider_url_selection_policy
     }
 
     pub fn get_dns_config(&self) -> Option<&ProviderDnsConfig> { self.dns.as_ref() }
@@ -551,7 +558,7 @@ impl SourcesConfig {
 #[cfg(test)]
 mod tests {
     use super::ConfigProvider;
-    use shared::model::ConfigProviderDto;
+    use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
     use std::net::IpAddr;
 
     #[test]
@@ -564,6 +571,7 @@ mod tests {
                 "http://cdn-b.example.net/redundant".into(),
                 "http://203.0.113.10".into(),
             ],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
 
@@ -582,6 +590,7 @@ mod tests {
                 "http://cdn-b.example.net".into(),
                 "http://cdn-c.example.net".into(),
             ],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
 
@@ -612,6 +621,21 @@ mod tests {
                 "extra-a.example.net".to_string(),
                 "extra-b.example.net".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn provider_preserves_url_selection_policy_from_dto() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "p1".into(),
+            urls: vec!["http://primary.example.net".into(), "http://backup.example.net".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        });
+
+        assert_eq!(
+            provider.provider_url_selection_policy(),
+            ProviderUrlSelectionPolicy::RestartFromFirst
         );
     }
 }

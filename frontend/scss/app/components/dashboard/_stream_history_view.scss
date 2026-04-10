@@ -85,13 +85,13 @@
     white-space: nowrap;
 
     &--connect {
-      color: var(--success-color, #4caf50);
-      background: var(--success-background-color, rgba(76, 175, 80, 0.12));
+      color: var(--success-color);
+      background: var(--success-background-color);
     }
 
     &--disconnect {
-      color: var(--error-color, #f44336);
-      background: var(--error-background-color, rgba(244, 67, 54, 0.12));
+      color: var(--error-color);
+      background: var(--error-background-color);
     }
   }
 }

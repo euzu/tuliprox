@@ -40,9 +40,10 @@
           background-color: var(--table-header-background-color);
           box-shadow: inset 0 -1px 0 var(--border-color);
 
-          &:not(:last-child) {
-            border-right: 1px solid var(--border-color);
-          }
+          // if you want cell border
+          //&:not(:last-child) {
+          //  border-right: 1px solid var(--border-color);
+          //}
 
           svg,
           .svg-icon {

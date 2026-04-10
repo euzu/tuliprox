@@ -746,7 +746,7 @@ fn assemble_provider_url_at_index(
 mod tests {
     use super::*;
     use crate::model::ConfigProvider;
-    use shared::model::ConfigProviderDto;
+    use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
     use std::borrow::Cow;
     use std::sync::Arc;
 
@@ -766,6 +766,7 @@ mod tests {
         let provider = ConfigProvider::from(&ConfigProviderDto {
             name: "myprovider".into(),
             urls: vec!["http://provider.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
             dns: None,
         });
         let input = ConfigInput {
@@ -784,6 +785,7 @@ mod tests {
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "myprovider".into(),
             urls: vec!["http://provider-a.example".into(), "http://provider-b.example".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
             dns: None,
         }));
         let _ = provider.rotate_to_next_url_with_cycle_check(0);

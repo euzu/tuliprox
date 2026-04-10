@@ -1,4 +1,4 @@
-use crate::app::components::chip::Chip;
+use crate::app::components::{chip::Chip, IconButton};
 use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
@@ -57,24 +57,40 @@ pub fn TagList(props: &TagListProps) -> Html {
         })
     };
 
-    // add new tag on enter
-    let on_keydown = {
+    let add_tag = {
         let new_tag = new_tag.clone();
         let tag_state = tag_state.clone();
         let on_change = on_change.clone();
+        Callback::from(move |()| {
+            let val = (*new_tag).trim().to_string();
+            if !val.is_empty() && !tag_state.iter().any(|t| t.label == val) {
+                let mut updated = (*tag_state).clone();
+                updated.push(Rc::new(Tag { label: val.clone(), class: None }));
+                on_change.emit(updated.clone());
+                tag_state.set(updated);
+            }
+            new_tag.set(String::new());
+        })
+    };
+
+    // add new tag on enter
+    let on_keydown = {
+        let add_tag = add_tag.clone();
         Callback::from(move |e: KeyboardEvent| {
-            if e.key() == "Enter" {
+            if e.key() == "Enter" && !e.is_composing() {
                 e.prevent_default();
                 e.stop_propagation();
-                let val = (*new_tag).trim().to_string();
-                if !val.is_empty() && !tag_state.iter().any(|t| t.label == val) {
-                    let mut updated = (*tag_state).clone();
-                    updated.push(Rc::new(Tag { label: val.clone(), class: None }));
-                    on_change.emit(updated.clone());
-                    tag_state.set(updated);
-                }
-                new_tag.set(String::new());
+                add_tag.emit(());
             }
+        })
+    };
+
+    let on_add_tag = {
+        let add_tag = add_tag.clone();
+        Callback::from(move |(_, e): (String, MouseEvent)| {
+            e.prevent_default();
+            e.stop_propagation();
+            add_tag.emit(());
         })
     };
 
@@ -103,6 +119,7 @@ pub fn TagList(props: &TagListProps) -> Html {
                             onkeydown={on_keydown.clone()}
                             placeholder={placeholder}
                         />
+                        <IconButton name="add" icon="Add" onclick={on_add_tag.clone()}/>
                     </div>
                     </div>
                     }

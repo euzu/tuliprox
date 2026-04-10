@@ -269,13 +269,28 @@ log:
   sanitize_sensitive_info: true
   log_active_user: false
   log_level: info
+  runtime_config_report_enabled: false
+  runtime_config_report_format: yaml
 ```
 
-| Parameter                 | Type   | Default | Technical Impact & Background                                                                                                                                                                                           |
-|:--------------------------|:-------|:--------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `log_level`               | String | `info`  | Verbosity. Possible values: `trace`, `debug`, `info`, `warn`, `error`. Can be overridden per-module (e.g., `tuliprox=debug,hyper_util=warn`).                                                                           |
-| `sanitize_sensitive_info` | Bool   | `true`  | **Critical:** Masks passwords, provider URLs, and external client IPs in the logs with `***`. Highly recommended to keep `true` so you can safely share logs on GitHub/Discord for support without leaking credentials. |
-| `log_active_user`         | Bool   | `false` | Periodically writes the current active client connection count as an INFO message to the log file.                                                                                                                      |
+| Parameter                       | Type   | Default | Technical Impact & Background                                                                                                                                                                                                          |
+|:--------------------------------|:-------|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `log_level`                     | String | `info`  | Verbosity. Possible values: `trace`, `debug`, `info`, `warn`, `error`. Can be overridden per-module (e.g., `tuliprox=debug,hyper_util=warn`).                                                                                          |
+| `sanitize_sensitive_info`       | Bool   | `true`  | **Critical:** Masks passwords, provider URLs, and external client IPs in the logs with `***`. Highly recommended to keep `true` so you can safely share logs on GitHub/Discord for support without leaking credentials.                |
+| `log_active_user`               | Bool   | `false` | Periodically writes the current active client connection count as an INFO message to the log file.                                                                                                                                     |
+| `runtime_config_report_enabled` | Bool   | `false` | Opt-in startup dump of the complete effective runtime configuration after defaults, path resolution, and runtime preparation have been applied. Sensitive values such as passwords, secrets, tokens, and API keys are masked as `***`. |
+| `runtime_config_report_format`  | String | `yaml`  | Output format for the runtime config report. Supported values: `json` and `yaml`. Both formats are emitted as pretty, multi-line output. Ignored unless `runtime_config_report_enabled` is `true`.                                     |
+
+If enabled, Tuliprox keeps the existing startup summary and prints the additional full runtime report once during
+startup. The report includes:
+
+* prepared `config.yml`
+* prepared `source.yml`
+* loaded mappings/templates/api-proxy sections when present
+* resolved runtime `paths`
+
+The report is intended for diagnostics and verification of effective defaults. Sensitive values are redacted before
+logging.
 
 ---
 

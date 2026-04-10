@@ -460,6 +460,7 @@ mod tests {
         let provider = ConfigProvider::from(&ConfigProviderDto {
             name: "demo".intern(),
             urls: vec!["http://provider.example".intern()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
         let input = Arc::new(ConfigInput {
@@ -484,6 +485,7 @@ mod tests {
         let provider = ConfigProvider::from(&ConfigProviderDto {
             name: "demo".intern(),
             urls: vec!["http://provider.example".intern()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
         let input = Arc::new(ConfigInput {
@@ -524,6 +526,7 @@ mod tests {
         let provider = ConfigProvider::from(&ConfigProviderDto {
             name: "demo".intern(),
             urls: vec!["http://provider.example".intern()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
         let input = Arc::new(ConfigInput {
@@ -545,6 +548,7 @@ mod tests {
         let provider = ConfigProvider::from(&ConfigProviderDto {
             name: "demo".intern(),
             urls: vec!["http://provider.example".intern()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
         let input = Arc::new(ConfigInput {
@@ -582,11 +586,13 @@ mod tests {
         let provider_a = ConfigProvider::from(&ConfigProviderDto {
             name: "shared".intern(),
             urls: vec!["http://provider-a.example".intern()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
         let provider_b = ConfigProvider::from(&ConfigProviderDto {
             name: "shared".intern(),
             urls: vec!["http://provider-b.example".intern()],
+            provider_url_selection_policy: shared::model::ProviderUrlSelectionPolicy::default(),
             dns: None,
         });
         let input_a = Arc::new(ConfigInput {

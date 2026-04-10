@@ -43,6 +43,7 @@ provider:
     urls:
       - http://primary.example.com
       - http://backup.example.com
+    provider_url_selection_policy: resume_last_working  # or restart_from_first
     dns:
       enabled: true
       refresh_secs: 300
@@ -56,6 +57,15 @@ provider:
         "primary.example.com":
           - 203.0.113.10
 ```
+
+### Provider Parameters (`provider[]`)
+
+| Parameter                       | Type   | Default               | Technical Impact                                                                                                                                                                                             |
+|:--------------------------------|:-------|:----------------------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`                          | String | required              | Internal provider identifier referenced by `provider://<name>` URLs. Must be unique within the provider list.                                                                                                |
+| `urls`                          | List   | required              | Ordered failover URL list for this provider. Tuliprox rotates through these URLs within a request when failover is triggered.                                                                                |
+| `provider_url_selection_policy` | Enum   | `resume_last_working` | Controls how a new request chooses its starting URL. `resume_last_working` starts at the last successful URL. `restart_from_first` always begins again at `urls[0]` and only fails over within that request. |
+| `dns`                           | Object | unset                 | Optional DNS/IP rotation settings for the provider. See the table below.                                                                                                                                     |
 
 ### DNS Rotation Parameters (`provider.dns`)
 
@@ -140,12 +150,12 @@ Tuliprox utilizes a flexible URI-based system to define where input data origina
 Depending on the prefix used, the engine switches between remote downloads, local file access, or internal failover
 logic.
 
-| Scheme            | Target Type     | Technical Impact & Background                                                                                                                                                   |
-|:------------------|:----------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **`http(s)://`**  | Remote Server   | Standard method for downloading playlists from provider endpoints.                                                                                                              |
-| **`file://`**     | Local Storage   | Reads a playlist directly from the host filesystem. Useful for manual backups or pre-processed files.                                                                           |
-| **`provider://`** | Failover System | Resolves the URL via internal `provider` definitions. **Pro-Tip:** Use this to implement automatic rotation or failover between multiple mirrors/gateways of the same provider. |
-| **`batch://`**    | CSV File        | Dedicated scheme for bulk alias management. Points to a local `;` separated CSV file (e.g., `batch://./aliases.csv`).                                                           |
+| Scheme            | Target Type     | Technical Impact & Background                                                                                                                                                                                                                                                                                                 |
+|:------------------|:----------------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **`http(s)://`**  | Remote Server   | Standard method for downloading playlists from provider endpoints.                                                                                                                                                                                                                                                            |
+| **`file://`**     | Local Storage   | Reads a playlist directly from the host filesystem. Useful for manual backups or pre-processed files.                                                                                                                                                                                                                         |
+| **`provider://`** | Failover System | Resolves the URL via internal `provider` definitions. **Pro-Tip:** Use this to implement automatic rotation or failover between multiple mirrors/gateways of the same provider. New requests honor `provider_url_selection_policy`, so they can either resume from the last healthy URL or always restart from the first URL. |
+| **`batch://`**    | CSV File        | Dedicated scheme for bulk alias management. Points to a local `;` separated CSV file (e.g., `batch://./aliases.csv`).                                                                                                                                                                                                         |
 
 ### Additional Notes
 

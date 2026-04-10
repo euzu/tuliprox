@@ -435,7 +435,7 @@
       "INPUT_TYPE": "Defines the streaming protocol or source format (e.g. xtream, m3u).",
       "LIVE_SOURCE": "Source selector for the Live cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "PROVIDERS": "Provider profiles define reusable upstream URLs and DNS behavior that this input can reference."
-      ,
+    ,
       "SERIES_SOURCE": "Source selector for the Series cluster when staged input is enabled (`default`, `staged`, `input`, `skip`).",
       "VOD_SOURCE": "Source selector for the VOD cluster when staged input is enabled (`default`, `staged`, `input`, `skip`)."
     },
@@ -467,7 +467,9 @@
     "LOG_CONFIG": {
       "LOG_ACTIVE_USER": "If enabled, the number of active reverse proxy clients is logged regularly.",
       "LOG_LEVEL": "Sets the verbosity of application logs (e.g. info, debug, error).",
-      "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs."
+      "SANITIZE_SENSITIVE_INFO": "If enabled, masks passwords and tokens in logs.",
+      "RUNTIME_CONFIG_REPORT_ENABLED": "If enabled, the runtime configuration is printed to the log on startup.",
+      "RUNTIME_CONFIG_REPORT_FORMAT": "Defines the format in\nwhich the runtime configuration report is printed to the log."
     },
     "M3U_TARGET_OUTPUT": {
       "FILENAME": "The name of the generated M3U file (e.g. playlist.m3u).",
@@ -544,6 +546,7 @@
       "USER": "Pushover user key identifying the notification recipient."
     },
     "PROVIDER_FORM": {
+      "URL_SELECTION_POLICY": "Controls how each new request chooses its starting provider URL. `resume_last_working` starts with the last successful URL. `restart_from_first` always begins again at the first configured URL and only fails over if that request encounters an error.",
       "URLS": "List of base URLs for this provider. They are used in order and rotated when failover is triggered.",
       "DNS": {
         "ON_CONNECT_ERROR": "Defines connect-error behavior: try the next resolved IP first, or rotate directly to the next provider URL.",
@@ -1145,6 +1148,10 @@
     "PROVIDER": "Provider",
     "PROVIDER_DNS": "Provider DNS",
     "PROVIDER_NAME": "Provider Name",
+    "PROVIDER_URL_SELECTION_POLICY": "Provider URL Selection Policy",
+    "PROVIDER_URL_SELECTION_RESUME_LAST_WORKING": "Resume Last Working",
+    "PROVIDER_URL_SELECTION_RESTART_FROM_FIRST": "Restart From First",
+    "SELECTION_POLICY": "Selection Policy",
     "PROVIDER_URLS": "Provider URLs",
     "PROXY": "Proxy",
     "PROXY_CONFIG": "Proxy",
@@ -1385,7 +1392,9 @@
     "VIEW_TYPE_PLAYLIST_EXPLORER":  "Playlist Explorer",
     "VIEW_TYPE_PLAYLIST_EPG": "Playlist EPG",
     "VIEW_TYPE_RBAC":  "WebUI Users",
-    "ADMISSION_STRATEGIES": "Admission Strategies"
+    "ADMISSION_STRATEGIES": "Admission Strategies",
+    "RUNTIME_CONFIG_REPORT": "Runtime Config Report",
+    "RUNTIME_CONFIG_REPORT_FORMAT": "Runtime Config Report Format"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
