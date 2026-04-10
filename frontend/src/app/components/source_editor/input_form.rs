@@ -53,6 +53,8 @@ const LABEL_PRIORITY: &str = "LABEL.PRIORITY";
 const LABEL_MAX_CONNECTIONS: &str = "LABEL.MAX_CONNECTIONS";
 const LABEL_EXP_DATE: &str = "LABEL.EXP_DATE";
 const LABEL_SELECTION_POLICY: &str = "LABEL.SELECTION_POLICY";
+const LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING: &str = "LABEL.PROVIDER_URL_SELECTION_RESUME_LAST_WORKING";
+const LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST: &str = "LABEL.PROVIDER_URL_SELECTION_RESTART_FROM_FIRST";
 const LABEL_PROVIDER_DNS: &str = "LABEL.PROVIDER_DNS";
 const LABEL_DNS_ON_CONNECT_ERROR: &str = "LABEL.DNS_ON_CONNECT_ERROR";
 const LABEL_DNS_REFRESH_SECS: &str = "LABEL.DNS_REFRESH_SECS";
@@ -84,10 +86,10 @@ const LABEL_SERIES_SOURCE: &str = "LABEL.SERIES_SOURCE";
 const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
 
-fn provider_url_selection_policy_text(policy: ProviderUrlSelectionPolicy) -> &'static str {
+fn provider_url_selection_policy_label_key(policy: ProviderUrlSelectionPolicy) -> &'static str {
     match policy {
-        ProviderUrlSelectionPolicy::ResumeLastWorking => "resume_last_working",
-        ProviderUrlSelectionPolicy::RestartFromFirst => "restart_from_first",
+        ProviderUrlSelectionPolicy::ResumeLastWorking => LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING,
+        ProviderUrlSelectionPolicy::RestartFromFirst => LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST,
     }
 }
 
@@ -100,10 +102,10 @@ fn provider_dns_enabled_text(provider: &ConfigProviderDto) -> &'static str {
 }
 
 fn provider_on_connect_error_text(provider: &ConfigProviderDto) -> &'static str {
-    match provider.dns.as_ref().map_or(OnConnectErrorPolicy::default(), |dns| dns.on_connect_error) {
+    provider.dns.as_ref().filter(|dns| dns.enabled).map_or("-", |dns| match dns.on_connect_error {
         OnConnectErrorPolicy::TryNextIp => "try_next_ip",
         OnConnectErrorPolicy::RotateProviderUrl => "rotate_provider_url",
-    }
+    })
 }
 
 fn provider_refresh_secs_text(provider: &ConfigProviderDto) -> String {
@@ -426,6 +428,28 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             }
             || ()
         });
+    }
+
+    {
+        let input_form_state = input_form_state.clone();
+        use_effect_with(
+            (
+                input_form_state.form.url.clone(),
+                input_form_state.form.username.clone(),
+                input_form_state.form.password.clone(),
+            ),
+            move |(url, username, password)| {
+                if url.starts_with(BATCH_SCHEME_PREFIX) {
+                    if username.is_some() {
+                        input_form_state.dispatch(ConfigInputFormAction::Username(None));
+                    }
+                    if password.is_some() {
+                        input_form_state.dispatch(ConfigInputFormAction::Password(None));
+                    }
+                }
+                || ()
+            },
+        );
     }
 
     let handle_add_epg_item = {
@@ -1308,7 +1332,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                                                     <div class="tp__provider-list-item__meta-row">
                                                         <span class="tp__provider-list-item__meta-label">{format!("{}: ", translate.t(LABEL_SELECTION_POLICY))}</span>
                                                         <span class="tp__provider-list-item__meta-value">
-                                                            {provider_url_selection_policy_text(provider.provider_url_selection_policy)}
+                                                            {translate.t(provider_url_selection_policy_label_key(provider.provider_url_selection_policy))}
                                                         </span>
                                                     </div>
                                                     <div class="tp__provider-list-item__meta-row">

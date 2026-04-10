@@ -1121,6 +1121,40 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_url_selection_policy_deserializes_default_when_omitted() {
+        let provider: ConfigProviderDto =
+            serde_json::from_str(r#"{"name":"provider-a","urls":["http://primary.example.com"]}"#)
+                .expect("provider dto should deserialize");
+
+        assert_eq!(provider.provider_url_selection_policy, ProviderUrlSelectionPolicy::ResumeLastWorking);
+    }
+
+    #[test]
+    fn test_provider_url_selection_policy_deserializes_restart_from_first() {
+        let provider: ConfigProviderDto = serde_json::from_str(
+            r#"{"name":"provider-a","urls":["http://primary.example.com"],"provider_url_selection_policy":"restart_from_first"}"#,
+        )
+        .expect("provider dto should deserialize");
+
+        assert_eq!(provider.provider_url_selection_policy, ProviderUrlSelectionPolicy::RestartFromFirst);
+    }
+
+    #[test]
+    fn test_provider_url_selection_policy_default_is_omitted_on_serialize() {
+        let provider = ConfigProviderDto {
+            name: "provider-a".intern(),
+            urls: vec!["http://primary.example.com".intern()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        };
+
+        let json = serde_json::to_string(&provider).expect("provider dto should serialize");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("serialized provider should be valid json");
+
+        assert!(value.get("provider_url_selection_policy").is_none());
+    }
+
+    #[test]
     fn test_provider_dns_prepare_normalizes_overrides_and_clamps_refresh() {
         let mut dns = ProviderDnsDto {
             refresh_secs: 1,

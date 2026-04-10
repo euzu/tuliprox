@@ -614,12 +614,12 @@ fn build_xtream_login_input_source(
     providers: &[Arc<crate::model::ConfigProvider>],
 ) -> Result<InputSource, TuliproxError> {
     let url = request.url.trim();
-    let request_providers: Vec<Arc<crate::model::ConfigProvider>> = request
-        .providers
-        .as_ref()
-        .map(|providers| providers.iter().map(crate::model::ConfigProvider::from).map(Arc::new).collect())
-        .unwrap_or_default();
     let provider = if url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        let request_providers: Vec<Arc<crate::model::ConfigProvider>> = request
+            .providers
+            .as_ref()
+            .map(|providers| providers.iter().map(crate::model::ConfigProvider::from).map(Arc::new).collect())
+            .unwrap_or_default();
         let (provider_name, _) = parse_provider_scheme_url_parts(url)?;
         Some(
             request_providers

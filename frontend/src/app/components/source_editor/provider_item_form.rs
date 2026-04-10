@@ -134,6 +134,13 @@ fn provider_url_selection_policy_from_id(id: &str) -> ProviderUrlSelectionPolicy
     }
 }
 
+fn provider_url_selection_policy_label_key(policy: ProviderUrlSelectionPolicy) -> &'static str {
+    match policy {
+        ProviderUrlSelectionPolicy::ResumeLastWorking => LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING,
+        ProviderUrlSelectionPolicy::RestartFromFirst => LABEL_PROVIDER_URL_SELECTION_RESTART_FROM_FIRST,
+    }
+}
+
 fn scheme_to_id(scheme: DnsScheme) -> &'static str {
     match scheme {
         DnsScheme::Http => DNS_SCHEME_HTTP,
@@ -414,7 +421,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
             if props.readonly {
                 { config_field_custom!(
                     translate.t(LABEL_PROVIDER_URL_SELECTION_POLICY),
-                    provider_url_selection_policy_to_id(form_state.form.provider_url_selection_policy).to_string()
+                    translate.t(provider_url_selection_policy_label_key(form_state.form.provider_url_selection_policy))
                 ) }
             } else {
                 { config_field_child!(translate.t(LABEL_PROVIDER_URL_SELECTION_POLICY), "PROVIDER_FORM.URL_SELECTION_POLICY", {

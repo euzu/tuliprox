@@ -77,7 +77,7 @@ pub fn TagList(props: &TagListProps) -> Html {
     let on_keydown = {
         let add_tag = add_tag.clone();
         Callback::from(move |e: KeyboardEvent| {
-            if e.key() == "Enter" {
+            if e.key() == "Enter" && !e.is_composing() {
                 e.prevent_default();
                 e.stop_propagation();
                 add_tag.emit(());
