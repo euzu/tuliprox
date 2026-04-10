@@ -1,11 +1,10 @@
 use super::setup_helpers::{
     apply_setup_api_users, build_setup_app_config, collect_setup_warnings, format_setup_error_message,
-    map_sources_to_playlist_rows, move_to_next_step, move_to_previous_step, prepare_config_and_api_proxy,
-    prepare_sources,
+    move_to_next_step, move_to_previous_step, prepare_config_and_api_proxy, prepare_sources,
 };
 use crate::{
     app::{
-        components::{Card, SetupContext, SetupStep, TextButton, UserlistView},
+        components::{map_sources_to_playlist_rows, Card, SetupContext, SetupStep, TextButton, UserlistView},
         context::{ConfigContext, PlaylistContext},
     },
     hooks::use_service_context,

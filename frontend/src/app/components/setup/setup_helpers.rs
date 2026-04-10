@@ -1,22 +1,17 @@
 use crate::app::{
-    components::{config::ConfigForm, InputRow, SetupConfigFormState, SetupContext, SetupStep},
+    components::{config::ConfigForm, SetupConfigFormState, SetupContext, SetupStep},
     ConfigContext,
 };
-use log::debug;
 use shared::{
     model::{
-        ApiProxyConfigDto, AppConfigDto, ConfigInputDto, ConfigTargetDto, ContentSecurityPolicyConfigDto,
-        HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto, LibraryPlaylistConfigDto, LogConfigDto,
-        ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, SourcesConfigDto, StreamConfigDto, TargetOutputDto,
-        TargetUserDto, ThumbnailConfigDto, WebAuthConfigDto, WebUiConfigDto,
+        ApiProxyConfigDto, AppConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, LibraryConfigDto,
+        LibraryMetadataConfigDto, LibraryPlaylistConfigDto, LogConfigDto, ReverseProxyConfigDto,
+        ReverseProxyDisabledHeaderConfigDto, StreamConfigDto, TargetOutputDto, TargetUserDto, ThumbnailConfigDto,
+        WebAuthConfigDto, WebUiConfigDto,
     },
     utils::{default_secret, is_default_supported_library_extensions},
 };
-use std::{
-    collections::HashMap,
-    rc::Rc,
-    sync::{Arc, OnceLock},
-};
+use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
@@ -348,53 +343,6 @@ pub fn apply_setup_api_users(app_config: &mut AppConfigDto, users: &[TargetUserD
     api_proxy.user = users.to_vec();
 }
 
-pub type SetupPlaylistRows = Vec<(Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>)>;
-
-pub fn map_sources_to_playlist_rows(sources: &SourcesConfigDto) -> Rc<SetupPlaylistRows> {
-    let mut mapped_sources = vec![];
-    let mut inputs_map: HashMap<Arc<str>, Vec<&ConfigInputDto>> = HashMap::with_capacity(sources.inputs.len());
-    for input in &sources.inputs {
-        inputs_map.entry(input.name.clone()).or_default().push(input);
-    }
-
-    for (name, entries) in &inputs_map {
-        if entries.len() > 1 && !name.trim().is_empty() {
-            debug!("Duplicate non-empty input name in setup sources: '{}' ({} entries)", name, entries.len());
-        }
-    }
-
-    for source in &sources.sources {
-        let mut inputs = vec![];
-        let mut per_source_name_occurrence: HashMap<Arc<str>, usize> = HashMap::new();
-
-        for input_name in &source.inputs {
-            let input_cfg = if let Some(candidates) = inputs_map.get(input_name) {
-                let name_occurrence = per_source_name_occurrence.entry(input_name.clone()).or_insert(0usize);
-                let resolved = candidates.get(*name_occurrence).or_else(|| candidates.last()).copied();
-                *name_occurrence += 1;
-                resolved
-            } else {
-                None
-            };
-
-            if let Some(input_cfg) = input_cfg {
-                let input = Rc::new(input_cfg.clone());
-                inputs.push(Rc::new(InputRow::Input(Rc::clone(&input))));
-                if let Some(aliases) = input_cfg.aliases.as_ref() {
-                    for alias in aliases {
-                        inputs.push(Rc::new(InputRow::Alias(Rc::new(alias.clone()), Rc::clone(&input))));
-                    }
-                }
-            }
-        }
-
-        let targets = source.targets.iter().map(|target| Rc::new(target.clone())).collect::<Vec<_>>();
-        mapped_sources.push((inputs, targets));
-    }
-
-    Rc::new(mapped_sources)
-}
-
 pub fn move_to_previous_step(setup_ctx: &SetupContext, current_step: SetupStep) {
     if let Some(previous_step) = current_step.prev() {
         setup_ctx.active_step.set(previous_step);
@@ -414,10 +362,10 @@ pub fn move_to_next_step(setup_ctx: &SetupContext, current_step: SetupStep) {
 mod tests {
     use super::{
         apply_setup_log_defaults, apply_setup_main_defaults, apply_setup_reverse_proxy_defaults,
-        build_setup_app_config, format_setup_error_message, map_sources_to_playlist_rows, matches_setup_error_pattern,
-        normalize_setup_error_message, ConfigForm, SETUP_ERROR_PATTERNS,
+        build_setup_app_config, format_setup_error_message, matches_setup_error_pattern, normalize_setup_error_message,
+        ConfigForm, SETUP_ERROR_PATTERNS,
     };
-    use crate::app::ConfigContext;
+    use crate::app::{components::map_sources_to_playlist_rows, ConfigContext};
     use shared::model::{
         AppConfigDto, ConfigInputDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
         LibraryConfigDto, LibraryScanDirectoryDto, MetadataUpdateConfigDto, ReverseProxyConfigDto, SourcesConfigDto,

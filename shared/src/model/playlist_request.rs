@@ -21,7 +21,7 @@ pub struct PlaylistRequestM3u {
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum PlaylistRequest {
     Target(u16),
-    Input(u16),
+    Input(String),
     CustomXtream(PlaylistRequestXtream),
     CustomM3u(PlaylistRequestM3u),
 }
