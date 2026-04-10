@@ -270,7 +270,7 @@ log:
   log_active_user: false
   log_level: info
   runtime_config_report_enabled: false
-  runtime_config_report_format: json
+  runtime_config_report_format: yaml
 ```
 
 | Parameter                       | Type   | Default | Technical Impact & Background                                                                                                                                                                                                          |

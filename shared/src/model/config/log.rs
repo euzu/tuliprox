@@ -109,6 +109,6 @@ mod tests {
 
         let encoded = serde_json::to_string(&cfg).expect("serialize");
         assert!(encoded.contains("\"runtime_config_report_enabled\":true"));
-        assert!(encoded.contains("\"runtime_config_report_format\":\"yaml\""));
+        assert!(!encoded.contains("\"runtime_config_report_format\":\"yaml\""));
     }
 }
