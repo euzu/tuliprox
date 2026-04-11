@@ -1,6 +1,6 @@
-use crate::model::AdmissionStrategy;
 use log::debug;
 use std::net::SocketAddr;
+use shared::model::AdmissionStrategy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionDecision {

@@ -13,7 +13,7 @@ const STREAM_QUEUE_SIZE: usize = 1024; // mpsc channel holding messages. with 81
 const MIN_SHARED_BURST_BUFFER_MB: u64 = 1;
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
-pub enum AdmissionStrategyDto {
+pub enum AdmissionStrategy {
     #[serde(rename = "evict_user_same_ip_oldest")]
     EvictUserSameIpOldest,
     #[serde(rename = "evict_user_same_ip_latest")]
@@ -26,6 +26,12 @@ pub enum AdmissionStrategyDto {
     GraceInstantStream,
     #[serde(rename = "grace_hold_stream")]
     GraceHoldStream,
+}
+
+impl AdmissionStrategy {
+    pub fn is_grace(&self) -> bool { matches!(self, Self::GraceInstantStream | Self::GraceHoldStream) }
+
+    pub fn is_grace_hold(&self) -> bool { matches!(self, Self::GraceHoldStream) }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
@@ -76,7 +82,7 @@ pub struct StreamConfigDto {
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
     pub shared_burst_buffer_mb: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admission_strategies: Option<Vec<AdmissionStrategyDto>>,
+    pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
 
 impl Default for StreamConfigDto {
@@ -152,9 +158,9 @@ impl StreamConfigDto {
     }
 }
 
-fn validate_admission_strategies(strategies: &[AdmissionStrategyDto], grace_period_millis: u64) -> Result<(), String> {
+fn validate_admission_strategies(strategies: &[AdmissionStrategy], grace_period_millis: u64) -> Result<(), String> {
     use std::collections::HashSet;
-    use AdmissionStrategyDto::*;
+    use AdmissionStrategy::*;
 
     let mut seen = HashSet::new();
     for s in strategies {
@@ -181,14 +187,14 @@ fn validate_admission_strategies(strategies: &[AdmissionStrategyDto], grace_peri
     Ok(())
 }
 
-pub fn is_valid_admission_strategy_order(strategies: &[AdmissionStrategyDto]) -> bool {
+pub fn is_valid_admission_strategy_order(strategies: &[AdmissionStrategy]) -> bool {
     validate_admission_strategy_order(strategies).is_ok()
 }
 
-pub fn validate_admission_strategy_order(strategies: &[AdmissionStrategyDto]) -> Result<(), String> {
-    use AdmissionStrategyDto::*;
+pub fn validate_admission_strategy_order(strategies: &[AdmissionStrategy]) -> Result<(), String> {
+    use AdmissionStrategy::*;
 
-    fn strategy_index(strategies: &[AdmissionStrategyDto], strategy: AdmissionStrategyDto) -> Option<usize> {
+    fn strategy_index(strategies: &[AdmissionStrategy], strategy: AdmissionStrategy) -> Option<usize> {
         strategies.iter().position(|candidate| *candidate == strategy)
     }
 
@@ -234,7 +240,7 @@ mod tests {
     fn test_duplicate_rejected() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest, AdmissionStrategyDto::EvictUserSameIpOldest]);
+            Some(vec![AdmissionStrategy::EvictUserSameIpOldest, AdmissionStrategy::EvictUserSameIpOldest]);
         let err = dto.prepare().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("Duplicate admission strategy"), "msg: {msg}");
@@ -244,7 +250,7 @@ mod tests {
     fn test_mutually_exclusive_grace_rejected() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::GraceInstantStream, AdmissionStrategyDto::GraceHoldStream]);
+            Some(vec![AdmissionStrategy::GraceInstantStream, AdmissionStrategy::GraceHoldStream]);
         let err = dto.prepare().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("mutually exclusive"), "msg: {msg}");
@@ -253,8 +259,7 @@ mod tests {
     #[test]
     fn test_valid_ordered_subset_accepted() {
         let mut dto = StreamConfigDto::default();
-        dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::GraceHoldStream]);
+        dto.admission_strategies = Some(vec![AdmissionStrategy::EvictUserOldest, AdmissionStrategy::GraceHoldStream]);
         assert!(dto.prepare().is_ok());
     }
 
@@ -262,7 +267,7 @@ mod tests {
     fn test_safe_ordering_same_ip_oldest_before_oldest_accepted() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest, AdmissionStrategyDto::EvictUserOldest]);
+            Some(vec![AdmissionStrategy::EvictUserSameIpOldest, AdmissionStrategy::EvictUserOldest]);
         assert!(dto.prepare().is_ok());
     }
 
@@ -270,7 +275,7 @@ mod tests {
     fn test_safe_ordering_same_ip_latest_before_latest_accepted() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserSameIpLatest, AdmissionStrategyDto::EvictUserLatest]);
+            Some(vec![AdmissionStrategy::EvictUserSameIpLatest, AdmissionStrategy::EvictUserLatest]);
         assert!(dto.prepare().is_ok());
     }
 
@@ -278,7 +283,7 @@ mod tests {
     fn test_grace_strategy_requires_positive_grace_period() {
         let mut dto = StreamConfigDto::default();
         dto.grace_period_millis = 0;
-        dto.admission_strategies = Some(vec![AdmissionStrategyDto::GraceHoldStream]);
+        dto.admission_strategies = Some(vec![AdmissionStrategy::GraceHoldStream]);
         let err = dto.prepare().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("grace_period_millis"), "msg: {msg}");
@@ -288,7 +293,7 @@ mod tests {
     fn test_shadowed_same_ip_oldest_order_rejected() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::EvictUserSameIpOldest]);
+            Some(vec![AdmissionStrategy::EvictUserOldest, AdmissionStrategy::EvictUserSameIpOldest]);
         let err = dto.prepare().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("shadowed"), "msg: {msg}");
@@ -298,7 +303,7 @@ mod tests {
     fn test_shadowed_same_ip_latest_order_rejected() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserLatest, AdmissionStrategyDto::EvictUserSameIpLatest]);
+            Some(vec![AdmissionStrategy::EvictUserLatest, AdmissionStrategy::EvictUserSameIpLatest]);
         let err = dto.prepare().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("shadowed"), "msg: {msg}");
@@ -308,7 +313,7 @@ mod tests {
     fn test_cross_order_pair_with_different_selection_policy_is_rejected() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::EvictUserSameIpLatest]);
+            Some(vec![AdmissionStrategy::EvictUserOldest, AdmissionStrategy::EvictUserSameIpLatest]);
         let err = dto.prepare().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("shadowed"), "msg: {msg}");
@@ -317,12 +322,12 @@ mod tests {
     #[test]
     fn test_single_strategy_accepted() {
         for s in [
-            AdmissionStrategyDto::EvictUserSameIpOldest,
-            AdmissionStrategyDto::EvictUserSameIpLatest,
-            AdmissionStrategyDto::EvictUserOldest,
-            AdmissionStrategyDto::EvictUserLatest,
-            AdmissionStrategyDto::GraceInstantStream,
-            AdmissionStrategyDto::GraceHoldStream,
+            AdmissionStrategy::EvictUserSameIpOldest,
+            AdmissionStrategy::EvictUserSameIpLatest,
+            AdmissionStrategy::EvictUserOldest,
+            AdmissionStrategy::EvictUserLatest,
+            AdmissionStrategy::GraceInstantStream,
+            AdmissionStrategy::GraceHoldStream,
         ] {
             let mut dto = StreamConfigDto::default();
             dto.admission_strategies = Some(vec![s]);
@@ -333,7 +338,7 @@ mod tests {
     #[test]
     fn test_is_empty_with_strategies() {
         let mut dto = StreamConfigDto::default();
-        dto.admission_strategies = Some(vec![AdmissionStrategyDto::GraceInstantStream]);
+        dto.admission_strategies = Some(vec![AdmissionStrategy::GraceInstantStream]);
         assert!(!dto.is_empty());
     }
 

@@ -270,6 +270,7 @@ macro_rules! try_result_not_found {
 use crate::api::panel_api::{can_provision_on_exhausted, create_panel_api_provisioning_stream_details};
 pub use internal_server_error;
 use shared::error::TuliproxError;
+use shared::model::AdmissionStrategy;
 use shared::utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
 pub use try_option_bad_request;
 pub use try_option_forbidden;
@@ -452,8 +453,7 @@ pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOpt
     StreamOptions { stream_retry, buffer_enabled, buffer_size, pipe_provider_stream }
 }
 
-pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppState>) -> Vec<crate::model::AdmissionStrategy> {
-    use crate::model::AdmissionStrategy;
+pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppState>) -> Vec<AdmissionStrategy> {
     let config = app_state.app_config.config.load();
     let stream_config = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref());
     match stream_config {
@@ -2962,7 +2962,7 @@ mod tests {
 
         assert_eq!(
             get_effective_admission_strategies(&app_state),
-            vec![crate::model::AdmissionStrategy::GraceHoldStream]
+            vec![shared::model::AdmissionStrategy::GraceHoldStream]
         );
     }
 
@@ -3001,8 +3001,8 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![
-                crate::model::AdmissionStrategy::GraceHoldStream,
-                crate::model::AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserSameIpOldest,
             ]),
         });
 

@@ -20,7 +20,7 @@ use crate::{
 };
 use shared::{
     model::{
-        AdmissionStrategyDto, CacheConfigDto, GeoIpConfigDto, QosAggregationConfigDto, RateLimitConfigDto,
+        AdmissionStrategy, CacheConfigDto, GeoIpConfigDto, QosAggregationConfigDto, RateLimitConfigDto,
         ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto,
         StreamConfigDto, StreamHistoryConfigDto,
     },
@@ -132,53 +132,53 @@ pub struct AdmissionStrategiesDto {
     pub strategies: Option<Vec<String>>,
 }
 
-fn admission_strategy_tag(strategy: AdmissionStrategyDto) -> &'static str {
+fn admission_strategy_tag(strategy: AdmissionStrategy) -> &'static str {
     match strategy {
-        AdmissionStrategyDto::EvictUserSameIpOldest => "evict_user_same_ip_oldest",
-        AdmissionStrategyDto::EvictUserSameIpLatest => "evict_user_same_ip_latest",
-        AdmissionStrategyDto::EvictUserOldest => "evict_user_oldest",
-        AdmissionStrategyDto::EvictUserLatest => "evict_user_latest",
-        AdmissionStrategyDto::GraceInstantStream => "grace_instant_stream",
-        AdmissionStrategyDto::GraceHoldStream => "grace_hold_stream",
+        AdmissionStrategy::EvictUserSameIpOldest => "evict_user_same_ip_oldest",
+        AdmissionStrategy::EvictUserSameIpLatest => "evict_user_same_ip_latest",
+        AdmissionStrategy::EvictUserOldest => "evict_user_oldest",
+        AdmissionStrategy::EvictUserLatest => "evict_user_latest",
+        AdmissionStrategy::GraceInstantStream => "grace_instant_stream",
+        AdmissionStrategy::GraceHoldStream => "grace_hold_stream",
     }
 }
 
-fn parse_admission_strategy_tag(tag: &str) -> Option<AdmissionStrategyDto> {
+fn parse_admission_strategy_tag(tag: &str) -> Option<AdmissionStrategy> {
     match tag.trim() {
-        "evict_user_same_ip_oldest" => Some(AdmissionStrategyDto::EvictUserSameIpOldest),
-        "evict_user_same_ip_latest" => Some(AdmissionStrategyDto::EvictUserSameIpLatest),
-        "evict_user_oldest" => Some(AdmissionStrategyDto::EvictUserOldest),
-        "evict_user_latest" => Some(AdmissionStrategyDto::EvictUserLatest),
-        "grace_instant_stream" => Some(AdmissionStrategyDto::GraceInstantStream),
-        "grace_hold_stream" => Some(AdmissionStrategyDto::GraceHoldStream),
+        "evict_user_same_ip_oldest" => Some(AdmissionStrategy::EvictUserSameIpOldest),
+        "evict_user_same_ip_latest" => Some(AdmissionStrategy::EvictUserSameIpLatest),
+        "evict_user_oldest" => Some(AdmissionStrategy::EvictUserOldest),
+        "evict_user_latest" => Some(AdmissionStrategy::EvictUserLatest),
+        "grace_instant_stream" => Some(AdmissionStrategy::GraceInstantStream),
+        "grace_hold_stream" => Some(AdmissionStrategy::GraceHoldStream),
         _ => None,
     }
 }
 
-fn admission_strategy_label_key(strategy: AdmissionStrategyDto) -> &'static str {
+fn admission_strategy_label_key(strategy: AdmissionStrategy) -> &'static str {
     match strategy {
-        AdmissionStrategyDto::EvictUserSameIpOldest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST,
-        AdmissionStrategyDto::EvictUserSameIpLatest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST,
-        AdmissionStrategyDto::EvictUserOldest => LABEL_ADMISSION_STRATEGY_EVICT_USER_OLDEST,
-        AdmissionStrategyDto::EvictUserLatest => LABEL_ADMISSION_STRATEGY_EVICT_USER_LATEST,
-        AdmissionStrategyDto::GraceInstantStream => LABEL_ADMISSION_STRATEGY_GRACE_INSTANT_STREAM,
-        AdmissionStrategyDto::GraceHoldStream => LABEL_ADMISSION_STRATEGY_GRACE_HOLD_STREAM,
+        AdmissionStrategy::EvictUserSameIpOldest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST,
+        AdmissionStrategy::EvictUserSameIpLatest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST,
+        AdmissionStrategy::EvictUserOldest => LABEL_ADMISSION_STRATEGY_EVICT_USER_OLDEST,
+        AdmissionStrategy::EvictUserLatest => LABEL_ADMISSION_STRATEGY_EVICT_USER_LATEST,
+        AdmissionStrategy::GraceInstantStream => LABEL_ADMISSION_STRATEGY_GRACE_INSTANT_STREAM,
+        AdmissionStrategy::GraceHoldStream => LABEL_ADMISSION_STRATEGY_GRACE_HOLD_STREAM,
     }
 }
 
-fn admission_strategy_label(translate: &YewI18n, strategy: AdmissionStrategyDto) -> String {
+fn admission_strategy_label(translate: &YewI18n, strategy: AdmissionStrategy) -> String {
     t_safe(translate, admission_strategy_label_key(strategy)).unwrap_or_else(|| match strategy {
-        AdmissionStrategyDto::EvictUserSameIpOldest => "Evict same-IP oldest stream".to_string(),
-        AdmissionStrategyDto::EvictUserSameIpLatest => "Evict same-IP latest stream".to_string(),
-        AdmissionStrategyDto::EvictUserOldest => "Evict user oldest stream".to_string(),
-        AdmissionStrategyDto::EvictUserLatest => "Evict user latest stream".to_string(),
-        AdmissionStrategyDto::GraceInstantStream => "Grace instant stream".to_string(),
-        AdmissionStrategyDto::GraceHoldStream => "Grace hold stream".to_string(),
+        AdmissionStrategy::EvictUserSameIpOldest => "Evict same-IP oldest stream".to_string(),
+        AdmissionStrategy::EvictUserSameIpLatest => "Evict same-IP latest stream".to_string(),
+        AdmissionStrategy::EvictUserOldest => "Evict user oldest stream".to_string(),
+        AdmissionStrategy::EvictUserLatest => "Evict user latest stream".to_string(),
+        AdmissionStrategy::GraceInstantStream => "Grace instant stream".to_string(),
+        AdmissionStrategy::GraceHoldStream => "Grace hold stream".to_string(),
     })
 }
 
-fn is_grace_strategy(strategy: AdmissionStrategyDto) -> bool {
-    matches!(strategy, AdmissionStrategyDto::GraceInstantStream | AdmissionStrategyDto::GraceHoldStream)
+fn is_grace_strategy(strategy: AdmissionStrategy) -> bool {
+    matches!(strategy, AdmissionStrategy::GraceInstantStream | AdmissionStrategy::GraceHoldStream)
 }
 
 fn is_grace_strategy_tag(tag: &str) -> bool {
@@ -186,11 +186,11 @@ fn is_grace_strategy_tag(tag: &str) -> bool {
     tag.starts_with("grace_") || parse_admission_strategy_tag(tag).is_some_and(is_grace_strategy)
 }
 
-fn admission_strategy_tags(strategies: Option<&Vec<AdmissionStrategyDto>>) -> Option<Vec<String>> {
+fn admission_strategy_tags(strategies: Option<&Vec<AdmissionStrategy>>) -> Option<Vec<String>> {
     strategies.map(|entries| entries.iter().map(|entry| admission_strategy_tag(*entry).to_string()).collect())
 }
 
-fn parse_admission_strategy_tags(tags: Option<&[String]>) -> Option<Vec<AdmissionStrategyDto>> {
+fn parse_admission_strategy_tags(tags: Option<&[String]>) -> Option<Vec<AdmissionStrategy>> {
     let tags = tags?;
     let mut parsed = Vec::new();
     for tag in tags {
@@ -212,9 +212,9 @@ fn filter_disabled_grace_strategy_tags(tags: Vec<String>, grace_period_millis: u
 }
 
 fn filter_disabled_grace_strategies(
-    strategies: Option<Vec<AdmissionStrategyDto>>,
+    strategies: Option<Vec<AdmissionStrategy>>,
     grace_period_millis: u64,
-) -> Option<Vec<AdmissionStrategyDto>> {
+) -> Option<Vec<AdmissionStrategy>> {
     strategies.map(|entries| {
         if grace_period_millis == 0 {
             entries.into_iter().filter(|strategy| !is_grace_strategy(*strategy)).collect()
@@ -235,9 +235,9 @@ fn legacy_admission_strategy_tags(stream: &StreamConfigDto) -> Vec<String> {
         Vec::new()
     } else {
         vec![admission_strategy_tag(if stream.grace_period_hold_stream {
-            AdmissionStrategyDto::GraceHoldStream
+            AdmissionStrategy::GraceHoldStream
         } else {
-            AdmissionStrategyDto::GraceInstantStream
+            AdmissionStrategy::GraceInstantStream
         })
         .to_string()]
     }
@@ -253,16 +253,16 @@ fn displayed_admission_strategy_tags(state: &AdmissionStrategiesDto, stream: &St
     )
 }
 
-fn available_admission_strategies(selected_tags: &[String], grace_period_millis: u64) -> Vec<AdmissionStrategyDto> {
+fn available_admission_strategies(selected_tags: &[String], grace_period_millis: u64) -> Vec<AdmissionStrategy> {
     let has_grace = selected_tags.iter().filter_map(|tag| parse_admission_strategy_tag(tag)).any(is_grace_strategy);
 
     [
-        AdmissionStrategyDto::EvictUserSameIpOldest,
-        AdmissionStrategyDto::EvictUserSameIpLatest,
-        AdmissionStrategyDto::EvictUserOldest,
-        AdmissionStrategyDto::EvictUserLatest,
-        AdmissionStrategyDto::GraceInstantStream,
-        AdmissionStrategyDto::GraceHoldStream,
+        AdmissionStrategy::EvictUserSameIpOldest,
+        AdmissionStrategy::EvictUserSameIpLatest,
+        AdmissionStrategy::EvictUserOldest,
+        AdmissionStrategy::EvictUserLatest,
+        AdmissionStrategy::GraceInstantStream,
+        AdmissionStrategy::GraceHoldStream,
     ]
     .into_iter()
     .filter(|strategy| {
@@ -275,7 +275,7 @@ fn available_admission_strategies(selected_tags: &[String], grace_period_millis:
     .collect()
 }
 
-fn add_admission_strategy_tag(current: &[String], strategy: AdmissionStrategyDto) -> Vec<String> {
+fn add_admission_strategy_tag(current: &[String], strategy: AdmissionStrategy) -> Vec<String> {
     let mut next = current.to_vec();
     let tag = admission_strategy_tag(strategy).to_string();
     if next.iter().any(|selected| selected == &tag) {
@@ -284,10 +284,10 @@ fn add_admission_strategy_tag(current: &[String], strategy: AdmissionStrategyDto
     // When adding a same-IP eviction rule, insert it before any broader user-wide
     // rule (if present) so the backend ordering validation is satisfied.
     let is_narrower =
-        matches!(strategy, AdmissionStrategyDto::EvictUserSameIpOldest | AdmissionStrategyDto::EvictUserSameIpLatest);
+        matches!(strategy, AdmissionStrategy::EvictUserSameIpOldest | AdmissionStrategy::EvictUserSameIpLatest);
     if is_narrower {
-        let broader_oldest = admission_strategy_tag(AdmissionStrategyDto::EvictUserOldest);
-        let broader_latest = admission_strategy_tag(AdmissionStrategyDto::EvictUserLatest);
+        let broader_oldest = admission_strategy_tag(AdmissionStrategy::EvictUserOldest);
+        let broader_latest = admission_strategy_tag(AdmissionStrategy::EvictUserLatest);
 
         let earliest_pos = next.iter().position(|t| t == broader_oldest || t == broader_latest);
         if let Some(pos) = earliest_pos {
@@ -313,7 +313,7 @@ fn move_admission_strategy_tag(current: &[String], index: usize, delta: isize) -
         if index < next.len() && target_index < next.len() {
             next.swap(index, target_index);
             // Reject the move if it would create an invalid ordering (broader before narrower).
-            let strategy_dtos: Vec<AdmissionStrategyDto> =
+            let strategy_dtos: Vec<AdmissionStrategy> =
                 next.iter().filter_map(|t| parse_admission_strategy_tag(t)).collect();
             if !shared::model::is_valid_admission_strategy_order(&strategy_dtos) {
                 next.swap(index, target_index); // revert
@@ -1158,26 +1158,26 @@ mod tests {
     #[test]
     fn admission_strategy_tags_roundtrip() {
         let tags = admission_strategy_tags(Some(&vec![
-            AdmissionStrategyDto::EvictUserOldest,
-            AdmissionStrategyDto::GraceHoldStream,
+            AdmissionStrategy::EvictUserOldest,
+            AdmissionStrategy::GraceHoldStream,
         ]))
         .unwrap_or_default();
         assert_eq!(
             parse_admission_strategy_tags(Some(&tags)),
-            Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::GraceHoldStream,])
+            Some(vec![AdmissionStrategy::EvictUserOldest, AdmissionStrategy::GraceHoldStream,])
         );
     }
 
     #[test]
     fn admission_strategy_tags_roundtrip_evict_user_latest() {
-        let tags = admission_strategy_tags(Some(&vec![AdmissionStrategyDto::EvictUserLatest])).unwrap_or_default();
-        assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategyDto::EvictUserLatest]));
+        let tags = admission_strategy_tags(Some(&vec![AdmissionStrategy::EvictUserLatest])).unwrap_or_default();
+        assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategy::EvictUserLatest]));
     }
 
     #[test]
     fn invalid_admission_strategy_tags_are_ignored() {
         let tags = vec!["evict_user_latest".to_string(), "not-a-strategy".to_string(), "evict_user_latest".to_string()];
-        assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategyDto::EvictUserLatest]));
+        assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategy::EvictUserLatest]));
     }
 
     #[test]
@@ -1195,21 +1195,21 @@ mod tests {
     #[test]
     fn available_admission_strategies_hide_second_grace_option() {
         let available = available_admission_strategies(&["grace_hold_stream".to_string()], 2_000);
-        assert!(!available.contains(&AdmissionStrategyDto::GraceInstantStream));
-        assert!(!available.contains(&AdmissionStrategyDto::GraceHoldStream));
-        assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpOldest));
-        assert!(available.contains(&AdmissionStrategyDto::EvictUserOldest));
+        assert!(!available.contains(&AdmissionStrategy::GraceInstantStream));
+        assert!(!available.contains(&AdmissionStrategy::GraceHoldStream));
+        assert!(available.contains(&AdmissionStrategy::EvictUserSameIpOldest));
+        assert!(available.contains(&AdmissionStrategy::EvictUserOldest));
     }
 
     #[test]
     fn available_admission_strategies_hide_grace_when_disabled() {
         let available = available_admission_strategies(&[], 0);
-        assert!(!available.contains(&AdmissionStrategyDto::GraceInstantStream));
-        assert!(!available.contains(&AdmissionStrategyDto::GraceHoldStream));
-        assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpOldest));
-        assert!(available.contains(&AdmissionStrategyDto::EvictUserSameIpLatest));
-        assert!(available.contains(&AdmissionStrategyDto::EvictUserOldest));
-        assert!(available.contains(&AdmissionStrategyDto::EvictUserLatest));
+        assert!(!available.contains(&AdmissionStrategy::GraceInstantStream));
+        assert!(!available.contains(&AdmissionStrategy::GraceHoldStream));
+        assert!(available.contains(&AdmissionStrategy::EvictUserSameIpOldest));
+        assert!(available.contains(&AdmissionStrategy::EvictUserSameIpLatest));
+        assert!(available.contains(&AdmissionStrategy::EvictUserOldest));
+        assert!(available.contains(&AdmissionStrategy::EvictUserLatest));
     }
 
     #[test]
@@ -1227,16 +1227,13 @@ mod tests {
             "grace_hold_stream".to_string(),
         ]));
 
-        assert_eq!(
-            filter_disabled_grace_strategies(parsed, 0),
-            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest])
-        );
+        assert_eq!(filter_disabled_grace_strategies(parsed, 0), Some(vec![AdmissionStrategy::EvictUserSameIpOldest]));
     }
 
     #[test]
     fn add_admission_strategy_enforces_narrower_before_broader() {
         let current = vec!["evict_user_oldest".to_string()];
-        let new_tags = add_admission_strategy_tag(&current, "evict_user_same_ip_oldest");
+        let new_tags = add_admission_strategy_tag(&current, AdmissionStrategy::EvictUserSameIpOldest);
         assert_eq!(new_tags, vec!["evict_user_same_ip_oldest".to_string(), "evict_user_oldest".to_string()]);
     }
 
