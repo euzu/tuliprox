@@ -18,6 +18,10 @@ pub enum AdmissionStrategyDto {
     EvictUserSameIpOldest,
     #[serde(rename = "evict_user_same_ip_latest")]
     EvictUserSameIpLatest,
+    #[serde(rename = "evict_user_oldest")]
+    EvictUserOldest,
+    #[serde(rename = "evict_user_latest")]
+    EvictUserLatest,
     #[serde(rename = "grace_instant_stream")]
     GraceInstantStream,
     #[serde(rename = "grace_hold_stream")]
@@ -216,7 +220,7 @@ mod tests {
     fn test_valid_ordered_subset_accepted() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
-            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest, AdmissionStrategyDto::GraceHoldStream]);
+            Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::GraceHoldStream]);
         assert!(dto.prepare().is_ok());
     }
 
@@ -235,6 +239,8 @@ mod tests {
         for s in [
             AdmissionStrategyDto::EvictUserSameIpOldest,
             AdmissionStrategyDto::EvictUserSameIpLatest,
+            AdmissionStrategyDto::EvictUserOldest,
+            AdmissionStrategyDto::EvictUserLatest,
             AdmissionStrategyDto::GraceInstantStream,
             AdmissionStrategyDto::GraceHoldStream,
         ] {

@@ -90,14 +90,60 @@
   - Current-day QoS rebuilds are skipped when the history day is unchanged.
   - Snapshot traversal APIs were reduced to a single repository traversal style to avoid duplicated code paths.
 
+- **Connection Admission Rules**: Added configurable admission strategies to `reverse_proxy.stream.admission_strategies`
+  that control how Tuliprox handles new stream requests when the user or provider connection limit is reached.
+  - `evict_user_same_ip_oldest` — evicts the oldest active connection from the same user and IP to make room.
+  - `evict_user_same_ip_latest` — evicts the newest active connection from the same user and IP to make room.
+  - `evict_user_oldest` — evicts the oldest active connection for the same user, regardless of IP.
+  - `evict_user_latest` — evicts the newest active connection for the same user, regardless of IP.
+  - `grace_instant_stream` — grants a grace period and immediately starts streaming.
+  - `grace_hold_stream` — grants a grace period but holds stream output until the grace check completes.
+  - Strategies are evaluated in order; the first matching strategy wins and blocks later ones.
+  - `grace_instant_stream` and `grace_hold_stream` are mutually exclusive.
+  - Grace strategies require `grace_period_millis > 0`.
+  - Added comprehensive connection handling documentation covering failures, user-visible behavior, priorities, sessions, and reconnects.
+- **Provider URL Selection Strategy**: Added `provider_url_selection_policy` to provider definitions in `source.yml`.
+  - `resume_last_working` (default) — after failover, the provider continues using the last known working URL until it fails again.
+  - `restart_from_first` — after failover, the provider always tries from the first URL on the next request.
+- **Structured Error Types**: Replaced the old `TuliproxErrorKind`-based error model with a typed `TuliproxError` enum
+  using `thiserror`. Each config domain now has its own variant (e.g., `ConfigStream`, `ConfigInput`, `ConfigSource`,
+  `ConfigApiProxy`, `ProxyUser`), making error messages precise and traceable.
+- **Web UI Landing Page**: Added `landing_page` setting to `web_ui` config to choose the initial view after login.
+  Supported values: `dashboard`, `stats`, `streams`, `stream_history`, `downloads`, `users`, `config`,
+  `source_editor`, `playlist_update`, `playlist_settings`, `playlist_explorer`, `playlist_epg`, `rbac`.
+- **Runtime Config Report**: Added opt-in startup dump of the complete effective runtime configuration.
+  - `log.runtime_config_report_enabled` (default `false`) — enables the report.
+  - `log.runtime_config_report_format` — `yaml` (default) or `json`.
+  - Sensitive values (passwords, secrets, tokens, API keys) are automatically redacted.
+  - Includes prepared `config.yml`, `source.yml`, loaded mappings/templates/api-proxy sections, and resolved paths.
+- **CVD-Friendly Theme**: Web UI now includes a CVD (color vision deficiency) friendly theme option.
+
 ## 🐛 Fixes
 
 - **Shutdown Diagnostics**: Stream-history shutdown now reports dead worker situations instead of silently swallowing them.
 - **Release Workflow Safety**:
   - `master` releases now refuse to build non-release versions when the patch component is not `0`.
   - The release-version validation now runs before expensive build steps for an early exit.
+- **provider:// Scheme**: Fixed `provider://` URL scheme resolution for failover scenarios.
+- **Log Level Change**: Fixed runtime log level changes not taking effect.
+- **API User Category Selection**: Fixed API user category selection in the Web UI.
+- **Refactored Playlist And EPG Explorer**: Playlist Explorer and EPG Explorer have been refactored for improved reliability and UX.
+- HLS session info now reports accurate duration and total transferred data.
 
 ## ⚙️ New Settings
+
+- **config.yml (`reverse_proxy.stream`)**:
+  - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
+    Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  
+    `grace_instant_stream`, `grace_hold_stream`.
+- **config.yml (`web_ui`)**:
+  - Added `landing_page` (optional, default `dashboard`): initial view after login.
+- **config.yml (`log`)**:
+  - Added `runtime_config_report_enabled` (bool, default `false`): enables full runtime config dump at startup.
+  - Added `runtime_config_report_format` (`yaml` | `json`, default `yaml`): output format for the runtime config report.
+- **source.yml (`providers`)**:
+  - Added `provider_url_selection_policy` (`resume_last_working` | `restart_from_first`, default `resume_last_working`):
+    controls URL selection behavior after provider failover.
 
 - **config.yml (`reverse_proxy`)**:
   - Added `qos_aggregation` (optional) with:

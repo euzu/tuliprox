@@ -7,6 +7,8 @@ use crate::model::macros;
 pub enum AdmissionStrategy {
     EvictUserSameIpOldest,
     EvictUserSameIpLatest,
+    EvictUserOldest,
+    EvictUserLatest,
     GraceInstantStream,
     GraceHoldStream,
 }
@@ -16,6 +18,8 @@ impl From<&AdmissionStrategyDto> for AdmissionStrategy {
         match dto {
             AdmissionStrategyDto::EvictUserSameIpOldest => Self::EvictUserSameIpOldest,
             AdmissionStrategyDto::EvictUserSameIpLatest => Self::EvictUserSameIpLatest,
+            AdmissionStrategyDto::EvictUserOldest => Self::EvictUserOldest,
+            AdmissionStrategyDto::EvictUserLatest => Self::EvictUserLatest,
             AdmissionStrategyDto::GraceInstantStream => Self::GraceInstantStream,
             AdmissionStrategyDto::GraceHoldStream => Self::GraceHoldStream,
         }
@@ -27,6 +31,8 @@ impl From<&AdmissionStrategy> for AdmissionStrategyDto {
         match domain {
             AdmissionStrategy::EvictUserSameIpOldest => Self::EvictUserSameIpOldest,
             AdmissionStrategy::EvictUserSameIpLatest => Self::EvictUserSameIpLatest,
+            AdmissionStrategy::EvictUserOldest => Self::EvictUserOldest,
+            AdmissionStrategy::EvictUserLatest => Self::EvictUserLatest,
             AdmissionStrategy::GraceInstantStream => Self::GraceInstantStream,
             AdmissionStrategy::GraceHoldStream => Self::GraceHoldStream,
         }
@@ -164,7 +170,7 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![
-                AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::EvictUserOldest,
                 AdmissionStrategy::GraceHoldStream,
             ]),
         };
@@ -173,7 +179,7 @@ mod tests {
         assert_eq!(
             dto.admission_strategies,
             Some(vec![
-                AdmissionStrategyDto::EvictUserSameIpOldest,
+                AdmissionStrategyDto::EvictUserOldest,
                 AdmissionStrategyDto::GraceHoldStream,
             ])
         );

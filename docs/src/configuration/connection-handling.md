@@ -156,6 +156,8 @@ Examples:
 - `GraceHoldStream`
 - `EvictUserSameIpOldest`
 - `EvictUserSameIpLatest`
+- `EvictUserOldest`
+- `EvictUserLatest`
 
 These rules are only evaluated after ordinary user admission is already exhausted.
 

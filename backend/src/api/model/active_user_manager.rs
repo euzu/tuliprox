@@ -752,7 +752,7 @@ impl ActiveUserManager {
     pub(crate) async fn get_eviction_candidates(
         &self,
         username: &str,
-        client_ip: &str,
+        _client_ip: &str,
     ) -> Vec<crate::api::model::EvictionCandidate> {
         let connections = self.connections.read().await;
         let Some(connection_data) = connections.by_key.get(username) else {
@@ -768,7 +768,7 @@ impl ActiveUserManager {
         connection_data
             .streams
             .iter()
-            .filter(|stream| !stream.preserved && stream.client_ip == client_ip)
+            .filter(|stream| !stream.preserved)
             .filter(|stream| matches!(addr_counts.get(&stream.addr), Some(1)))
             .map(|s| crate::api::model::EvictionCandidate {
                 addr: s.addr,
@@ -1795,6 +1795,63 @@ mod tests {
         let candidates = manager.get_eviction_candidates("same-user", "127.0.0.1").await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].addr, unique_addr);
+    }
+
+    #[tokio::test]
+    async fn eviction_candidates_include_other_ips_for_user_wide_rules() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let first_addr: SocketAddr = "127.0.0.1:55041".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:55042".parse().unwrap();
+        let first_fp = Fingerprint::new("fp-user-wide-1".to_string(), "10.0.0.1".to_string(), first_addr);
+        let second_fp = Fingerprint::new("fp-user-wide-2".to_string(), "10.0.0.2".to_string(), second_addr);
+
+        manager.add_connection(&first_addr).await;
+        manager.add_connection(&second_addr).await;
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 41,
+                meter_uid: 0,
+                username: "same-user",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &first_fp,
+                provider: "provider-a",
+                stream_channel: &test_channel(1041),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-41"),
+            })
+            .await;
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 42,
+                meter_uid: 0,
+                username: "same-user",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &second_fp,
+                provider: "provider-a",
+                stream_channel: &test_channel(1042),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-42"),
+            })
+            .await;
+
+        let candidates = manager.get_eviction_candidates("same-user", "10.0.0.1").await;
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|candidate| candidate.addr == first_addr));
+        assert!(candidates.iter().any(|candidate| candidate.addr == second_addr));
     }
 
     #[tokio::test]

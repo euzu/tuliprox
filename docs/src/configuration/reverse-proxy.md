@@ -74,6 +74,15 @@ node -e "console.log(require('crypto').randomBytes(16).toString('hex').toUpperCa
 
 This sub-block defines how Tuliprox maintains stream stability, buffers data, and handles HLS/Catchup session affinity.
 
+Admission strategies in this block can optionally evict an existing stream after normal and soft user admission are already exhausted:
+
+* `evict_user_same_ip_oldest`
+* `evict_user_same_ip_latest`
+* `evict_user_oldest`
+* `evict_user_latest`
+* `grace_instant_stream`
+* `grace_hold_stream`
+
 ```yaml
 reverse_proxy:
   stream:
