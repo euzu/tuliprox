@@ -176,20 +176,36 @@ fn validate_admission_strategies(strategies: &[AdmissionStrategyDto], grace_peri
         return Err("admission_strategies: grace strategies require grace_period_millis > 0".into());
     }
 
+    validate_admission_strategy_order(strategies)?;
+
+    Ok(())
+}
+
+pub fn is_valid_admission_strategy_order(strategies: &[AdmissionStrategyDto]) -> bool {
+    validate_admission_strategy_order(strategies).is_ok()
+}
+
+pub fn validate_admission_strategy_order(strategies: &[AdmissionStrategyDto]) -> Result<(), String> {
+    use AdmissionStrategyDto::*;
+
     fn strategy_index(strategies: &[AdmissionStrategyDto], strategy: AdmissionStrategyDto) -> Option<usize> {
         strategies.iter().position(|candidate| *candidate == strategy)
     }
 
-    for (broader, narrower) in [(EvictUserOldest, EvictUserSameIpOldest), (EvictUserLatest, EvictUserSameIpLatest)] {
-        if let (Some(broader_idx), Some(narrower_idx)) =
-            (strategy_index(strategies, broader), strategy_index(strategies, narrower))
-        {
-            if broader_idx < narrower_idx {
-                let broader_name = serde_json::to_string(&broader).unwrap_or_default().trim_matches('"').to_string();
-                let narrower_name = serde_json::to_string(&narrower).unwrap_or_default().trim_matches('"').to_string();
-                return Err(format!(
-                    "admission_strategies: {broader_name} must not appear before {narrower_name} because the later rule would be shadowed"
-                ));
+    for broader in [EvictUserOldest, EvictUserLatest] {
+        if let Some(broader_idx) = strategy_index(strategies, broader) {
+            for narrower in [EvictUserSameIpOldest, EvictUserSameIpLatest] {
+                if let Some(narrower_idx) = strategy_index(strategies, narrower) {
+                    if broader_idx < narrower_idx {
+                        let broader_name =
+                            serde_json::to_string(&broader).unwrap_or_default().trim_matches('"').to_string();
+                        let narrower_name =
+                            serde_json::to_string(&narrower).unwrap_or_default().trim_matches('"').to_string();
+                        return Err(format!(
+                            "admission_strategies: {broader_name} must not appear before {narrower_name} because the later rule would be shadowed"
+                        ));
+                    }
+                }
             }
         }
     }
@@ -289,11 +305,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cross_order_pair_with_different_selection_policy_is_allowed() {
+    fn test_cross_order_pair_with_different_selection_policy_is_rejected() {
         let mut dto = StreamConfigDto::default();
         dto.admission_strategies =
             Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::EvictUserSameIpLatest]);
-        assert!(dto.prepare().is_ok());
+        let err = dto.prepare().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("shadowed"), "msg: {msg}");
     }
 
     #[test]

@@ -315,6 +315,12 @@ fn move_admission_strategy_tag(current: &[String], index: usize, delta: isize) -
     if let Some(target_index) = index.checked_add_signed(delta) {
         if index < next.len() && target_index < next.len() {
             next.swap(index, target_index);
+            // Reject the move if it would create an invalid ordering (broader before narrower).
+            let strategy_dtos: Vec<AdmissionStrategyDto> =
+                next.iter().filter_map(|t| parse_admission_strategy_tag(t)).collect();
+            if !shared::model::is_valid_admission_strategy_order(&strategy_dtos) {
+                next.swap(index, target_index); // revert
+            }
         }
     }
     next

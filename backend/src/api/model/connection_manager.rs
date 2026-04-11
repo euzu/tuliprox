@@ -1235,10 +1235,11 @@ mod tests {
     #[tokio::test]
     async fn enqueue_with_backpressure_bounds_overflow_buffer() {
         let (tx, mut rx) = mpsc::channel(1);
-        let sender = BackpressureSender::new(tx.clone(), "test", 2);
+        let sender = BackpressureSender::new(tx.clone(), "test", 1);
         assert!(tx.send(1_u8).await.is_ok());
 
         sender.enqueue(2_u8);
+        tokio::task::yield_now().await;
         sender.enqueue(3_u8);
         sender.enqueue(4_u8);
 

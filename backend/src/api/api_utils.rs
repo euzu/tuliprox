@@ -3806,4 +3806,60 @@ mod tests {
         assert!(logical.contains(&fingerprint.key));
         assert!(socket_bound.contains(&fingerprint.addr.to_string()));
     }
+
+    #[tokio::test]
+    async fn get_query_path_strips_extension_for_live_with_flag() {
+        use crate::model::ConfigInputFlags;
+        use shared::model::{InputType, PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
+
+        let mut input = ConfigInput {
+            id: 1,
+            name: "provider_with_flag".intern(),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let mut options = crate::model::ConfigInputOptions::defaults().clone();
+        options.flags.set(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
+        input.options = Some(options);
+
+        let sources = SourcesConfig { inputs: vec![Arc::new(input)], ..SourcesConfig::default() };
+        let mut app_cfg_raw = create_test_app_config();
+        app_cfg_raw.sources = Arc::new(ArcSwap::from_pointee(sources));
+        let app_state = create_test_app_state_for_config(Arc::new(app_cfg_raw));
+
+        let pli = XtreamPlaylistItem {
+            virtual_id: 100,
+            provider_id: 1,
+            name: "test".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "".intern(),
+            title: "".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/123".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 0,
+            input_name: "provider_with_flag".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+        };
+
+        let hls_ext = shared::utils::HLS_EXT.to_string();
+        let (query_path, extension) =
+            crate::api::endpoints::xtream_api::get_query_path("", Some(&hls_ext), &pli, &app_state);
+
+        assert_eq!(extension, "");
+        assert_eq!(query_path, "1");
+
+        let dash_ext = shared::utils::DASH_EXT.to_string();
+        let (query_path, extension) =
+            crate::api::endpoints::xtream_api::get_query_path("", Some(&dash_ext), &pli, &app_state);
+
+        assert_eq!(extension, "");
+        assert_eq!(query_path, "1");
+    }
 }
