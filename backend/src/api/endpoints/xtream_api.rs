@@ -338,7 +338,7 @@ async fn xtream_player_api_stream(
     let requested_extension = stream_ext
         .clone()
         .filter(|ext| !ext.is_empty())
-        .or_else(|| pli.get_container_extension().map(|ext| ext.to_string()))
+        .or_else(|| pli.get_container_extension().map(|ext| concat_string!(".", ext.as_ref())))
         .unwrap_or_default();
     let session_key = if item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
@@ -479,9 +479,9 @@ async fn xtream_player_api_stream(
         )
     );
 
-    let is_hls_request = is_session_based_playback(item_type, Some(extension.as_str()));
-    // Reverse proxy mode
-    if is_hls_request {
+    let is_session_request = is_session_based_playback(item_type, Some(extension.as_str()));
+    // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
+    if is_session_request && extension == shared::utils::HLS_EXT {
         return handle_hls_stream_request(
             fingerprint,
             app_state,
@@ -612,18 +612,18 @@ async fn xtream_player_api_stream_with_token(
         let stream_ext = stream_ext.filter(|s| !s.is_empty())
             .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
 
-        let is_hls_request = is_session_based_playback(pli.item_type, stream_ext.as_deref());
+        let is_session_request = is_session_based_playback(pli.item_type, stream_ext.as_deref());
         let session_key = create_session_fingerprint(
             fingerprint,
             "webui",
             virtual_id,
-            !is_session_based_playback(pli.item_type, stream_ext.as_deref()),
+            !is_session_request,
         );
 
         // TODO how should we use fixed provider for hls in multi provider config?
 
-        // Reverse proxy mode
-        if is_hls_request {
+        // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
+        if is_session_request && stream_ext.as_deref() == Some(shared::utils::HLS_EXT) {
             return handle_hls_stream_request(
                 fingerprint,
                 app_state,

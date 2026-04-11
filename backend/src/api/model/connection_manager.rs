@@ -50,13 +50,14 @@ struct BackpressureSender<T> {
     tx: mpsc::Sender<T>,
     state: Arc<Mutex<BackpressureState<T>>>,
     queue_name: &'static str,
+    overflow_capacity: usize,
 }
 
 impl<T> BackpressureSender<T>
 where
     T: Send + 'static,
 {
-    fn new(tx: mpsc::Sender<T>, queue_name: &'static str) -> Self {
+    fn new(tx: mpsc::Sender<T>, queue_name: &'static str, overflow_capacity: usize) -> Self {
         Self {
             tx,
             state: Arc::new(Mutex::new(BackpressureState {
@@ -64,6 +65,7 @@ where
                 draining: false,
             })),
             queue_name,
+            overflow_capacity,
         }
     }
 
@@ -72,6 +74,13 @@ where
         {
             let mut state = lock_backpressure_state(self.state.as_ref());
             if state.draining {
+                if state.overflow.len() >= self.overflow_capacity {
+                    warn!(
+                        "{} overflow buffer full (capacity={}), dropping event",
+                        self.queue_name, self.overflow_capacity
+                    );
+                    return;
+                }
                 state.overflow.push_back(event);
                 return;
             }
@@ -80,6 +89,14 @@ where
                 Ok(()) => return,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
                     state.draining = true;
+                    if state.overflow.len() >= self.overflow_capacity {
+                        warn!(
+                            "{} overflow buffer full (capacity={}), dropping event",
+                            self.queue_name, self.overflow_capacity
+                        );
+                        state.draining = false;
+                        return;
+                    }
                     state.overflow.push_back(event);
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {
@@ -538,7 +555,7 @@ impl ConnectionManager {
             shared_stream_manager: Arc::clone(shared_stream_manager),
             event_manager: Arc::clone(event_manager),
             close_socket_signal_tx,
-            cleanup_sender: BackpressureSender::new(cleanup_tx, "cleanup"),
+            cleanup_sender: BackpressureSender::new(cleanup_tx, "cleanup", CLEANUP_QUEUE_CAPACITY),
             socket_activity_tracker: socket_activity_tracker.clone(),
             capacity_notify: Arc::clone(&capacity_notify),
             stream_uid_counter: AtomicU32::new(1),
@@ -1198,7 +1215,7 @@ mod tests {
     #[tokio::test]
     async fn enqueue_with_backpressure_delivers_events_after_queue_full() {
         let (tx, mut rx) = mpsc::channel(1);
-        let sender = BackpressureSender::new(tx.clone(), "test");
+        let sender = BackpressureSender::new(tx.clone(), "test", 2);
         assert!(tx.send(1_u8).await.is_ok());
 
         sender.enqueue(2_u8);
@@ -1212,6 +1229,31 @@ mod tests {
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
             Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_with_backpressure_bounds_overflow_buffer() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sender = BackpressureSender::new(tx.clone(), "test", 1);
+        assert!(tx.send(1_u8).await.is_ok());
+
+        sender.enqueue(2_u8);
+        sender.enqueue(3_u8);
+        sender.enqueue(4_u8);
+
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
+            Some(2)
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
+            Some(3)
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await,
+            Err(tokio::time::error::Elapsed(()))
         );
     }
 

@@ -305,9 +305,9 @@ async fn m3u_api_stream(
         return response.into_response();
     }
 
-    let is_hls_request = is_session_based_playback(pli.item_type, Some(extension.as_str()));
-    // Reverse proxy mode
-    if is_hls_request {
+    let is_session_request = is_session_based_playback(pli.item_type, Some(extension.as_str()));
+    // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
+    if is_session_request && extension == shared::utils::HLS_EXT {
         return handle_hls_stream_request(
             fingerprint,
             app_state,

@@ -278,9 +278,23 @@ fn available_admission_strategies(selected_tags: &[String], grace_period_millis:
 fn add_admission_strategy_tag(current: &[String], strategy: AdmissionStrategyDto) -> Vec<String> {
     let mut next = current.to_vec();
     let tag = admission_strategy_tag(strategy).to_string();
-    if !next.iter().any(|selected| selected == &tag) {
-        next.push(tag);
+    if next.iter().any(|selected| selected == &tag) {
+        return next;
     }
+    // When adding a same-IP eviction rule, insert it before the broader user-wide
+    // rule (if present) so the backend ordering validation is satisfied.
+    let broader_tag: Option<&'static str> = match strategy {
+        AdmissionStrategyDto::EvictUserSameIpOldest => Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserOldest)),
+        AdmissionStrategyDto::EvictUserSameIpLatest => Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserLatest)),
+        _ => None,
+    };
+    if let Some(broader) = broader_tag {
+        if let Some(pos) = next.iter().position(|t| t == broader) {
+            next.insert(pos, tag);
+            return next;
+        }
+    }
+    next.push(tag);
     next
 }
 
