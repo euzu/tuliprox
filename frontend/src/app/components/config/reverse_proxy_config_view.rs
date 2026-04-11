@@ -284,8 +284,12 @@ fn add_admission_strategy_tag(current: &[String], strategy: AdmissionStrategyDto
     // When adding a same-IP eviction rule, insert it before the broader user-wide
     // rule (if present) so the backend ordering validation is satisfied.
     let broader_tag: Option<&'static str> = match strategy {
-        AdmissionStrategyDto::EvictUserSameIpOldest => Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserOldest)),
-        AdmissionStrategyDto::EvictUserSameIpLatest => Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserLatest)),
+        AdmissionStrategyDto::EvictUserSameIpOldest => {
+            Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserOldest))
+        }
+        AdmissionStrategyDto::EvictUserSameIpLatest => {
+            Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserLatest))
+        }
         _ => None,
     };
     if let Some(broader) = broader_tag {

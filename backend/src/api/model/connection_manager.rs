@@ -1235,7 +1235,7 @@ mod tests {
     #[tokio::test]
     async fn enqueue_with_backpressure_bounds_overflow_buffer() {
         let (tx, mut rx) = mpsc::channel(1);
-        let sender = BackpressureSender::new(tx.clone(), "test", 1);
+        let sender = BackpressureSender::new(tx.clone(), "test", 2);
         assert!(tx.send(1_u8).await.is_ok());
 
         sender.enqueue(2_u8);
@@ -1251,10 +1251,8 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
             Some(3)
         );
-        assert_eq!(
-            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await,
-            Err(tokio::time::error::Elapsed(()))
-        );
+        let result = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(result.is_err());
     }
 
     #[test]

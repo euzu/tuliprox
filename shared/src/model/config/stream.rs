@@ -245,20 +245,16 @@ mod tests {
     #[test]
     fn test_safe_ordering_same_ip_oldest_before_oldest_accepted() {
         let mut dto = StreamConfigDto::default();
-        dto.admission_strategies = Some(vec![
-            AdmissionStrategyDto::EvictUserSameIpOldest,
-            AdmissionStrategyDto::EvictUserOldest,
-        ]);
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest, AdmissionStrategyDto::EvictUserOldest]);
         assert!(dto.prepare().is_ok());
     }
 
     #[test]
     fn test_safe_ordering_same_ip_latest_before_latest_accepted() {
         let mut dto = StreamConfigDto::default();
-        dto.admission_strategies = Some(vec![
-            AdmissionStrategyDto::EvictUserSameIpLatest,
-            AdmissionStrategyDto::EvictUserLatest,
-        ]);
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::EvictUserSameIpLatest, AdmissionStrategyDto::EvictUserLatest]);
         assert!(dto.prepare().is_ok());
     }
 
