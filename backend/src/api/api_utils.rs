@@ -479,14 +479,31 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
     _fingerprint: &Fingerprint,
     is_session_request: bool,
     session_token: Option<&str>,
+    activate_unbound_session: bool,
 ) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>) {
     use crate::api::model::{AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext, evaluate_strategy};
     use shared::model::UserConnectionPermission;
 
     let admission = if is_session_request {
-        app_state.get_connection_admission_for_session(
-            username, max_connections, soft_connections, session_token.unwrap_or_default(),
-        ).await
+        if activate_unbound_session {
+            app_state
+                .get_connection_admission_for_session_activation(
+                    username,
+                    max_connections,
+                    soft_connections,
+                    session_token.unwrap_or_default(),
+                )
+                .await
+        } else {
+            app_state
+                .get_connection_admission_for_session(
+                    username,
+                    max_connections,
+                    soft_connections,
+                    session_token.unwrap_or_default(),
+                )
+                .await
+        }
     } else {
         app_state.get_connection_admission(username, max_connections, soft_connections).await
     };
@@ -522,14 +539,25 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
                 debug!("Evicting connection {} for user {username}", target.addr);
                 app_state.connection_manager.release_connection_as_kicked(&target.addr).await;
                 let retry_admission = if is_session_request {
-                    app_state
-                        .get_connection_admission_for_session(
-                            username,
-                            max_connections,
-                            soft_connections,
-                            session_token.unwrap_or_default(),
-                        )
-                        .await
+                    if activate_unbound_session {
+                        app_state
+                            .get_connection_admission_for_session_activation(
+                                username,
+                                max_connections,
+                                soft_connections,
+                                session_token.unwrap_or_default(),
+                            )
+                            .await
+                    } else {
+                        app_state
+                            .get_connection_admission_for_session(
+                                username,
+                                max_connections,
+                                soft_connections,
+                                session_token.unwrap_or_default(),
+                            )
+                            .await
+                    }
                 } else {
                     app_state
                         .get_connection_admission(username, max_connections, soft_connections)
@@ -550,6 +578,73 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
 
     debug!("No admission strategy could admit user {username}");
     (admission, None)
+}
+
+struct SessionActivationRequest<'a> {
+    fingerprint: &'a Fingerprint,
+    input: &'a ConfigInput,
+    user: &'a ProxyUserCredentials,
+    session_token: &'a str,
+    virtual_id: VirtualId,
+    stream_url: &'a str,
+    connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
+}
+
+async fn activate_session_before_stream_open(
+    app_state: &Arc<AppState>,
+    request: SessionActivationRequest<'_>,
+) -> (crate::api::model::ConnectionAdmission, bool) {
+    let SessionActivationRequest {
+        fingerprint,
+        input,
+        user,
+        session_token,
+        virtual_id,
+        stream_url,
+        connection_permission,
+        connection_kind,
+    } = request;
+    let limits_enabled =
+        app_state.app_config.config.load().user_access_control && (user.max_connections > 0 || user.soft_connections > 0);
+    if !limits_enabled || connection_permission == UserConnectionPermission::GracePeriod {
+        return (
+            crate::api::model::ConnectionAdmission {
+                permission: connection_permission,
+                kind: Some(connection_kind),
+            },
+            false,
+        );
+    }
+
+    let created_placeholder = app_state
+        .active_users
+        .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
+            user,
+            session_token,
+            virtual_id,
+            provider: input.name.as_ref(),
+            stream_url,
+            addr: &fingerprint.addr,
+            connection_permission,
+            connection_kind: Some(connection_kind),
+        })
+        .await;
+
+    let (admission, _grace_mode) = resolve_admission_with_strategies(
+        app_state,
+        &user.username,
+        user.max_connections,
+        user.soft_connections,
+        &fingerprint.client_ip,
+        fingerprint,
+        true,
+        Some(session_token),
+        true,
+    )
+    .await;
+
+    (admission, created_placeholder)
 }
 
 pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> String {
@@ -1120,6 +1215,10 @@ pub async fn force_provider_stream_response(
     {
         Ok(stream_details) => stream_details,
         Err(err) => {
+            app_state
+                .active_users
+                .release_unbound_session_reservation(&ctx.user.username, &user_session.token, false)
+                .await;
             error!("Failed to stream: {err}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -1185,6 +1284,10 @@ pub async fn force_provider_stream_response(
     }
 
     app_state.connection_manager.release_provider_handle(stream_details.provider_handle).await;
+    app_state
+        .active_users
+        .release_unbound_session_reservation(&ctx.user.username, &user_session.token, false)
+        .await;
     if let (Some(stream), _stream_info) =
         create_channel_unavailable_stream(&app_state.app_config, &[], StatusCode::SERVICE_UNAVAILABLE)
     {
@@ -1227,6 +1330,25 @@ pub async fn stream_response(
 
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
+    let mut connection_permission = connection_permission;
+    let mut connection_kind = connection_kind;
+    let (final_admission, created_placeholder_session) = activate_session_before_stream_open(
+        app_state,
+        SessionActivationRequest {
+            fingerprint,
+            input,
+            user,
+            session_token,
+            virtual_id,
+            stream_url,
+            connection_permission,
+            connection_kind,
+        },
+    )
+    .await;
+    connection_permission = final_admission.permission;
+    connection_kind = final_admission.kind.unwrap_or(connection_kind);
+
     let allow_shared_reuse = connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
 
     let share_stream = is_stream_share_enabled(item_type, target);
@@ -1279,6 +1401,10 @@ pub async fn stream_response(
     };
 
     if connection_permission == UserConnectionPermission::Exhausted {
+        app_state
+            .active_users
+            .release_unbound_session_reservation(&user.username, session_token, created_placeholder_session)
+            .await;
         record_connect_failed_attempt(ConnectFailedAttempt {
             app_state,
             fingerprint,
@@ -1322,6 +1448,10 @@ pub async fn stream_response(
     {
         Ok(stream_details) => stream_details,
         Err(err) => {
+            app_state
+                .active_users
+                .release_unbound_session_reservation(&user.username, session_token, created_placeholder_session)
+                .await;
             error!("Failed to stream: {err}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
@@ -1520,6 +1650,10 @@ pub async fn stream_response(
         return stream_resp.into_response();
     }
     app_state.connection_manager.release_provider_handle(stream_details.provider_handle).await;
+    app_state
+        .active_users
+        .release_unbound_session_reservation(&user.username, session_token, created_placeholder_session)
+        .await;
     StatusCode::BAD_REQUEST.into_response()
 }
 
@@ -1710,6 +1844,7 @@ pub async fn local_stream_response(
         trace!("Try to open stream {}", sanitize_sensitive_info(&pli.url));
     }
 
+    let mut connection_permission = connection_permission;
     if connection_permission == UserConnectionPermission::Exhausted {
         let allow_session_reopen = if let Some(session_token) = playback_session_token {
             user.max_connections > 0
@@ -1744,6 +1879,7 @@ pub async fn local_stream_response(
             )
             .into_response();
         }
+        connection_permission = UserConnectionPermission::Allowed;
     }
 
     let path = PathBuf::from(pli.url.strip_prefix("file://").unwrap_or(&pli.url));
@@ -1829,6 +1965,38 @@ pub async fn local_stream_response(
     } else {
         stream
     };
+    let mut connection_kind = connection_kind;
+    if let Some(session_token) = playback_session_token {
+        let (final_admission, created_placeholder) = activate_session_before_stream_open(
+            app_state,
+            SessionActivationRequest {
+                fingerprint,
+                input,
+                user,
+                session_token,
+                virtual_id: pli.virtual_id,
+                stream_url: &pli.url,
+                connection_permission,
+                connection_kind,
+            },
+        )
+        .await;
+        connection_permission = final_admission.permission;
+        connection_kind = final_admission.kind.unwrap_or(connection_kind);
+
+        if connection_permission == UserConnectionPermission::Exhausted {
+            app_state
+                .active_users
+                .release_unbound_session_reservation(&user.username, session_token, created_placeholder)
+                .await;
+            return create_custom_video_stream_response(
+                app_state,
+                &fingerprint.addr,
+                CustomVideoStreamType::UserConnectionsExhausted,
+            )
+            .into_response();
+        }
+    }
     let mut grace_period_options = app_state.get_grace_options();
     if connection_permission != UserConnectionPermission::GracePeriod {
         grace_period_options.period_millis = 0;
@@ -2207,12 +2375,20 @@ where
     stream_json_array_stream(data)
 }
 
-pub fn create_session_fingerprint(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
-    concat_string!(&fingerprint.key, "|", username, "|", &virtual_id.to_string())
+pub fn create_session_fingerprint(fingerprint: &Fingerprint, username: &str, virtual_id: u32, socket_bound: bool) -> String {
+    if socket_bound {
+        concat_string!(&fingerprint.addr.to_string(), "|", username, "|", &virtual_id.to_string())
+    } else {
+        concat_string!(&fingerprint.key, "|", username, "|", &virtual_id.to_string())
+    }
 }
 
 pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
     concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
+}
+
+pub(crate) fn is_session_based_playback(item_type: PlaylistItemType, extension: Option<&str>) -> bool {
+    item_type.is_live_adaptive() || matches!(extension, Some(ext) if ext == HLS_EXT || ext == DASH_EXT)
 }
 
 pub(crate) fn should_allow_exhausted_shared_reconnect(
@@ -2495,6 +2671,7 @@ mod tests {
             addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
             ts: 1,
             permission: UserConnectionPermission::Allowed,
+            counted: false,
         };
 
         assert!(should_allow_exhausted_shared_reconnect(
@@ -2877,6 +3054,7 @@ mod tests {
             &create_test_fingerprint("127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!())),
             true,
             Some("tok-third"),
+            false,
         )
         .await;
 
@@ -2933,6 +3111,90 @@ mod tests {
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "local file streaming should register an active stream");
         assert_eq!(active_streams[0].channel.item_type, PlaylistItemType::LocalVideo);
+    }
+
+    #[tokio::test]
+    async fn local_stream_response_rechecks_limits_before_registering_socket_bound_streams() {
+        let mut app_cfg = create_test_app_config();
+        let mut config = Config::default();
+        config.user_access_control = true;
+        app_cfg.config = Arc::new(ArcSwap::from_pointee(config));
+        let app_state = create_test_app_state_for_config(Arc::new(app_cfg));
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("local-race-test.mkv");
+        tokio::fs::write(&file_path, Bytes::from_static(b"local-stream")).await.expect("write local file");
+
+        let first_addr = "127.0.0.1:55131".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr = "127.0.0.1:55132".parse().unwrap_or_else(|_| unreachable!());
+        let first_fingerprint = create_test_fingerprint(first_addr);
+        let second_fingerprint = create_test_fingerprint(second_addr);
+        let channel = create_test_local_channel(&format!("file://{}", file_path.display()));
+        let input = ConfigInput { input_type: InputType::Library, ..ConfigInput::default() };
+        let mut user = ProxyUserCredentials::default();
+        user.username = "local-limit-user".to_string();
+        user.max_connections = 1;
+        let target = ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "test".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        };
+        let first_token = create_session_fingerprint(&first_fingerprint, &user.username, channel.virtual_id, true);
+        let second_token = create_session_fingerprint(&second_fingerprint, &user.username, channel.virtual_id, true);
+
+        let _first_response = local_stream_response(
+            &first_fingerprint,
+            &app_state,
+            channel.clone(),
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
+            Some(&first_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        let _second_response = local_stream_response(
+            &second_fingerprint,
+            &app_state,
+            channel,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
+            Some(&second_token),
+            false,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(app_state.active_users.user_connections(&user.username).await, 1);
+        assert_eq!(app_state.active_users.active_streams().await.len(), 1);
+        assert_eq!(
+            app_state
+                .active_users
+                .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
+                .await
+                .permission,
+            UserConnectionPermission::Exhausted,
+            "failed second open must not leave a placeholder session that bypasses admission"
+        );
     }
 
     #[tokio::test]
@@ -3295,5 +3557,253 @@ mod tests {
             .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, playback_session_token)
             .await;
         assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+    }
+
+    #[tokio::test]
+    async fn activated_session_admission_reserves_hls_slots_via_api_utils() {
+        let app_state = create_test_app_state();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "hls-user".to_string();
+        user.max_connections = 1;
+
+        let first_addr: std::net::SocketAddr = "127.0.0.1:55177".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: std::net::SocketAddr = "127.0.0.1:55178".parse().unwrap_or_else(|_| unreachable!());
+        let first_fingerprint = create_test_fingerprint(first_addr);
+        let second_fingerprint = create_test_fingerprint(second_addr);
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-first",
+                virtual_id: 7101,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/7101.m3u8",
+                addr: &first_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            })
+            .await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-second",
+                virtual_id: 7102,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/7102.m3u8",
+                addr: &second_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            })
+            .await;
+
+        let first_admission = resolve_admission_with_strategies(
+            &app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &first_fingerprint.client_ip,
+            &first_fingerprint,
+            true,
+            Some("tok-hls-first"),
+            true,
+        )
+        .await
+        .0;
+        let second_admission = resolve_admission_with_strategies(
+            &app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &second_fingerprint.client_ip,
+            &second_fingerprint,
+            true,
+            Some("tok-hls-second"),
+            true,
+        )
+        .await
+        .0;
+
+        assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(second_admission.permission, UserConnectionPermission::Exhausted);
+    }
+
+    #[tokio::test]
+    async fn socket_bound_playback_tokens_enforce_hard_limits_per_socket() {
+        let app_state = create_test_app_state();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user1".to_string();
+        user.max_connections = 1;
+
+        let first_addr: std::net::SocketAddr = "127.0.0.1:55171".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: std::net::SocketAddr = "127.0.0.1:55172".parse().unwrap_or_else(|_| unreachable!());
+        let first_fingerprint = create_test_fingerprint(first_addr);
+        let first_token = create_session_fingerprint(&first_fingerprint, &user.username, 5001, true);
+        let second_fingerprint = create_test_fingerprint(second_addr);
+        let second_token = create_session_fingerprint(&second_fingerprint, &user.username, 5001, true);
+
+        app_state.connection_manager.add_connection(&first_addr).await;
+        app_state.connection_manager.add_connection(&second_addr).await;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: &first_token,
+                virtual_id: 5001,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/vod/5001.ts",
+                addr: &first_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 5001,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &first_fingerprint,
+                provider: "provider-a",
+                stream_channel: &create_test_live_channel("http://provider-1.example/vod/5001.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some(&first_token),
+            })
+            .await;
+
+        let admission = app_state
+            .active_users
+            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
+            .await;
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+    }
+
+    #[tokio::test]
+    async fn socket_bound_playback_tokens_still_allow_soft_slots() {
+        let app_state = create_test_app_state();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "soft-user".to_string();
+        user.max_connections = 1;
+        user.soft_connections = 1;
+        user.priority = 0;
+        user.soft_priority = 9;
+
+        let first_addr: std::net::SocketAddr = "127.0.0.1:55173".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: std::net::SocketAddr = "127.0.0.1:55174".parse().unwrap_or_else(|_| unreachable!());
+        let third_addr: std::net::SocketAddr = "127.0.0.1:55175".parse().unwrap_or_else(|_| unreachable!());
+        let first_fingerprint = create_test_fingerprint(first_addr);
+        let second_fingerprint = create_test_fingerprint(second_addr);
+        let first_token = create_session_fingerprint(&first_fingerprint, &user.username, 6001, true);
+        let second_token = create_session_fingerprint(&second_fingerprint, &user.username, 6001, true);
+        let third_fingerprint = create_test_fingerprint(third_addr);
+        let third_token = create_session_fingerprint(&third_fingerprint, &user.username, 6001, true);
+
+        app_state.connection_manager.add_connection(&first_addr).await;
+        app_state.connection_manager.add_connection(&second_addr).await;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: &first_token,
+                virtual_id: 6001,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/vod/6001.ts",
+                addr: &first_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            })
+            .await;
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 6001,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: user.priority,
+                soft_priority: user.soft_priority,
+                fingerprint: &first_fingerprint,
+                provider: "provider-a",
+                stream_channel: &create_test_live_channel("http://provider-1.example/vod/6001.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some(&first_token),
+            })
+            .await;
+
+        let second_admission = app_state
+            .active_users
+            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
+            .await;
+        assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(second_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: &second_token,
+                virtual_id: 6001,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/vod/6001.ts",
+                addr: &second_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Soft),
+            })
+            .await;
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 6002,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Soft,
+                priority: user.priority,
+                soft_priority: user.soft_priority,
+                fingerprint: &second_fingerprint,
+                provider: "provider-a",
+                stream_channel: &create_test_live_channel("http://provider-1.example/vod/6002.ts"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some(&second_token),
+            })
+            .await;
+
+        let third_admission = app_state
+            .active_users
+            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &third_token)
+            .await;
+        assert_eq!(third_admission.permission, UserConnectionPermission::Exhausted);
+    }
+
+    #[test]
+    fn session_based_playback_matches_adaptive_types_and_extensions() {
+        assert!(is_session_based_playback(PlaylistItemType::LiveHls, None));
+        assert!(is_session_based_playback(PlaylistItemType::LiveDash, None));
+        assert!(is_session_based_playback(PlaylistItemType::Live, Some(HLS_EXT)));
+        assert!(is_session_based_playback(PlaylistItemType::Live, Some(DASH_EXT)));
+        assert!(!is_session_based_playback(PlaylistItemType::Video, None));
+    }
+
+    #[test]
+    fn create_session_fingerprint_switches_between_logical_and_socket_bound_keys() {
+        let fingerprint = create_test_fingerprint("127.0.0.1:55176".parse().unwrap_or_else(|_| unreachable!()));
+        let logical = create_session_fingerprint(&fingerprint, "user1", 7001, false);
+        let socket_bound = create_session_fingerprint(&fingerprint, "user1", 7001, true);
+
+        assert_ne!(logical, socket_bound);
+        assert!(logical.contains(&fingerprint.key));
+        assert!(socket_bound.contains(&fingerprint.addr.to_string()));
     }
 }

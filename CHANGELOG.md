@@ -99,9 +99,19 @@
   - `grace_instant_stream` — grants a grace period and immediately starts streaming.
   - `grace_hold_stream` — grants a grace period but holds stream output until the grace check completes.
   - Strategies are evaluated in order; the first matching strategy wins and blocks later ones.
+  - Configuration rejects obviously shadowed orderings where `evict_user_oldest` is placed before `evict_user_same_ip_oldest`,
+    or `evict_user_latest` before `evict_user_same_ip_latest`.
   - `grace_instant_stream` and `grace_hold_stream` are mutually exclusive.
   - Grace strategies require `grace_period_millis > 0`.
   - Added comprehensive connection handling documentation covering failures, user-visible behavior, priorities, sessions, and reconnects.
+- **Session Handling Boundary**: HLS and catchup remain session-based for continuity and provider affinity, but regular TS/VOD/local playback is now
+  enforced as socket-bound admission.
+  - A second non-HLS socket now counts as a second user connection even for the same user, IP, and stream.
+  - This prevents parallel TS/VOD sockets from being collapsed into one logical playback.
+  - Soft connections still work normally: once `max_connections` is full, an additional socket may still be admitted as `Soft` when
+    `soft_connections > 0`, and provider-side priority/preemption rules still apply afterward.
+  - HLS activity refresh and cleanup dispatch were moved off the request/drop fast path so activity updates do not block segment responses and
+    cleanup events are not silently lost when queues are temporarily full.
 - **Provider URL Selection Strategy**: Added `provider_url_selection_policy` to provider definitions in `source.yml`.
   - `resume_last_working` (default) — after failover, the provider continues using the last known working URL until it fails again.
   - `restart_from_first` — after failover, the provider always tries from the first URL on the next request.

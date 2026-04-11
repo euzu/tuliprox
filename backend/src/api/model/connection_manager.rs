@@ -17,13 +17,14 @@ use shared::{
 use std::{
     borrow::Cow,
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap},
+    collections::{BinaryHeap, HashMap, VecDeque},
     net::SocketAddr,
     str::FromStr,
     sync::{
         atomic::{AtomicU32, Ordering},
-        Arc,
+        Arc, Mutex, MutexGuard,
     },
+    thread,
     time::Duration,
 };
 use tokio::sync::{mpsc, Notify};
@@ -34,13 +35,171 @@ const CLEANUP_QUEUE_CAPACITY: usize = 4096;
 pub(crate) const PROVIDER_END_NOT_SET: u8 = 0;
 pub(crate) const PROVIDER_END_CLOSED: u8 = 1; // Provider EOF
 pub(crate) const PROVIDER_END_ERROR: u8 = 2; // Provider Err
-// Maximum number of adaptive HTTP activity updates waiting to refresh socket expiry state.
-const SOCKET_ACTIVITY_QUEUE_CAPACITY: usize = 4096;
 // Rebuild the expiry heap when it grows beyond this multiple of the live index size.
 const SOCKET_EXPIRY_QUEUE_REBUILD_FACTOR: usize = 2;
 // Avoid rebuilding the expiry heap unless it contains at least this many stale entries.
 const SOCKET_EXPIRY_QUEUE_REBUILD_MIN_STALE: usize = 256;
 fn notify_capacity(capacity_notify: &Notify) { capacity_notify.notify_waiters(); }
+
+struct BackpressureState<T> {
+    overflow: VecDeque<T>,
+    draining: bool,
+}
+
+struct BackpressureSender<T> {
+    tx: mpsc::Sender<T>,
+    state: Arc<Mutex<BackpressureState<T>>>,
+    queue_name: &'static str,
+}
+
+impl<T> BackpressureSender<T>
+where
+    T: Send + 'static,
+{
+    fn new(tx: mpsc::Sender<T>, queue_name: &'static str) -> Self {
+        Self {
+            tx,
+            state: Arc::new(Mutex::new(BackpressureState {
+                overflow: VecDeque::new(),
+                draining: false,
+            })),
+            queue_name,
+        }
+    }
+
+    fn enqueue(&self, event: T) {
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        {
+            let mut state = lock_backpressure_state(self.state.as_ref());
+            if state.draining {
+                state.overflow.push_back(event);
+                return;
+            }
+
+            match self.tx.try_send(event) {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
+                    state.draining = true;
+                    state.overflow.push_back(event);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {
+                    debug!("{} channel closed, dropping event", self.queue_name);
+                    return;
+                }
+            }
+        }
+
+        let tx = self.tx.clone();
+        let state = Arc::clone(&self.state);
+        let queue_name = self.queue_name;
+        if let Some(handle) = runtime {
+            handle.spawn(async move { Self::drain_async(&tx, &state, queue_name).await; });
+        } else {
+            thread::spawn(move || Self::drain_blocking(&tx, &state, queue_name));
+        }
+    }
+
+    async fn drain_async(
+        tx: &mpsc::Sender<T>,
+        state: &Arc<Mutex<BackpressureState<T>>>,
+        queue_name: &'static str,
+    ) {
+        loop {
+            let Some(event) = Self::next_event(state) else {
+                break;
+            };
+            if tx.send(event).await.is_err() {
+                debug!("{queue_name} channel closed while draining backpressure");
+                Self::clear_and_stop(state);
+                break;
+            }
+        }
+    }
+
+    fn drain_blocking(
+        tx: &mpsc::Sender<T>,
+        state: &Arc<Mutex<BackpressureState<T>>>,
+        queue_name: &'static str,
+    ) {
+        loop {
+            let Some(event) = Self::next_event(state) else {
+                break;
+            };
+            if tx.blocking_send(event).is_err() {
+                warn!("{queue_name} channel closed while draining backpressure");
+                Self::clear_and_stop(state);
+                break;
+            }
+        }
+    }
+
+    fn next_event(state: &Arc<Mutex<BackpressureState<T>>>) -> Option<T> {
+        let mut state = lock_backpressure_state(state.as_ref());
+        if let Some(event) = state.overflow.pop_front() {
+            return Some(event);
+        }
+        state.draining = false;
+        None
+    }
+
+    fn clear_and_stop(state: &Arc<Mutex<BackpressureState<T>>>) {
+        let mut state = lock_backpressure_state(state.as_ref());
+        state.overflow.clear();
+        state.draining = false;
+    }
+}
+
+fn lock_backpressure_state<T>(state: &Mutex<BackpressureState<T>>) -> MutexGuard<'_, BackpressureState<T>> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("Backpressure queue state was poisoned, continuing with recovered state");
+            poisoned.into_inner()
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SocketActivityTracker {
+    pending: Arc<Mutex<HashMap<SocketAddr, SocketActivityEvent>>>,
+    notify: Arc<Notify>,
+}
+
+impl SocketActivityTracker {
+    fn new() -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    fn track(&self, event: SocketActivityEvent) {
+        let key = event.addr();
+        let mut pending = lock_socket_activity_pending(self.pending.as_ref());
+        pending.insert(key, event);
+        drop(pending);
+        self.notify.notify_one();
+    }
+
+    fn drain(&self) -> Vec<SocketActivityEvent> {
+        let mut pending = lock_socket_activity_pending(self.pending.as_ref());
+        pending.drain().map(|(_, event)| event).collect()
+    }
+
+    async fn notified(&self) { self.notify.notified().await; }
+}
+
+fn lock_socket_activity_pending(
+    pending: &Mutex<HashMap<SocketAddr, SocketActivityEvent>>,
+) -> MutexGuard<'_, HashMap<SocketAddr, SocketActivityEvent>> {
+    match pending.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("Socket activity state was poisoned, continuing with recovered state");
+            poisoned.into_inner()
+        }
+    }
+}
 
 struct CleanupWorkerDeps {
     user_manager: Arc<ActiveUserManager>,
@@ -307,8 +466,22 @@ struct SocketExpiryEntry {
     addr: SocketAddr,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum SocketActivityEvent { Track(SocketAddr) }
+#[derive(Clone, Debug)]
+enum SocketActivityEvent {
+    HttpActivity {
+        username: String,
+        token: String,
+        addr: SocketAddr,
+    },
+}
+
+impl SocketActivityEvent {
+    fn addr(&self) -> SocketAddr {
+        match self {
+            Self::HttpActivity { addr, .. } => *addr,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CloseConnectionSignal {
@@ -321,8 +494,8 @@ pub struct ConnectionManager {
     pub shared_stream_manager: Arc<SharedStreamManager>,
     event_manager: Arc<EventManager>,
     close_socket_signal_tx: tokio::sync::broadcast::Sender<CloseConnectionSignal>,
-    cleanup_tx: mpsc::Sender<CleanupEvent>,
-    socket_activity_tx: mpsc::Sender<SocketActivityEvent>,
+    cleanup_sender: BackpressureSender<CleanupEvent>,
+    socket_activity_tracker: SocketActivityTracker,
     capacity_notify: Arc<Notify>,
     stream_uid_counter: AtomicU32,
     history_writer: Arc<ArcSwapOption<StreamHistoryWriter>>,
@@ -356,8 +529,8 @@ impl ConnectionManager {
         let (cleanup_tx, cleanup_rx) = mpsc::channel(CLEANUP_QUEUE_CAPACITY);
         user_manager.set_cleanup_sender(cleanup_tx.clone());
         user_manager.set_provider_manager(Arc::clone(provider_manager));
-        let (socket_activity_tx, socket_activity_rx) = mpsc::channel(SOCKET_ACTIVITY_QUEUE_CAPACITY);
         let socket_cleanup_tx = cleanup_tx.clone();
+        let socket_activity_tracker = SocketActivityTracker::new();
         let capacity_notify = Arc::new(Notify::new());
         let mgr = Self {
             user_manager: Arc::clone(user_manager),
@@ -365,8 +538,8 @@ impl ConnectionManager {
             shared_stream_manager: Arc::clone(shared_stream_manager),
             event_manager: Arc::clone(event_manager),
             close_socket_signal_tx,
-            cleanup_tx,
-            socket_activity_tx,
+            cleanup_sender: BackpressureSender::new(cleanup_tx, "cleanup"),
+            socket_activity_tracker: socket_activity_tracker.clone(),
             capacity_notify: Arc::clone(&capacity_notify),
             stream_uid_counter: AtomicU32::new(1),
             history_writer: Arc::clone(&history_writer),
@@ -382,7 +555,7 @@ impl ConnectionManager {
             history_writer,
         );
         Self::spawn_socket_activity_worker(
-            socket_activity_rx,
+            socket_activity_tracker,
             Arc::clone(user_manager),
             socket_cleanup_tx,
         );
@@ -402,7 +575,7 @@ impl ConnectionManager {
     }
 
     fn spawn_socket_activity_worker(
-        mut rx: mpsc::Receiver<SocketActivityEvent>,
+        activity_tracker: SocketActivityTracker,
         user_manager: Arc<ActiveUserManager>,
         cleanup_tx: mpsc::Sender<CleanupEvent>,
     ) {
@@ -411,6 +584,8 @@ impl ConnectionManager {
             let mut expiry_index: HashMap<SocketAddr, u64> = HashMap::new();
 
             loop {
+                Self::drain_pending_socket_activity(&activity_tracker, &mut expiry_queue, &mut expiry_index, &user_manager).await;
+
                 let next_expiry = expiry_queue.peek().map(|entry| entry.0.expires_at);
                 if let Some(expires_at) = next_expiry {
                     let now = shared::utils::current_time_secs();
@@ -427,22 +602,26 @@ impl ConnectionManager {
                     }
 
                     tokio::select! {
-                        maybe_event = rx.recv() => {
-                            let Some(event) = maybe_event else {
-                                break;
-                            };
-                            Self::handle_socket_activity_event(event, &mut expiry_queue, &mut expiry_index, &user_manager).await;
-                        }
+                        biased;
+                        () = activity_tracker.notified() => {}
                         () = tokio::time::sleep(Duration::from_secs(expires_at.saturating_sub(now))) => {}
                     }
                 } else {
-                    let Some(event) = rx.recv().await else {
-                        break;
-                    };
-                    Self::handle_socket_activity_event(event, &mut expiry_queue, &mut expiry_index, &user_manager).await;
+                    activity_tracker.notified().await;
                 }
             }
         });
+    }
+
+    async fn drain_pending_socket_activity(
+        activity_tracker: &SocketActivityTracker,
+        expiry_queue: &mut BinaryHeap<Reverse<SocketExpiryEntry>>,
+        expiry_index: &mut HashMap<SocketAddr, u64>,
+        user_manager: &Arc<ActiveUserManager>,
+    ) {
+        for event in activity_tracker.drain() {
+            Self::handle_socket_activity_event(event, expiry_queue, expiry_index, user_manager).await;
+        }
     }
 
     async fn handle_socket_activity_event(
@@ -451,7 +630,9 @@ impl ConnectionManager {
         expiry_index: &mut HashMap<SocketAddr, u64>,
         user_manager: &Arc<ActiveUserManager>,
     ) {
-        let SocketActivityEvent::Track(addr) = event;
+        let SocketActivityEvent::HttpActivity { username, token, addr } = event;
+
+        user_manager.touch_http_activity(&username, &token, &addr).await;
 
         if let Some(expires_at) = user_manager.socket_expiry_deadline(&addr).await {
             let current = expiry_index.insert(addr, expires_at);
@@ -608,17 +789,7 @@ impl ConnectionManager {
         });
     }
 
-    pub(crate) fn send_cleanup(&self, event: CleanupEvent) {
-        match self.cleanup_tx.try_send(event) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_event)) => {
-                warn!("Cleanup queue full, dropping event");
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_event)) => {
-                debug!("Cleanup channel closed, dropping cleanup event");
-            }
-        }
-    }
+    pub(crate) fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
 
     pub fn get_close_connection_channel(&self) -> tokio::sync::broadcast::Receiver<CloseConnectionSignal> { self.close_socket_signal_tx.subscribe() }
 
@@ -772,15 +943,14 @@ impl ConnectionManager {
 
     pub async fn add_connection(&self, addr: &SocketAddr) { self.user_manager.add_connection(addr).await; }
 
-    async fn track_socket_activity(&self, addr: &SocketAddr) {
-        if self.socket_activity_tx.send(SocketActivityEvent::Track(*addr)).await.is_err() {
-            debug!("Socket activity channel closed, dropping socket activity event");
-        }
-    }
-
-    pub async fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
-        self.user_manager.touch_http_activity(username, token, addr).await;
-        self.track_socket_activity(addr).await;
+    pub fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
+        self.socket_activity_tracker.track(
+            SocketActivityEvent::HttpActivity {
+                username: username.to_string(),
+                token: token.to_string(),
+                addr: *addr,
+            },
+        );
     }
 
     pub async fn update_connection(&self, update: ConnectionParams<'_>) {
@@ -920,16 +1090,17 @@ fn resolve_disconnect_failure_stage(info: &StreamInfo, reason: &DisconnectReason
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::model::{ActiveProviderManager, ActiveUserManager, EventManager, SharedStreamManager};
-    use crate::model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, SourcesConfig};
+    use crate::api::model::{ActiveProviderManager, ActiveUserManager, CreateUserSessionParams, EventManager, SharedStreamManager};
+    use crate::model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProxyUserCredentials, SourcesConfig};
     use crate::utils::{FileLockManager, GeoIp};
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::{ConfigPaths, InputFetchMethod, InputType};
+    use shared::model::{ConfigPaths, InputFetchMethod, InputType, ProxyType, UserConnectionPermission};
     use shared::model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster};
     use shared::utils::Internable;
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use tokio::sync::mpsc;
 
     fn make_stream_info(provider: &str, title: &str) -> StreamInfo {
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
@@ -1013,6 +1184,108 @@ mod tests {
             &event_manager,
             None,
         ))
+    }
+
+    fn create_test_proxy_user(username: &str) -> ProxyUserCredentials {
+        let mut user = ProxyUserCredentials::default();
+        user.username = username.to_string();
+        user.password = "password".to_string();
+        user.proxy = ProxyType::Reverse(None);
+        user.max_connections = 1;
+        user
+    }
+
+    #[tokio::test]
+    async fn enqueue_with_backpressure_delivers_events_after_queue_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sender = BackpressureSender::new(tx.clone(), "test");
+        assert!(tx.send(1_u8).await.is_ok());
+
+        sender.enqueue(2_u8);
+        sender.enqueue(3_u8);
+
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
+            Some(2)
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn socket_activity_tracker_coalesces_updates_per_socket() {
+        let tracker = SocketActivityTracker::new();
+        let addr_one: SocketAddr = "127.0.0.1:3234".parse().unwrap_or_else(|_| unreachable!());
+        let addr_two: SocketAddr = "127.0.0.1:3235".parse().unwrap_or_else(|_| unreachable!());
+
+        tracker.track(SocketActivityEvent::HttpActivity {
+            username: String::from("user1"),
+            token: String::from("tok-old"),
+            addr: addr_one,
+        });
+        tracker.track(SocketActivityEvent::HttpActivity {
+            username: String::from("user1"),
+            token: String::from("tok-new"),
+            addr: addr_one,
+        });
+        tracker.track(SocketActivityEvent::HttpActivity {
+            username: String::from("user2"),
+            token: String::from("tok-two"),
+            addr: addr_two,
+        });
+
+        let pending = tracker.drain();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|event| matches!(
+            event,
+            SocketActivityEvent::HttpActivity { addr, token, .. } if *addr == addr_one && token == "tok-new"
+        )));
+        assert!(pending.iter().any(|event| matches!(
+            event,
+            SocketActivityEvent::HttpActivity { addr, token, .. } if *addr == addr_two && token == "tok-two"
+        )));
+    }
+
+    #[tokio::test]
+    async fn touch_http_activity_is_processed_by_socket_activity_worker() {
+        let manager = create_test_connection_manager();
+        let addr: SocketAddr = "127.0.0.1:3234".parse().unwrap_or_else(|_| unreachable!());
+        let user = create_test_proxy_user("user1");
+
+        manager.add_connection(&addr).await;
+        let _ = manager
+            .user_manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-touch",
+                virtual_id: 1,
+                provider: "provider_1",
+                stream_url: "http://provider-1.example/live.ts",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            })
+            .await;
+
+        manager.touch_http_activity(&user.username, "tok-touch", &addr);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if manager.user_manager.socket_expiry_deadline(&addr).await.is_some()
+                        && manager.user_manager.get_username_for_addr(&addr).await.as_deref() == Some(user.username.as_str())
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok()
+        );
     }
 
     #[tokio::test]

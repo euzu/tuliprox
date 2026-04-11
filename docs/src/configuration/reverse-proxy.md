@@ -83,6 +83,17 @@ Admission strategies in this block can optionally evict an existing stream after
 * `grace_instant_stream`
 * `grace_hold_stream`
 
+Order matters.
+
+If you want same-IP eviction to be preferred, place the same-IP rule before the broader user-wide rule with the same oldest/latest policy.
+
+Examples:
+
+* valid: `evict_user_same_ip_oldest`, then `evict_user_oldest`
+* invalid: `evict_user_oldest`, then `evict_user_same_ip_oldest`
+* valid: `evict_user_same_ip_latest`, then `evict_user_latest`
+* invalid: `evict_user_latest`, then `evict_user_same_ip_latest`
+
 ```yaml
 reverse_proxy:
   stream:
@@ -162,6 +173,12 @@ to maintain account affinity:
   The reservation keeps the provider account stable between segment fetches.
 * **Catchup (`45s`):** Keeps the reservation alive during seeking and reconnects.
 * **Note:** Channel switches from the same client immediately take over the reservation, bypassing the TTL.
+
+Important boundary:
+
+* These TTLs are for HLS/catchup style session continuity.
+* Regular TS/VOD/local playback is socket-bound for admission and user-connection counting.
+* Opening the same TS/VOD stream on a second socket consumes another connection or soft slot.
 
 ---
 

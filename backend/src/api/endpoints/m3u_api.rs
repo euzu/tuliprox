@@ -3,7 +3,7 @@ use crate::{
         api_utils::{
             create_catchup_session_key, create_session_fingerprint, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
-            is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
+            is_session_based_playback, is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
             admission_failure_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found,
             try_unwrap_body, RedirectParams,
@@ -24,7 +24,7 @@ use futures::StreamExt;
 use log::{debug, error};
 use shared::{
     model::{FieldGetAccessor, PlaylistEntry, PlaylistItemType, TargetType, UserConnectionPermission, XtreamCluster},
-    utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info, HLS_EXT},
+    utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
 use std::sync::Arc;
 
@@ -132,7 +132,7 @@ async fn m3u_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, true);
         let (admission, _grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
             && app_state.app_config.config.load().user_access_control
         {
@@ -145,6 +145,7 @@ async fn m3u_api_stream(
                 fingerprint,
                 true,
                 Some(playback_session_token.as_str()),
+                false,
             )
             .await
         } else {
@@ -178,10 +179,16 @@ async fn m3u_api_stream(
     debug_if_enabled!(
         "ID chain for m3u endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
+    let extension = stream_ext.clone().unwrap_or_else(|| extract_extension_from_url(&pli.url).unwrap_or_default());
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
-        create_session_fingerprint(fingerprint, &user.username, virtual_id)
+        create_session_fingerprint(
+            fingerprint,
+            &user.username,
+            virtual_id,
+            !is_session_based_playback(pli.item_type, Some(extension.as_str())),
+        )
     };
     let user_session = app_state.active_users.get_and_update_user_session(&user.username, &session_key).await;
 
@@ -244,6 +251,7 @@ async fn m3u_api_stream(
             fingerprint,
             true,
             Some(&session_key),
+            false,
         )
         .await
     } else {
@@ -297,11 +305,7 @@ async fn m3u_api_stream(
         return response.into_response();
     }
 
-    let extension = stream_ext.unwrap_or_else(|| extract_extension_from_url(&pli.url).unwrap_or_default());
-
-    let is_hls_request = pli.item_type == PlaylistItemType::LiveHls
-        || pli.item_type == PlaylistItemType::LiveDash
-        || extension == HLS_EXT;
+    let is_hls_request = is_session_based_playback(pli.item_type, Some(extension.as_str()));
     // Reverse proxy mode
     if is_hls_request {
         return handle_hls_stream_request(

@@ -1148,6 +1148,12 @@ mod tests {
     }
 
     #[test]
+    fn admission_strategy_tags_roundtrip_evict_user_latest() {
+        let tags = admission_strategy_tags(Some(&vec![AdmissionStrategyDto::EvictUserLatest])).unwrap_or_default();
+        assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategyDto::EvictUserLatest]));
+    }
+
+    #[test]
     fn invalid_admission_strategy_tags_are_ignored() {
         let tags = vec!["evict_user_latest".to_string(), "not-a-strategy".to_string(), "evict_user_latest".to_string()];
         assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategyDto::EvictUserLatest]));

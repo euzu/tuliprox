@@ -178,7 +178,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             None => (url, None, None),
         }
     } else {
-        let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+        let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
         match app_state
             .active_provider
             .acquire_connection_with_grace_for_session(
@@ -279,6 +279,12 @@ pub(in crate::api) async fn handle_hls_stream_request(
         }
         Err(err) => {
             error!("Failed to download m3u8 {}", sanitize_sensitive_info(err.to_string().as_str()));
+            if let Some(session_token) = session_token.as_deref() {
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(&user.username, session_token, false)
+                    .await;
+            }
 
             let custom_stream_response = app_state.app_config.custom_stream_response.load();
             if custom_stream_response.as_ref().and_then(|c| c.channel_unavailable.as_ref()).is_some() {
@@ -395,7 +401,7 @@ async fn hls_api_stream(
     let lookup_session_token = decoded_hls_token
         .0
         .clone()
-        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id));
+        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id, false));
     let mut user_session = app_state
         .active_users
         .get_and_update_user_session(&user.username, &lookup_session_token)
@@ -438,8 +444,7 @@ async fn hls_api_stream(
         if session.virtual_id == virtual_id {
             app_state
                 .connection_manager
-                .touch_http_activity(&user.username, &session.token, &fingerprint.addr)
-                .await;
+                .touch_http_activity(&user.username, &session.token, &fingerprint.addr);
             let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &hls_url).await;
             if is_seek_request(stream_channel.cluster, &req_headers).await {
                 // partial request means we are in reverse proxy mode, seek happened
@@ -475,6 +480,7 @@ async fn hls_api_stream(
                 &fingerprint,
                 true,
                 Some(&session.token),
+                true,
             )
             .await
         } else {
@@ -491,6 +497,8 @@ async fn hls_api_stream(
             .kind
             .or(session.connection_kind)
             .unwrap_or(crate::api::model::ConnectionKind::Normal);
+        session.permission = connection_permission;
+        session.connection_kind = Some(connection_kind);
         if connection_permission == UserConnectionPermission::Exhausted {
             let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &session.stream_url).await;
             return admission_failure_response(

@@ -176,6 +176,24 @@ fn validate_admission_strategies(strategies: &[AdmissionStrategyDto], grace_peri
         return Err("admission_strategies: grace strategies require grace_period_millis > 0".into());
     }
 
+    fn strategy_index(strategies: &[AdmissionStrategyDto], strategy: AdmissionStrategyDto) -> Option<usize> {
+        strategies.iter().position(|candidate| *candidate == strategy)
+    }
+
+    for (broader, narrower) in [(EvictUserOldest, EvictUserSameIpOldest), (EvictUserLatest, EvictUserSameIpLatest)] {
+        if let (Some(broader_idx), Some(narrower_idx)) =
+            (strategy_index(strategies, broader), strategy_index(strategies, narrower))
+        {
+            if broader_idx < narrower_idx {
+                let broader_name = serde_json::to_string(&broader).unwrap_or_default().trim_matches('"').to_string();
+                let narrower_name = serde_json::to_string(&narrower).unwrap_or_default().trim_matches('"').to_string();
+                return Err(format!(
+                    "admission_strategies: {broader_name} must not appear before {narrower_name} because the later rule would be shadowed"
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -232,6 +250,34 @@ mod tests {
         let err = dto.prepare().unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("grace_period_millis"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_shadowed_same_ip_oldest_order_rejected() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::EvictUserSameIpOldest]);
+        let err = dto.prepare().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("shadowed"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_shadowed_same_ip_latest_order_rejected() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::EvictUserLatest, AdmissionStrategyDto::EvictUserSameIpLatest]);
+        let err = dto.prepare().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("shadowed"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_cross_order_pair_with_different_selection_policy_is_allowed() {
+        let mut dto = StreamConfigDto::default();
+        dto.admission_strategies =
+            Some(vec![AdmissionStrategyDto::EvictUserOldest, AdmissionStrategyDto::EvictUserSameIpLatest]);
+        assert!(dto.prepare().is_ok());
     }
 
     #[test]

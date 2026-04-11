@@ -172,6 +172,7 @@ mod tests {
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserOldest,
                 AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserLatest,
             ]),
         };
 
@@ -181,6 +182,7 @@ mod tests {
             Some(vec![
                 AdmissionStrategyDto::EvictUserOldest,
                 AdmissionStrategyDto::GraceHoldStream,
+                AdmissionStrategyDto::EvictUserLatest,
             ])
         );
     }
