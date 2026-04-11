@@ -594,7 +594,7 @@ struct SessionActivationRequest<'a> {
 async fn activate_session_before_stream_open(
     app_state: &Arc<AppState>,
     request: SessionActivationRequest<'_>,
-) -> (crate::api::model::ConnectionAdmission, bool) {
+) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>, bool) {
     let SessionActivationRequest {
         fingerprint,
         input,
@@ -613,6 +613,7 @@ async fn activate_session_before_stream_open(
                 permission: connection_permission,
                 kind: Some(connection_kind),
             },
+            None,
             false,
         );
     }
@@ -631,7 +632,7 @@ async fn activate_session_before_stream_open(
         })
         .await;
 
-    let (admission, _grace_mode) = resolve_admission_with_strategies(
+    let (admission, grace_mode) = resolve_admission_with_strategies(
         app_state,
         &user.username,
         user.max_connections,
@@ -644,7 +645,7 @@ async fn activate_session_before_stream_open(
     )
     .await;
 
-    (admission, created_placeholder)
+    (admission, grace_mode, created_placeholder)
 }
 
 pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> String {
@@ -1332,7 +1333,7 @@ pub async fn stream_response(
     let item_type = stream_channel.item_type;
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
-    let (final_admission, created_placeholder_session) = activate_session_before_stream_open(
+    let (final_admission, resolved_grace_mode, created_placeholder_session) = activate_session_before_stream_open(
         app_state,
         SessionActivationRequest {
             fingerprint,
@@ -1346,6 +1347,7 @@ pub async fn stream_response(
         },
     )
     .await;
+    let grace_mode = resolved_grace_mode.or(grace_mode);
     connection_permission = final_admission.permission;
     connection_kind = final_admission.kind.unwrap_or(connection_kind);
 
@@ -1845,6 +1847,7 @@ pub async fn local_stream_response(
     }
 
     let mut connection_permission = connection_permission;
+    let mut grace_mode = None;
     if connection_permission == UserConnectionPermission::Exhausted {
         let allow_session_reopen = if let Some(session_token) = playback_session_token {
             user.max_connections > 0
@@ -1967,7 +1970,7 @@ pub async fn local_stream_response(
     };
     let mut connection_kind = connection_kind;
     if let Some(session_token) = playback_session_token {
-        let (final_admission, created_placeholder) = activate_session_before_stream_open(
+        let (final_admission, resolved_grace_mode, created_placeholder) = activate_session_before_stream_open(
             app_state,
             SessionActivationRequest {
                 fingerprint,
@@ -1981,6 +1984,7 @@ pub async fn local_stream_response(
             },
         )
         .await;
+        grace_mode = resolved_grace_mode;
         connection_permission = final_admission.permission;
         connection_kind = final_admission.kind.unwrap_or(connection_kind);
 
@@ -2000,6 +2004,9 @@ pub async fn local_stream_response(
     let mut grace_period_options = app_state.get_grace_options();
     if connection_permission != UserConnectionPermission::GracePeriod {
         grace_period_options.period_millis = 0;
+    }
+    if let Some(resolved_mode) = grace_mode {
+        grace_period_options.hold_stream = matches!(resolved_mode, crate::api::model::GraceMode::Hold);
     }
     let resolved_connection_kind = if let Some(session_token) = playback_session_token {
         app_state

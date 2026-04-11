@@ -690,10 +690,9 @@ impl ConnectionManager {
                     Self::maybe_rebuild_socket_expiry_queue(expiry_queue, expiry_index);
                     continue;
                 }
-            } else {
-                expiry_index.remove(&addr);
-                continue;
             }
+
+            // Fallthrough to release connection if `None` or `< now`
 
             expiry_index.remove(&addr);
             if cleanup_tx.send(CleanupEvent::ReleaseConnection { addr }).await.is_err() {

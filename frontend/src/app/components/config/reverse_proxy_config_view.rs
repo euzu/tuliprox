@@ -281,19 +281,16 @@ fn add_admission_strategy_tag(current: &[String], strategy: AdmissionStrategyDto
     if next.iter().any(|selected| selected == &tag) {
         return next;
     }
-    // When adding a same-IP eviction rule, insert it before the broader user-wide
+    // When adding a same-IP eviction rule, insert it before any broader user-wide
     // rule (if present) so the backend ordering validation is satisfied.
-    let broader_tag: Option<&'static str> = match strategy {
-        AdmissionStrategyDto::EvictUserSameIpOldest => {
-            Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserOldest))
-        }
-        AdmissionStrategyDto::EvictUserSameIpLatest => {
-            Some(admission_strategy_tag(AdmissionStrategyDto::EvictUserLatest))
-        }
-        _ => None,
-    };
-    if let Some(broader) = broader_tag {
-        if let Some(pos) = next.iter().position(|t| t == broader) {
+    let is_narrower =
+        matches!(strategy, AdmissionStrategyDto::EvictUserSameIpOldest | AdmissionStrategyDto::EvictUserSameIpLatest);
+    if is_narrower {
+        let broader_oldest = admission_strategy_tag(AdmissionStrategyDto::EvictUserOldest);
+        let broader_latest = admission_strategy_tag(AdmissionStrategyDto::EvictUserLatest);
+
+        let earliest_pos = next.iter().position(|t| t == broader_oldest || t == broader_latest);
+        if let Some(pos) = earliest_pos {
             next.insert(pos, tag);
             return next;
         }
