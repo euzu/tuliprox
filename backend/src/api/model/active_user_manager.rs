@@ -9,10 +9,13 @@ use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
 use log::{debug, info};
 use shared::{
-    model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, StreamTechnicalInfo, UserConnectionPermission, VirtualId},
+    model::{
+        ActiveUserConnectionChange, PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo,
+        UserConnectionPermission, VirtualId,
+    },
     utils::{
-        current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs,
-        default_hls_session_ttl_secs, sanitize_sensitive_info, strip_port, Internable,
+        current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs,
+        extract_extension_from_url, sanitize_sensitive_info, strip_port, Internable, DASH_EXT, HLS_EXT,
     },
 };
 use std::{
@@ -81,6 +84,7 @@ pub struct UserSession {
     pub ts: u64,
     pub permission: UserConnectionPermission,
     pub connection_kind: Option<ConnectionKind>,
+    pub counted: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -202,11 +206,61 @@ impl UserConnectionData {
             new_priority,
         })
     }
+
+    fn try_promote_soft_session_reservation(&mut self) -> bool {
+        if self.counts.normal >= self.max_connections || self.counts.soft == 0 {
+            return false;
+        }
+
+        let active_tokens = self
+            .streams
+            .iter()
+            .filter_map(|stream| stream.session_token.as_deref())
+            .collect::<HashSet<_>>();
+
+        let candidate_index = self.sessions.iter().position(|session| {
+            session.counted
+                && session.connection_kind == Some(ConnectionKind::Soft)
+                && !active_tokens.contains(session.token.as_str())
+        });
+
+        let Some(candidate_index) = candidate_index else {
+            return false;
+        };
+
+        self.counts.normal = self.counts.normal.saturating_add(1);
+        if self.counts.soft > 0 {
+            self.counts.soft -= 1;
+        }
+        self.sessions[candidate_index].connection_kind = Some(ConnectionKind::Normal);
+        true
+    }
+}
+
+fn create_socket_reentry_guard_key(username: &str, client_ip: &str, virtual_id: VirtualId) -> String {
+    shared::concat_string!(username, "|", client_ip, "|", &virtual_id.to_string())
+}
+
+fn is_stable_session_stream(stream: &StreamInfo) -> bool {
+    stream.channel.item_type == PlaylistItemType::Catchup
+        || stream.channel.item_type.is_live_adaptive()
+        || matches!(
+            extract_extension_from_url(stream.channel.url.as_ref()).as_deref(),
+            Some(ext) if ext == HLS_EXT || ext == DASH_EXT
+        )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RecentWinnerProtection {
+    protected_addr: SocketAddr,
+    expires_at: u64,
 }
 
 #[derive(Debug, Default)]
 struct UserConnections {
     kicked: HashMap<String, (u64, VirtualId)>,
+    recently_evicted_sessions: HashMap<String, RecentWinnerProtection>,
+    recent_socket_reentry_guards: HashMap<String, RecentWinnerProtection>,
     by_key: HashMap<String, UserConnectionData>,
     key_by_addr: HashMap<SocketAddr, SocketRegistration>,
 }
@@ -462,6 +516,13 @@ impl ActiveUserManager {
                             }
                             promotion = Some(action);
                         }
+                        if let Some(session_token) = removed_stream
+                            .as_ref()
+                            .and_then(|stream| stream.session_token.as_deref())
+                        {
+                            Self::clear_session_counted_without_stream(connection_data, session_token);
+                        }
+                        while connection_data.try_promote_soft_session_reservation() {}
                     }
                 }
             }
@@ -516,6 +577,9 @@ impl ActiveUserManager {
                                         released_kinds.push(kind);
                                     }
                                     connection_data.stream_normal_priorities.remove(&stream_info.uid);
+                                    if let Some(token) = stream_info.session_token.as_ref() {
+                                        removed_session_tokens.insert(token.clone());
+                                    }
                                     removed_streams.push(stream_info);
                                 }
                             } else {
@@ -549,6 +613,10 @@ impl ActiveUserManager {
                         }
                         promotions.push(action);
                     }
+                    for session_token in &removed_session_tokens {
+                        Self::clear_session_counted_without_stream(connection_data, session_token);
+                    }
+                    while connection_data.try_promote_soft_session_reservation() {}
 
                     if connection_data.connections < connection_data.max_connections {
                         connection_data.granted_grace = false;
@@ -752,7 +820,7 @@ impl ActiveUserManager {
     pub(crate) async fn get_eviction_candidates(
         &self,
         username: &str,
-        client_ip: &str,
+        _client_ip: &str,
     ) -> Vec<crate::api::model::EvictionCandidate> {
         let connections = self.connections.read().await;
         let Some(connection_data) = connections.by_key.get(username) else {
@@ -768,7 +836,7 @@ impl ActiveUserManager {
         connection_data
             .streams
             .iter()
-            .filter(|stream| !stream.preserved && stream.client_ip == client_ip)
+            .filter(|stream| !stream.preserved)
             .filter(|stream| matches!(addr_counts.get(&stream.addr), Some(1)))
             .map(|s| crate::api::model::EvictionCandidate {
                 addr: s.addr,
@@ -895,6 +963,7 @@ impl ActiveUserManager {
                 );
             }
 
+            let tracked_socket_count = user_connections.key_by_addr.len();
             let connection_data = user_connections
                 .by_key
                 .entry(username.to_string())
@@ -903,6 +972,13 @@ impl ActiveUserManager {
             connection_data.soft_connections = soft_connections;
 
             let user_agent_string = user_agent.to_string();
+            let reserved_session_kind = session_token.and_then(|token| {
+                connection_data
+                    .sessions
+                    .iter()
+                    .find(|session| session.token == token && session.counted)
+                    .map(|session| session.connection_kind.unwrap_or(connection_kind))
+            });
 
             let existing_stream_info = connection_data
                 .streams
@@ -948,8 +1024,17 @@ impl ActiveUserManager {
                 });
 
             if let Some(stream_info) = existing_stream_info {
+                if let Some(token) = session_token {
+                    if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
+                        session.counted = true;
+                        if session.connection_kind.is_none() {
+                            session.connection_kind = Some(reserved_session_kind.unwrap_or(connection_kind));
+                        }
+                    }
+                }
                 stream_info
             } else {
+                let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
                 let country_code = self.lookup_country(&fingerprint.client_ip);
 
                 let stream_info = StreamInfo::new(
@@ -965,15 +1050,19 @@ impl ActiveUserManager {
                     session_token,
                 );
 
-                let tracked_socket_count = user_connections.key_by_addr.len();
-
-                if let Some(connection_data) = user_connections.by_key.get_mut(username) {
-                    connection_data.increment_kind(connection_kind);
-                    connection_data.streams.push(stream_info.clone());
-                    connection_data.stream_kinds.insert(stream_info.uid, connection_kind);
-                    connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
-                    Self::log_connection_added(username, &fingerprint.addr, connection_data, tracked_socket_count);
+                if reserved_session_kind.is_none() {
+                    connection_data.increment_kind(effective_connection_kind);
                 }
+                connection_data.streams.push(stream_info.clone());
+                connection_data.stream_kinds.insert(stream_info.uid, effective_connection_kind);
+                connection_data.stream_normal_priorities.insert(stream_info.uid, priority);
+                if let Some(token) = session_token {
+                    if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
+                        session.counted = true;
+                        session.connection_kind = Some(effective_connection_kind);
+                    }
+                }
+                Self::log_connection_added(username, &fingerprint.addr, connection_data, tracked_socket_count);
 
                 stream_info
             }
@@ -1042,6 +1131,7 @@ impl ActiveUserManager {
             ts: current_time_secs(),
             permission: connection_permission,
             connection_kind,
+            counted: false,
         }
     }
 
@@ -1049,7 +1139,204 @@ impl ActiveUserManager {
         if let Some(token) = stream.session_token.as_deref() {
             if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
                 session.connection_kind = Some(ConnectionKind::Normal);
+                session.counted = true;
             }
+        }
+    }
+
+    fn session_has_stream(connection_data: &UserConnectionData, session_token: &str) -> bool {
+        connection_data
+            .streams
+            .iter()
+            .any(|stream| stream.session_token.as_deref() == Some(session_token))
+    }
+
+    fn clear_session_counted_without_stream(connection_data: &mut UserConnectionData, session_token: &str) {
+        if Self::session_has_stream(connection_data, session_token) {
+            return;
+        }
+        if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == session_token) {
+            session.counted = false;
+        }
+    }
+
+    fn release_expired_session_reservations(connection_data: &mut UserConnectionData, now: u64) {
+        let expired_counted = connection_data
+            .sessions
+            .iter()
+            .filter(|session| session.counted)
+            .filter(|session| now.saturating_sub(session.ts) >= USER_CON_TTL)
+            .filter(|session| !Self::session_has_stream(connection_data, session.token.as_str()))
+            .map(|session| (session.token.clone(), session.connection_kind.unwrap_or(ConnectionKind::Normal)))
+            .collect::<Vec<_>>();
+
+        for (_, kind) in &expired_counted {
+            connection_data.decrement_kind(*kind);
+        }
+        for (token, _) in expired_counted {
+            Self::clear_session_counted_without_stream(connection_data, &token);
+        }
+        while connection_data.try_promote_soft_session_reservation() {}
+    }
+
+    pub(crate) async fn connection_admission_for_session_activation(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+        session_token: &str,
+    ) -> ConnectionAdmission {
+        if max_connections == 0 && soft_connections == 0 {
+            return ConnectionAdmission {
+                permission: UserConnectionPermission::Allowed,
+                kind: Some(ConnectionKind::Normal),
+            };
+        }
+
+        let mut connections = self.connections.write().await;
+        let Some(connection_data) = connections.by_key.get_mut(username) else {
+            return ConnectionAdmission {
+                permission: UserConnectionPermission::Allowed,
+                kind: Some(ConnectionKind::Normal),
+            };
+        };
+        connection_data.max_connections = max_connections;
+        connection_data.soft_connections = soft_connections;
+
+        let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == session_token) else {
+            return self.check_connection_admission(username, connection_data);
+        };
+
+        if connection_data.sessions[session_index].counted || Self::session_has_stream(connection_data, session_token) {
+            connection_data.sessions[session_index].counted = true;
+            return ConnectionAdmission {
+                permission: UserConnectionPermission::Allowed,
+                kind: connection_data.sessions[session_index]
+                    .connection_kind
+                    .or(Some(ConnectionKind::Normal)),
+            };
+        }
+
+        let admission = self.check_connection_admission(username, connection_data);
+        if admission.permission == UserConnectionPermission::Allowed {
+            let kind = admission.kind.unwrap_or(ConnectionKind::Normal);
+            connection_data.increment_kind(kind);
+            let session = &mut connection_data.sessions[session_index];
+            session.permission = admission.permission;
+            session.connection_kind = Some(kind);
+            session.counted = true;
+        }
+        admission
+    }
+
+    pub async fn ensure_user_session_placeholder(&self, request: CreateUserSessionParams<'_>) -> bool {
+        let CreateUserSessionParams {
+            user,
+            session_token,
+            virtual_id,
+            provider,
+            stream_url,
+            addr,
+            connection_permission,
+            connection_kind,
+        } = request;
+        self.gc();
+
+        let username = user.username.clone();
+        let mut user_connections = self.connections.write().await;
+        let connection_data = user_connections
+            .by_key
+            .entry(username)
+            .or_insert_with(|| UserConnectionData::new(0, user.max_connections, user.soft_connections));
+
+        if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == session_token) {
+            session.ts = current_time_secs();
+            session.addr = *addr;
+            if session.connection_kind.is_none() {
+                session.connection_kind = connection_kind;
+            }
+            if session.permission == UserConnectionPermission::Exhausted {
+                session.permission = connection_permission;
+            }
+            return false;
+        }
+
+        connection_data.add_session(Self::new_user_session(
+            session_token,
+            virtual_id,
+            provider,
+            stream_url,
+            addr,
+            connection_permission,
+            connection_kind,
+        ));
+        true
+    }
+
+    pub async fn release_unbound_session_reservation(
+        &self,
+        username: &str,
+        session_token: &str,
+        remove_session_if_unbound: bool,
+    ) {
+        let (connection_changed, user_removed, promotions) = {
+            let mut user_connections = self.connections.write().await;
+            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                return;
+            };
+
+            if Self::session_has_stream(connection_data, session_token) {
+                return;
+            }
+
+            let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == session_token) else {
+                return;
+            };
+
+            let mut connection_changed = false;
+            if connection_data.sessions[session_index].counted {
+                let kind = connection_data.sessions[session_index]
+                    .connection_kind
+                    .unwrap_or(ConnectionKind::Normal);
+                connection_data.decrement_kind(kind);
+                connection_data.sessions[session_index].counted = false;
+                connection_changed = true;
+            }
+
+            if remove_session_if_unbound {
+                connection_data.sessions.swap_remove(session_index);
+            }
+
+            if connection_data.connections < connection_data.max_connections {
+                connection_data.granted_grace = false;
+                connection_data.grace_ts = 0;
+            }
+
+            let mut promotions = Vec::new();
+            while let Some(action) = connection_data.try_promote_soft_stream() {
+                let promoted_stream = connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
+                if let Some(stream) = promoted_stream.as_ref() {
+                    Self::promote_session_for_stream(connection_data, stream);
+                }
+                promotions.push(action);
+            }
+            while connection_data.try_promote_soft_session_reservation() {}
+
+            let user_removed = connection_data.connections == 0
+                && connection_data.streams.is_empty()
+                && connection_data.sessions.is_empty();
+            if user_removed {
+                user_connections.by_key.remove(username);
+            }
+
+            (connection_changed, user_removed, promotions)
+        };
+
+        if connection_changed || user_removed {
+            self.log_active_user().await;
+        }
+        for action in promotions {
+            self.emit_promotion_update(username, action).await;
         }
     }
 
@@ -1229,11 +1516,10 @@ impl ActiveUserManager {
         }
 
         for stream in &mut connection_data.streams {
-            if stream.session_token.as_deref() == Some(token) || stream.addr == *addr {
-                stream.ts = now;
-                if stream.session_token.as_deref() == Some(token) {
-                    stream.addr = *addr;
-                }
+            if stream.session_token.as_deref() == Some(token) {
+                // Only update the addr to keep it current; do NOT reset stream.ts,
+                // which represents the session start time shown as "Duration" in the dashboard.
+                stream.addr = *addr;
             }
         }
     }
@@ -1321,6 +1607,30 @@ impl ActiveUserManager {
         matches!(connections.kicked.get(username), Some((expires_at, vid)) if *vid == virtual_id && *expires_at > now)
     }
 
+    pub async fn recently_evicted_session_protected_addr(&self, session_token: &str) -> Option<SocketAddr> {
+        let connections = self.connections.read().await;
+        let now = current_time_secs();
+        connections
+            .recently_evicted_sessions
+            .get(session_token)
+            .and_then(|protection| (protection.expires_at > now).then_some(protection.protected_addr))
+    }
+
+    pub async fn recent_socket_reentry_protected_addr(
+        &self,
+        username: &str,
+        client_ip: &str,
+        virtual_id: VirtualId,
+    ) -> Option<SocketAddr> {
+        let connections = self.connections.read().await;
+        let now = current_time_secs();
+        let key = create_socket_reentry_guard_key(username, client_ip, virtual_id);
+        connections
+            .recent_socket_reentry_guards
+            .get(&key)
+            .and_then(|protection| (protection.expires_at > now).then_some(protection.protected_addr))
+    }
+
     pub async fn block_user_for_stream(&self, addr: &SocketAddr, virtual_id: VirtualId, blocked_secs: u64) {
         let block_for_secs = blocked_secs.clamp(0, 86_400); // max 1 day;
         if block_for_secs > 0 {
@@ -1336,6 +1646,71 @@ impl ActiveUserManager {
                 let expires_at = now + block_for_secs;
                 connections.kicked.insert(username, (expires_at, virtual_id));
             }
+        }
+    }
+
+    pub async fn mark_recent_eviction_guard_for_addr(
+        &self,
+        addr: &SocketAddr,
+        protected_addr: SocketAddr,
+        ttl_secs: u64,
+    ) {
+        if ttl_secs == 0 {
+            return;
+        }
+
+        let mut connections = self.connections.write().await;
+        let now = current_time_secs();
+        connections
+            .recently_evicted_sessions
+            .retain(|_, protection| protection.expires_at > now);
+        connections
+            .recent_socket_reentry_guards
+            .retain(|_, protection| protection.expires_at > now);
+
+        let Some(username) = connections
+            .key_by_addr
+            .get(addr)
+            .map(|registration| registration.username.clone())
+            .filter(|username| !username.is_empty())
+        else {
+            return;
+        };
+
+        let Some(connection_data) = connections.by_key.get(&username) else {
+            return;
+        };
+
+        let protection = RecentWinnerProtection {
+            protected_addr,
+            expires_at: now + ttl_secs,
+        };
+        let mut session_tokens = Vec::new();
+        let mut socket_guard_keys = Vec::new();
+
+        for stream in connection_data.streams.iter().filter(|stream| stream.addr == *addr) {
+            if is_stable_session_stream(stream) {
+                if let Some(session_token) = stream.session_token.clone() {
+                    session_tokens.push(session_token);
+                }
+            } else {
+                socket_guard_keys.push(create_socket_reentry_guard_key(
+                    &username,
+                    &stream.client_ip,
+                    stream.channel.virtual_id,
+                ));
+            }
+        }
+
+        for session_token in session_tokens {
+            connections
+                .recently_evicted_sessions
+                .insert(session_token, protection);
+        }
+        for key in socket_guard_keys {
+            connections
+                .recent_socket_reentry_guards
+                .insert(key, protection);
         }
     }
 
@@ -1464,6 +1839,7 @@ impl ActiveUserManager {
 
                         if should_remove {
                             let addr = connection_data.streams[stream_idx].addr;
+                            let session_token = connection_data.streams[stream_idx].session_token.clone();
                             if self.cleanup_tx.get().is_some() {
                                 cleanup_events.push((addr, Box::new(connection_data.streams[stream_idx].clone())));
                             } else {
@@ -1482,6 +1858,10 @@ impl ActiveUserManager {
                                 }
                                 promotions.push((entry.username.clone(), action));
                             }
+                            if let Some(session_token) = session_token.as_deref() {
+                                Self::clear_session_counted_without_stream(connection_data, session_token);
+                            }
+                            while connection_data.try_promote_soft_session_reservation() {}
                             expiry_index.remove(&key);
                         } else if let Some(replacement_entry) = self.build_preserved_stream_expiry(
                             &entry.username,
@@ -1546,12 +1926,19 @@ impl ActiveUserManager {
             {
                 if let Ok(mut user_connections) = self.connections.try_write() {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
+                    user_connections
+                        .recently_evicted_sessions
+                        .retain(|_, protection| protection.expires_at > now);
+                    user_connections
+                        .recent_socket_reentry_guards
+                        .retain(|_, protection| protection.expires_at > now);
+                    for connection_data in user_connections.by_key.values_mut() {
+                        Self::release_expired_session_reservations(connection_data, now);
+                        connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
+                    }
                     user_connections.by_key.retain(|_k, v| {
                         v.connections > 0 || !v.streams.is_empty() || now.saturating_sub(v.ts) < USER_CON_TTL
                     });
-                    for connection_data in user_connections.by_key.values_mut() {
-                        connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
-                    }
                     user_connections.key_by_addr.retain(|_, registration| {
                         !(registration.username.is_empty() && now.saturating_sub(registration.ts) >= ANON_SOCKET_TTL)
                     });
@@ -1795,6 +2182,63 @@ mod tests {
         let candidates = manager.get_eviction_candidates("same-user", "127.0.0.1").await;
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].addr, unique_addr);
+    }
+
+    #[tokio::test]
+    async fn eviction_candidates_include_other_ips_for_user_wide_rules() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let first_addr: SocketAddr = "127.0.0.1:55041".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:55042".parse().unwrap();
+        let first_fp = Fingerprint::new("fp-user-wide-1".to_string(), "10.0.0.1".to_string(), first_addr);
+        let second_fp = Fingerprint::new("fp-user-wide-2".to_string(), "10.0.0.2".to_string(), second_addr);
+
+        manager.add_connection(&first_addr).await;
+        manager.add_connection(&second_addr).await;
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 41,
+                meter_uid: 0,
+                username: "same-user",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &first_fp,
+                provider: "provider-a",
+                stream_channel: &test_channel(1041),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-41"),
+            })
+            .await;
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 42,
+                meter_uid: 0,
+                username: "same-user",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &second_fp,
+                provider: "provider-a",
+                stream_channel: &test_channel(1042),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-42"),
+            })
+            .await;
+
+        let candidates = manager.get_eviction_candidates("same-user", "10.0.0.1").await;
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|candidate| candidate.addr == first_addr));
+        assert!(candidates.iter().any(|candidate| candidate.addr == second_addr));
     }
 
     #[tokio::test]
@@ -3152,6 +3596,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn touch_http_activity_does_not_reset_stream_started_at_ts() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr1: SocketAddr = "127.0.0.1:55030".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:55031".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), addr1);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-touch-ts".to_string();
+
+        manager.add_connection(&addr1).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-ts",
+                virtual_id: 7777,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+
+        // Simulate first HLS segment: creates the stream entry with ts = now
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 601,
+                meter_uid: 701,
+                username: "user-touch-ts",
+                max_connections: 0,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_adaptive_channel(7777),
+                user_agent: Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-hls-ts"),
+            })
+            .await
+            .expect("stream should be created");
+
+        // Record the original stream start timestamp
+        let original_ts = {
+            let connections = manager.connections.read().await;
+            connections
+                .by_key
+                .get("user-touch-ts")
+                .and_then(|data| data.streams.iter().find(|s| s.session_token.as_deref() == Some("tok-hls-ts")))
+                .map(|s| s.ts)
+                .expect("stream should exist")
+        };
+
+        // Simulate manifest re-fetch (touch_http_activity called with a new addr)
+        manager.touch_http_activity("user-touch-ts", "tok-hls-ts", &addr2).await;
+
+        // stream.ts must NOT have been reset — it represents session start time shown as Duration
+        let connections = manager.connections.read().await;
+        let stream = connections
+            .by_key
+            .get("user-touch-ts")
+            .and_then(|data| data.streams.iter().find(|s| s.session_token.as_deref() == Some("tok-hls-ts")))
+            .expect("stream should still exist");
+        assert_eq!(stream.ts, original_ts, "touch_http_activity must not reset the stream start timestamp");
+        // addr should be updated to reflect the latest manifest request
+        assert_eq!(stream.addr, addr2, "touch_http_activity should update the stream addr");
+    }
+
+    #[tokio::test]
     async fn update_session_addr_prunes_previous_registration_when_session_moves_to_new_socket() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
@@ -3263,6 +3780,238 @@ mod tests {
         let connection_data = connections.by_key.get("user1").expect("active user entry must survive gc");
         assert_eq!(connection_data.connections, 1);
         assert_eq!(connection_data.streams.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn session_activation_reserves_first_hls_slot_before_stream_registration() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user-hls-reserve");
+        user.max_connections = 1;
+
+        let first_addr: SocketAddr = "127.0.0.1:55180".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:55181".parse().unwrap();
+
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-first",
+                virtual_id: 9201,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-a.m3u8",
+                addr: &first_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-second",
+                virtual_id: 9202,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-b.m3u8",
+                addr: &second_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+
+        let first_admission = manager
+            .connection_admission_for_session_activation(&user.username, user.max_connections, 0, "tok-first")
+            .await;
+        let second_admission = manager
+            .connection_admission_for_session_activation(&user.username, user.max_connections, 0, "tok-second")
+            .await;
+
+        assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(first_admission.kind, Some(ConnectionKind::Normal));
+        assert_eq!(second_admission.permission, UserConnectionPermission::Exhausted);
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert_eq!(connection_data.connections, 1);
+        assert_eq!(connection_data.counts.normal, 1);
+        assert_eq!(connection_data.streams.len(), 0);
+        assert!(
+            connection_data
+                .sessions
+                .iter()
+                .find(|session| session.token == "tok-first")
+                .is_some_and(|session| session.counted)
+        );
+        assert!(
+            connection_data
+                .sessions
+                .iter()
+                .find(|session| session.token == "tok-second")
+                .is_some_and(|session| !session.counted)
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_reserved_sessions_keeps_hard_and_soft_counts_stable() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user-hls-soft");
+        user.max_connections = 1;
+        user.soft_connections = 1;
+
+        let first_addr: SocketAddr = "127.0.0.1:55182".parse().unwrap();
+        let second_addr: SocketAddr = "127.0.0.1:55183".parse().unwrap();
+        let first_fingerprint = Fingerprint::new("fp-hls-1".to_string(), "127.0.0.1".to_string(), first_addr);
+        let second_fingerprint = Fingerprint::new("fp-hls-2".to_string(), "127.0.0.1".to_string(), second_addr);
+
+        manager.add_connection(&first_addr).await;
+        manager.add_connection(&second_addr).await;
+
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-normal",
+                virtual_id: 9203,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-normal.m3u8",
+                addr: &first_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-soft",
+                virtual_id: 9204,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-soft.m3u8",
+                addr: &second_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+
+        let first_admission = manager
+            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-normal")
+            .await;
+        assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(first_admission.kind, Some(ConnectionKind::Normal));
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 401,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &first_fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_adaptive_channel(9203),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-normal"),
+            })
+            .await
+            .expect("reserved normal session should bind");
+
+        let second_admission = manager
+            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-soft")
+            .await;
+        assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(second_admission.kind, Some(ConnectionKind::Soft));
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 402,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Soft,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &second_fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_adaptive_channel(9204),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-soft"),
+            })
+            .await
+            .expect("reserved soft session should bind");
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert_eq!(connection_data.connections, 2);
+        assert_eq!(connection_data.counts.normal, 1);
+        assert_eq!(connection_data.counts.soft, 1);
+        assert_eq!(connection_data.streams.len(), 2);
+        assert_eq!(
+            connection_data.stream_kinds.get(&401),
+            Some(&ConnectionKind::Normal),
+            "binding a reserved normal session must not increment counts twice"
+        );
+        assert_eq!(
+            connection_data.stream_kinds.get(&402),
+            Some(&ConnectionKind::Soft),
+            "binding a reserved soft session must keep the soft classification"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_unbound_session_reservation_frees_reserved_slot() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user-release-reservation");
+        user.max_connections = 1;
+
+        let addr: SocketAddr = "127.0.0.1:55184".parse().unwrap();
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-release",
+                virtual_id: 9205,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-release.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+
+        let admission = manager
+            .connection_admission_for_session_activation(&user.username, user.max_connections, 0, "tok-release")
+            .await;
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+
+        manager
+            .release_unbound_session_reservation(&user.username, "tok-release", false)
+            .await;
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert_eq!(connection_data.connections, 0);
+        assert_eq!(connection_data.counts.normal, 0);
+        assert_eq!(connection_data.streams.len(), 0);
+        assert!(
+            connection_data
+                .sessions
+                .iter()
+                .find(|session| session.token == "tok-release")
+                .is_some_and(|session| !session.counted)
+        );
     }
 }
 

@@ -1,6 +1,6 @@
-use crate::model::AdmissionStrategy;
 use log::debug;
 use std::net::SocketAddr;
+use shared::model::AdmissionStrategy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionDecision {
@@ -90,6 +90,8 @@ pub(in crate::api) fn evaluate_strategy(
         AdmissionStrategy::EvictUserSameIpLatest => {
             evaluate_evict_same_ip(ctx, candidates, EvictionOrder::Latest)
         }
+        AdmissionStrategy::EvictUserOldest => evaluate_evict_user(candidates, EvictionOrder::Oldest),
+        AdmissionStrategy::EvictUserLatest => evaluate_evict_user(candidates, EvictionOrder::Latest),
         AdmissionStrategy::GraceInstantStream => AdmissionDecision::Grace(GraceMode::Instant),
         AdmissionStrategy::GraceHoldStream => AdmissionDecision::Grace(GraceMode::Hold),
     }
@@ -106,22 +108,10 @@ fn evaluate_evict_same_ip(
     candidates: &[EvictionCandidate],
     order: EvictionOrder,
 ) -> AdmissionDecision {
-    let mut selected: Option<&EvictionCandidate> = None;
-    for candidate in candidates {
-        if candidate.client_ip != ctx.client_ip {
-            continue;
-        }
-        let should_replace = match selected {
-            None => true,
-            Some(current) => match order {
-                EvictionOrder::Oldest => candidate.ts < current.ts,
-                EvictionOrder::Latest => candidate.ts > current.ts,
-            },
-        };
-        if should_replace {
-            selected = Some(candidate);
-        }
-    }
+    let selected = select_candidate(
+        candidates.iter().filter(|candidate| candidate.client_ip == ctx.client_ip),
+        order,
+    );
 
     if selected.is_none() {
         debug!(
@@ -141,6 +131,35 @@ fn evaluate_evict_same_ip(
         }),
         None => AdmissionDecision::NoMatch,
     }
+}
+
+fn evaluate_evict_user(candidates: &[EvictionCandidate], order: EvictionOrder) -> AdmissionDecision {
+    match select_candidate(candidates.iter(), order) {
+        Some(candidate) => AdmissionDecision::Evict(EvictionTarget {
+            addr: candidate.addr,
+        }),
+        None => AdmissionDecision::NoMatch,
+    }
+}
+
+fn select_candidate<'a>(
+    candidates: impl Iterator<Item = &'a EvictionCandidate>,
+    order: EvictionOrder,
+) -> Option<&'a EvictionCandidate> {
+    let mut selected: Option<&EvictionCandidate> = None;
+    for candidate in candidates {
+        let should_replace = match selected {
+            None => true,
+            Some(current) => match order {
+                EvictionOrder::Oldest => candidate.ts < current.ts,
+                EvictionOrder::Latest => candidate.ts > current.ts,
+            },
+        };
+        if should_replace {
+            selected = Some(candidate);
+        }
+    }
+    selected
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +262,44 @@ mod tests {
         let result = evaluate_admission_strategies(&ctx, &candidates);
         match result {
             AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(1001)),
+            other => panic!("Expected Evict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evict_oldest_user_regardless_of_ip() {
+        let ctx = StrategyContext {
+            username: "user1",
+            client_ip: "1.1.1.1",
+            strategies: &[AdmissionStrategy::EvictUserOldest],
+        };
+        let candidates = vec![
+            candidate(1000, "2.2.2.2", 300),
+            candidate(1001, "1.1.1.1", 200),
+            candidate(1002, "3.3.3.3", 100),
+        ];
+        let result = evaluate_admission_strategies(&ctx, &candidates);
+        match result {
+            AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(1002)),
+            other => panic!("Expected Evict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evict_latest_user_regardless_of_ip() {
+        let ctx = StrategyContext {
+            username: "user1",
+            client_ip: "1.1.1.1",
+            strategies: &[AdmissionStrategy::EvictUserLatest],
+        };
+        let candidates = vec![
+            candidate(1000, "2.2.2.2", 300),
+            candidate(1001, "1.1.1.1", 200),
+            candidate(1002, "3.3.3.3", 100),
+        ];
+        let result = evaluate_admission_strategies(&ctx, &candidates);
+        match result {
+            AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(1000)),
             other => panic!("Expected Evict, got {other:?}"),
         }
     }
