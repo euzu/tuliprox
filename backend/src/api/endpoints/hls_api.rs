@@ -444,7 +444,8 @@ async fn hls_api_stream(
         if session.virtual_id == virtual_id {
             app_state
                 .connection_manager
-                .touch_http_activity(&user.username, &session.token, &fingerprint.addr);
+                .touch_http_activity(&user.username, &session.token, &fingerprint.addr)
+                .await;
             let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &hls_url).await;
             if is_seek_request(stream_channel.cluster, &req_headers).await {
                 // partial request means we are in reverse proxy mode, seek happened

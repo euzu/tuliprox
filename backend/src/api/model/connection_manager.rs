@@ -486,8 +486,6 @@ struct SocketExpiryEntry {
 #[derive(Clone, Debug)]
 enum SocketActivityEvent {
     HttpActivity {
-        username: String,
-        token: String,
         addr: SocketAddr,
     },
 }
@@ -647,9 +645,7 @@ impl ConnectionManager {
         expiry_index: &mut HashMap<SocketAddr, u64>,
         user_manager: &Arc<ActiveUserManager>,
     ) {
-        let SocketActivityEvent::HttpActivity { username, token, addr } = event;
-
-        user_manager.touch_http_activity(&username, &token, &addr).await;
+        let SocketActivityEvent::HttpActivity { addr } = event;
 
         if let Some(expires_at) = user_manager.socket_expiry_deadline(&addr).await {
             let current = expiry_index.insert(addr, expires_at);
@@ -959,14 +955,9 @@ impl ConnectionManager {
 
     pub async fn add_connection(&self, addr: &SocketAddr) { self.user_manager.add_connection(addr).await; }
 
-    pub fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
-        self.socket_activity_tracker.track(
-            SocketActivityEvent::HttpActivity {
-                username: username.to_string(),
-                token: token.to_string(),
-                addr: *addr,
-            },
-        );
+    pub async fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
+        self.user_manager.touch_http_activity(username, token, addr).await;
+        self.socket_activity_tracker.track(SocketActivityEvent::HttpActivity { addr: *addr });
     }
 
     pub async fn update_connection(&self, update: ConnectionParams<'_>) {
@@ -1238,7 +1229,15 @@ mod tests {
         assert!(tx.send(1_u8).await.is_ok());
 
         sender.enqueue(2_u8);
-        tokio::task::yield_now().await;
+        for _ in 0..50 {
+            let state = super::lock_backpressure_state(sender.state.as_ref());
+            let ready = state.overflow.is_empty() && state.draining;
+            drop(state);
+            if ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         sender.enqueue(3_u8);
         sender.enqueue(4_u8);
 
@@ -1261,31 +1260,19 @@ mod tests {
         let addr_one: SocketAddr = "127.0.0.1:3234".parse().unwrap_or_else(|_| unreachable!());
         let addr_two: SocketAddr = "127.0.0.1:3235".parse().unwrap_or_else(|_| unreachable!());
 
-        tracker.track(SocketActivityEvent::HttpActivity {
-            username: String::from("user1"),
-            token: String::from("tok-old"),
-            addr: addr_one,
-        });
-        tracker.track(SocketActivityEvent::HttpActivity {
-            username: String::from("user1"),
-            token: String::from("tok-new"),
-            addr: addr_one,
-        });
-        tracker.track(SocketActivityEvent::HttpActivity {
-            username: String::from("user2"),
-            token: String::from("tok-two"),
-            addr: addr_two,
-        });
+        tracker.track(SocketActivityEvent::HttpActivity { addr: addr_one });
+        tracker.track(SocketActivityEvent::HttpActivity { addr: addr_one });
+        tracker.track(SocketActivityEvent::HttpActivity { addr: addr_two });
 
         let pending = tracker.drain();
         assert_eq!(pending.len(), 2);
         assert!(pending.iter().any(|event| matches!(
             event,
-            SocketActivityEvent::HttpActivity { addr, token, .. } if *addr == addr_one && token == "tok-new"
+            SocketActivityEvent::HttpActivity { addr } if *addr == addr_one
         )));
         assert!(pending.iter().any(|event| matches!(
             event,
-            SocketActivityEvent::HttpActivity { addr, token, .. } if *addr == addr_two && token == "tok-two"
+            SocketActivityEvent::HttpActivity { addr } if *addr == addr_two
         )));
     }
 
@@ -1310,7 +1297,7 @@ mod tests {
             })
             .await;
 
-        manager.touch_http_activity(&user.username, "tok-touch", &addr);
+        manager.touch_http_activity(&user.username, "tok-touch", &addr).await;
 
         assert!(
             tokio::time::timeout(Duration::from_secs(1), async {

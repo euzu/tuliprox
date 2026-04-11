@@ -1232,4 +1232,19 @@ mod tests {
             Some(vec![AdmissionStrategyDto::EvictUserSameIpOldest])
         );
     }
+
+    #[test]
+    fn add_admission_strategy_enforces_narrower_before_broader() {
+        let current = vec!["evict_user_oldest".to_string()];
+        let new_tags = add_admission_strategy_tag(&current, "evict_user_same_ip_oldest");
+        assert_eq!(new_tags, vec!["evict_user_same_ip_oldest".to_string(), "evict_user_oldest".to_string()]);
+    }
+
+    #[test]
+    fn move_admission_strategy_reverts_invalid_order() {
+        let current = vec!["evict_user_same_ip_oldest".to_string(), "evict_user_oldest".to_string()];
+        // Attempt to move broader EvictUserOldest up before narrower EvictUserSameIpOldest
+        let next = move_admission_strategy_tag(&current, 1, -1);
+        assert_eq!(next, current);
+    }
 }

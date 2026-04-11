@@ -1492,11 +1492,10 @@ impl ActiveUserManager {
         }
 
         for stream in &mut connection_data.streams {
-            if stream.session_token.as_deref() == Some(token) || stream.addr == *addr {
-                stream.ts = now;
-                if stream.session_token.as_deref() == Some(token) {
-                    stream.addr = *addr;
-                }
+            if stream.session_token.as_deref() == Some(token) {
+                // Only update the addr to keep it current; do NOT reset stream.ts,
+                // which represents the session start time shown as "Duration" in the dashboard.
+                stream.addr = *addr;
             }
         }
     }
@@ -3475,6 +3474,79 @@ mod tests {
         let connection_data = connections.by_key.get("user1").expect("user should still exist");
         assert!(registration.ts > previous_ts);
         assert!(connection_data.sessions[0].ts >= registration.ts);
+    }
+
+    #[tokio::test]
+    async fn touch_http_activity_does_not_reset_stream_started_at_ts() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr1: SocketAddr = "127.0.0.1:55030".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:55031".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), addr1);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-touch-ts".to_string();
+
+        manager.add_connection(&addr1).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-ts",
+                virtual_id: 7777,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+            })
+            .await;
+
+        // Simulate first HLS segment: creates the stream entry with ts = now
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 601,
+                meter_uid: 701,
+                username: "user-touch-ts",
+                max_connections: 0,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &test_adaptive_channel(7777),
+                user_agent: Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-hls-ts"),
+            })
+            .await
+            .expect("stream should be created");
+
+        // Record the original stream start timestamp
+        let original_ts = {
+            let connections = manager.connections.read().await;
+            connections
+                .by_key
+                .get("user-touch-ts")
+                .and_then(|data| data.streams.iter().find(|s| s.session_token.as_deref() == Some("tok-hls-ts")))
+                .map(|s| s.ts)
+                .expect("stream should exist")
+        };
+
+        // Simulate manifest re-fetch (touch_http_activity called with a new addr)
+        manager.touch_http_activity("user-touch-ts", "tok-hls-ts", &addr2).await;
+
+        // stream.ts must NOT have been reset — it represents session start time shown as Duration
+        let connections = manager.connections.read().await;
+        let stream = connections
+            .by_key
+            .get("user-touch-ts")
+            .and_then(|data| data.streams.iter().find(|s| s.session_token.as_deref() == Some("tok-hls-ts")))
+            .expect("stream should still exist");
+        assert_eq!(stream.ts, original_ts, "touch_http_activity must not reset the stream start timestamp");
+        // addr should be updated to reflect the latest manifest request
+        assert_eq!(stream.addr, addr2, "touch_http_activity should update the stream addr");
     }
 
     #[tokio::test]
