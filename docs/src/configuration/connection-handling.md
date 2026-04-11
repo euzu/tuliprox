@@ -259,6 +259,23 @@ If it is the best valid victim, it can be terminated completely.
 
 When a connection is deliberately kicked, Tuliprox should not immediately treat the same session as still valid.
 
+### Recent eviction does not create a full user cooldown
+
+Tuliprox now distinguishes between:
+
+- a normal reconnect that fits into a free hard slot or soft slot
+- an immediate reconnect of the just-evicted playback that would only work by kicking another stream again
+
+Only the second case is temporarily suppressed.
+
+Important:
+
+- for HLS/catchup, this protection is scoped to the same session identity where Tuliprox has a stable session token
+- for socket-bound TS/VOD/local playback, Tuliprox uses a short same-user, same-IP, same-channel winner protection instead
+- switching to a different channel is not blocked by it
+- soft admission can still succeed if a soft slot is free
+- the goal is to stop endless eviction ping-pong between aggressive player reconnect loops
+
 ### Admission strategy order is semantic
 
 Admission strategies are not a set. They are processed from top to bottom.

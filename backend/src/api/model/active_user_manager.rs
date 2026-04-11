@@ -9,10 +9,13 @@ use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
 use log::{debug, info};
 use shared::{
-    model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, StreamTechnicalInfo, UserConnectionPermission, VirtualId},
+    model::{
+        ActiveUserConnectionChange, PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo,
+        UserConnectionPermission, VirtualId,
+    },
     utils::{
-        current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs,
-        default_hls_session_ttl_secs, sanitize_sensitive_info, strip_port, Internable,
+        current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs,
+        extract_extension_from_url, sanitize_sensitive_info, strip_port, Internable, DASH_EXT, HLS_EXT,
     },
 };
 use std::{
@@ -234,9 +237,30 @@ impl UserConnectionData {
     }
 }
 
+fn create_socket_reentry_guard_key(username: &str, client_ip: &str, virtual_id: VirtualId) -> String {
+    shared::concat_string!(username, "|", client_ip, "|", &virtual_id.to_string())
+}
+
+fn is_stable_session_stream(stream: &StreamInfo) -> bool {
+    stream.channel.item_type == PlaylistItemType::Catchup
+        || stream.channel.item_type.is_live_adaptive()
+        || matches!(
+            extract_extension_from_url(stream.channel.url.as_ref()).as_deref(),
+            Some(ext) if ext == HLS_EXT || ext == DASH_EXT
+        )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RecentWinnerProtection {
+    protected_addr: SocketAddr,
+    expires_at: u64,
+}
+
 #[derive(Debug, Default)]
 struct UserConnections {
     kicked: HashMap<String, (u64, VirtualId)>,
+    recently_evicted_sessions: HashMap<String, RecentWinnerProtection>,
+    recent_socket_reentry_guards: HashMap<String, RecentWinnerProtection>,
     by_key: HashMap<String, UserConnectionData>,
     key_by_addr: HashMap<SocketAddr, SocketRegistration>,
 }
@@ -1583,6 +1607,30 @@ impl ActiveUserManager {
         matches!(connections.kicked.get(username), Some((expires_at, vid)) if *vid == virtual_id && *expires_at > now)
     }
 
+    pub async fn recently_evicted_session_protected_addr(&self, session_token: &str) -> Option<SocketAddr> {
+        let connections = self.connections.read().await;
+        let now = current_time_secs();
+        connections
+            .recently_evicted_sessions
+            .get(session_token)
+            .and_then(|protection| (protection.expires_at > now).then_some(protection.protected_addr))
+    }
+
+    pub async fn recent_socket_reentry_protected_addr(
+        &self,
+        username: &str,
+        client_ip: &str,
+        virtual_id: VirtualId,
+    ) -> Option<SocketAddr> {
+        let connections = self.connections.read().await;
+        let now = current_time_secs();
+        let key = create_socket_reentry_guard_key(username, client_ip, virtual_id);
+        connections
+            .recent_socket_reentry_guards
+            .get(&key)
+            .and_then(|protection| (protection.expires_at > now).then_some(protection.protected_addr))
+    }
+
     pub async fn block_user_for_stream(&self, addr: &SocketAddr, virtual_id: VirtualId, blocked_secs: u64) {
         let block_for_secs = blocked_secs.clamp(0, 86_400); // max 1 day;
         if block_for_secs > 0 {
@@ -1598,6 +1646,71 @@ impl ActiveUserManager {
                 let expires_at = now + block_for_secs;
                 connections.kicked.insert(username, (expires_at, virtual_id));
             }
+        }
+    }
+
+    pub async fn mark_recent_eviction_guard_for_addr(
+        &self,
+        addr: &SocketAddr,
+        protected_addr: SocketAddr,
+        ttl_secs: u64,
+    ) {
+        if ttl_secs == 0 {
+            return;
+        }
+
+        let mut connections = self.connections.write().await;
+        let now = current_time_secs();
+        connections
+            .recently_evicted_sessions
+            .retain(|_, protection| protection.expires_at > now);
+        connections
+            .recent_socket_reentry_guards
+            .retain(|_, protection| protection.expires_at > now);
+
+        let Some(username) = connections
+            .key_by_addr
+            .get(addr)
+            .map(|registration| registration.username.clone())
+            .filter(|username| !username.is_empty())
+        else {
+            return;
+        };
+
+        let Some(connection_data) = connections.by_key.get(&username) else {
+            return;
+        };
+
+        let protection = RecentWinnerProtection {
+            protected_addr,
+            expires_at: now + ttl_secs,
+        };
+        let mut session_tokens = Vec::new();
+        let mut socket_guard_keys = Vec::new();
+
+        for stream in connection_data.streams.iter().filter(|stream| stream.addr == *addr) {
+            if is_stable_session_stream(stream) {
+                if let Some(session_token) = stream.session_token.clone() {
+                    session_tokens.push(session_token);
+                }
+            } else {
+                socket_guard_keys.push(create_socket_reentry_guard_key(
+                    &username,
+                    &stream.client_ip,
+                    stream.channel.virtual_id,
+                ));
+            }
+        }
+
+        for session_token in session_tokens {
+            connections
+                .recently_evicted_sessions
+                .insert(session_token, protection);
+        }
+        for key in socket_guard_keys {
+            connections
+                .recent_socket_reentry_guards
+                .insert(key, protection);
         }
     }
 
@@ -1813,6 +1926,12 @@ impl ActiveUserManager {
             {
                 if let Ok(mut user_connections) = self.connections.try_write() {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
+                    user_connections
+                        .recently_evicted_sessions
+                        .retain(|_, protection| protection.expires_at > now);
+                    user_connections
+                        .recent_socket_reentry_guards
+                        .retain(|_, protection| protection.expires_at > now);
                     for connection_data in user_connections.by_key.values_mut() {
                         Self::release_expired_session_reservations(connection_data, now);
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);

@@ -478,10 +478,11 @@ async fn hls_api_stream(
                 user.max_connections,
                 user.soft_connections,
                 &fingerprint.client_ip,
-                &fingerprint,
+                &fingerprint.addr,
                 true,
                 Some(&session.token),
                 true,
+                crate::api::api_utils::EvictionReentryGuard::Session(&session.token),
             )
             .await
         } else {

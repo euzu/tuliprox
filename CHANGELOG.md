@@ -110,6 +110,12 @@
   - This prevents parallel TS/VOD sockets from being collapsed into one logical playback.
   - Soft connections still work normally: once `max_connections` is full, an additional socket may still be admitted as `Soft` when
     `soft_connections > 0`, and provider-side priority/preemption rules still apply afterward.
+  - Admission-driven evictions now record the just-evicted session briefly so aggressive player reconnect loops cannot immediately evict the new
+    winner back out again.
+  - This is not a full user cooldown: reconnects still succeed when a hard slot or soft slot is actually free, and switching to another channel is
+    unaffected.
+  - For socket-bound TS/VOD/local playback, the anti-ping-pong protection uses a short same-user, same-IP, same-channel winner guard because those
+    clients do not provide a stable reconnect session identifier.
   - HLS activity refresh and cleanup dispatch were moved off the request/drop fast path so activity updates do not block segment responses and
     cleanup events are not silently lost when queues are temporarily full.
 - **Provider URL Selection Strategy**: Added `provider_url_selection_policy` to provider definitions in `source.yml`.

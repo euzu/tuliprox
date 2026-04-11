@@ -142,10 +142,13 @@ async fn m3u_api_stream(
                 user.max_connections,
                 user.soft_connections,
                 &fingerprint.client_ip,
-                fingerprint,
+                &fingerprint.addr,
                 true,
                 Some(playback_session_token.as_str()),
                 false,
+                crate::api::api_utils::EvictionReentryGuard::SocketPlayback {
+                    virtual_id: pli.virtual_id,
+                },
             )
             .await
         } else {
@@ -189,6 +192,13 @@ async fn m3u_api_stream(
             virtual_id,
             !is_session_based_playback(pli.item_type, Some(extension.as_str())),
         )
+    };
+    let eviction_reentry_guard = if pli.item_type == PlaylistItemType::Catchup
+        || is_session_based_playback(pli.item_type, Some(extension.as_str()))
+    {
+        crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
+    } else {
+        crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id: pli.virtual_id }
     };
     let user_session = app_state.active_users.get_and_update_user_session(&user.username, &session_key).await;
 
@@ -248,10 +258,11 @@ async fn m3u_api_stream(
             user.max_connections,
             user.soft_connections,
             &fingerprint.client_ip,
-            fingerprint,
+            &fingerprint.addr,
             true,
             Some(&session_key),
             false,
+            eviction_reentry_guard,
         )
         .await
     } else {

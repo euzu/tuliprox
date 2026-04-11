@@ -58,6 +58,69 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 use url::Url;
 
+const RECENT_EVICTION_REENTRY_TTL_SECS: u64 = 3;
+
+#[derive(Clone, Copy)]
+pub(crate) enum EvictionReentryGuard<'a> {
+    Session(&'a str),
+    SocketPlayback { virtual_id: VirtualId },
+}
+
+async fn should_suppress_eviction_for_recent_request(
+    app_state: &Arc<AppState>,
+    username: &str,
+    client_ip: &str,
+    guard: EvictionReentryGuard<'_>,
+    target_addr: &std::net::SocketAddr,
+) -> bool {
+    match guard {
+        EvictionReentryGuard::Session(session_token) => app_state
+            .active_users
+            .recently_evicted_session_protected_addr(session_token)
+            .await
+            .is_some_and(|protected_addr| protected_addr == *target_addr),
+        EvictionReentryGuard::SocketPlayback { virtual_id } => app_state
+            .active_users
+            .recent_socket_reentry_protected_addr(username, client_ip, virtual_id)
+            .await
+            .is_some_and(|protected_addr| protected_addr == *target_addr),
+    }
+}
+
+async fn get_admission_for_request(
+    app_state: &Arc<AppState>,
+    username: &str,
+    max_connections: u32,
+    soft_connections: u16,
+    is_session_request: bool,
+    session_token: Option<&str>,
+    activate_unbound_session: bool,
+) -> crate::api::model::ConnectionAdmission {
+    if is_session_request {
+        if activate_unbound_session {
+            app_state
+                .get_connection_admission_for_session_activation(
+                    username,
+                    max_connections,
+                    soft_connections,
+                    session_token.unwrap_or_default(),
+                )
+                .await
+        } else {
+            app_state
+                .get_connection_admission_for_session(
+                    username,
+                    max_connections,
+                    soft_connections,
+                    session_token.unwrap_or_default(),
+                )
+                .await
+        }
+    } else {
+        app_state.get_connection_admission(username, max_connections, soft_connections).await
+    }
+}
+
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
     if is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(stream_url);
@@ -476,37 +539,25 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
     max_connections: u32,
     soft_connections: u16,
     client_ip: &str,
-    _fingerprint: &Fingerprint,
+    request_addr: &std::net::SocketAddr,
     is_session_request: bool,
     session_token: Option<&str>,
     activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
 ) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>) {
     use crate::api::model::{AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext, evaluate_strategy};
     use shared::model::UserConnectionPermission;
 
-    let admission = if is_session_request {
-        if activate_unbound_session {
-            app_state
-                .get_connection_admission_for_session_activation(
-                    username,
-                    max_connections,
-                    soft_connections,
-                    session_token.unwrap_or_default(),
-                )
-                .await
-        } else {
-            app_state
-                .get_connection_admission_for_session(
-                    username,
-                    max_connections,
-                    soft_connections,
-                    session_token.unwrap_or_default(),
-                )
-                .await
-        }
-    } else {
-        app_state.get_connection_admission(username, max_connections, soft_connections).await
-    };
+    let admission = get_admission_for_request(
+        app_state,
+        username,
+        max_connections,
+        soft_connections,
+        is_session_request,
+        session_token,
+        activate_unbound_session,
+    )
+    .await;
 
     if admission.permission != UserConnectionPermission::Exhausted {
         return (admission, None);
@@ -536,33 +587,37 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
                 debug!("Grace grant rejected for user {username}, continuing with later strategies");
             }
             AdmissionDecision::Evict(target) => {
+                if should_suppress_eviction_for_recent_request(
+                    app_state,
+                    username,
+                    client_ip,
+                    eviction_reentry_guard,
+                    &target.addr,
+                )
+                .await
+                {
+                    debug!(
+                        "Skipping eviction strategy {strategy:?} for recently evicted request of user {username} targeting {}",
+                        target.addr
+                    );
+                    continue;
+                }
                 debug!("Evicting connection {} for user {username}", target.addr);
+                app_state
+                    .active_users
+                    .mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+                    .await;
                 app_state.connection_manager.release_connection_as_kicked(&target.addr).await;
-                let retry_admission = if is_session_request {
-                    if activate_unbound_session {
-                        app_state
-                            .get_connection_admission_for_session_activation(
-                                username,
-                                max_connections,
-                                soft_connections,
-                                session_token.unwrap_or_default(),
-                            )
-                            .await
-                    } else {
-                        app_state
-                            .get_connection_admission_for_session(
-                                username,
-                                max_connections,
-                                soft_connections,
-                                session_token.unwrap_or_default(),
-                            )
-                            .await
-                    }
-                } else {
-                    app_state
-                        .get_connection_admission(username, max_connections, soft_connections)
-                        .await
-                };
+                let retry_admission = get_admission_for_request(
+                    app_state,
+                    username,
+                    max_connections,
+                    soft_connections,
+                    is_session_request,
+                    session_token,
+                    activate_unbound_session,
+                )
+                .await;
                 if retry_admission.permission == UserConnectionPermission::Allowed {
                     return (retry_admission, None);
                 }
@@ -638,10 +693,11 @@ async fn activate_session_before_stream_open(
         user.max_connections,
         user.soft_connections,
         &fingerprint.client_ip,
-        fingerprint,
+        &fingerprint.addr,
         true,
         Some(session_token),
         true,
+        EvictionReentryGuard::SocketPlayback { virtual_id },
     )
     .await;
 
@@ -2848,6 +2904,10 @@ mod tests {
         Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr)
     }
 
+    fn create_test_fingerprint_with_user_agent(addr: std::net::SocketAddr, user_agent: &str) -> Fingerprint {
+        Fingerprint::new(format!("{}|{user_agent}", addr.ip()), addr.ip().to_string(), addr)
+    }
+
     fn create_test_app_state_with_stream_config(stream: crate::model::StreamConfig) -> Arc<AppState> {
         let mut config = Config::default();
         config.reverse_proxy = Some(crate::model::ReverseProxyConfig {
@@ -3058,16 +3118,385 @@ mod tests {
             1,
             1,
             "127.0.0.1",
-            &create_test_fingerprint("127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!())),
+            &"127.0.0.1:55153".parse().unwrap_or_else(|_| unreachable!()),
             true,
             Some("tok-third"),
             false,
+            EvictionReentryGuard::Session("tok-third"),
         )
         .await;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
         assert_eq!(grace_mode, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_admission_with_strategies_prevents_recently_evicted_playback_ping_pong() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 0,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: false,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
+        });
+
+        let victim_addr: std::net::SocketAddr = "127.0.0.1:55181".parse().unwrap_or_else(|_| unreachable!());
+        let reconnect_addr: std::net::SocketAddr = "127.0.0.1:55182".parse().unwrap_or_else(|_| unreachable!());
+        let winner_addr: std::net::SocketAddr = "127.0.0.1:55183".parse().unwrap_or_else(|_| unreachable!());
+        let victim_fingerprint = create_test_fingerprint_with_user_agent(victim_addr, "player/1.0");
+        let reconnect_fingerprint = create_test_fingerprint_with_user_agent(reconnect_addr, "player/1.0");
+        let winner_fingerprint = create_test_fingerprint_with_user_agent(winner_addr, "winner/1.0");
+        let mut victim_channel = create_test_live_channel("http://provider-1.example/live/9001.ts");
+        victim_channel.virtual_id = 9001;
+        let mut winner_channel = create_test_live_channel("http://provider-1.example/live/9002.ts");
+        winner_channel.virtual_id = 9002;
+
+        app_state.connection_manager.add_connection(&victim_addr).await;
+        app_state.connection_manager.add_connection(&winner_addr).await;
+
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: "loop-user",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &victim_fingerprint,
+                provider: "provider-a",
+                stream_channel: &victim_channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("session-victim"),
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 2,
+                username: "loop-user",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &winner_fingerprint,
+                provider: "provider-a",
+                stream_channel: &winner_channel,
+                user_agent: std::borrow::Cow::Borrowed("winner/1.0"),
+                session_token: Some("session-winner"),
+            })
+            .await;
+
+        app_state
+            .active_users
+            .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+            .await;
+        app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
+
+        let (admission, grace_mode) = resolve_admission_with_strategies(
+            &app_state,
+            "loop-user",
+            1,
+            0,
+            &reconnect_fingerprint.client_ip,
+            &reconnect_fingerprint.addr,
+            true,
+            Some("socket-reconnect"),
+            false,
+            EvictionReentryGuard::SocketPlayback { virtual_id: 9001 },
+        )
+        .await;
+
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(grace_mode, None);
+        let active_streams = app_state.active_users.active_streams().await;
+        assert_eq!(active_streams.len(), 1);
+        assert_eq!(active_streams[0].channel.virtual_id, 9002);
+    }
+
+    #[tokio::test]
+    async fn resolve_admission_with_strategies_allows_other_channel_after_recent_eviction() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 0,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: false,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
+        });
+
+        let victim_addr: std::net::SocketAddr = "127.0.0.1:55184".parse().unwrap_or_else(|_| unreachable!());
+        let winner_addr: std::net::SocketAddr = "127.0.0.1:55185".parse().unwrap_or_else(|_| unreachable!());
+        let new_addr: std::net::SocketAddr = "127.0.0.1:55186".parse().unwrap_or_else(|_| unreachable!());
+        let victim_fingerprint = create_test_fingerprint_with_user_agent(victim_addr, "player/1.0");
+        let winner_fingerprint = create_test_fingerprint_with_user_agent(winner_addr, "winner/1.0");
+        let new_fingerprint = create_test_fingerprint_with_user_agent(new_addr, "player/1.0");
+        let mut victim_channel = create_test_live_channel("http://provider-1.example/live/9101.ts");
+        victim_channel.virtual_id = 9101;
+        let mut winner_channel = create_test_live_channel("http://provider-1.example/live/9102.ts");
+        winner_channel.virtual_id = 9102;
+
+        app_state.connection_manager.add_connection(&victim_addr).await;
+        app_state.connection_manager.add_connection(&winner_addr).await;
+
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: "loop-user-2",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &victim_fingerprint,
+                provider: "provider-a",
+                stream_channel: &victim_channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("session-victim"),
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 2,
+                username: "loop-user-2",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &winner_fingerprint,
+                provider: "provider-a",
+                stream_channel: &winner_channel,
+                user_agent: std::borrow::Cow::Borrowed("winner/1.0"),
+                session_token: Some("session-winner"),
+            })
+            .await;
+
+        app_state
+            .active_users
+            .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+            .await;
+        app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
+
+        let (admission, _grace_mode) = resolve_admission_with_strategies(
+            &app_state,
+            "loop-user-2",
+            1,
+            0,
+            &new_fingerprint.client_ip,
+            &new_fingerprint.addr,
+            true,
+            Some("session-new"),
+            false,
+            EvictionReentryGuard::SocketPlayback { virtual_id: 9103 },
+        )
+        .await;
+
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert!(app_state.active_users.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_admission_with_strategies_does_not_suppress_different_session_on_same_channel() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 0,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: false,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
+        });
+
+        let victim_addr: std::net::SocketAddr = "127.0.0.1:55190".parse().unwrap_or_else(|_| unreachable!());
+        let winner_addr: std::net::SocketAddr = "127.0.0.1:55191".parse().unwrap_or_else(|_| unreachable!());
+        let new_addr: std::net::SocketAddr = "127.0.0.1:55192".parse().unwrap_or_else(|_| unreachable!());
+        let victim_fingerprint = create_test_fingerprint_with_user_agent(victim_addr, "player/1.0");
+        let winner_fingerprint = create_test_fingerprint_with_user_agent(winner_addr, "player/1.0");
+        let new_fingerprint = create_test_fingerprint_with_user_agent(new_addr, "player/1.0");
+        let mut channel = create_test_live_channel("http://provider-1.example/live/9301.m3u8");
+        channel.virtual_id = 9301;
+        channel.item_type = PlaylistItemType::LiveHls;
+
+        app_state.connection_manager.add_connection(&victim_addr).await;
+        app_state.connection_manager.add_connection(&winner_addr).await;
+
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: "loop-user-4",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &victim_fingerprint,
+                provider: "provider-a",
+                stream_channel: &channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("session-victim"),
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 2,
+                username: "loop-user-4",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &winner_fingerprint,
+                provider: "provider-a",
+                stream_channel: &channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("session-winner"),
+            })
+            .await;
+
+        app_state
+            .active_users
+            .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+            .await;
+        app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
+
+        let (admission, grace_mode) = resolve_admission_with_strategies(
+            &app_state,
+            "loop-user-4",
+            1,
+            0,
+            &new_fingerprint.client_ip,
+            &new_fingerprint.addr,
+            true,
+            Some("session-other"),
+            false,
+            EvictionReentryGuard::Session("session-other"),
+        )
+        .await;
+
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(grace_mode, None);
+        assert!(app_state.active_users.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_admission_with_strategies_allows_recently_evicted_playback_when_soft_slot_is_free() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 0,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: false,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
+        });
+
+        let victim_addr: std::net::SocketAddr = "127.0.0.1:55187".parse().unwrap_or_else(|_| unreachable!());
+        let reconnect_addr: std::net::SocketAddr = "127.0.0.1:55188".parse().unwrap_or_else(|_| unreachable!());
+        let winner_addr: std::net::SocketAddr = "127.0.0.1:55189".parse().unwrap_or_else(|_| unreachable!());
+        let victim_fingerprint = create_test_fingerprint_with_user_agent(victim_addr, "player/1.0");
+        let reconnect_fingerprint = create_test_fingerprint_with_user_agent(reconnect_addr, "player/1.0");
+        let winner_fingerprint = create_test_fingerprint_with_user_agent(winner_addr, "winner/1.0");
+        let mut victim_channel = create_test_live_channel("http://provider-1.example/live/9201.ts");
+        victim_channel.virtual_id = 9201;
+        let mut winner_channel = create_test_live_channel("http://provider-1.example/live/9202.ts");
+        winner_channel.virtual_id = 9202;
+
+        app_state.connection_manager.add_connection(&victim_addr).await;
+        app_state.connection_manager.add_connection(&winner_addr).await;
+
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: "loop-user-3",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &victim_fingerprint,
+                provider: "provider-a",
+                stream_channel: &victim_channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("session-victim"),
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 2,
+                username: "loop-user-3",
+                max_connections: 2,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &winner_fingerprint,
+                provider: "provider-a",
+                stream_channel: &winner_channel,
+                user_agent: std::borrow::Cow::Borrowed("winner/1.0"),
+                session_token: Some("session-winner"),
+            })
+            .await;
+
+        app_state
+            .active_users
+            .mark_recent_eviction_guard_for_addr(&victim_addr, winner_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
+            .await;
+        app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
+
+        let (admission, grace_mode) = resolve_admission_with_strategies(
+            &app_state,
+            "loop-user-3",
+            1,
+            1,
+            &reconnect_fingerprint.client_ip,
+            &reconnect_fingerprint.addr,
+            true,
+            Some("socket-reconnect"),
+            false,
+            EvictionReentryGuard::SocketPlayback { virtual_id: 9201 },
+        )
+        .await;
+
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+        assert_eq!(grace_mode, None);
+
+        let active_streams = app_state.active_users.active_streams().await;
+        assert_eq!(active_streams.len(), 1);
+        assert_eq!(active_streams[0].channel.virtual_id, 9202);
     }
 
     #[tokio::test]
@@ -3611,10 +4040,11 @@ mod tests {
             user.max_connections,
             user.soft_connections,
             &first_fingerprint.client_ip,
-            &first_fingerprint,
+            &first_fingerprint.addr,
             true,
             Some("tok-hls-first"),
             true,
+            EvictionReentryGuard::Session("tok-hls-first"),
         )
         .await
         .0;
@@ -3624,10 +4054,11 @@ mod tests {
             user.max_connections,
             user.soft_connections,
             &second_fingerprint.client_ip,
-            &second_fingerprint,
+            &second_fingerprint.addr,
             true,
             Some("tok-hls-second"),
             true,
+            EvictionReentryGuard::Session("tok-hls-second"),
         )
         .await
         .0;
