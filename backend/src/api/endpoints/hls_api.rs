@@ -167,6 +167,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         addr: &fingerprint.addr,
                         connection_permission,
                         connection_kind: session.connection_kind,
+                        socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                     })
                     .await;
                 app_state
@@ -211,6 +212,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                             addr: &fingerprint.addr,
                             connection_permission,
                             connection_kind: Some(connection_kind),
+                            socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                         })
                         .await;
                     app_state

@@ -130,11 +130,11 @@ fmt-check: ## Check if code follows formatting rules (Nightly)
 .PHONY: markdown-lint
 markdown-lint: ## Lint markdown files
 	@echo "==> Linting markdown files"
-	@command -v markdownlint-cli2 >/dev/null 2>&1 || { \
-		echo "❌ markdownlint-cli2 not found. Install with: npm install -g markdownlint-cli2"; \
-		exit 1; \
-	}
-	@markdownlint-cli2 "**/*.md"
+# 	@command -v markdownlint-cli2 >/dev/null 2>&1 || { \
+# 		echo "❌ markdownlint-cli2 not found. Install with: npm install -g markdownlint-cli2"; \
+# 		exit 1; \
+# 	}
+	@npx markdownlint-cli2 "**/*.md"
 	@echo "✅ Markdown linting complete"
 
 .PHONY: docs

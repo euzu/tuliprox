@@ -78,6 +78,8 @@ pub struct UserSession {
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
     pub addr: SocketAddr,
+    pub socket_bound: bool,
+    pub active_addrs: Vec<SocketAddr>,
     pub ts: u64,
     pub permission: UserConnectionPermission,
     pub connection_kind: Option<ConnectionKind>,
@@ -143,6 +145,22 @@ impl UserConnectionData {
             self.sessions.sort_by_key(|e| std::cmp::Reverse(e.ts));
             self.sessions.truncate(USER_SESSION_LIMIT);
         }
+    }
+
+    fn has_session_addr(&self, addr: &SocketAddr) -> bool {
+        self.sessions
+            .iter()
+            .any(|session| session.addr == *addr || session.active_addrs.contains(addr))
+    }
+
+    fn release_addr_from_sessions(&mut self, addr: &SocketAddr) -> HashMap<String, Option<SocketAddr>> {
+        let mut migrated_addrs = HashMap::new();
+        for session in &mut self.sessions {
+            if session.addr == *addr || session.active_addrs.contains(addr) {
+                migrated_addrs.insert(session.token.clone(), release_session_addr(session, addr));
+            }
+        }
+        migrated_addrs
     }
 
     fn increment_kind(&mut self, kind: ConnectionKind) {
@@ -262,6 +280,34 @@ pub struct CreateUserSessionParams<'a> {
     pub addr: &'a SocketAddr,
     pub connection_permission: UserConnectionPermission,
     pub connection_kind: Option<ConnectionKind>,
+    pub socket_bound: bool,
+}
+
+fn remember_session_addr(session: &mut UserSession, addr: SocketAddr) {
+    if session.socket_bound {
+        session.active_addrs.clear();
+    } else if let Some(position) = session.active_addrs.iter().position(|active_addr| *active_addr == addr) {
+        session.active_addrs.remove(position);
+    }
+    session.active_addrs.push(addr);
+    session.addr = addr;
+}
+
+fn release_session_addr(session: &mut UserSession, addr: &SocketAddr) -> Option<SocketAddr> {
+    if let Some(position) = session.active_addrs.iter().position(|active_addr| active_addr == addr) {
+        session.active_addrs.remove(position);
+    } else if session.addr != *addr {
+        return None;
+    }
+
+    if session.addr == *addr {
+        if let Some(next_addr) = session.active_addrs.last().copied() {
+            session.addr = next_addr;
+            return Some(next_addr);
+        }
+    }
+
+    None
 }
 
 impl SocketRegistration {
@@ -423,12 +469,22 @@ impl ActiveUserManager {
             let mut connection_changed = false;
             let mut promotion = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
+                let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
                 if let Some(stream_idx) = connection_data
                     .streams
                     .iter()
                     .position(|stream| stream.addr == *addr && !stream.preserved)
                 {
-                    if Self::should_preserve_session_stream(&connection_data.streams[stream_idx]) {
+                    let migrated_addr = connection_data.streams[stream_idx]
+                        .session_token
+                        .as_deref()
+                        .and_then(|token| migrated_session_addrs.get(token))
+                        .copied()
+                        .flatten();
+                    if let Some(next_addr) = migrated_addr {
+                        connection_data.streams[stream_idx].addr = next_addr;
+                        connection_data.streams[stream_idx].ts = current_time_secs();
+                    } else if Self::should_preserve_session_stream(&connection_data.streams[stream_idx]) {
                         if let Some(entry) = self.build_preserved_stream_expiry(
                             &username,
                             &connection_data.streams[stream_idx],
@@ -499,12 +555,24 @@ impl ActiveUserManager {
                 let mut expiry_entries = Vec::new();
                 let mut promotions = Vec::new();
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
+                    let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
                     let mut remaining_streams = Vec::with_capacity(connection_data.streams.len());
                     let mut released_kinds = Vec::new();
                     let mut removed_session_tokens = HashSet::new();
+                    let now = current_time_secs();
                     for mut stream_info in connection_data.streams.drain(..) {
                         if stream_info.addr == *addr {
-                            if preserve_session_streams && Self::should_preserve_session_stream(&stream_info) {
+                            let migrated_addr = stream_info
+                                .session_token
+                                .as_deref()
+                                .and_then(|token| migrated_session_addrs.get(token))
+                                .copied()
+                                .flatten();
+                            if let Some(next_addr) = migrated_addr {
+                                stream_info.addr = next_addr;
+                                stream_info.ts = now;
+                                remaining_streams.push(stream_info);
+                            } else if preserve_session_streams && Self::should_preserve_session_stream(&stream_info) {
                                 if let Some(entry) =
                                     self.build_preserved_stream_expiry(&username, &stream_info, &connection_data.sessions)
                                 {
@@ -902,6 +970,13 @@ impl ActiveUserManager {
             connection_data.max_connections = max_connections;
             connection_data.soft_connections = soft_connections;
 
+            if let Some(token) = session_token {
+                if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
+                    session.ts = now;
+                    remember_session_addr(session, fingerprint.addr);
+                }
+            }
+
             let user_agent_string = user_agent.to_string();
 
             let existing_stream_info = connection_data
@@ -1024,6 +1099,8 @@ impl ActiveUserManager {
         }
     }
 
+
+    #[allow(clippy::too_many_arguments)]
     fn new_user_session(
         session_token: &str,
         virtual_id: u32,
@@ -1032,6 +1109,7 @@ impl ActiveUserManager {
         addr: &SocketAddr,
         connection_permission: UserConnectionPermission,
         connection_kind: Option<ConnectionKind>,
+        socket_bound: bool,
     ) -> UserSession {
         UserSession {
             token: session_token.to_string(),
@@ -1039,6 +1117,8 @@ impl ActiveUserManager {
             provider: provider.intern(),
             stream_url: stream_url.intern(),
             addr: *addr,
+            socket_bound,
+            active_addrs: vec![*addr],
             ts: current_time_secs(),
             permission: connection_permission,
             connection_kind,
@@ -1063,6 +1143,7 @@ impl ActiveUserManager {
             addr,
             connection_permission,
             connection_kind,
+            socket_bound,
         } = request;
         self.gc();
 
@@ -1080,6 +1161,7 @@ impl ActiveUserManager {
                     addr,
                     connection_permission,
                     connection_kind,
+                    socket_bound,
                 );
             data.add_session(session);
             data
@@ -1089,7 +1171,8 @@ impl ActiveUserManager {
         for session in &mut connection_data.sessions {
             if session.token == session_token {
                 session.ts = current_time_secs();
-                session.addr = *addr;
+                session.socket_bound = socket_bound;
+                remember_session_addr(session, *addr);
                 if &*session.stream_url != stream_url {
                     session.stream_url = stream_url.intern();
                 }
@@ -1122,6 +1205,7 @@ impl ActiveUserManager {
                 addr,
                 connection_permission,
                 connection_kind,
+                socket_bound,
             );
         let token = session.token.clone();
         connection_data.add_session(session);
@@ -1134,7 +1218,7 @@ impl ActiveUserManager {
         if let Some(connection_data) = user_connections.by_key.get_mut(username) {
             let update_result = if let Some(session) = connection_data.sessions.iter_mut().find(|s| s.token == token) {
                 let previous_addr = session.addr;
-                session.addr = *addr;
+                remember_session_addr(session, *addr);
                 session.ts = now;
                 for stream in &mut connection_data.streams {
                     if stream.addr == previous_addr {
@@ -1143,7 +1227,7 @@ impl ActiveUserManager {
                     }
                 }
                 let prune_previous_registration = previous_addr != *addr
-                    && !connection_data.sessions.iter().any(|active_session| active_session.addr == previous_addr)
+                    && !connection_data.has_session_addr(&previous_addr)
                     && !connection_data.streams.iter().any(|stream| stream.addr == previous_addr);
                 Some((previous_addr, prune_previous_registration))
             } else {
@@ -1218,7 +1302,7 @@ impl ActiveUserManager {
         for session in &mut connection_data.sessions {
             if session.token == token {
                 session.ts = now;
-                session.addr = *addr;
+                remember_session_addr(session, *addr);
                 touched_session = true;
                 break;
             }
@@ -1821,6 +1905,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -1875,6 +1960,7 @@ mod tests {
                 addr: &kicked_addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: true,
             })
             .await;
         manager
@@ -1887,6 +1973,7 @@ mod tests {
                 addr: &survivor_addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: true,
             })
             .await;
 
@@ -2007,6 +2094,7 @@ mod tests {
                 addr: &first_addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: true,
             })
             .await;
         manager
@@ -2083,6 +2171,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Soft),
+                socket_bound: true,
             })
             .await;
         manager
@@ -2213,6 +2302,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         let first = manager
@@ -2306,6 +2396,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2359,6 +2450,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2434,6 +2526,7 @@ mod tests {
                 addr: &normal_addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2524,6 +2617,7 @@ mod tests {
                 addr: &addr_a,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2607,6 +2701,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2699,6 +2794,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2781,6 +2877,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2852,6 +2949,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         manager
@@ -2936,6 +3034,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
         let first = manager
@@ -3127,6 +3226,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
             })
             .await;
 
@@ -3152,7 +3252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_session_addr_prunes_previous_registration_when_session_moves_to_new_socket() {
+    async fn update_session_addr_prunes_previous_registration_for_socket_bound_session() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let event_manager = Arc::new(EventManager::new());
@@ -3173,10 +3273,11 @@ mod tests {
                 session_token: "tok-move",
                 virtual_id: 9101,
                 provider: "provider-a",
-                stream_url: "http://localhost/movie.mkv",
+                stream_url: "http://localhost/live.ts",
                 addr: &old_addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: true,
             })
             .await;
         manager
@@ -3192,14 +3293,14 @@ mod tests {
                 fingerprint: &old_fingerprint,
                 provider: "provider-a",
                 stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::Video,
+                    item_type: PlaylistItemType::Live,
                     ..test_channel(9101)
                 },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-move"),
             })
             .await
-            .expect("initial movie stream should register");
+            .expect("initial live stream should register");
 
         manager.update_session_addr("user1", "tok-move", &new_addr).await;
 
@@ -3215,6 +3316,122 @@ mod tests {
         assert_eq!(connection_data.sessions[0].addr, new_addr);
         assert_eq!(connection_data.streams.len(), 1);
         assert_eq!(connection_data.streams[0].addr, new_addr);
+    }
+
+    #[tokio::test]
+    async fn vod_session_survives_overlapping_and_seek_sockets() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let base_addr: SocketAddr = "127.0.0.1:55131".parse().unwrap();
+        let range_addr: SocketAddr = "127.0.0.1:55132".parse().unwrap();
+        let seek_addr: SocketAddr = "127.0.0.1:55133".parse().unwrap();
+        let base_fingerprint = Fingerprint::new("fp-vod-base".to_string(), "127.0.0.1".to_string(), base_addr);
+        let range_fingerprint = Fingerprint::new("fp-vod-range".to_string(), "127.0.0.1".to_string(), range_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user1");
+        user.max_connections = 1;
+
+        manager.add_connection(&base_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-vod",
+                virtual_id: 9102,
+                provider: "provider-a",
+                stream_url: "http://localhost/movie.mkv",
+                addr: &base_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 302,
+                meter_uid: 402,
+                username: "user1",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &base_fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::Video,
+                    ..test_channel(9102)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-vod"),
+            })
+            .await
+            .expect("initial vod stream should register");
+
+        manager.add_connection(&range_addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 303,
+                meter_uid: 403,
+                username: "user1",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &range_fingerprint,
+                provider: "provider-a",
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::Video,
+                    ..test_channel(9102)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-vod"),
+            })
+            .await
+            .expect("overlapping range request should reuse the same vod session");
+
+        assert_eq!(manager.user_connections("user1").await, 1);
+        assert!(manager.release_stream(&range_addr).await.is_none());
+        let released = manager.release_connection(&range_addr).await;
+        assert!(released.addr_removed);
+        assert!(released.removed_streams.is_empty());
+
+        {
+            let connections = manager.connections.read().await;
+            assert!(connections.key_by_addr.contains_key(&base_addr));
+            let connection_data = connections.by_key.get("user1").expect("user connection data");
+            assert_eq!(connection_data.sessions[0].addr, base_addr);
+            assert_eq!(connection_data.streams[0].addr, base_addr);
+        }
+
+        manager.add_connection(&seek_addr).await;
+        manager.update_session_addr("user1", "tok-vod", &seek_addr).await;
+
+        {
+            let connections = manager.connections.read().await;
+            assert!(
+                connections.key_by_addr.contains_key(&base_addr),
+                "existing vod socket must remain registered while the session spans multiple requests"
+            );
+            assert!(connections.key_by_addr.contains_key(&seek_addr));
+
+            let connection_data = connections.by_key.get("user1").expect("user connection data");
+            assert_eq!(connection_data.sessions[0].addr, seek_addr);
+            assert_eq!(connection_data.streams[0].addr, seek_addr);
+        }
+
+        assert!(manager.release_stream(&seek_addr).await.is_none());
+        let released = manager.release_connection(&seek_addr).await;
+        assert!(released.addr_removed);
+        assert!(released.removed_streams.is_empty());
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get("user1").expect("user connection data");
+        assert_eq!(connection_data.sessions[0].addr, base_addr);
+        assert_eq!(connection_data.streams[0].addr, base_addr);
     }
 
     #[tokio::test]

@@ -399,6 +399,7 @@ pub struct StreamOptions {
 
 struct StreamingAcquireOptions<'a> {
     force_provider: Option<&'a Arc<str>>,
+    allow_forced_provider_fallback: bool,
     allow_provider_grace: bool,
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
@@ -477,13 +478,15 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
     soft_connections: u16,
     client_ip: &str,
     _fingerprint: &Fingerprint,
-    is_session_request: bool,
+    // This controls whether an existing logical playback session may reopen while the user is already at limit.
+    // It is intentionally independent from whether the session is socket-bound.
+    use_session_admission: bool,
     session_token: Option<&str>,
 ) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>) {
     use crate::api::model::{AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext, evaluate_strategy};
     use shared::model::UserConnectionPermission;
 
-    let admission = if is_session_request {
+    let admission = if use_session_admission {
         app_state.get_connection_admission_for_session(
             username, max_connections, soft_connections, session_token.unwrap_or_default(),
         ).await
@@ -521,7 +524,7 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
             AdmissionDecision::Evict(target) => {
                 debug!("Evicting connection {} for user {username}", target.addr);
                 app_state.connection_manager.release_connection_as_kicked(&target.addr).await;
-                let retry_admission = if is_session_request {
+                let retry_admission = if use_session_admission {
                     app_state
                         .get_connection_admission_for_session(
                             username,
@@ -618,7 +621,6 @@ async fn resolve_streaming_strategy(
     let provider_connection_handle = match options.force_provider {
         Some(provider) => {
             // First try to stay on the exact pinned provider account without over-allocating.
-            // If that account is no longer available, fall back to any available account in the same lineup.
             if let Some(handle) = app_state
                 .active_provider
                 .acquire_exact_connection_with_grace_for_session(
@@ -633,7 +635,7 @@ async fn resolve_streaming_strategy(
             {
                 forced_provider_allocated = true;
                 Some(handle)
-            } else {
+            } else if options.allow_forced_provider_fallback {
                 debug_if_enabled!(
                     "Pinned provider {} unavailable for {}; falling back to lineup allocation",
                     sanitize_sensitive_info(provider),
@@ -650,6 +652,13 @@ async fn resolve_streaming_strategy(
                         options.session_owner,
                     )
                     .await
+            } else {
+                debug_if_enabled!(
+                    "Pinned provider {} unavailable for {}; strict provider affinity prevents fallback",
+                    sanitize_sensitive_info(provider),
+                    sanitize_sensitive_info(&fingerprint.addr.to_string())
+                );
+                None
             }
         }
         None => {
@@ -749,6 +758,7 @@ async fn create_stream_response_details(
     share_stream: bool,
     connection_permission: UserConnectionPermission,
     force_provider: Option<&Arc<str>>,
+    allow_forced_provider_fallback: bool,
     allow_provider_grace: bool,
     virtual_id: VirtualId,
     user_priority: i8,
@@ -763,6 +773,7 @@ async fn create_stream_response_details(
         input,
         StreamingAcquireOptions {
             force_provider,
+            allow_forced_provider_fallback,
             allow_provider_grace,
             user_priority,
             connection_kind,
@@ -1086,9 +1097,10 @@ pub async fn force_provider_stream_response(
     // This is critical for users with a connection limit of 1 to avoid "Provider exhausted" or provider-side 502/509 errors during seeking.
     app_state.connection_manager.release_provider_connection(&user_session.addr).await;
 
-    // Keep seek/range reconnects on the same provider account whenever that exact account is still available.
-    // If it is not available anymore, resolve_streaming_strategy will fall back to another free account.
+    // Provider-affine playback must stay on the same provider account across seeks/range reconnects.
+    // Only non-affine sessions may fall back to a different account in the same lineup.
     let preferred_provider = Some(&user_session.provider);
+    let allow_forced_provider_fallback = !item_type.requires_provider_affinity();
     // Never allow provider-side grace for forced seek/session reacquire.
     // Over-allocation here would break provider-side one-connection limits.
     let allow_provider_grace = false;
@@ -1109,6 +1121,7 @@ pub async fn force_provider_stream_response(
         share_stream,
         connection_permission,
         preferred_provider,
+        allow_forced_provider_fallback,
         allow_provider_grace,
         stream_channel.virtual_id,
         connection_priority_for_kind(ctx.user, connection_kind),
@@ -1312,6 +1325,7 @@ pub async fn stream_response(
         connection_permission,
         None,
         true,
+        true,
         stream_channel.virtual_id,
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
@@ -1432,18 +1446,14 @@ pub async fn stream_response(
                 StatusCode::BAD_REQUEST.into_response()
             }
         } else {
-            // Previously, we would always check if the provider redirected the request.
-            // If the provider redirected a movie from /movie/... to a temporary /live/... URL,
-            // We would save that redirected URL in your session.
-            // When we tried to seek or pause/resume, we would use that saved /live/ URL.
-            // However, providers often make these redirect links ephemeral or restricted—they
-            // might not support seeking, or they might trigger a 509 error if accessed again.
-            // For Movies/Series: We now ignore the redirect and always save the original,
-            // canonical URL (the one starting with /movie/) in your session.
-            // This ensures that every time you seek, we start "fresh" with the correct provider handshake,
-            // preventing the session from being "poisoned" by a temporary redirect.
-            // For everything else (Live): It continues to work as before, using the redirected URL if available,
-            // which is often desirable for live streams to stay on the same edge server.
+            // Previously, we always persisted the provider's final request URL into the session.
+            // For VOD-like playback that can be the wrong thing to reuse later: a seek or reopen
+            // should start from the canonical playback entrypoint, not from a provider-specific
+            // redirected target that happened to be used for an earlier request.
+            // For Movies/Series/Catchup we therefore keep the canonical request URL in the session.
+            // That avoids "session poisoning" where later seeks/resumes inherit a non-canonical URL.
+            // For live playback we still keep the redirected URL when available, because staying on
+            // the chosen upstream edge/server is often desirable there.
             let session_url: Cow<'_, str> = if matches!(
                 item_type,
                 PlaylistItemType::Catchup
@@ -1499,6 +1509,7 @@ pub async fn stream_response(
                             addr: &fingerprint.addr,
                             connection_permission,
                             connection_kind: Some(connection_kind),
+                            socket_bound: item_type.uses_socket_bound_session(),
                         })
                         .await;
                     let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
@@ -1655,6 +1666,7 @@ async fn try_shared_stream_response_if_any(
                         addr: &fingerprint.addr,
                         connection_permission: connect_permission,
                         connection_kind: Some(connection_kind),
+                        socket_bound: stream_channel.item_type.uses_socket_bound_session(),
                     })
                     .await;
             }
@@ -1855,6 +1867,7 @@ pub async fn local_stream_response(
                 addr: &fingerprint.addr,
                 connection_permission,
                 connection_kind: Some(resolved_connection_kind),
+                socket_bound: pli.item_type.uses_socket_bound_session(),
             })
             .await;
     }
@@ -2401,7 +2414,10 @@ mod tests {
             PlaylistStorageState, SharedStreamManager,
         },
         auth::Fingerprint,
-        model::{AppConfig, Config, ConfigInput, ConfigTarget, MediaToolCapabilities, ProcessTargets, ProxyUserCredentials, SourcesConfig},
+        model::{
+            AppConfig, Config, ConfigInput, ConfigInputAlias, ConfigTarget, MediaToolCapabilities, ProcessTargets,
+            ProxyUserCredentials, SourcesConfig,
+        },
         utils::{GeoIp, FileLockManager},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -2412,7 +2428,7 @@ mod tests {
         model::{ConfigPaths, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder, StreamChannel, XtreamCluster},
         utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
     };
-    use std::{borrow::Cow, collections::HashMap, sync::Arc};
+    use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
     use tokio::sync::mpsc;
     use crate::model::StreamHistoryConfig;
 
@@ -2485,6 +2501,94 @@ mod tests {
     }
 
     #[test]
+    fn provider_affinity_policy_matches_stream_types() {
+        assert!(!PlaylistItemType::Live.requires_provider_affinity());
+        assert!(!PlaylistItemType::LiveUnknown.requires_provider_affinity());
+        assert!(PlaylistItemType::LiveHls.requires_provider_affinity());
+        assert!(PlaylistItemType::LiveDash.requires_provider_affinity());
+        assert!(PlaylistItemType::Video.requires_provider_affinity());
+        assert!(PlaylistItemType::Series.requires_provider_affinity());
+        assert!(PlaylistItemType::Catchup.requires_provider_affinity());
+    }
+
+    #[tokio::test]
+    async fn resolve_streaming_strategy_honors_forced_provider_fallback_policy() {
+        let app_state = create_test_dual_provider_app_state();
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .sources
+            .load()
+            .get_input_by_name(&input_name)
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        let pinned_provider = "provider_1".intern();
+        let busy_addr: SocketAddr = "127.0.0.1:55301".parse().unwrap_or_else(|_| unreachable!());
+        let strict_addr: SocketAddr = "127.0.0.1:55302".parse().unwrap_or_else(|_| unreachable!());
+        let fallback_addr: SocketAddr = "127.0.0.1:55303".parse().unwrap_or_else(|_| unreachable!());
+        let stream_url = "http://provider-1.example/movie/1.mkv";
+
+        let busy = app_state
+            .active_provider
+            .acquire_exact_connection_with_grace(
+                &pinned_provider,
+                &busy_addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
+            .await;
+        assert!(busy.is_some(), "setup should occupy the pinned provider");
+
+        let strict = resolve_streaming_strategy(
+            &app_state,
+            stream_url,
+            &create_test_fingerprint(strict_addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: Some(&pinned_provider),
+                allow_forced_provider_fallback: false,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("vod-session"),
+            },
+        )
+        .await;
+        assert!(strict.provider_handle.is_none(), "strict provider affinity should not allocate a different provider");
+        assert!(
+            matches!(strict.provider_stream_state, ProviderStreamState::Custom(_)),
+            "strict provider affinity should fail closed when the pinned provider is unavailable"
+        );
+
+        let fallback = resolve_streaming_strategy(
+            &app_state,
+            stream_url,
+            &create_test_fingerprint(fallback_addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: Some(&pinned_provider),
+                allow_forced_provider_fallback: true,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("live-session"),
+            },
+        )
+        .await;
+        let fallback_provider = match fallback.provider_stream_state {
+            ProviderStreamState::Available(Some(provider_name), _)
+            | ProviderStreamState::GracePeriod(Some(provider_name), _) => provider_name,
+            _ => panic!("fallback-enabled request should allocate a provider"),
+        };
+        assert_eq!(fallback_provider.as_ref(), "provider_2");
+
+        app_state.active_provider.release_connection(&busy_addr).await;
+        app_state.active_provider.release_connection(&strict_addr).await;
+        app_state.active_provider.release_connection(&fallback_addr).await;
+    }
+
+    #[test]
     fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session() {
         let session = UserSession {
             connection_kind: Some(crate::api::model::ConnectionKind::Normal),
@@ -2493,6 +2597,8 @@ mod tests {
             provider: Arc::<str>::from("provider"),
             stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
             addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
+            socket_bound: false,
+            active_addrs: vec!["127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!())],
             ts: 1,
             permission: UserConnectionPermission::Allowed,
         };
@@ -2609,12 +2715,70 @@ mod tests {
         }
     }
 
+    fn create_test_dual_provider_app_config() -> AppConfig {
+        let input = Arc::new(ConfigInput {
+            id: 1,
+            name: "provider_1".intern(),
+            input_type: InputType::Xtream,
+            headers: HashMap::default(),
+            url: "http://provider-1.example".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            enabled: true,
+            priority: 0,
+            max_connections: 1,
+            method: InputFetchMethod::default(),
+            aliases: Some(vec![ConfigInputAlias {
+                id: 2,
+                name: "provider_2".intern(),
+                url: "http://provider-2.example".to_string(),
+                username: Some("user2".to_string()),
+                password: Some("pass2".to_string()),
+                priority: 1,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+            }]),
+            ..ConfigInput::default()
+        });
+        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(sources)),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        }
+    }
+
     fn create_test_app_state() -> Arc<AppState> {
         create_test_app_state_for_config(Arc::new(create_test_app_config()))
     }
 
     fn create_test_provider_app_state() -> Arc<AppState> {
         create_test_app_state_for_config(Arc::new(create_test_provider_app_config()))
+    }
+
+    fn create_test_dual_provider_app_state() -> Arc<AppState> {
+        create_test_app_state_for_config(Arc::new(create_test_dual_provider_app_config()))
     }
 
     fn create_test_app_state_for_config(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
@@ -2883,6 +3047,75 @@ mod tests {
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
         assert_eq!(grace_mode, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_admission_with_strategies_allows_existing_session_even_when_user_is_at_limit() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55154".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "session-admission".to_string();
+        user.max_connections = 1;
+
+        app_state.connection_manager.add_connection(&addr).await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "vod-session",
+                virtual_id: 1,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/movie/1.mkv",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &fingerprint,
+                provider: "provider-a",
+                stream_channel: &create_test_live_channel("http://provider-1.example/movie/1.mkv"),
+                user_agent: std::borrow::Cow::Borrowed("ua"),
+                session_token: Some("vod-session"),
+            })
+            .await;
+
+        let session_based = resolve_admission_with_strategies(
+            &app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &fingerprint.client_ip,
+            &fingerprint,
+            true,
+            Some("vod-session"),
+        )
+        .await;
+        assert_eq!(session_based.0.permission, UserConnectionPermission::Allowed);
+
+        let connection_based = resolve_admission_with_strategies(
+            &app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &fingerprint.client_ip,
+            &fingerprint,
+            false,
+            Some("vod-session"),
+        )
+        .await;
+        assert_eq!(connection_based.0.permission, UserConnectionPermission::Exhausted);
     }
 
     #[tokio::test]
