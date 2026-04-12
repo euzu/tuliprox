@@ -84,6 +84,7 @@ pub struct UserSession {
     pub socket_bound: bool,
     pub active_addrs: Vec<SocketAddr>,
     pub ts: u64,
+    pub started_at: u64,
     pub permission: UserConnectionPermission,
     pub connection_kind: Option<ConnectionKind>,
     pub counted: bool,
@@ -1066,6 +1067,12 @@ impl ActiveUserManager {
                     None => stream_info.addr == fingerprint.addr && stream_info.session_token.is_none(),
                 })
                 .map(|stream_idx| {
+                    let session_started_at = session_token.and_then(|token| {
+                        connection_data.sessions.iter()
+                            .find(|s| s.token == token)
+                            .map(|s| s.started_at)
+                    });
+
                     let stream_info = &mut connection_data.streams[stream_idx];
                     let client_ip = fingerprint.client_ip.clone();
                     let preserve_started_at = stream_info.session_token.is_some()
@@ -1079,6 +1086,11 @@ impl ActiveUserManager {
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.to_string();
                     stream_info.user_agent.clone_from(&user_agent_string);
+                    
+                    if let Some(started_at) = session_started_at {
+                        stream_info.started_at = started_at;
+                    }
+
                     if preserve_started_at {
                         let now = current_time_secs();
                         if utc_day_from_secs(stream_info.ts) != utc_day_from_secs(now) {
@@ -1100,7 +1112,6 @@ impl ActiveUserManager {
                     stream_info.previous_session_id = None;
                     result
                 });
-
             if let Some(stream_info) = existing_stream_info {
                 if let Some(token) = session_token {
                     if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
@@ -1115,7 +1126,7 @@ impl ActiveUserManager {
                 let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
                 let country_code = self.lookup_country(&fingerprint.client_ip);
 
-                let stream_info = StreamInfo::new(
+                let mut stream_info = StreamInfo::new(
                     uid,
                     meter_uid,
                     username,
@@ -1127,6 +1138,12 @@ impl ActiveUserManager {
                     country_code,
                     session_token,
                 );
+
+                if let Some(token) = session_token {
+                    if let Some(session) = connection_data.sessions.iter().find(|s| s.token == token) {
+                        stream_info.started_at = session.started_at;
+                    }
+                }
 
                 if reserved_session_kind.is_none() {
                     connection_data.increment_kind(effective_connection_kind);
@@ -1203,6 +1220,7 @@ impl ActiveUserManager {
         connection_kind: Option<ConnectionKind>,
         socket_bound: bool,
     ) -> UserSession {
+        let now = current_time_secs();
         UserSession {
             token: session_token.to_string(),
             virtual_id,
@@ -1211,7 +1229,8 @@ impl ActiveUserManager {
             addr: *addr,
             socket_bound,
             active_addrs: vec![*addr],
-            ts: current_time_secs(),
+            ts: now,
+            started_at: now,
             permission: connection_permission,
             connection_kind,
             counted: false,
