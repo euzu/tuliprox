@@ -134,7 +134,7 @@ markdown-lint: ## Lint markdown files
 # 		echo "❌ markdownlint-cli2 not found. Install with: npm install -g markdownlint-cli2"; \
 # 		exit 1; \
 # 	}
-	@npx markdownlint-cli2 "**/*.md"
+	@npx markdownlint-cli2 "docs/src/**/*.md" "README.md" "CHANGELOG.md" "CONTRIBUTING.md"
 	@echo "✅ Markdown linting complete"
 
 .PHONY: docs

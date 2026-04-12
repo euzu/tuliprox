@@ -1,47 +1,8 @@
-use shared::model::{AdmissionStrategyDto, StreamBufferConfigDto, StreamConfigDto};
+use shared::model::{AdmissionStrategy, StreamBufferConfigDto, StreamConfigDto};
 use shared::utils::parse_to_kbps;
 use crate::api::model::TransportStreamBuffer;
 use crate::model::macros;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum AdmissionStrategy {
-    EvictUserSameIpOldest,
-    EvictUserSameIpLatest,
-    GraceInstantStream,
-    GraceHoldStream,
-}
-
-impl From<&AdmissionStrategyDto> for AdmissionStrategy {
-    fn from(dto: &AdmissionStrategyDto) -> Self {
-        match dto {
-            AdmissionStrategyDto::EvictUserSameIpOldest => Self::EvictUserSameIpOldest,
-            AdmissionStrategyDto::EvictUserSameIpLatest => Self::EvictUserSameIpLatest,
-            AdmissionStrategyDto::GraceInstantStream => Self::GraceInstantStream,
-            AdmissionStrategyDto::GraceHoldStream => Self::GraceHoldStream,
-        }
-    }
-}
-
-impl From<&AdmissionStrategy> for AdmissionStrategyDto {
-    fn from(domain: &AdmissionStrategy) -> Self {
-        match domain {
-            AdmissionStrategy::EvictUserSameIpOldest => Self::EvictUserSameIpOldest,
-            AdmissionStrategy::EvictUserSameIpLatest => Self::EvictUserSameIpLatest,
-            AdmissionStrategy::GraceInstantStream => Self::GraceInstantStream,
-            AdmissionStrategy::GraceHoldStream => Self::GraceHoldStream,
-        }
-    }
-}
-
-impl AdmissionStrategy {
-    pub fn is_grace(&self) -> bool {
-        matches!(self, Self::GraceInstantStream | Self::GraceHoldStream)
-    }
-
-    pub fn is_grace_hold(&self) -> bool {
-        matches!(self, Self::GraceHoldStream)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct StreamBufferConfig {
@@ -99,10 +60,7 @@ impl From<&StreamConfigDto> for StreamConfig {
             throttle_str: dto.throttle.clone(),
             throttle_kbps: dto.throttle.as_ref().map_or(0u64, |throttle| parse_to_kbps(throttle).unwrap_or(0u64)),
             shared_burst_buffer_mb: dto.shared_burst_buffer_mb,
-            admission_strategies: dto
-                .admission_strategies
-                .as_ref()
-                .map(|entries| entries.iter().map(AdmissionStrategy::from).collect()),
+            admission_strategies: dto.admission_strategies.clone()
         }
     }
 }
@@ -121,18 +79,15 @@ impl From<&StreamConfig> for StreamConfigDto {
             throttle: instance.throttle_str.clone(),
             throttle_kbps: instance.throttle_kbps,
             shared_burst_buffer_mb: instance.shared_burst_buffer_mb,
-            admission_strategies: instance
-                .admission_strategies
-                .as_ref()
-                .map(|entries| entries.iter().map(AdmissionStrategyDto::from).collect()),
+            admission_strategies: instance.admission_strategies.clone()
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AdmissionStrategy, StreamConfig};
-    use shared::model::{AdmissionStrategyDto, StreamConfigDto};
+    use super::{StreamConfig};
+    use shared::model::{AdmissionStrategy, StreamConfigDto};
 
     #[test]
     fn stream_config_preserves_missing_admission_strategies() {
@@ -164,8 +119,9 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![
-                AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::EvictUserOldest,
                 AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserLatest,
             ]),
         };
 
@@ -173,8 +129,9 @@ mod tests {
         assert_eq!(
             dto.admission_strategies,
             Some(vec![
-                AdmissionStrategyDto::EvictUserSameIpOldest,
-                AdmissionStrategyDto::GraceHoldStream,
+                AdmissionStrategy::EvictUserOldest,
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserLatest,
             ])
         );
     }

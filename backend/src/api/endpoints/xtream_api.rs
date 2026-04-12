@@ -4,10 +4,11 @@ use crate::{
     api::{
         api_utils,
         api_utils::{
-            create_api_proxy_user, create_catchup_session_key, create_session_fingerprint, empty_json_response_as_array,
-            empty_json_response_as_object, force_provider_stream_response, get_session_reservation_ttl_secs,
+            create_api_proxy_user, create_catchup_session_key, create_session_fingerprint,
+            empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request,
-            admission_failure_response, is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
+            admission_failure_response, is_session_based_playback, is_stream_share_enabled, local_stream_response, redirect,
+            redirect_response, resource_response,
             separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found,
             try_unwrap_body, RedirectParams,
@@ -53,7 +54,7 @@ use shared::{
     },
     utils::{
         deserialize_as_string, extract_extension_from_url, generate_provider_playlist_uuid, sanitize_sensitive_info, trim_slash,
-        Internable, HLS_EXT,
+        Internable,
     },
 };
 use std::{
@@ -283,7 +284,7 @@ async fn xtream_player_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, true);
         let (admission, _grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
             && app_state.app_config.config.load().user_access_control
         {
@@ -293,9 +294,13 @@ async fn xtream_player_api_stream(
                 user.max_connections,
                 user.soft_connections,
                 &fingerprint.client_ip,
-                fingerprint,
+                &fingerprint.addr,
                 true,
                 Some(playback_session_token.as_str()),
+                false,
+                crate::api::api_utils::EvictionReentryGuard::SocketPlayback {
+                    virtual_id: pli.virtual_id,
+                },
             )
             .await
         } else {
@@ -333,10 +338,27 @@ async fn xtream_player_api_stream(
     debug_if_enabled!(
         "ID chain for xtream endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
+    let requested_extension = stream_ext
+        .clone()
+        .filter(|ext| !ext.is_empty())
+        .or_else(|| pli.get_container_extension().map(|ext| concat_string!(".", ext.as_ref())))
+        .unwrap_or_default();
     let session_key = if item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
-        create_session_fingerprint(fingerprint, &user.username, virtual_id)
+        create_session_fingerprint(
+            fingerprint,
+            &user.username,
+            virtual_id,
+            !is_session_based_playback(item_type, Some(requested_extension.as_str())),
+        )
+    };
+    let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
+        || is_session_based_playback(item_type, Some(requested_extension.as_str()))
+    {
+        crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
+    } else {
+        crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id }
     };
     let user_session = app_state.active_users.get_and_update_user_session(&user.username, &session_key).await;
 
@@ -400,9 +422,11 @@ async fn xtream_player_api_stream(
             user.max_connections,
             user.soft_connections,
             &fingerprint.client_ip,
-            fingerprint,
+            &fingerprint.addr,
             true,
             Some(&session_key),
+            false,
+            eviction_reentry_guard,
         )
         .await
     } else {
@@ -455,7 +479,7 @@ async fn xtream_player_api_stream(
         return response.into_response();
     }
 
-    let (query_path, extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
+    let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
 
     let stream_url = try_option_bad_request!(
         get_xtream_player_api_stream_url(&input, stream_req.context, &query_path, &session_url),
@@ -466,10 +490,9 @@ async fn xtream_player_api_stream(
         )
     );
 
-    let is_hls_request =
-        item_type == PlaylistItemType::LiveHls || item_type == PlaylistItemType::LiveDash || extension == HLS_EXT;
-    // Reverse proxy mode
-    if is_hls_request {
+    let is_session_request = is_session_based_playback(item_type, Some(requested_extension.as_str()));
+    // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
+    if is_session_request && requested_extension == shared::utils::HLS_EXT {
         return handle_hls_stream_request(
             fingerprint,
             app_state,
@@ -507,7 +530,7 @@ async fn xtream_player_api_stream(
     .into_response()
 }
 
-fn get_query_path(
+pub(crate) fn get_query_path(
     action_path: &str,
     stream_ext: Option<&String>,
     pli: &XtreamPlaylistItem,
@@ -579,7 +602,7 @@ async fn xtream_player_api_stream_with_token(
         let user = create_api_proxy_user(app_state);
 
         if pli.item_type.is_local() {
-            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id);
+            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id, true);
             return local_stream_response(
                 fingerprint,
                 app_state,
@@ -597,17 +620,25 @@ async fn xtream_player_api_stream_with_token(
             .into_response();
         }
 
-        let stream_ext = stream_ext.filter(|s| !s.is_empty())
-            .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
+        let requested_extension = stream_ext
+            .as_ref().filter(|s| !s.is_empty()).cloned()
+            .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())))
+            .unwrap_or_default();
 
-        let session_key = create_session_fingerprint(fingerprint, "webui", virtual_id);
+        let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
 
-        let is_hls_request = pli.item_type == PlaylistItemType::LiveHls || stream_ext.as_deref() == Some(HLS_EXT);
+        let is_session_request = is_session_based_playback(pli.item_type, Some(requested_extension.as_str()));
+        let session_key = create_session_fingerprint(
+            fingerprint,
+            "webui",
+            virtual_id,
+            !is_session_request,
+        );
 
         // TODO how should we use fixed provider for hls in multi provider config?
 
-        // Reverse proxy mode
-        if is_hls_request {
+        // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
+        if is_session_request && requested_extension == shared::utils::HLS_EXT {
             return handle_hls_stream_request(
                 fingerprint,
                 app_state,
@@ -623,8 +654,6 @@ async fn xtream_player_api_stream_with_token(
             .await
             .into_response();
         }
-
-        let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
 
         let stream_url = try_option_bad_request!(
             get_xtream_player_api_stream_url(&input, stream_req.context, &query_path, &pli.url),

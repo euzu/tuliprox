@@ -87,6 +87,12 @@ This matters especially for:
 
 - HLS
 - catchup
+
+It does not apply equally to every stream type:
+
+- HLS and catchup are session-oriented because many follow-up HTTP requests still belong to one logical playback
+- regular TS/VOD/local playback is socket-bound for admission and connection counting
+- for TS/VOD, a second socket is a second connection even if it is the same user, same IP, and same stream
 - quick reconnects
 - channel switches with a brief overlap
 
@@ -134,6 +140,13 @@ Examples:
 
 If Tuliprox recognizes the same playback, not every follow-up request is treated like a completely new stream.
 
+This recognition is mainly relevant for HLS and catchup style playback.
+Regular TS/VOD playback is intentionally stricter:
+
+- one active socket-backed stream counts as one connection
+- a parallel reopen on another socket counts as another connection
+- if `max_connections` is already exhausted, only a soft slot, admission strategy, or rejection remains
+
 ### 2. Normal connection
 
 If the user is still below the normal limit, the stream is admitted as a normal connection.
@@ -156,6 +169,8 @@ Examples:
 - `GraceHoldStream`
 - `EvictUserSameIpOldest`
 - `EvictUserSameIpLatest`
+- `EvictUserOldest`
+- `EvictUserLatest`
 
 These rules are only evaluated after ordinary user admission is already exhausted.
 
@@ -243,6 +258,34 @@ If it is the best valid victim, it can be terminated completely.
 ### A kick ends both the stream and its session
 
 When a connection is deliberately kicked, Tuliprox should not immediately treat the same session as still valid.
+
+### Recent eviction does not create a full user cooldown
+
+Tuliprox now distinguishes between:
+
+- a normal reconnect that fits into a free hard slot or soft slot
+- an immediate reconnect of the just-evicted playback that would only work by kicking another stream again
+
+Only the second case is temporarily suppressed.
+
+Important:
+
+- for HLS/catchup, this protection is scoped to the same session identity where Tuliprox has a stable session token
+- for socket-bound TS/VOD/local playback, Tuliprox uses a short same-user, same-IP, same-channel winner protection instead
+- switching to a different channel is not blocked by it
+- soft admission can still succeed if a soft slot is free
+- the goal is to stop endless eviction ping-pong between aggressive player reconnect loops
+
+### Admission strategy order is semantic
+
+Admission strategies are not a set. They are processed from top to bottom.
+
+That means broader user-wide eviction rules can shadow narrower same-IP rules when they use the same oldest/latest policy.
+
+Recommended:
+
+- `evict_user_same_ip_oldest` before `evict_user_oldest`
+- `evict_user_same_ip_latest` before `evict_user_latest`
 
 ## Operator checklist
 

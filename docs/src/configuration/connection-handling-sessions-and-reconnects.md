@@ -31,6 +31,12 @@ Without session logic, Tuliprox would often count these operations incorrectly a
 
 A session is the logical playback identity of a user for one stream activity.
 
+Important distinction:
+
+- HLS and catchup rely heavily on logical sessions
+- regular TS/VOD/local playback is counted by active socket-backed stream, not by a long-lived playback session
+- this means opening the same TS/VOD stream twice on two sockets counts as 2 connections
+
 It helps Tuliprox decide:
 
 - is this the same playback?
@@ -50,6 +56,9 @@ Typical behavior:
 - channel switches or quality changes may trigger new requests
 
 For operators this can look like many connections in the logs. Tuliprox therefore tries to treat these follow-up requests as one logical session.
+
+This behavior is intentional for adaptive/session-style playback.
+It is not the general rule for every stream type.
 
 ## Catchup and why it can look even more unstable
 
@@ -76,6 +85,14 @@ In plain language:
 - catchup usually gets a somewhat longer one
 
 ## What the session TTL does not mean
+
+It does not mean that every later socket should always be treated as the same playback.
+
+In particular:
+
+- HLS and catchup may reuse session identity within their configured TTL
+- regular TS/VOD/local playback remains socket-bound and is counted per active stream/socket
+- a second TS/VOD socket therefore consumes another user connection or soft slot
 
 The TTL does not automatically mean:
 
@@ -186,6 +203,9 @@ Depending on timing, Tuliprox may:
 - keep the session briefly
 - allow a resume
 - or discard the session once the window expires
+
+This is most relevant for HLS and catchup continuity.
+Regular TS/VOD/local playback should be understood primarily as socket-bound admission.
 
 ## What matters when shared streams and sessions meet
 
