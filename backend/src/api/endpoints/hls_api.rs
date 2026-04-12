@@ -167,6 +167,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         addr: &fingerprint.addr,
                         connection_permission,
                         connection_kind: session.connection_kind,
+                        socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                     })
                     .await;
                 app_state
@@ -178,7 +179,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             None => (url, None, None),
         }
     } else {
-        let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id);
+        let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
         match app_state
             .active_provider
             .acquire_connection_with_grace_for_session(
@@ -211,6 +212,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                             addr: &fingerprint.addr,
                             connection_permission,
                             connection_kind: Some(connection_kind),
+                            socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                         })
                         .await;
                     app_state
@@ -279,6 +281,12 @@ pub(in crate::api) async fn handle_hls_stream_request(
         }
         Err(err) => {
             error!("Failed to download m3u8 {}", sanitize_sensitive_info(err.to_string().as_str()));
+            if let Some(session_token) = session_token.as_deref() {
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(&user.username, session_token, false)
+                    .await;
+            }
 
             let custom_stream_response = app_state.app_config.custom_stream_response.load();
             if custom_stream_response.as_ref().and_then(|c| c.channel_unavailable.as_ref()).is_some() {
@@ -395,7 +403,7 @@ async fn hls_api_stream(
     let lookup_session_token = decoded_hls_token
         .0
         .clone()
-        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id));
+        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id, false));
     let mut user_session = app_state
         .active_users
         .get_and_update_user_session(&user.username, &lookup_session_token)
@@ -472,9 +480,11 @@ async fn hls_api_stream(
                 user.max_connections,
                 user.soft_connections,
                 &fingerprint.client_ip,
-                &fingerprint,
+                &fingerprint.addr,
                 true,
                 Some(&session.token),
+                true,
+                crate::api::api_utils::EvictionReentryGuard::Session(&session.token),
             )
             .await
         } else {
@@ -491,6 +501,8 @@ async fn hls_api_stream(
             .kind
             .or(session.connection_kind)
             .unwrap_or(crate::api::model::ConnectionKind::Normal);
+        session.permission = connection_permission;
+        session.connection_kind = Some(connection_kind);
         if connection_permission == UserConnectionPermission::Exhausted {
             let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &session.stream_url).await;
             return admission_failure_response(

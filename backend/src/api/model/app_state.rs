@@ -529,6 +529,18 @@ impl AppState {
             .await
     }
 
+    pub(crate) async fn get_connection_admission_for_session_activation(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+        session_token: &str,
+    ) -> ConnectionAdmission {
+        self.active_users
+            .connection_admission_for_session_activation(username, max_connections, soft_connections, session_token)
+            .await
+    }
+
     pub async fn get_connection_permission(
         &self,
         username: &str,

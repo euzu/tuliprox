@@ -196,25 +196,25 @@ async fn load_epg_channels_for_input(
     };
 
     let storage_dir = app_state.app_config.config.load().storage_dir.clone();
-    let mut channels_by_source = Vec::new();
-    let mut failed_sources = 0usize;
+        let mut channels_by_source = Vec::new();
+        let mut failed_sources = 0usize;
 
-    for epg_source in &epg_config.sources {
-        let resolved_url = resolve_provider_url_with_input(input, &epg_source.url);
-        let raw_epg_path = match get_input_raw_epg_file_path(&resolved_url, input, &storage_dir).await {
-            Ok(path) => path,
-            Err(err) => {
-                debug!(
-                    "Skipping EPG source {}: {}",
-                    sanitize_sensitive_info(resolved_url.as_str()),
-                    sanitize_sensitive_info(&err.to_string())
-                );
-                failed_sources += 1;
-                continue;
-            }
-        };
+        for epg_source in &epg_config.sources {
+            let resolved_url = resolve_provider_url_with_input(input, &epg_source.url);
+            let raw_epg_path = match get_input_raw_epg_file_path(&resolved_url, input, &storage_dir).await {
+                Ok(path) => path,
+                Err(err) => {
+                    debug!(
+                        "Skipping EPG source {}: {}",
+                        sanitize_sensitive_info(resolved_url.as_str()),
+                        sanitize_sensitive_info(&err.to_string())
+                    );
+                    failed_sources += 1;
+                    continue;
+                }
+            };
 
-        let source_channels = if file_exists_async(&raw_epg_path).await {
+            let source_channels = if file_exists_async(&raw_epg_path).await {
             match parse_xmltv_for_web_ui_from_file(&raw_epg_path).await {
                 Ok(ch) => ch,
                 Err(file_err) => {
@@ -604,10 +604,18 @@ mod tests {
         utils::Internable,
     };
     use std::sync::Arc;
+    use chrono::Utc;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
+
+    /// Generate an XMLTV datetime string in the format `YYYYMMDDHHmmss +0000`
+    /// offset by `hours_from_now` hours from the current time.
+    fn epg_dt(hours_from_now: i64) -> String {
+        let dt = Utc::now() + chrono::Duration::hours(hours_from_now);
+        dt.format("%Y%m%d%H%M%S %z").to_string()
+    }
 
     fn test_app_config(input: Arc<ConfigInput>, source: ConfigSource) -> AppConfig {
         let sources = SourcesConfig {
@@ -1022,17 +1030,21 @@ mod tests {
         if let Some(parent) = raw_epg_path.parent() {
             tokio::fs::create_dir_all(parent).await.expect("epg dir");
         }
+        let prog_start = epg_dt(0);
+        let prog_stop = epg_dt(1);
         tokio::fs::write(
             &raw_epg_path,
-            r#"<?xml version="1.0" encoding="utf-8"?>
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
 <tv>
   <channel id="demo.channel">
     <display-name>Demo Channel</display-name>
   </channel>
-  <programme start="20260410080000 +0000" stop="20260410090000 +0000" channel="demo.channel">
+  <programme start="{prog_start}" stop="{prog_stop}" channel="demo.channel">
     <title>Morning Show</title>
   </programme>
-</tv>"#,
+</tv>"#
+            ),
         )
             .await
             .expect("write epg");
@@ -1099,17 +1111,21 @@ mod tests {
         if let Some(parent) = raw_epg_path.parent() {
             tokio::fs::create_dir_all(parent).await.expect("epg dir");
         }
+        let prog_start = epg_dt(0);
+        let prog_stop = epg_dt(1);
         tokio::fs::write(
             &raw_epg_path,
-            r#"<?xml version="1.0" encoding="utf-8"?>
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
 <tv>
   <channel id="demo.channel">
     <display-name>Demo Channel</display-name>
   </channel>
-  <programme start="20260410080000 +0000" stop="20260410090000 +0000" channel="demo.channel">
+  <programme start="{prog_start}" stop="{prog_stop}" channel="demo.channel">
     <title>Morning Show</title>
   </programme>
-</tv>"#,
+</tv>"#
+            ),
         )
             .await
             .expect("write epg");
@@ -1256,51 +1272,62 @@ mod tests {
             }
         }
 
+        let p0 = epg_dt(0);
+        let p1 = epg_dt(1);
+        let p2 = epg_dt(2);
+        let p3 = epg_dt(3);
+
         tokio::fs::write(
             &secondary_path,
-            r#"<?xml version="1.0" encoding="utf-8"?>
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
 <tv>
   <channel id="demo.channel">
     <display-name>Secondary Channel</display-name>
     <icon src="http://secondary/icon.png" />
   </channel>
-  <programme start="20260410070000 +0000" stop="20260410080000 +0000" channel="demo.channel">
+  <programme start="{p0}" stop="{p1}" channel="demo.channel">
     <title>Secondary Show</title>
   </programme>
-</tv>"#,
+</tv>"#
+            ),
         )
             .await
             .expect("write secondary epg");
         tokio::fs::write(
             &primary_path,
-            r#"<?xml version="1.0" encoding="utf-8"?>
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
 <tv>
   <channel id="demo.channel">
     <display-name>Primary Channel</display-name>
     <icon src="http://primary/icon.png" />
   </channel>
-  <programme start="20260410080000 +0000" stop="20260410090000 +0000" channel="demo.channel">
+  <programme start="{p1}" stop="{p2}" channel="demo.channel">
     <title>Primary Show</title>
   </programme>
-</tv>"#,
+</tv>"#
+            ),
         )
             .await
             .expect("write primary epg");
         tokio::fs::write(
             &same_priority_path,
-            r#"<?xml version="1.0" encoding="utf-8"?>
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
 <tv>
   <channel id="demo.channel">
     <display-name>Same Priority Channel</display-name>
     <icon src="http://same/icon.png" />
   </channel>
-  <programme start="20260410080000 +0000" stop="20260410090000 +0000" channel="demo.channel">
+  <programme start="{p0}" stop="{p1}" channel="demo.channel">
     <title>Duplicate Show</title>
   </programme>
-  <programme start="20260410090000 +0000" stop="20260410100000 +0000" channel="demo.channel">
+  <programme start="{p2}" stop="{p3}" channel="demo.channel">
     <title>Second Show</title>
   </programme>
-</tv>"#,
+</tv>"#
+            ),
         )
             .await
             .expect("write same priority epg");

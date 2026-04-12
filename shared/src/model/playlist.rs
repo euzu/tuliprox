@@ -152,6 +152,27 @@ impl PlaylistItemType {
 
     pub fn is_live_adaptive(&self) -> bool { matches!(self, PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) }
 
+    /// Controls address tracking only.
+    /// Do not use this to decide whether a playback request should use session-based admission
+    /// or whether a logical playback must stay on the same provider account.
+    pub fn uses_socket_bound_session(&self) -> bool {
+        matches!(self, PlaylistItemType::Live | PlaylistItemType::LiveUnknown)
+    }
+
+    /// Controls whether follow-up requests for the same logical playback must stay on the
+    /// same provider account.
+    /// This is separate from both session admission and socket binding.
+    pub fn requires_provider_affinity(&self) -> bool {
+        matches!(
+            self,
+            PlaylistItemType::LiveHls
+                | PlaylistItemType::LiveDash
+                | PlaylistItemType::Video
+                | PlaylistItemType::Series
+                | PlaylistItemType::Catchup
+        )
+    }
+
     pub fn as_u8(self) -> u8 { self as u8 }
 
     pub fn as_str(&self) -> &'static str {

@@ -11,6 +11,7 @@
       - [Connection Handling](./configuration/connection-handling.md)
       - [Priorities, Soft Connections and Preemption](./configuration/connection-handling-priorities-and-preemption.md)
       - [Sessions, HLS, Catchup and Reconnects](./configuration/connection-handling-sessions-and-reconnects.md)
+      - [Session Handling Internals](./configuration/connection-handling-session-implementation-notes.md)
       - [Failures and User-Visible Behavior](./configuration/connection-handling-failures-and-user-visible-behavior.md)
     - [Metadata Updater & FFprobe](./configuration/metadata-update.md)
     - [Local Media Library](./configuration/local-library.md)
