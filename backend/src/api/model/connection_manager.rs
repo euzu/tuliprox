@@ -1294,6 +1294,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
             })
             .await;
 
