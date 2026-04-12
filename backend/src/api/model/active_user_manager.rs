@@ -391,6 +391,7 @@ pub struct ActiveUserManager {
     last_logged_user_connection_count: AtomicUsize,
     cleanup_tx: tokio::sync::OnceCell<mpsc::Sender<CleanupEvent>>,
     provider_manager: tokio::sync::OnceCell<Arc<ActiveProviderManager>>,
+    pub(crate) dropped_cleanup_events: AtomicU64,
 }
 
 impl ActiveUserManager {
@@ -453,6 +454,7 @@ impl ActiveUserManager {
             last_logged_user_connection_count: AtomicUsize::new(0),
             cleanup_tx: tokio::sync::OnceCell::new(),
             provider_manager: tokio::sync::OnceCell::new(),
+            dropped_cleanup_events: AtomicU64::new(0),
         }
     }
 
@@ -1333,8 +1335,8 @@ impl ActiveUserManager {
 
         if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == session_token) {
             session.ts = current_time_secs();
-            remember_session_addr(session, *addr);
             session.socket_bound = socket_bound;
+            remember_session_addr(session, *addr);
             if session.connection_kind.is_none() {
                 session.connection_kind = connection_kind;
             }
@@ -1980,6 +1982,7 @@ impl ActiveUserManager {
         if let Some(tx) = self.cleanup_tx.get() {
             for (addr, stream_info) in cleanup_events {
                 if tx.try_send(CleanupEvent::AdaptiveSessionExpired { stream_info }).is_err() {
+                    self.dropped_cleanup_events.fetch_add(1, Ordering::Relaxed);
                     debug!("Cleanup channel unavailable, dropping adaptive session expiry");
                     removed_addrs.push(addr);
                 }

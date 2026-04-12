@@ -33,6 +33,7 @@ use std::{
 use tokio::{io::AsyncWriteExt, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use crate::model::ApiProxyServerInfo;
 
 pub fn get_empty_epg_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
@@ -176,18 +177,20 @@ async fn serve_epg_with_rewrites(
     let server_info = app_state.app_config.get_user_server_info(user);
     let base_url =
         if !matches!(epg_processing_options.time_shift, EpgTimeShift::None) || epg_processing_options.rewrite_urls {
-            Some(concat_string!(
-                &server_info.get_base_url(),
-                "/",
-                storage_const::EPG_RESOURCE_PATH,
-                "/",
-                &user.username,
-                "/",
-                &user.password
-            ))
+            server_info.as_ref().map(|si| concat_string!(
+                 &si.get_base_url(),
+                 "/",
+                 storage_const::EPG_RESOURCE_PATH,
+                 "/",
+                 &user.username,
+                 "/",
+                 &user.password
+             ))
         } else {
             None
         };
+
+    let generator_info = server_info.as_ref().map(ApiProxyServerInfo::get_base_url).unwrap_or_default();
 
     let limit = limit.unwrap_or_default();
 
@@ -214,9 +217,6 @@ async fn serve_epg_with_rewrites(
             error!("EPG rewrite producer task failed for {}: {err}", epg_path_for_log.display());
         }
     });
-
-
-    let generator_info = server_info.get_base_url();
 
     let (mut tx, rx) = tokio::io::duplex(8192);
     tokio::spawn(async move {

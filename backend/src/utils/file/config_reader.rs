@@ -184,13 +184,36 @@ pub async fn read_sources_file_from_path_with_templates(
     Ok(sources)
 }
 
+pub async fn read_sources_file_from_path_with_options(
+    sources_file: &Path,
+    opts: ReadConfigOptions,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    read_sources_file_from_path_with_templates(sources_file, opts.resolve_env, opts.include_computed, hdhr_config, prepared_templates).await
+}
+
 pub async fn read_sources_file_from_path(
     sources_file: &Path,
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(sources_file, resolve_env, include_computed, hdhr_config, None).await
+    read_sources_file_from_path_with_options(
+        sources_file,
+        ReadConfigOptions { resolve_env, include_computed },
+        hdhr_config,
+        None
+    ).await
+}
+
+pub async fn read_sources_file_with_options(
+    sources_file: &str,
+    opts: ReadConfigOptions,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    read_sources_file_from_path_with_options(&PathBuf::from(sources_file), opts, hdhr_config, prepared_templates).await
 }
 
 pub async fn read_sources_file(
@@ -200,22 +223,21 @@ pub async fn read_sources_file(
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
     prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(&PathBuf::from(sources_file), resolve_env, include_computed, hdhr_config, prepared_templates).await
+    read_sources_file_with_options(sources_file, ReadConfigOptions { resolve_env, include_computed }, hdhr_config, prepared_templates).await
 }
 
-pub fn read_config_file(
+pub fn read_config_file_with_options(
     config_file: &str,
-    resolve_env: bool,
-    include_computed: bool,
+    opts: ReadConfigOptions,
 ) -> Result<ConfigDto, TuliproxError> {
     match open_file(&std::path::PathBuf::from(config_file)) {
         Ok(file) => {
             let maybe_config: Result<ConfigDto, _> =
-                serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+                serde_saphyr::from_reader(config_file_reader(file, opts.resolve_env));
             match maybe_config {
                 Ok(mut config) => {
-                    if resolve_env {
-                        config.prepare(include_computed)?;
+                    if opts.resolve_env {
+                        config.prepare(opts.include_computed)?;
                     }
                     Ok(config)
                 }
@@ -224,6 +246,14 @@ pub fn read_config_file(
         }
         Err(err) => Err(TuliproxError::Config(format!("Can't read the config file: {config_file}: {err}"))),
     }
+}
+
+pub fn read_config_file(
+    config_file: &str,
+    resolve_env: bool,
+    include_computed: bool,
+) -> Result<ConfigDto, TuliproxError> {
+    read_config_file_with_options(config_file, ReadConfigOptions { resolve_env, include_computed })
 }
 
 #[allow(clippy::too_many_lines)]

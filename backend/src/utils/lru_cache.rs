@@ -197,6 +197,16 @@ impl LRUResourceCache {
     }
 
     fn evict_if_needed(&mut self) {
+        // Compact the usage_order deque when it has grown excessively relative to the number
+        // of live cache entries (each get_content() call appends a new entry, leaving stale
+        // entries from previous promotions). Rebuild from live cache data sorted by generation
+        // so the approximate MRU order is preserved without allocating a HashMap.
+        if self.usage_order.len() > self.cache.len().saturating_mul(4).max(64) {
+            let mut live: Vec<(String, u64)> = self.cache.iter().map(|(k, e)| (k.clone(), e.3)).collect();
+            live.sort_unstable_by_key(|(_, gen)| *gen);
+            self.usage_order = live.into_iter().collect();
+        }
+
         // if the cache size is too small and one element exceeds the size then the cache won't work, we ignore this
         while self.current_size > self.capacity {
             // Pop from the front; skip stale entries (lazy-deletion).

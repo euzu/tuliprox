@@ -175,8 +175,7 @@ impl M3uPlaylistIterator {
             flags.set(M3uPlaylistIteratorFlags::RewriteResource);
         }
 
-        let server_info = cfg.get_user_server_info(user);
-        let base_url = server_info.get_base_url();
+        let base_url = cfg.get_user_server_info(user).map(|si| si.get_base_url()).unwrap_or_default();
         let username = user.username.clone();
         let password = user.password.clone();
         let proxy_type = user.proxy;

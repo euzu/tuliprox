@@ -3,7 +3,7 @@ use crate::{
     model::{Config, Mappings, ProcessTargets, SourcesConfig},
     utils,
     utils::{
-        prepare_sources_batch, read_config_file, read_mappings_file_unprepared, read_mappings_file_with_templates,
+        prepare_sources_batch, read_mappings_file_unprepared, read_mappings_file_with_templates,
         read_sources_file, read_sources_file_from_path_with_templates, read_templates,
     },
 };
@@ -263,7 +263,7 @@ impl ConfigFile {
         let config_file = paths.config_file_path.clone();
 
         // ── Parse ────────────────────────────────────────────────────
-        let config_dto = read_config_file(config_file.as_str(), true, true)?;
+        let config_dto = crate::utils::read_config_file_with_options(config_file.as_str(), crate::utils::ReadConfigOptions { resolve_env: true, include_computed: true })?;
 
         let current_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| {
             utils::resolve_mapping_file_path(paths.config_path.as_str(), None)

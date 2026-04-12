@@ -389,8 +389,16 @@ async fn playlist_download_from_input(
     let cache_duration = input.cache_duration_seconds;
 
     // Ensure data directory exists
-    if !tokio::fs::try_exists(&storage_path).await.unwrap_or(false) {
-        let _ = tokio::fs::create_dir_all(&storage_path).await;
+    match tokio::fs::try_exists(&storage_path).await {
+        Ok(false) => {
+            if let Err(err) = tokio::fs::create_dir_all(&storage_path).await {
+                warn!("Failed to create input storage directory '{}': {err}", storage_path.display());
+            }
+        }
+        Err(err) => {
+            warn!("Failed to check existence of input storage directory '{}': {err}", storage_path.display());
+        }
+        Ok(true) => {}
     }
 
     let hybrid = is_hybrid_m3u_xtream(input);

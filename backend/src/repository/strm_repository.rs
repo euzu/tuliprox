@@ -1069,7 +1069,7 @@ fn get_credentials_and_server_info(
 ) -> Option<(ProxyUserCredentials, ApiProxyServerInfo)> {
     let username = username?;
     let credentials = cfg.get_user_credentials(username)?;
-    let server_info = cfg.get_user_server_info(&credentials);
+    let server_info = cfg.get_user_server_info(&credentials)?;
     Some((credentials, server_info))
 }
 

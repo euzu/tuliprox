@@ -430,6 +430,9 @@ fn playlist_webplayer(
         .and_then(|web_ui| web_ui.player_server.as_ref())
         .map_or("default", |server_name| server_name.as_str());
     let server_info = app_state.app_config.get_server_info(server_name);
+    let Some(server_info) = server_info else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let base_url = server_info.get_base_url();
     build_playlist_webplayer_url(&base_url, &access_token, target_id, virtual_id, cluster).into_response()
 }

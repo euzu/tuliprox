@@ -7,7 +7,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::runtime::Handle;
 
 use crate::api::model::AppState;
 use crate::model::Config;
@@ -328,14 +327,11 @@ fn bucket_in_window(today: Option<NaiveDate>, bucket_day_utc: &str, max_day_dist
 fn parse_utc_day(day: &str) -> Option<NaiveDate> { NaiveDate::parse_from_str(day, "%Y-%m-%d").ok() }
 
 fn discover_history_days(history_dir: &Path) -> io::Result<Vec<String>> {
-    let history_dir = history_dir.to_path_buf();
-    let entries = Handle::current().block_on(tokio::task::spawn_blocking(move || {
-        if !history_dir.exists() {
-            return Ok(Vec::new());
-        }
-        std::fs::read_dir(&history_dir)
-            .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)
-    })).unwrap_or_else(|err| Err(io::Error::other(err.to_string())))?;
+    if !history_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(history_dir)
+        .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
 
     let mut days = BTreeSet::new();
     for entry in entries {
@@ -412,14 +408,11 @@ fn aggregate_reader_entries<R: io::Read>(
 }
 
 fn discover_day_files(history_dir: &Path, day_utc: &str) -> io::Result<Vec<HistoryDayFile>> {
-    let history_dir = history_dir.to_path_buf();
-    let entries = Handle::current().block_on(tokio::task::spawn_blocking(move || {
-        if !history_dir.exists() {
-            return Ok(Vec::new());
-        }
-        std::fs::read_dir(&history_dir)
-            .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)
-    })).unwrap_or_else(|err| Err(io::Error::other(err.to_string())))?;
+    if !history_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(history_dir)
+        .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
 
     let mut archives = Vec::new();
     let mut pending = Vec::new();
@@ -449,10 +442,7 @@ fn history_day_revision(history_dir: &Path, day_utc: &str) -> io::Result<Option<
     let day_files = discover_day_files(history_dir, day_utc)?;
     let mut revision: Option<(u64, u64)> = None;
     for file in day_files {
-        let file_path = file.path.clone();
-        let metadata = Handle::current().block_on(tokio::task::spawn_blocking(move || {
-            std::fs::metadata(&file_path)
-        })).unwrap_or_else(|err| Err(io::Error::other(err.to_string())))?;
+        let metadata = std::fs::metadata(&file.path)?;
         let modified = metadata.modified()?;
         let secs = modified
             .duration_since(std::time::UNIX_EPOCH)

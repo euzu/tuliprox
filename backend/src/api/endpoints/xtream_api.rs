@@ -192,8 +192,22 @@ async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> Xtr
     let server_info = app_state.app_config.get_user_server_info(user);
     let active_connections = app_state.get_active_connections_for_user(&user.username).await;
 
+    let default_server_info;
+    let server_info_ref = if let Some(si) = server_info.as_ref() { si } else {
+            default_server_info = crate::model::ApiProxyServerInfo {
+                    name: String::new(),
+                    protocol: "http".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: None,
+                    timezone: String::new(),
+                    message: String::new(),
+                    path: None,
+                };
+            &default_server_info
+        };
+
     XtreamAuthorizationResponse::new(
-        &server_info,
+        server_info_ref,
         user,
         active_connections,
         app_state.app_config.config.load().user_access_control,

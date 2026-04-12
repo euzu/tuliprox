@@ -75,7 +75,7 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
             .map_or("", String::as_str);
         concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource")
     } else {
-        app_config.get_user_server_info(user).get_base_url()
+        app_config.get_user_server_info(user).map(|si| si.get_base_url()).unwrap_or_default()
     };
 
 

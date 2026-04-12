@@ -439,7 +439,7 @@ impl AppConfig {
     }
 
 
-    pub fn get_server_info(&self, server_info_name: &str) -> ApiProxyServerInfo {
+    pub fn get_server_info(&self, server_info_name: &str) -> Option<ApiProxyServerInfo> {
         let guard = self.api_proxy.load();
         if let Some(api_proxy) = guard.as_ref() {
             let server_info_list = &api_proxy.server;
@@ -447,34 +447,12 @@ impl AppConfig {
                 .iter()
                 .find(|c| c.name.eq(server_info_name))
                 .cloned()
-                .or_else(|| server_info_list.first().cloned())
-                .unwrap_or_else(|| {
-                    error!("No server info configured, using empty fallback for '{server_info_name}'");
-                    ApiProxyServerInfo {
-                        name: String::new(),
-                        protocol: "http".to_string(),
-                        host: "127.0.0.1".to_string(),
-                        port: None,
-                        timezone: String::new(),
-                        message: String::new(),
-                        path: None,
-                    }
-                })
         } else {
-            error!("No ApiProxy configured, using empty fallback for '{server_info_name}'");
-            ApiProxyServerInfo {
-                name: String::new(),
-                protocol: "http".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: None,
-                timezone: String::new(),
-                message: String::new(),
-                path: None,
-            }
+            None
         }
     }
 
-    pub fn get_user_server_info(&self, user: &ProxyUserCredentials) -> ApiProxyServerInfo {
+    pub fn get_user_server_info(&self, user: &ProxyUserCredentials) -> Option<ApiProxyServerInfo> {
         let server_info_name = user.server.as_ref().map_or("default", |server_name| server_name.as_str());
         self.get_server_info(server_info_name)
     }

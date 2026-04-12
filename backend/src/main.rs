@@ -317,7 +317,10 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         utils::resolve_template_file_path(config_path.as_str(), Some(path.as_str()))
     });
     let storage_path = if Path::new(&config_file).exists() {
-        match utils::read_config_file(&config_file, true, false) {
+        match utils::read_config_file_with_options(
+            &config_file,
+            crate::utils::ReadConfigOptions { resolve_env: true, include_computed: false },
+        ) {
             Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
             Err(err) => {
                 eprintln!("Can't read config file {config_file} while resolving storage path: {err}");

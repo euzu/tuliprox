@@ -703,7 +703,11 @@ async fn activate_session_before_stream_open(
         true,
         Some(session_token),
         true,
-        EvictionReentryGuard::SocketPlayback { virtual_id },
+        if socket_bound {
+            EvictionReentryGuard::SocketPlayback { virtual_id }
+        } else {
+            EvictionReentryGuard::Session(session_token)
+        },
     )
     .await;
 

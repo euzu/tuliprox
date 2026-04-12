@@ -104,6 +104,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
     let url = replace_url_extension(&normalized_hls_url, HLS_EXT);
     let server_info = app_state.app_config.get_user_server_info(user);
+    let Some(server_info) = server_info else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
 
     let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
     let (request_url, session_token, provider_handle) = if let Some(session) = user_session {
@@ -135,6 +138,10 @@ pub(in crate::api) async fn handle_hls_stream_request(
             );
             None
         };
+
+        if provider_handle.is_none() {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
 
         match provider_handle.as_ref().map(|handle| &handle.allocation) {
             Some(ProviderAllocation::Exhausted) => (url, None, provider_handle),

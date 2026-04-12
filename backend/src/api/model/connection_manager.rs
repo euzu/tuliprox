@@ -815,7 +815,7 @@ impl ConnectionManager {
 
     pub(crate) fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
 
-    pub fn dropped_cleanup_events(&self) -> u64 { self.cleanup_sender.dropped_count() }
+    pub fn dropped_cleanup_events(&self) -> u64 { self.cleanup_sender.dropped_count() + self.user_manager.dropped_cleanup_events.load(Ordering::Relaxed) }
 
     pub fn get_close_connection_channel(&self) -> tokio::sync::broadcast::Receiver<CloseConnectionSignal> { self.close_socket_signal_tx.subscribe() }
 
