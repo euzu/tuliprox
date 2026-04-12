@@ -259,8 +259,8 @@ async fn xtream_player_api_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let stream_ext = stream_ext.filter(|s| !s.is_empty())
-        .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
+    let container_ext = pli.get_container_extension().map(|e| concat_string!(".", e.as_ref()));
+    let stream_ext = stream_ext.filter(|s| !s.is_empty()).or(container_ext.as_deref());
 
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
@@ -338,10 +338,10 @@ async fn xtream_player_api_stream(
     debug_if_enabled!(
         "ID chain for xtream endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
+    let container_ext = pli.get_container_extension().map(|ext| concat_string!(".", ext.as_ref()));
     let requested_extension = stream_ext
-        .clone()
         .filter(|ext| !ext.is_empty())
-        .or_else(|| pli.get_container_extension().map(|ext| concat_string!(".", ext.as_ref())))
+        .or(container_ext.as_deref())
         .unwrap_or_default();
     let session_key = if item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
@@ -350,11 +350,11 @@ async fn xtream_player_api_stream(
             fingerprint,
             &user.username,
             virtual_id,
-            !is_session_based_playback(item_type, Some(requested_extension.as_str())),
+            !is_session_based_playback(item_type, Some(requested_extension)),
         )
     };
     let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
-        || is_session_based_playback(item_type, Some(requested_extension.as_str()))
+        || is_session_based_playback(item_type, Some(requested_extension))
     {
         crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
     } else {
@@ -471,7 +471,7 @@ async fn xtream_player_api_stream(
         target: &target,
         input: &input,
         user: &user,
-        stream_ext: stream_ext.as_deref(),
+        stream_ext,
         req_context: context,
         action_path: stream_req.action_path,
     };
@@ -479,7 +479,7 @@ async fn xtream_player_api_stream(
         return response.into_response();
     }
 
-    let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
+    let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext, &pli, app_state);
 
     let stream_url = try_option_bad_request!(
         get_xtream_player_api_stream_url(&input, stream_req.context, &query_path, &session_url),
@@ -490,7 +490,7 @@ async fn xtream_player_api_stream(
         )
     );
 
-    let is_session_request = is_session_based_playback(item_type, Some(requested_extension.as_str()));
+    let is_session_request = is_session_based_playback(item_type, Some(requested_extension));
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && requested_extension == shared::utils::HLS_EXT {
         return handle_hls_stream_request(
@@ -532,7 +532,7 @@ async fn xtream_player_api_stream(
 
 pub(crate) fn get_query_path(
     action_path: &str,
-    stream_ext: Option<&String>,
+    stream_ext: Option<&str>,
     pli: &XtreamPlaylistItem,
     app_state: &Arc<AppState>,
 ) -> (String, String) {
@@ -620,14 +620,15 @@ async fn xtream_player_api_stream_with_token(
             .into_response();
         }
 
+        let container_ext = pli.get_container_extension().map(|e| concat_string!(".", e.as_ref()));
         let requested_extension = stream_ext
-            .as_ref().filter(|s| !s.is_empty()).cloned()
-            .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())))
+            .filter(|s| !s.is_empty())
+            .or(container_ext.as_deref())
             .unwrap_or_default();
 
-        let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
+        let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext, &pli, app_state);
 
-        let is_session_request = is_session_based_playback(pli.item_type, Some(requested_extension.as_str()));
+        let is_session_request = is_session_based_playback(pli.item_type, Some(requested_extension));
         let session_key = create_session_fingerprint(
             fingerprint,
             "webui",

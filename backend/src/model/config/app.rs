@@ -439,17 +439,38 @@ impl AppConfig {
     }
 
 
-    /// # Panics
-    ///
-    /// Will panic if default server invalid
     pub fn get_server_info(&self, server_info_name: &str) -> ApiProxyServerInfo {
         let guard = self.api_proxy.load();
         if let Some(api_proxy) = guard.as_ref() {
-            let server_info_list = api_proxy.server.clone();
-            server_info_list.iter().find(|c| c.name.eq(server_info_name))
-                .map_or_else(|| server_info_list.first().unwrap().clone(), Clone::clone)
+            let server_info_list = &api_proxy.server;
+            server_info_list
+                .iter()
+                .find(|c| c.name.eq(server_info_name))
+                .cloned()
+                .or_else(|| server_info_list.first().cloned())
+                .unwrap_or_else(|| {
+                    error!("No server info configured, using empty fallback for '{server_info_name}'");
+                    ApiProxyServerInfo {
+                        name: String::new(),
+                        protocol: "http".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        port: None,
+                        timezone: String::new(),
+                        message: String::new(),
+                        path: None,
+                    }
+                })
         } else {
-            panic!("ApiProxyServer info not found");
+            error!("No ApiProxy configured, using empty fallback for '{server_info_name}'");
+            ApiProxyServerInfo {
+                name: String::new(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: None,
+                timezone: String::new(),
+                message: String::new(),
+                path: None,
+            }
         }
     }
 

@@ -181,6 +181,17 @@ pub enum TargetOutput {
     HdHomeRun(HdHomeRunTargetOutput),
 }
 
+impl From<&TargetOutput> for TargetType {
+    fn from(output: &TargetOutput) -> Self {
+        match output {
+            TargetOutput::Xtream(_) => TargetType::Xtream,
+            TargetOutput::M3u(_) => TargetType::M3u,
+            TargetOutput::Strm(_) => TargetType::Strm,
+            TargetOutput::HdHomeRun(_) => TargetType::HdHomeRun,
+        }
+    }
+}
+
 macros::from_impl!(TargetOutput);
 impl From<&TargetOutputDto> for TargetOutput {
     fn from(dto: &TargetOutputDto) -> Self {
@@ -228,57 +239,28 @@ impl ConfigTarget {
     }
 
     pub(crate) fn get_xtream_output(&self) -> Option<&XtreamTargetOutput> {
-        if let Some(TargetOutput::Xtream(output)) = self.output.iter().find(|o| matches!(o, TargetOutput::Xtream(_))) {
-            Some(output)
-        } else {
-            None
-        }
+        self.output.iter().find_map(|o| match o {
+            TargetOutput::Xtream(output) => Some(output),
+            _ => None,
+        })
     }
 
     pub(crate) fn get_m3u_output(&self) -> Option<&M3uTargetOutput> {
-        if let Some(TargetOutput::M3u(output)) = self.output.iter().find(|o| matches!(o, TargetOutput::M3u(_))) {
-            Some(output)
-        } else {
-            None
-        }
+        self.output.iter().find_map(|o| match o {
+            TargetOutput::M3u(output) => Some(output),
+            _ => None,
+        })
     }
 
     pub(crate) fn get_hdhomerun_output(&self) -> Option<&HdHomeRunTargetOutput> {
-        if let Some(TargetOutput::HdHomeRun(output)) =
-            self.output.iter().find(|o| matches!(o, TargetOutput::HdHomeRun(_)))
-        {
-            Some(output)
-        } else {
-            None
-        }
+        self.output.iter().find_map(|o| match o {
+            TargetOutput::HdHomeRun(output) => Some(output),
+            _ => None,
+        })
     }
 
     pub fn has_output(&self, tt: TargetType) -> bool {
-        for target_output in &self.output {
-            match target_output {
-                TargetOutput::Xtream(_) => {
-                    if tt == TargetType::Xtream {
-                        return true;
-                    }
-                }
-                TargetOutput::M3u(_) => {
-                    if tt == TargetType::M3u {
-                        return true;
-                    }
-                }
-                TargetOutput::Strm(_) => {
-                    if tt == TargetType::Strm {
-                        return true;
-                    }
-                }
-                TargetOutput::HdHomeRun(_) => {
-                    if tt == TargetType::HdHomeRun {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        self.output.iter().any(|o| TargetType::from(o) == tt)
     }
 
     pub fn is_force_redirect(&self, item_type: PlaylistItemType) -> bool {

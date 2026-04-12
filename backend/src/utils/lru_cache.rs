@@ -19,18 +19,34 @@ fn encode_cache_key(key: &str) -> String {
 /// automatically managing their lifecycle based on a specified maximum cache size. The cache evicts
 /// the least recently used files when the size limit is exceeded.
 ///
+/// # Implementation note — O(1) LRU with lazy-deletion
+///
+/// Instead of an O(n) `VecDeque::position()` scan on every cache hit, we use a **lazy-deletion**
+/// strategy:
+/// - Each entry in `cache` stores a monotonic `generation` counter alongside its data.
+/// - `usage_order` is a `VecDeque<(key, generation)>`. Promoting an entry to MRU costs O(1):
+///   bump the generation in `cache` and push a new `(key, new_gen)` tuple to the back.
+/// - The old tuple(s) in `usage_order` that carry a stale generation are left in place and
+///   discarded during the next eviction sweep — hence "lazy deletion".
+/// - Amortised cost per operation is O(1); worst-case eviction is proportional to the number
+///   of stale entries that accumulated, which is bounded by total access count.
+///
 /// # Fields
-/// - `capacity`: The maximum cache size in bytes. Once the cache size exceeds this value, files are evicted.
+/// - `capacity`: The maximum cache size in bytes.
 /// - `cache_dir`: The directory where cached files are stored.
 /// - `current_size`: The current total size of all files in the cache, in bytes.
-/// - `cache`: A `HashMap` that maps a unique key to a tuple containing the file path and its size.
-/// - `usage_order`: A `VecDeque` that tracks the access order of keys, with the oldest at the front.
+/// - `cache`: Maps a unique key to `(path, mime_type, size_bytes, generation)`.
+/// - `usage_order`: LRU deque of `(key, generation)` pairs; stale entries are skipped on eviction.
+/// - `next_generation`: Monotonic counter for assigning unique generations.
 pub struct LRUResourceCache {
     capacity: usize,  // Maximum size in bytes
     cache_dir: PathBuf,
     current_size: usize,  // Current size in bytes
-    cache: HashMap<String, (PathBuf, Option<String>, usize)>,
-    usage_order: VecDeque<String>,
+    // (`path`, `mime_type`, `size_bytes`, `generation`)
+    cache: HashMap<String, (PathBuf, Option<String>, usize, u64)>,
+    // Lazy-deletion LRU queue: (`cache_key`, `generation_at_enqueue`)
+    usage_order: VecDeque<(String, u64)>,
+    next_generation: u64,
 }
 
 impl LRUResourceCache {
@@ -59,8 +75,9 @@ impl LRUResourceCache {
             capacity,
             cache_dir,
             current_size: 0,
-            cache: HashMap::<String, (PathBuf, Option<String>, usize)>::with_capacity(estimated_entries),
+            cache: HashMap::<String, (PathBuf, Option<String>, usize, u64)>::with_capacity(estimated_entries),
             usage_order: VecDeque::new(),
+            next_generation: 0,
         }
     }
 
@@ -89,12 +106,13 @@ impl LRUResourceCache {
                 let file_size = usize::try_from(metadata.len()).unwrap_or(0);
                 // we need to duplicate because of closure we can't call insert_to_cache
                 {  // insert_to_cache
-
                     let mut path = self.cache_dir.clone();
                     path.push(&file_name);
                     trace!("Added file to cache: {}", &path.to_string_lossy());
-                    self.cache.insert(key.clone(), (path.clone(), mime_type, file_size));
-                    self.usage_order.push_back(key);
+                    let gen = self.next_generation;
+                    self.next_generation = self.next_generation.wrapping_add(1);
+                    self.cache.insert(key.clone(), (path.clone(), mime_type, file_size, gen));
+                    self.usage_order.push_back((key, gen));
                     self.current_size += file_size;
                 }
             }
@@ -127,8 +145,10 @@ impl LRUResourceCache {
     fn insert_to_cache(&mut self, key: String, mime_type: Option<String>, file_size: usize) -> PathBuf {
         let path = self.get_store_path(&key, mime_type.as_deref());
         debug!("Added file to cache: {}", &path.to_string_lossy());
-        self.cache.insert(key.clone(), (path.clone(), mime_type, file_size));
-        self.usage_order.push_back(key);
+        let gen = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.cache.insert(key.clone(), (path.clone(), mime_type, file_size, gen));
+        self.usage_order.push_back((key, gen));
         self.current_size += file_size;
         path
     }
@@ -148,54 +168,57 @@ impl LRUResourceCache {
         path
     }
 
-
     ///   - Retrieves a file from the cache if it exists.
-    ///   - Moves the file's key to the end of the usage queue to mark it as recently used.
+    ///   - Moves the file's key to the end of the usage queue to mark it as recently used (O(1)).
     ///   - Arguments:
     ///     - `url`: The unique identifier for the file.
     ///   - Returns:
     ///     - The `PathBuf` of the file if it exists; `None` otherwise.
     pub fn get_content(&mut self, url: &str) -> Option<(PathBuf, Option<String>)> {
         let key = encode_cache_key(url);
-        {
-            if let Some((path, mime_type, size)) = self.cache.get(&key) {
-                if path.exists() {
-                    trace_if_enabled!("Responding resource from cache with key: {key} for url: {}", sanitize_sensitive_info(url));
-                    // Move to the end of the queue
-                    if let Some(pos) = self.usage_order.iter().position(|k| k == &key) {
-                        self.usage_order.remove(pos); // remove from queue
-                    }
-                    self.usage_order.push_back(key);  // add to the to end
-                    return Some((path.clone(), mime_type.clone()));
-                }
-                {
-                    trace_if_enabled!("Cache inconsistency: file missing for key: {key}, url: {}", sanitize_sensitive_info(url));
-                    // this should not happen, someone deleted the file manually and the cache is not in sync
-                    self.current_size -= size;
-                    self.cache.remove(&key);
-                    if let Some(pos) = self.usage_order.iter().position(|k| k == &key) {
-                        self.usage_order.remove(pos);
-                    }
-                }
+        if let Some((path, mime_type, size, gen)) = self.cache.get_mut(&key) {
+            if path.exists() {
+                trace_if_enabled!("Responding resource from cache with key: {key} for url: {}", sanitize_sensitive_info(url));
+                // O(1) MRU promotion: bump the generation and push a new entry to the back.
+                // The old tuple in `usage_order` with the previous generation becomes stale
+                // and will be lazily discarded during the next eviction sweep.
+                let new_gen = self.next_generation;
+                self.next_generation = self.next_generation.wrapping_add(1);
+                *gen = new_gen;
+                self.usage_order.push_back((key, new_gen));
+                return Some((path.clone(), mime_type.clone()));
             }
+            trace_if_enabled!("Cache inconsistency: file missing for key: {key}, url: {}", sanitize_sensitive_info(url));
+            // this should not happen, someone deleted the file manually and the cache is not in sync
+            self.current_size -= *size;
+            self.cache.remove(&key);
         }
         None
     }
 
     fn evict_if_needed(&mut self) {
-        // if the cache size is to small and one element exceeds the size than the cache won't work, we ignore this
+        // if the cache size is too small and one element exceeds the size then the cache won't work, we ignore this
         while self.current_size > self.capacity {
-            if let Some(oldest_file) = self.usage_order.pop_front() {
-                if let Some((file, _mime_type, size)) = self.cache.remove(&oldest_file) {
-                    self.current_size -= size;
-                    if let Err(err) = fs::remove_file(&file) {
-                        error!("Failed to delete cached file {} {err}", file.to_string_lossy());
-                    } else {
-                        debug!("Removed file from cache: {}", file.to_string_lossy());
-                    }
+            // Pop from the front; skip stale entries (lazy-deletion).
+            let Some((oldest_key, queued_gen)) = self.usage_order.pop_front() else {
+                break;
+            };
+
+            // Check whether this queue entry is still the live generation.
+            let live_gen = self.cache.get(&oldest_key).map(|e| e.3);
+            if live_gen != Some(queued_gen) {
+                // Stale entry — the key was promoted to a newer generation; skip it.
+                continue;
+            }
+
+            if let Some((file, _mime_type, size, _gen)) = self.cache.remove(&oldest_key) {
+                self.current_size -= size;
+                if let Err(err) = fs::remove_file(&file) {
+                    error!("Failed to delete cached file {} {err}", file.to_string_lossy());
+                } else {
+                    debug!("Removed file from cache: {}", file.to_string_lossy());
                 }
             }
         }
     }
 }
-

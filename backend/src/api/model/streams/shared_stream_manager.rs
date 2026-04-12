@@ -20,7 +20,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{
-    sync::{mpsc, mpsc::Sender, RwLock},
+    sync::{mpsc, mpsc::Sender, Mutex, RwLock},
     time::{sleep, Duration, Instant},
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -130,7 +130,7 @@ pub struct SharedStreamState {
     subscribers: RwLock<HashMap<SubscriberId, CancellationToken>>,
     broadcaster: tokio::sync::broadcast::Sender<Bytes>,
     stop_token: CancellationToken,
-    burst_buffer: Arc<RwLock<BurstBuffer>>,
+    burst_buffer: Arc<Mutex<BurstBuffer>>,
     task_handles: RwLock<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -153,7 +153,7 @@ impl SharedStreamState {
             subscribers: RwLock::new(HashMap::new()),
             broadcaster,
             stop_token: CancellationToken::new(),
-            burst_buffer: Arc::new(RwLock::new(BurstBuffer::new(burst_buffer_size_in_bytes))),
+            burst_buffer: Arc::new(Mutex::new(BurstBuffer::new(burst_buffer_size_in_bytes))),
             task_handles: RwLock::new(Vec::new()),
         }
     }
@@ -199,7 +199,7 @@ impl SharedStreamState {
 
         let handle = tokio::spawn(async move {
             let snapshot = {
-                let buffer = burst_buffer.read().await;
+                let buffer = burst_buffer.lock().await;
                 buffer.snapshot()
             };
             let sent_burst_chunks = send_burst_buffer(&snapshot, &client_tx_clone, &cancel_token).await;
@@ -283,7 +283,7 @@ impl SharedStreamState {
                                 consecutive_lag_count = consecutive_lag_count.saturating_add(1);
                                 if last_lag_log.elapsed() > Duration::from_secs(5) {
                                     let buffered_bytes = {
-                                        let buffer = burst_buffer_for_log.read().await;
+                                        let buffer = burst_buffer_for_log.lock().await;
                                         buffer.current_bytes
                                     };
                                     warn!(
@@ -408,7 +408,7 @@ impl SharedStreamState {
                                     }
                                 }
                                 {
-                                    let mut buffer = burst_buffer.write().await;
+                                    let mut buffer = burst_buffer.lock().await;
                                     buffer.push(data.clone());
                                 }
 

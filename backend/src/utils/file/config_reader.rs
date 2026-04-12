@@ -33,6 +33,45 @@ use shared::concat_string;
 use crate::utils::request::{is_uri};
 use url::Url;
 
+/// Options controlling how configuration files are parsed.
+///
+/// Prefer constructing this struct over passing individual `bool` literals to
+/// `read_config_file`, `read_sources_file_from_path`, etc. — bare `true`/`false`
+/// arguments at call sites are hard to read without an IDE hover.
+///
+/// # Example
+/// ```ignore
+/// // Before (opaque):
+/// read_sources_file_from_path(&path, true, true, hdhr).await?;
+///
+/// // After (self-documenting):
+/// let opts = ReadConfigOptions::resolve_and_compute();
+/// read_sources_file_from_path(&path, opts.resolve_env, opts.include_computed, hdhr).await?;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ReadConfigOptions {
+    // When `true`, `${ENV_VAR}` placeholders in config files are expanded.
+    pub resolve_env: bool,
+    // When `true`, computed / derived fields (e.g. auto EPG URLs) are filled in.
+    pub include_computed: bool,
+}
+
+impl ReadConfigOptions {
+    // Expand environment variables and include all computed fields — the typical
+    // production default.
+    #[must_use]
+    pub const fn resolve_and_compute() -> Self {
+        Self { resolve_env: true, include_computed: true }
+    }
+
+    // Parse the raw YAML without any variable expansion or computed fields —
+    // useful when you need the literal, unexpanded content (e.g. before saving).
+    #[must_use]
+    pub const fn raw() -> Self {
+        Self { resolve_env: false, include_computed: false }
+    }
+}
+
 pub(crate) struct PreparedTemplateBundle {
     pub(crate) definition: Option<TemplateDefinitionDto>,
     pub(crate) prepared: Option<Vec<PatternTemplate>>,

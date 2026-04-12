@@ -107,10 +107,14 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
     }
 
     fn get_group_count(&mut self) -> usize {
+        fn collect_groups<Q>(query: &mut Option<(BPlusTreeQuery<u32, XtreamPlaylistItem>, Q)>, groups: &mut HashSet<Arc<str>>) {
+            if let Some((query, _)) = query { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
+        }
         let mut groups = HashSet::new();
-        if let Some((query, _)) = self.live.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
-        if let Some((query, _)) = self.vod.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
-        if let Some((query, _)) = self.series.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
+
+        collect_groups(&mut self.live, &mut groups);
+        collect_groups(&mut self.vod, &mut groups);
+        collect_groups(&mut self.series, &mut groups);
         groups.len()
     }
 
@@ -161,27 +165,19 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
     }
 
     fn get_missing_vod_info_count(&mut self) -> usize {
-        let mut count = 0;
-        if let Some((query, _)) = self.vod.as_mut() {
-            for (_, item) in query.iter() {
-                if item.item_type == PlaylistItemType::Video && item.provider_id > 0 && !item.has_details() {
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.vod.as_mut().map_or(0, |(query, _)| {
+            query.iter().filter(|(_, item)| {
+                item.item_type == PlaylistItemType::Video && item.provider_id > 0 && !item.has_details()
+            }).count()
+        })
     }
 
     fn get_missing_series_info_count(&mut self) -> usize {
-        let mut count = 0;
-        if let Some((query, _)) = self.series.as_mut() {
-            for (_, item) in query.iter() {
-                if item.item_type == PlaylistItemType::SeriesInfo && item.provider_id > 0 && !item.has_details() {
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.series.as_mut().map_or(0, |(query, _)| {
+            query.iter().filter(|(_, item)| {
+                item.item_type == PlaylistItemType::SeriesInfo && item.provider_id > 0 && !item.has_details()
+            }).count()
+        })
     }
 
     fn deduplicate(&mut self, _duplicates: &mut HashSet<UUIDType>) {

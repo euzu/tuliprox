@@ -389,8 +389,8 @@ async fn playlist_download_from_input(
     let cache_duration = input.cache_duration_seconds;
 
     // Ensure data directory exists
-    if !storage_path.exists() {
-        let _ = std::fs::create_dir_all(&storage_path);
+    if !tokio::fs::try_exists(&storage_path).await.unwrap_or(false) {
+        let _ = tokio::fs::create_dir_all(&storage_path).await;
     }
 
     let hybrid = is_hybrid_m3u_xtream(input);

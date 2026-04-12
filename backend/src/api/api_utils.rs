@@ -2359,12 +2359,12 @@ pub async fn resource_response(
     StatusCode::BAD_REQUEST.into_response()
 }
 
-pub fn separate_number_and_remainder(input: &str) -> (String, Option<String>) {
+pub fn separate_number_and_remainder(input: &str) -> (&str, Option<&str>) {
     input.rfind('.').map_or_else(
-        || (input.to_string(), None),
+        || (input, None),
         |dot_index| {
-            let number_part = input[..dot_index].to_string();
-            let rest = input[dot_index..].to_string();
+            let number_part = &input[..dot_index];
+            let rest = &input[dot_index..];
             (number_part, if rest.len() < 2 { None } else { Some(rest) })
         },
     )
