@@ -1333,7 +1333,7 @@ impl ActiveUserManager {
 
         if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == session_token) {
             session.ts = current_time_secs();
-            session.addr = *addr;
+            remember_session_addr(session, *addr);
             session.socket_bound = socket_bound;
             if session.connection_kind.is_none() {
                 session.connection_kind = connection_kind;

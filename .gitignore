@@ -50,6 +50,7 @@ backend/Cargo.lock
 
 #ignore d files
 *.md
+!docs/src/**/*.md
 !README.md
 !CHANGELOG.md
 !CONTRIBUTING.md

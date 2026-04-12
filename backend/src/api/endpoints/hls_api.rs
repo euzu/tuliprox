@@ -129,27 +129,11 @@ pub(in crate::api) async fn handle_hls_stream_request(
             Some(handle)
         } else {
             debug_if_enabled!(
-                "HLS pinned provider {} unavailable for {}; falling back to lineup allocation",
+                "HLS pinned provider {} unavailable for {}; aborting allocation to prevent mid-session migration",
                 sanitize_sensitive_info(&session.provider),
                 sanitize_sensitive_info(&fingerprint.addr.to_string())
             );
-            app_state
-                .active_provider
-                .acquire_connection_with_grace(
-                    &input.name,
-                    &fingerprint.addr,
-                    false,
-                    connection_priority_for_kind(
-                        user,
-                        session
-                            .connection_kind
-                            .unwrap_or(connection_kind),
-                    ),
-                    session
-                        .connection_kind
-                        .unwrap_or(connection_kind),
-                )
-                .await
+            None
         };
 
         match provider_handle.as_ref().map(|handle| &handle.allocation) {

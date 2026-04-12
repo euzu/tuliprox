@@ -1653,6 +1653,8 @@ pub async fn stream_response(
                     | PlaylistItemType::LocalVideo
                     | PlaylistItemType::Series
                     | PlaylistItemType::LocalSeries
+                    | PlaylistItemType::SeriesInfo
+                    | PlaylistItemType::LocalSeriesInfo
             ) {
                 Cow::Owned(actual_request_url.to_string())
             } else {
