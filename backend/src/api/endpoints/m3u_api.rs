@@ -182,7 +182,8 @@ async fn m3u_api_stream(
     debug_if_enabled!(
         "ID chain for m3u endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
-    let extension = stream_ext.clone().unwrap_or_else(|| extract_extension_from_url(&pli.url).unwrap_or_default());
+    let extracted_ext = extract_extension_from_url(&pli.url).unwrap_or_default();
+    let extension = stream_ext.unwrap_or(extracted_ext.as_str());
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
@@ -190,11 +191,11 @@ async fn m3u_api_stream(
             fingerprint,
             &user.username,
             virtual_id,
-            !is_session_based_playback(pli.item_type, Some(extension.as_str())),
+            !is_session_based_playback(pli.item_type, Some(extension)),
         )
     };
     let eviction_reentry_guard = if pli.item_type == PlaylistItemType::Catchup
-        || is_session_based_playback(pli.item_type, Some(extension.as_str()))
+        || is_session_based_playback(pli.item_type, Some(extension))
     {
         crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
     } else {
@@ -307,7 +308,7 @@ async fn m3u_api_stream(
         target: &target,
         input: &input,
         user: &user,
-        stream_ext: stream_ext.as_deref(),
+        stream_ext,
         req_context: context,
         action_path: "", // TODO is there timeshift or something like that ?
     };
@@ -316,7 +317,7 @@ async fn m3u_api_stream(
         return response.into_response();
     }
 
-    let is_session_request = is_session_based_playback(pli.item_type, Some(extension.as_str()));
+    let is_session_request = is_session_based_playback(pli.item_type, Some(extension));
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::utils::HLS_EXT {
         return handle_hls_stream_request(

@@ -181,7 +181,7 @@ where
 
 fn create_device(app_state: &Arc<HdHomerunAppState>) -> Option<Device> {
     if let Some(credentials) = app_state.app_state.app_config.get_user_credentials(&app_state.device.t_username) {
-        let server_info = app_state.app_state.app_config.get_user_server_info(&credentials);
+        let server_info = app_state.app_state.app_config.get_user_server_info(&credentials)?;
         let device = &app_state.device;
         let device_url = format!("{}://{}:{}", server_info.protocol, server_info.host, device.port);
 
@@ -344,7 +344,9 @@ async fn lineup(
             .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
             .body(axum::body::Body::from_stream(body_stream)));
     } else if (use_all || use_xtream) && target.has_output(TargetType::Xtream) {
-        let server_info = app_state.app_state.app_config.get_user_server_info(credentials);
+        let Some(server_info) = app_state.app_state.app_config.get_user_server_info(credentials) else {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
         let base_url = server_info.get_base_url();
 
         let base_url_live = if credentials.proxy.is_redirect(PlaylistItemType::Live)

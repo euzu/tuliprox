@@ -439,21 +439,20 @@ impl AppConfig {
     }
 
 
-    /// # Panics
-    ///
-    /// Will panic if default server invalid
-    pub fn get_server_info(&self, server_info_name: &str) -> ApiProxyServerInfo {
+    pub fn get_server_info(&self, server_info_name: &str) -> Option<ApiProxyServerInfo> {
         let guard = self.api_proxy.load();
         if let Some(api_proxy) = guard.as_ref() {
-            let server_info_list = api_proxy.server.clone();
-            server_info_list.iter().find(|c| c.name.eq(server_info_name))
-                .map_or_else(|| server_info_list.first().unwrap().clone(), Clone::clone)
+            let server_info_list = &api_proxy.server;
+            server_info_list
+                .iter()
+                .find(|c| c.name.eq(server_info_name))
+                .cloned()
         } else {
-            panic!("ApiProxyServer info not found");
+            None
         }
     }
 
-    pub fn get_user_server_info(&self, user: &ProxyUserCredentials) -> ApiProxyServerInfo {
+    pub fn get_user_server_info(&self, user: &ProxyUserCredentials) -> Option<ApiProxyServerInfo> {
         let server_info_name = user.server.as_ref().map_or("default", |server_name| server_name.as_str());
         self.get_server_info(server_info_name)
     }

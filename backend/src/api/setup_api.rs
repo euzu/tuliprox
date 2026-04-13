@@ -3,7 +3,7 @@ use crate::{
     auth::generate_password_from_input,
     model::validate_library_paths_from_dto,
     utils::{
-        file_exists, get_default_web_root_path_for_home, read_api_proxy_file, read_config_file, read_sources_file,
+        file_exists, get_default_web_root_path_for_home, read_api_proxy_file, read_config_file_with_options, read_sources_file,
         read_templates_file, resolve_template_persist_file_path, sanitize_sources_for_persist,
     },
 };
@@ -204,7 +204,7 @@ async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
     let mut draft = create_default_draft(paths.home_path.as_str());
 
     if file_exists(&paths.config_file_path) {
-        match read_config_file(paths.config_file_path.as_str(), true, false) {
+        match read_config_file_with_options(paths.config_file_path.as_str(), crate::utils::ReadConfigOptions { resolve_env: true, include_computed: false }) {
             Ok(cfg) => draft.config = cfg,
             Err(err) => warn!("Setup mode: failed to load existing config.yml: {err}"),
         }

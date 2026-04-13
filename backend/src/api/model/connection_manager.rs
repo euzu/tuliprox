@@ -21,7 +21,7 @@ use std::{
     net::SocketAddr,
     str::FromStr,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard,
     },
     thread,
@@ -51,6 +51,7 @@ struct BackpressureSender<T> {
     state: Arc<Mutex<BackpressureState<T>>>,
     queue_name: &'static str,
     overflow_capacity: usize,
+    dropped_events: AtomicU64,
 }
 
 impl<T> BackpressureSender<T>
@@ -66,6 +67,7 @@ where
             })),
             queue_name,
             overflow_capacity,
+            dropped_events: AtomicU64::new(0),
         }
     }
 
@@ -75,10 +77,13 @@ where
             let mut state = lock_backpressure_state(self.state.as_ref());
             if state.draining {
                 if state.overflow.len() >= self.overflow_capacity {
-                    warn!(
-                        "{} overflow buffer full (capacity={}), dropping event",
-                        self.queue_name, self.overflow_capacity
-                    );
+                    let count = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count == 1 || count.is_multiple_of(1024) {
+                        warn!(
+                            "{} overflow buffer full (capacity={}), {} events dropped total",
+                            self.queue_name, self.overflow_capacity, count
+                        );
+                    }
                     return;
                 }
                 state.overflow.push_back(event);
@@ -90,10 +95,13 @@ where
                 Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
                     state.draining = true;
                     if state.overflow.len() >= self.overflow_capacity {
-                        warn!(
-                            "{} overflow buffer full (capacity={}), dropping event",
-                            self.queue_name, self.overflow_capacity
-                        );
+                        let count = self.dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
+                        if count == 1 || count.is_multiple_of(1024) {
+                            warn!(
+                                "{} overflow buffer full (capacity={}), {} events dropped total",
+                                self.queue_name, self.overflow_capacity, count
+                            );
+                        }
                         state.draining = false;
                         return;
                     }
@@ -163,6 +171,10 @@ where
         let mut state = lock_backpressure_state(state.as_ref());
         state.overflow.clear();
         state.draining = false;
+    }
+
+    fn dropped_count(&self) -> u64 {
+        self.dropped_events.load(Ordering::Relaxed)
     }
 }
 
@@ -803,6 +815,8 @@ impl ConnectionManager {
 
     pub(crate) fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
 
+    pub fn dropped_cleanup_events(&self) -> u64 { self.cleanup_sender.dropped_count() + self.user_manager.dropped_cleanup_events.load(Ordering::Relaxed) }
+
     pub fn get_close_connection_channel(&self) -> tokio::sync::broadcast::Receiver<CloseConnectionSignal> { self.close_socket_signal_tx.subscribe() }
 
     pub async fn kick_connection(&self, addr: &SocketAddr, virtual_id: VirtualId, block_secs: u64) -> bool {
@@ -1294,6 +1308,7 @@ mod tests {
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
             })
             .await;
 

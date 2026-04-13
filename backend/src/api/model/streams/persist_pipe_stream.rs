@@ -123,29 +123,46 @@ pub async fn tee_dyn_reader(
         let mut buf = [0u8; 8192];
 
         let mut reader = reader_arc;
+        let mut read_failed = false;
 
         loop {
             let n = match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(err) => {
+                    debug!("tee_dyn_reader: read error, terminating stream: {err}");
+                    read_failed = true;
+                    break;
+                }
                 Ok(n) => n,
             };
 
             total_bytes += n;
 
-            if tx.write_all(&buf[..n]).await.is_err() {
+            if let Err(err) = tx.write_all(&buf[..n]).await {
+                debug!("tee_dyn_reader: downstream write error, terminating: {err}");
+                read_failed = true;
                 break;
             }
 
-            if writer.write_all(&buf[..n]).await.is_err() {
+            if let Err(err) = writer.write_all(&buf[..n]).await {
+                debug!("tee_dyn_reader: file write error, terminating: {err}");
+                read_failed = true;
                 break;
             }
         }
 
-        let _ = writer.flush().await;
-        let _ = tx.shutdown().await;
+        if let Err(err) = writer.flush().await {
+            debug!("tee_dyn_reader: flush error: {err}");
+            read_failed = true;
+        }
+        if let Err(err) = tx.shutdown().await {
+            debug!("tee_dyn_reader: shutdown error: {err}");
+        }
 
-        if let Some(cb) = callback {
-            cb(total_bytes);
+        if !read_failed {
+            if let Some(cb) = callback {
+                cb(total_bytes);
+            }
         }
     });
 

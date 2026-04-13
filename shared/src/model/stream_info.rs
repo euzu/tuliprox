@@ -282,6 +282,8 @@ pub struct StreamInfo {
     pub user_agent: String,
     #[serde(default)]
     pub ts: u64,
+    #[serde(default)]
+    pub started_at: u64,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub country_code: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -306,6 +308,7 @@ impl StreamInfo {
         country_code: Option<String>,
         session_token: Option<&str>,
     ) -> Self {
+        let now = current_time_secs();
         Self {
             uid,
             meter_uid,
@@ -315,7 +318,8 @@ impl StreamInfo {
             addr: *addr,
             client_ip: client_ip.to_string(),
             user_agent,
-            ts: current_time_secs(),
+            ts: now,
+            started_at: now,
             country_code,
             session_token: session_token.map(|token| token.to_string()),
             preserved: false,

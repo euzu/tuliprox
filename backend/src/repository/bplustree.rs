@@ -3954,7 +3954,7 @@ where
     /// Use `tokio::task::spawn_blocking(...)` when calling from async code.
     pub fn try_new_with_backoff_stats(filepath: &Path) -> io::Result<(Self, u64)> {
         let mut attempts = 0u64;
-        let mut backoff = Duration::from_micros(10);
+        let mut backoff = Duration::from_millis(1);
         let max_backoff = Duration::from_millis(10);
         let started_at = Instant::now();
         let timeout = Duration::from_secs(30);

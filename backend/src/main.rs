@@ -231,17 +231,14 @@ async fn print_info(app_config: &AppConfig) {
     let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_config.paths);
     info!("Current time: {}", chrono::offset::Local::now().format("%Y-%m-%d %H:%M:%S"));
     info!("Temp dir: {}", tempfile::env::temp_dir().display());
-    info!("Storage dir: {:?}", &config.storage_dir);
-    info!("Config dir: {:?}", &paths.config_path);
-    info!("Config file: {:?}", &paths.config_file_path);
-    info!("Source file: {:?}", &paths.sources_file_path);
-    info!("Api Proxy File: {:?}", &paths.api_proxy_file_path);
-    info!("Mapping path: {:?}", &paths.mapping_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
-    info!("Template path: {:?}", &paths.template_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
-    info!(
-        "Resources path: {:?}",
-        &paths.custom_stream_response_path.as_ref().map_or_else(|| "not used", |v| v.as_str())
-    );
+    info!("Storage dir: {}", &config.storage_dir);
+    info!("Config dir: {}", &paths.config_path);
+    info!("Config file: {}", &paths.config_file_path);
+    info!("Source file: {}", &paths.sources_file_path);
+    info!("Api Proxy File: {}", &paths.api_proxy_file_path);
+    info!("Mapping path: {}", &paths.mapping_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
+    info!("Template path: {}", &paths.template_file_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
+    info!("Resources path: {}", &paths.custom_stream_response_path.as_ref().map_or_else(|| "not used", |v| v.as_str()));
 
     if let Some(mapping_paths) = paths.mapping_files_used.as_ref() {
         for mapping_path in mapping_paths {
@@ -320,7 +317,10 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         utils::resolve_template_file_path(config_path.as_str(), Some(path.as_str()))
     });
     let storage_path = if Path::new(&config_file).exists() {
-        match utils::read_config_file(&config_file, true, false) {
+        match utils::read_config_file_with_options(
+            &config_file,
+            crate::utils::ReadConfigOptions { resolve_env: true, include_computed: false },
+        ) {
             Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
             Err(err) => {
                 eprintln!("Can't read config file {config_file} while resolving storage path: {err}");

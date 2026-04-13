@@ -104,6 +104,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
     let url = replace_url_extension(&normalized_hls_url, HLS_EXT);
     let server_info = app_state.app_config.get_user_server_info(user);
+    let Some(server_info) = server_info else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
 
     let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
     let (request_url, session_token, provider_handle) = if let Some(session) = user_session {
@@ -129,28 +132,16 @@ pub(in crate::api) async fn handle_hls_stream_request(
             Some(handle)
         } else {
             debug_if_enabled!(
-                "HLS pinned provider {} unavailable for {}; falling back to lineup allocation",
+                "HLS pinned provider {} unavailable for {}; aborting allocation to prevent mid-session migration",
                 sanitize_sensitive_info(&session.provider),
                 sanitize_sensitive_info(&fingerprint.addr.to_string())
             );
-            app_state
-                .active_provider
-                .acquire_connection_with_grace(
-                    &input.name,
-                    &fingerprint.addr,
-                    false,
-                    connection_priority_for_kind(
-                        user,
-                        session
-                            .connection_kind
-                            .unwrap_or(connection_kind),
-                    ),
-                    session
-                        .connection_kind
-                        .unwrap_or(connection_kind),
-                )
-                .await
+            None
         };
+
+        if provider_handle.is_none() {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
 
         match provider_handle.as_ref().map(|handle| &handle.allocation) {
             Some(ProviderAllocation::Exhausted) => (url, None, provider_handle),
@@ -167,6 +158,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         addr: &fingerprint.addr,
                         connection_permission,
                         connection_kind: session.connection_kind,
+                        socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                     })
                     .await;
                 app_state
@@ -211,6 +203,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                             addr: &fingerprint.addr,
                             connection_permission,
                             connection_kind: Some(connection_kind),
+                            socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                         })
                         .await;
                     app_state

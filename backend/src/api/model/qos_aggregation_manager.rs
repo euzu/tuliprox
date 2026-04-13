@@ -67,7 +67,7 @@ pub(in crate::api) fn exec_qos_aggregation(app_state: &Arc<AppState>, cancel_tok
 
     tokio::spawn(async move {
         let repo = match QosSnapshotRepository::open(&storage_dir) {
-            Ok(repo) => repo,
+            Ok(repo) => std::sync::Arc::new(repo),
             Err(err) => {
                 error!("Failed to open QoS snapshot repository: {err}");
                 return;
@@ -76,7 +76,11 @@ pub(in crate::api) fn exec_qos_aggregation(app_state: &Arc<AppState>, cancel_tok
 
         loop {
             let today = current_utc_day();
-            if let Err(err) = run_aggregation_once(&repo, &history_dir, &today) {
+            let repo_clone = repo.clone();
+            let history_dir_clone = history_dir.clone();
+            if let Err(err) = tokio::task::spawn_blocking(move || {
+                run_aggregation_once(&repo_clone, &history_dir_clone, &today)
+            }).await.unwrap_or_else(|e| Err(std::io::Error::other(e.to_string()))) {
                 warn!("QoS aggregation run failed: {err}");
             }
 
@@ -326,10 +330,11 @@ fn discover_history_days(history_dir: &Path) -> io::Result<Vec<String>> {
     if !history_dir.exists() {
         return Ok(Vec::new());
     }
+    let entries = std::fs::read_dir(history_dir)
+        .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
 
     let mut days = BTreeSet::new();
-    for entry in std::fs::read_dir(history_dir)? {
-        let entry = entry?;
+    for entry in entries {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if let Some(day) = extract_day_from_filename(&name) {
@@ -406,11 +411,12 @@ fn discover_day_files(history_dir: &Path, day_utc: &str) -> io::Result<Vec<Histo
     if !history_dir.exists() {
         return Ok(Vec::new());
     }
+    let entries = std::fs::read_dir(history_dir)
+        .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
 
     let mut archives = Vec::new();
     let mut pending = Vec::new();
-    for entry in std::fs::read_dir(history_dir)? {
-        let entry = entry?;
+    for entry in entries {
         let path = entry.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         if extract_day_from_filename(&name) != Some(day_utc) {
@@ -678,14 +684,16 @@ mod tests {
         assert_eq!(bucket.total_provider_reconnect_count, 2);
     }
 
-    #[test]
-    fn history_day_revision_tracks_seconds_and_file_length() {
+    #[tokio::test]
+    async fn history_day_revision_tracks_seconds_and_file_length() {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path();
         let record = base_record(EventType::Connect);
         write_pending_history_records(history_dir, vec![record.clone(), record]);
 
-        let revision = history_day_revision(history_dir, "2026-04-02")
+        let history_dir_copy = history_dir.to_path_buf();
+        let revision = tokio::task::spawn_blocking(move || history_day_revision(&history_dir_copy, "2026-04-02"))
+            .await.unwrap()
             .expect("revision should load")
             .expect("revision should exist");
         let pending_path = history_dir.join("stream-history-2026-04-02.pending");
@@ -796,8 +804,13 @@ mod tests {
         connect.shared_joined_existing = Some(false);
         write_pending_history_records(&history_dir, vec![connect]);
 
-        let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
-        run_aggregation_once(&repo, &history_dir, &today).expect("aggregation should succeed");
+        let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
+        
+        let repo_c = repo.clone();
+        let h_dir = history_dir.clone();
+        let t_day = today.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c, &h_dir, &t_day))
+            .await.unwrap().expect("aggregation should succeed");
 
         let snapshot = repo
             .get_snapshot("stream-a")
@@ -825,10 +838,19 @@ mod tests {
         connect.shared_joined_existing = Some(false);
         write_pending_history_records(&history_dir, vec![connect]);
 
-        let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
+        let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
 
-        run_aggregation_once(&repo, &history_dir, &today).expect("first aggregation should succeed");
-        run_aggregation_once(&repo, &history_dir, &today).expect("second aggregation should succeed");
+        let repo_c1 = repo.clone();
+        let h_dir1 = history_dir.clone();
+        let t_day1 = today.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c1, &h_dir1, &t_day1))
+            .await.unwrap().expect("first aggregation should succeed");
+
+        let repo_c2 = repo.clone();
+        let h_dir2 = history_dir.clone();
+        let t_day2 = today.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c2, &h_dir2, &t_day2))
+            .await.unwrap().expect("second aggregation should succeed");
 
         let snapshot = repo
             .get_snapshot("stream-a")
@@ -864,9 +886,13 @@ mod tests {
             write_pending_history_records(&history_dir, vec![connect]);
         }
 
-        let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
+        let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
 
-        run_aggregation_once(&repo, &history_dir, "2036-04-05").expect("first aggregation should succeed");
+        let repo_c1 = repo.clone();
+        let h_dir1 = history_dir.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c1, &h_dir1, "2036-04-05"))
+            .await.unwrap().expect("first aggregation should succeed");
+            
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");
         assert_eq!(checkpoint.last_completed_day_utc.as_deref(), Some("2036-04-03"));
 
@@ -877,7 +903,11 @@ mod tests {
         assert_eq!(snapshot.daily_buckets.len(), 3);
         assert_eq!(snapshot.window_7d.connect_count, 3);
 
-        run_aggregation_once(&repo, &history_dir, "2036-04-05").expect("second aggregation should succeed");
+        let repo_c2 = repo.clone();
+        let h_dir2 = history_dir.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c2, &h_dir2, "2036-04-05"))
+            .await.unwrap().expect("second aggregation should succeed");
+            
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");
         assert_eq!(checkpoint.last_completed_day_utc.as_deref(), Some("2036-04-04"));
 

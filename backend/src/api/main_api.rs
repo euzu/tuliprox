@@ -365,7 +365,12 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
     app_state.metadata_manager.shutdown();
-    app_state.connection_manager.shutdown().await;
+    if tokio::time::timeout(std::time::Duration::from_secs(30), app_state.connection_manager.shutdown())
+        .await
+        .is_err()
+    {
+        warn!("Connection manager shutdown timed out after 30s, forcing exit");
+    }
 }
 
 #[cfg(unix)]

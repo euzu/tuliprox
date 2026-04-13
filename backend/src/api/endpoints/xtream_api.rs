@@ -188,16 +188,16 @@ pub(in crate::api) fn get_xtream_player_api_stream_url(
     }
 }
 
-async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> XtreamAuthorizationResponse {
-    let server_info = app_state.app_config.get_user_server_info(user);
+async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> Option<XtreamAuthorizationResponse> {
+    let server_info = app_state.app_config.get_user_server_info(user)?;
     let active_connections = app_state.get_active_connections_for_user(&user.username).await;
 
-    XtreamAuthorizationResponse::new(
+    Some(XtreamAuthorizationResponse::new(
         &server_info,
         user,
         active_connections,
         app_state.app_config.config.load().user_access_control,
-    )
+    ))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -259,8 +259,8 @@ async fn xtream_player_api_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let stream_ext = stream_ext.filter(|s| !s.is_empty())
-        .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())));
+    let container_ext = pli.get_container_extension().map(|e| concat_string!(".", e.as_ref()));
+    let stream_ext = stream_ext.filter(|s| !s.is_empty()).or(container_ext.as_deref());
 
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
@@ -338,11 +338,24 @@ async fn xtream_player_api_stream(
     debug_if_enabled!(
         "ID chain for xtream endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
+    let container_ext = pli.get_container_extension().map(|ext| concat_string!(".", ext.as_ref()));
     let requested_extension = stream_ext
-        .clone()
         .filter(|ext| !ext.is_empty())
-        .or_else(|| pli.get_container_extension().map(|ext| concat_string!(".", ext.as_ref())))
+        .or(container_ext.as_deref())
         .unwrap_or_default();
+
+    // Derive the playback extension from get_query_path so session semantics match
+    // the actual path it will route. Falls back to requested_extension when empty.
+    #[allow(clippy::needless_borrow, clippy::borrow_deref_ref)]
+    let (_, playback_ext) =
+        get_query_path(stream_req.action_path, Some(&requested_extension), &pli, app_state);
+    #[allow(clippy::needless_borrow, clippy::borrow_deref_ref)]
+    let playback_ext: &str = if playback_ext.is_empty() {
+        &requested_extension
+    } else {
+        &playback_ext
+    };
+
     let session_key = if item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
@@ -350,11 +363,11 @@ async fn xtream_player_api_stream(
             fingerprint,
             &user.username,
             virtual_id,
-            !is_session_based_playback(item_type, Some(requested_extension.as_str())),
+            !is_session_based_playback(item_type, Some(playback_ext)),
         )
     };
     let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
-        || is_session_based_playback(item_type, Some(requested_extension.as_str()))
+        || is_session_based_playback(item_type, Some(playback_ext))
     {
         crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
     } else {
@@ -471,7 +484,7 @@ async fn xtream_player_api_stream(
         target: &target,
         input: &input,
         user: &user,
-        stream_ext: stream_ext.as_deref(),
+        stream_ext,
         req_context: context,
         action_path: stream_req.action_path,
     };
@@ -479,7 +492,8 @@ async fn xtream_player_api_stream(
         return response.into_response();
     }
 
-    let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
+    #[allow(clippy::needless_borrow)]
+    let (query_path, _extension) = get_query_path(stream_req.action_path, Some(&requested_extension), &pli, app_state);
 
     let stream_url = try_option_bad_request!(
         get_xtream_player_api_stream_url(&input, stream_req.context, &query_path, &session_url),
@@ -490,9 +504,9 @@ async fn xtream_player_api_stream(
         )
     );
 
-    let is_session_request = is_session_based_playback(item_type, Some(requested_extension.as_str()));
+    let is_session_request = is_session_based_playback(item_type, Some(playback_ext));
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-    if is_session_request && requested_extension == shared::utils::HLS_EXT {
+    if is_session_request && playback_ext == shared::utils::HLS_EXT {
         return handle_hls_stream_request(
             fingerprint,
             app_state,
@@ -532,7 +546,7 @@ async fn xtream_player_api_stream(
 
 pub(crate) fn get_query_path(
     action_path: &str,
-    stream_ext: Option<&String>,
+    stream_ext: Option<&str>,
     pli: &XtreamPlaylistItem,
     app_state: &Arc<AppState>,
 ) -> (String, String) {
@@ -620,14 +634,20 @@ async fn xtream_player_api_stream_with_token(
             .into_response();
         }
 
+        let container_ext = pli.get_container_extension().map(|e| concat_string!(".", e.as_ref()));
         let requested_extension = stream_ext
-            .as_ref().filter(|s| !s.is_empty()).cloned()
-            .or_else(|| pli.get_container_extension().map(|e| concat_string!(".", e.as_ref())))
-            .unwrap_or_default();
+            .filter(|s| !s.is_empty())
+            .or(container_ext.as_deref());
 
-        let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext.as_ref(), &pli, app_state);
+        let (query_path, playback_ext) =
+            get_query_path(stream_req.action_path, requested_extension, &pli, app_state);
+        let playback_ext: Option<&str> = if playback_ext.is_empty() {
+            requested_extension
+        } else {
+            Some(&*playback_ext)
+        };
 
-        let is_session_request = is_session_based_playback(pli.item_type, Some(requested_extension.as_str()));
+        let is_session_request = is_session_based_playback(pli.item_type, playback_ext);
         let session_key = create_session_fingerprint(
             fingerprint,
             "webui",
@@ -638,7 +658,7 @@ async fn xtream_player_api_stream_with_token(
         // TODO how should we use fixed provider for hls in multi provider config?
 
         // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-        if is_session_request && requested_extension == shared::utils::HLS_EXT {
+        if is_session_request && playback_ext == Some(shared::utils::HLS_EXT) {
             return handle_hls_stream_request(
                 fingerprint,
                 app_state,
@@ -1251,12 +1271,16 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
         format!("Could not find any user for xc player api {}", api_req.username)
     );
     if !target.has_output(TargetType::Xtream) {
-            return axum::response::Json(get_user_info(&user, app_state).await).into_response();
+            return get_user_info(&user, app_state)
+                .await
+                .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response());
         }
 
         let action = api_req.action.trim();
         if action.is_empty() {
-            return axum::response::Json(get_user_info(&user, app_state).await).into_response();
+            return get_user_info(&user, app_state)
+                .await
+                .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response());
         }
 
         if user.permission_denied(app_state) {
@@ -1280,7 +1304,9 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
 
         match action {
             crate::model::XC_ACTION_GET_ACCOUNT_INFO => {
-                return axum::response::Json(get_user_info(&user, app_state).await).into_response();
+                return get_user_info(&user, app_state)
+                    .await
+                    .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response());
             }
             crate::model::XC_ACTION_GET_SERIES_INFO => {
                 skip_json_response_if_flag_set!(
@@ -1379,7 +1405,9 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
                     }
                     Err(err) => {
                         error!("Failed response for xtream target: {} action: {} error: {}", &target.name, action, err);
-                        axum::response::Json(get_user_info(&user, app_state).await).into_response()
+                        get_user_info(&user, app_state)
+                            .await
+                            .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response())
                     }
                 }
             }

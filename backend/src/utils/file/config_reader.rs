@@ -33,6 +33,45 @@ use shared::concat_string;
 use crate::utils::request::{is_uri};
 use url::Url;
 
+/// Options controlling how configuration files are parsed.
+///
+/// Prefer constructing this struct over passing individual `bool` literals to
+/// `read_config_file`, `read_sources_file_from_path`, etc. — bare `true`/`false`
+/// arguments at call sites are hard to read without an IDE hover.
+///
+/// # Example
+/// ```ignore
+/// // Before (opaque):
+/// read_sources_file_from_path(&path, true, true, hdhr).await?;
+///
+/// // After (self-documenting):
+/// let opts = ReadConfigOptions::resolve_and_compute();
+/// read_sources_file_from_path(&path, opts.resolve_env, opts.include_computed, hdhr).await?;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ReadConfigOptions {
+    // When `true`, `${ENV_VAR}` placeholders in config files are expanded.
+    pub resolve_env: bool,
+    // When `true`, computed / derived fields (e.g. auto EPG URLs) are filled in.
+    pub include_computed: bool,
+}
+
+impl ReadConfigOptions {
+    // Expand environment variables and include all computed fields — the typical
+    // production default.
+    #[must_use]
+    pub const fn resolve_and_compute() -> Self {
+        Self { resolve_env: true, include_computed: true }
+    }
+
+    // Parse the raw YAML without any variable expansion or computed fields —
+    // useful when you need the literal, unexpanded content (e.g. before saving).
+    #[must_use]
+    pub const fn raw() -> Self {
+        Self { resolve_env: false, include_computed: false }
+    }
+}
+
 pub(crate) struct PreparedTemplateBundle {
     pub(crate) definition: Option<TemplateDefinitionDto>,
     pub(crate) prepared: Option<Vec<PatternTemplate>>,
@@ -145,13 +184,36 @@ pub async fn read_sources_file_from_path_with_templates(
     Ok(sources)
 }
 
+pub async fn read_sources_file_from_path_with_options(
+    sources_file: &Path,
+    opts: ReadConfigOptions,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    read_sources_file_from_path_with_templates(sources_file, opts.resolve_env, opts.include_computed, hdhr_config, prepared_templates).await
+}
+
 pub async fn read_sources_file_from_path(
     sources_file: &Path,
     resolve_env: bool,
     include_computed: bool,
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(sources_file, resolve_env, include_computed, hdhr_config, None).await
+    read_sources_file_from_path_with_options(
+        sources_file,
+        ReadConfigOptions { resolve_env, include_computed },
+        hdhr_config,
+        None
+    ).await
+}
+
+pub async fn read_sources_file_with_options(
+    sources_file: &str,
+    opts: ReadConfigOptions,
+    hdhr_config: Option<&HdHomeRunDeviceOverview>,
+    prepared_templates: Option<&[shared::model::PatternTemplate]>,
+) -> Result<SourcesConfigDto, TuliproxError> {
+    read_sources_file_from_path_with_options(&PathBuf::from(sources_file), opts, hdhr_config, prepared_templates).await
 }
 
 pub async fn read_sources_file(
@@ -161,22 +223,21 @@ pub async fn read_sources_file(
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
     prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(&PathBuf::from(sources_file), resolve_env, include_computed, hdhr_config, prepared_templates).await
+    read_sources_file_with_options(sources_file, ReadConfigOptions { resolve_env, include_computed }, hdhr_config, prepared_templates).await
 }
 
-pub fn read_config_file(
+pub fn read_config_file_with_options(
     config_file: &str,
-    resolve_env: bool,
-    include_computed: bool,
+    opts: ReadConfigOptions,
 ) -> Result<ConfigDto, TuliproxError> {
     match open_file(&std::path::PathBuf::from(config_file)) {
         Ok(file) => {
             let maybe_config: Result<ConfigDto, _> =
-                serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+                serde_saphyr::from_reader(config_file_reader(file, opts.resolve_env));
             match maybe_config {
                 Ok(mut config) => {
-                    if resolve_env {
-                        config.prepare(include_computed)?;
+                    if opts.resolve_env {
+                        config.prepare(opts.include_computed)?;
                     }
                     Ok(config)
                 }
@@ -185,6 +246,14 @@ pub fn read_config_file(
         }
         Err(err) => Err(TuliproxError::Config(format!("Can't read the config file: {config_file}: {err}"))),
     }
+}
+
+pub fn read_config_file(
+    config_file: &str,
+    resolve_env: bool,
+    include_computed: bool,
+) -> Result<ConfigDto, TuliproxError> {
+    read_config_file_with_options(config_file, ReadConfigOptions { resolve_env, include_computed })
 }
 
 #[allow(clippy::too_many_lines)]

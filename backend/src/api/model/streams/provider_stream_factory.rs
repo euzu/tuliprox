@@ -890,7 +890,6 @@ pub async fn create_provider_stream(
         Ok(None) => None,
         Err(failure) => {
             let status = failure.status();
-            app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
             record_provider_open_failure(
                 app_state,
                 &stream_options,

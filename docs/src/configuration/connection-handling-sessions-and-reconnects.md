@@ -4,6 +4,10 @@ This page explains why Tuliprox does not treat every request as a completely new
 
 This matters for operators because many seemingly strange connection patterns are actually normal player behavior.
 
+If you are changing the code rather than the configuration, also read:
+
+- [Session Handling Internals](./connection-handling-session-implementation-notes.md)
+
 ## Why sessions are needed at all
 
 Many operators initially assume this model:

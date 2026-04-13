@@ -231,6 +231,7 @@ mod tests {
             client_ip: "127.0.0.1:1234".to_string(),
             user_agent: String::new(),
             ts: 0,
+            started_at: 0,
             country_code: None,
             session_token: has_session.then(|| "session".to_string()),
             preserved,

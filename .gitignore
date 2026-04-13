@@ -48,14 +48,13 @@ artifacts
 .envrc
 backend/Cargo.lock
 
+#ignore d files
+*.md
+!docs/src/**/*.md
+!README.md
+!CHANGELOG.md
+!CONTRIBUTING.md
+
 # Ignore ai documentation files
-AGENTS.md
-PLANS.md
-STEPS.md
-CLAUDE.md
-CODEX.md
-.claude
-.crush
-.codex
-.dual-graph/
-.dual-graph-context/
+.c[lor][adu]*
+.dual*
