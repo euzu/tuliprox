@@ -168,7 +168,11 @@ impl PlaylistItemType {
             PlaylistItemType::LiveHls
                 | PlaylistItemType::LiveDash
                 | PlaylistItemType::Video
+                | PlaylistItemType::LocalVideo
                 | PlaylistItemType::Series
+                | PlaylistItemType::SeriesInfo
+                | PlaylistItemType::LocalSeries
+                | PlaylistItemType::LocalSeriesInfo
                 | PlaylistItemType::Catchup
         )
     }
