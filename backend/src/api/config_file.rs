@@ -263,7 +263,7 @@ impl ConfigFile {
         let config_file = paths.config_file_path.clone();
 
         // ── Parse ────────────────────────────────────────────────────
-        let config_dto = crate::utils::read_config_file_with_options(config_file.as_str(), crate::utils::ReadConfigOptions { resolve_env: true, include_computed: true })?;
+        let config_dto = crate::utils::read_config_file_with_options(config_file.as_str(), crate::utils::ReadConfigOptions::resolve_and_compute())?;
 
         let current_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| {
             utils::resolve_mapping_file_path(paths.config_path.as_str(), None)

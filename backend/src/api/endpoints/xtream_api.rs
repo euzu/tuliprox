@@ -188,30 +188,16 @@ pub(in crate::api) fn get_xtream_player_api_stream_url(
     }
 }
 
-async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> XtreamAuthorizationResponse {
-    let server_info = app_state.app_config.get_user_server_info(user);
+async fn get_user_info(user: &ProxyUserCredentials, app_state: &AppState) -> Option<XtreamAuthorizationResponse> {
+    let server_info = app_state.app_config.get_user_server_info(user)?;
     let active_connections = app_state.get_active_connections_for_user(&user.username).await;
 
-    let default_server_info;
-    let server_info_ref = if let Some(si) = server_info.as_ref() { si } else {
-            default_server_info = crate::model::ApiProxyServerInfo {
-                    name: String::new(),
-                    protocol: "http".to_string(),
-                    host: "127.0.0.1".to_string(),
-                    port: None,
-                    timezone: String::new(),
-                    message: String::new(),
-                    path: None,
-                };
-            &default_server_info
-        };
-
-    XtreamAuthorizationResponse::new(
-        server_info_ref,
+    Some(XtreamAuthorizationResponse::new(
+        &server_info,
         user,
         active_connections,
         app_state.app_config.config.load().user_access_control,
-    )
+    ))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -640,7 +626,7 @@ async fn xtream_player_api_stream_with_token(
             .or(container_ext.as_deref())
             .unwrap_or_default();
 
-        let (query_path, _extension) = get_query_path(stream_req.action_path, stream_ext, &pli, app_state);
+        let (query_path, _extension) = get_query_path(stream_req.action_path, Some(requested_extension), &pli, app_state);
 
         let is_session_request = is_session_based_playback(pli.item_type, Some(requested_extension));
         let session_key = create_session_fingerprint(
@@ -1266,12 +1252,16 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
         format!("Could not find any user for xc player api {}", api_req.username)
     );
     if !target.has_output(TargetType::Xtream) {
-            return axum::response::Json(get_user_info(&user, app_state).await).into_response();
+            return get_user_info(&user, app_state)
+                .await
+                .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response());
         }
 
         let action = api_req.action.trim();
         if action.is_empty() {
-            return axum::response::Json(get_user_info(&user, app_state).await).into_response();
+            return get_user_info(&user, app_state)
+                .await
+                .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response());
         }
 
         if user.permission_denied(app_state) {
@@ -1295,7 +1285,9 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
 
         match action {
             crate::model::XC_ACTION_GET_ACCOUNT_INFO => {
-                return axum::response::Json(get_user_info(&user, app_state).await).into_response();
+                return get_user_info(&user, app_state)
+                    .await
+                    .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response());
             }
             crate::model::XC_ACTION_GET_SERIES_INFO => {
                 skip_json_response_if_flag_set!(
@@ -1394,7 +1386,9 @@ async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -
                     }
                     Err(err) => {
                         error!("Failed response for xtream target: {} action: {} error: {}", &target.name, action, err);
-                        axum::response::Json(get_user_info(&user, app_state).await).into_response()
+                        get_user_info(&user, app_state)
+                            .await
+                            .map_or_else(|| axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(), |info| axum::response::Json(info).into_response())
                     }
                 }
             }
