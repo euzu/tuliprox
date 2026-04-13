@@ -623,12 +623,11 @@ async fn xtream_player_api_stream_with_token(
         let container_ext = pli.get_container_extension().map(|e| concat_string!(".", e.as_ref()));
         let requested_extension = stream_ext
             .filter(|s| !s.is_empty())
-            .or(container_ext.as_deref())
-            .unwrap_or_default();
+            .or(container_ext.as_deref());
 
-        let (query_path, _extension) = get_query_path(stream_req.action_path, Some(requested_extension), &pli, app_state);
+        let (query_path, _extension) = get_query_path(stream_req.action_path, requested_extension, &pli, app_state);
 
-        let is_session_request = is_session_based_playback(pli.item_type, Some(requested_extension));
+        let is_session_request = is_session_based_playback(pli.item_type, requested_extension);
         let session_key = create_session_fingerprint(
             fingerprint,
             "webui",
@@ -639,7 +638,7 @@ async fn xtream_player_api_stream_with_token(
         // TODO how should we use fixed provider for hls in multi provider config?
 
         // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-        if is_session_request && requested_extension == shared::utils::HLS_EXT {
+        if is_session_request && requested_extension == Some(shared::utils::HLS_EXT) {
             return handle_hls_stream_request(
                 fingerprint,
                 app_state,
