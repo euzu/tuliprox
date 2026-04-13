@@ -2850,6 +2850,7 @@ mod tests {
             socket_bound: false,
             active_addrs: vec!["127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!())],
             ts: 1,
+            started_at:1,
             permission: UserConnectionPermission::Allowed,
             counted: false,
         };
