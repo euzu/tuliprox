@@ -11,7 +11,6 @@ use crate::{
     },
     auth::Fingerprint,
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
-    repository::{ConnectFailureReason, FailureStage},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -147,7 +146,7 @@ pub(crate) struct ConnectFailedAttempt<'a> {
     pub fingerprint: &'a Fingerprint,
     pub user: &'a ProxyUserCredentials,
     pub stream_channel: StreamChannel,
-    pub provider_name: &'a str,
+    pub provider_name: Arc<str>,
     pub req_headers: &'a HeaderMap,
     pub reason: ConnectFailureReason,
     pub failure_stage: FailureStage,
@@ -172,10 +171,24 @@ pub(crate) fn record_connect_failed_attempt(attempt: ConnectFailedAttempt<'_>) {
         None,
         None,
     );
+    // Resolve target_name from target_id using the stable target config name.
+    let target_name = attempt
+        .app_state
+        .app_config
+        .get_target_by_id(info.channel.target_id)
+        .as_deref()
+        .map(|t| (&t.name).intern());
     attempt
         .app_state
         .connection_manager
-        .record_connect_failed(&info, attempt.reason, attempt.failure_stage);
+        .record_connect_failed_with_provider_failure(
+            &info,
+            attempt.reason,
+            attempt.failure_stage,
+            None,
+            None,
+            target_name,
+        );
 }
 
 fn admission_failure_video_type(reason: ConnectFailureReason) -> Option<CustomVideoStreamType> {
@@ -192,7 +205,7 @@ pub(crate) fn admission_failure_response(
     fingerprint: &Fingerprint,
     user: &ProxyUserCredentials,
     stream_channel: StreamChannel,
-    provider_name: &str,
+    provider_name: Arc<str>,
     req_headers: &HeaderMap,
     reason: ConnectFailureReason,
 ) -> axum::response::Response {
@@ -341,6 +354,7 @@ pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
 pub use try_unwrap_body;
+use crate::model::{ConnectFailureReason, FailureStage};
 use crate::utils::LRUResourceCache;
 
 pub fn get_server_time() -> String {
@@ -382,12 +396,12 @@ pub async fn serve_file(file_path: &Path, mime_type: String, cache_control: Opti
     match tokio::fs::try_exists(file_path).await {
         Ok(exists) => {
             if !exists {
-                return axum::http::StatusCode::NOT_FOUND.into_response();
+                return StatusCode::NOT_FOUND.into_response();
             }
         }
         Err(err) => {
             error!("Failed to open file {}, {err:?}", file_path.display());
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+            return StatusCode::NOT_FOUND.into_response();
         }
     }
 
@@ -399,16 +413,16 @@ pub async fn serve_file(file_path: &Path, mime_type: String, cache_control: Opti
             });
 
             let reader = async_file_reader(file);
-            let stream = tokio_util::io::ReaderStream::new(reader);
-            let body = axum::body::Body::from_stream(stream);
+            let stream = ReaderStream::new(reader);
+            let body = Body::from_stream(stream);
 
             let mut builder = axum::response::Response::builder()
-                .status(axum::http::StatusCode::OK)
-                .header(axum::http::header::CONTENT_TYPE, mime_type)
-                .header(axum::http::header::CACHE_CONTROL, cache_control.unwrap_or("no-cache"));
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime_type)
+                .header(header::CACHE_CONTROL, cache_control.unwrap_or("no-cache"));
 
             if let Some(lm) = last_modified {
-                builder = builder.header(axum::http::header::LAST_MODIFIED, lm);
+                builder = builder.header(header::LAST_MODIFIED, lm);
             }
 
             try_unwrap_body!(builder.body(body))
@@ -970,7 +984,7 @@ async fn create_stream_response_details(
         return Ok(create_panel_api_provisioning_stream_details(
             app_state,
             input,
-            guard_provider_name.clone(),
+            guard_provider_name.clone().or_else(|| Some(input.name.clone())),
             &grace_period_options,
             fingerprint.addr,
             virtual_id,
@@ -981,10 +995,13 @@ async fn create_stream_response_details(
         // custom stream means we display our own stream like connection exhausted, channel-unavailable...
         ProviderStreamState::Custom(provider_stream) => {
             let (stream, stream_info) = provider_stream;
+            // When allocation is exhausted or no connection was acquired, guard_provider_name is None.
+            // Use input.name as fallback so the provider field is never empty.
+            let provider_name = guard_provider_name.clone().unwrap_or_else(|| input.name.clone());
             Ok(StreamDetails {
                 stream,
                 stream_info,
-                provider_name: guard_provider_name.clone(),
+                provider_name: Some(provider_name),
                 request_url: None,
                 grace_period: grace_period_options,
                 provider_grace_active: false,
@@ -1489,7 +1506,7 @@ pub async fn stream_response(
             fingerprint,
             user,
             stream_channel: stream_channel.clone(),
-            provider_name: input.name.as_ref(),
+            provider_name: input.name.clone(),
             req_headers,
             reason: ConnectFailureReason::UserConnectionsExhausted,
             failure_stage: FailureStage::Admission,
@@ -1950,7 +1967,7 @@ pub async fn local_stream_response(
                 fingerprint,
                 user,
                 stream_channel: pli.clone(),
-                provider_name: input.name.as_ref(),
+                provider_name: input.name.clone(),
                 req_headers,
                 reason: ConnectFailureReason::UserConnectionsExhausted,
                 failure_stage: FailureStage::Admission,

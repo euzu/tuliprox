@@ -25,6 +25,7 @@ use shared::{
 };
 use std::sync::Arc;
 use url::Url;
+use crate::model::ConnectFailureReason;
 
 const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
 #EXT-X-VERSION:3
@@ -349,10 +350,10 @@ async fn resolve_stream_channel(
 #[allow(clippy::too_many_lines)]
 async fn hls_api_stream(
     fingerprint: Fingerprint,
-    req_headers: axum::http::HeaderMap,
+    req_headers: HeaderMap,
     axum::extract::Path(params): axum::extract::Path<HlsApiPathParams>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl axum::response::IntoResponse + Send {
+) -> impl IntoResponse + Send {
     let (user, target) = try_option_bad_request!(
         app_state.app_config.get_target_for_user(&params.username, &params.password),
         false,
@@ -380,9 +381,9 @@ async fn hls_api_stream(
             &fingerprint,
             &user,
             denied_channel,
-            input.name.as_ref(),
+            input.name.clone(),
             &req_headers,
-            crate::repository::ConnectFailureReason::UserAccountExpired,
+            ConnectFailureReason::UserAccountExpired,
         );
     }
 
@@ -408,9 +409,9 @@ async fn hls_api_stream(
                 &fingerprint,
                 &user,
                 stream_channel,
-                &session.provider,
+                session.provider.clone(),
                 &req_headers,
-                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+                ConnectFailureReason::UserConnectionsExhausted,
             );
         }
 
@@ -421,9 +422,9 @@ async fn hls_api_stream(
                 &fingerprint,
                 &user,
                 stream_channel,
-                &session.provider,
+                session.provider.clone(),
                 &req_headers,
-                crate::repository::ConnectFailureReason::ProviderConnectionsExhausted,
+                ConnectFailureReason::ProviderConnectionsExhausted,
             );
         }
 
@@ -501,9 +502,9 @@ async fn hls_api_stream(
                 &fingerprint,
                 &user,
                 stream_channel,
-                input.name.as_ref(),
+                input.name.clone(),
                 &req_headers,
-                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+                ConnectFailureReason::UserConnectionsExhausted,
             );
         }
 

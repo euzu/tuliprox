@@ -46,6 +46,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
+use crate::model::DisconnectReason;
 
 #[derive(Debug, Clone)]
 struct AccountCredentials {
@@ -3500,7 +3501,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
                 &addr,
                 virtual_id,
                 provisioning_kick_secs,
-                crate::repository::DisconnectReason::Provisioning,
+                DisconnectReason::Provisioning,
             )
             .await;
         return Ok(());
@@ -3517,7 +3518,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
                 &addr,
                 virtual_id,
                 provisioning_kick_secs,
-                crate::repository::DisconnectReason::Provisioning,
+                DisconnectReason::Provisioning,
             )
             .await;
         return Ok(());
@@ -3534,7 +3535,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
                 &addr,
                 virtual_id,
                 provisioning_kick_secs,
-                crate::repository::DisconnectReason::Provisioning,
+                DisconnectReason::Provisioning,
             )
             .await;
         return Ok(());
@@ -3595,7 +3596,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
                 &addr,
                 virtual_id,
                 provisioning_kick_secs,
-                crate::repository::DisconnectReason::Provisioning,
+                DisconnectReason::Provisioning,
             )
             .await;
         return Ok(());
@@ -3621,7 +3622,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
                 &addr,
                 virtual_id,
                 provisioning_kick_secs,
-                crate::repository::DisconnectReason::Provisioning,
+                DisconnectReason::Provisioning,
             )
             .await;
         return Ok(());
@@ -3704,7 +3705,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
             &addr,
             virtual_id,
             provisioning_kick_secs,
-            crate::repository::DisconnectReason::Provisioning,
+            DisconnectReason::Provisioning,
         )
         .await;
     Ok(())

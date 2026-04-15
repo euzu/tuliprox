@@ -27,6 +27,7 @@ use shared::{
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
 use std::sync::Arc;
+use crate::model::ConnectFailureReason;
 
 async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoResponse + Send {
     api_req.log_sanitized("m3u_api");
@@ -125,9 +126,9 @@ async fn m3u_api_stream(
             fingerprint,
             &user,
             pli.to_stream_channel(target.id),
-            pli.input_name.as_ref(),
+            pli.input_name.clone(),
             req_headers,
-            crate::repository::ConnectFailureReason::UserAccountExpired,
+            ConnectFailureReason::UserAccountExpired,
         );
     }
 
@@ -210,9 +211,9 @@ async fn m3u_api_stream(
                 fingerprint,
                 &user,
                 pli.to_stream_channel(target.id),
-                &session.provider,
+                session.provider.clone(),
                 req_headers,
-                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+                ConnectFailureReason::UserConnectionsExhausted,
             );
         }
 
@@ -222,9 +223,9 @@ async fn m3u_api_stream(
                 fingerprint,
                 &user,
                 pli.to_stream_channel(target.id),
-                &session.provider,
+                session.provider.clone(),
                 req_headers,
-                crate::repository::ConnectFailureReason::ProviderConnectionsExhausted,
+                ConnectFailureReason::ProviderConnectionsExhausted,
             );
         }
         if session.virtual_id == virtual_id && is_seek_request(cluster, req_headers).await {
@@ -292,9 +293,9 @@ async fn m3u_api_stream(
             fingerprint,
             &user,
             pli.to_stream_channel(target.id),
-            input.name.as_ref(),
+            input.name.clone(),
             req_headers,
-            crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+            ConnectFailureReason::UserConnectionsExhausted,
         );
     }
 
