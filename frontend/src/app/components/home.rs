@@ -13,8 +13,10 @@ use crate::{
     i18n::use_translation,
     model::{EventMessage, ViewType},
     provider::DialogProvider,
-    services::{ToastCloseMode, ToastOptions},
+    services::{FlagsLoadState, ToastCloseMode, ToastOptions},
 };
+use gloo_timers::future::TimeoutFuture;
+use log::error;
 use shared::{
     model::{
         permission::{Permission, PERM_ALL},
@@ -22,8 +24,8 @@ use shared::{
     },
     utils::Internable,
 };
-use std::{future, rc::Rc};
-use yew::{prelude::*, suspense::use_future};
+use std::{cell::Cell, future, rc::Rc};
+use yew::{platform::spawn_local, prelude::*, suspense::use_future};
 
 #[component]
 pub fn Home() -> Html {
@@ -148,6 +150,34 @@ pub fn Home() -> Html {
     let playlist_context = PlaylistContext { sources: sources.clone() };
 
     //<div class={"app-header__toolbar"}><select onchange={handle_language} defaultValue={i18next.language}>{services.config().getUiConfig().languages.map(l => <option key={l} value={l}>{l}</option>)}</select></div>
+
+    let geoip_enabled = config.as_ref().is_some_and(|cfg| cfg.config.is_geoip_enabled());
+
+    {
+        let flags_service = services.flags.clone();
+        use_effect_with(geoip_enabled, move |geoip_enabled| {
+            let cancelled = Rc::new(Cell::new(false));
+            if *geoip_enabled {
+                let flags_service = flags_service.clone();
+                let cancelled = cancelled.clone();
+                spawn_local(async move {
+                    while !cancelled.get() && !flags_service.is_loaded() {
+                        match flags_service.ensure_loaded_from_assets().await {
+                            Ok(FlagsLoadState::Loaded) => break,
+                            Ok(FlagsLoadState::InProgress) => {
+                                TimeoutFuture::new(250).await;
+                            }
+                            Err(err) => {
+                                error!("Failed to load flags {err}");
+                                TimeoutFuture::new(5000).await;
+                            }
+                        }
+                    }
+                });
+            }
+            move || cancelled.set(true)
+        });
+    }
 
     if config.is_none() {
         return html! {};

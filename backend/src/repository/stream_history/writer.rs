@@ -1,47 +1,25 @@
 use crate::repository::stream_history::{
     BlockHeaderBody, CompressionKind, FileHeaderBody, RecordEncodingKind, CONTAINER_FORMAT_VERSION,
-    RECORD_SCHEMA_VERSION, SOURCE_KIND_STREAM_HISTORY, StreamHistoryRecord,
-    write_block_magic, write_file_magic, write_framed,
+    SOURCE_KIND_STREAM_HISTORY, write_framed,
 };
 use crate::repository::stream_history::archive::finalize_and_archive;
-use crate::model::StreamHistoryConfig;
+use crate::model::{StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
 use log::{error, info, warn};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{self, BufWriter, Write},
+    io,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::fs::{self, OpenOptions};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
-
-const SECS_PER_DAY: u64 = 86_400;
+use crate::utils::{current_utc_day, now_utc_secs, utc_day_from_secs, SECS_PER_DAY};
 
 const QUEUE_CAPACITY: usize = 4096;
 
-pub(crate) fn now_utc_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-pub(crate) fn utc_day_from_secs(ts_secs: u64) -> String {
-    chrono::DateTime::from_timestamp_secs(i64::try_from(ts_secs).unwrap_or(0)).map_or_else(|| "1970-01-01".to_string(), |dt| dt.format("%Y-%m-%d").to_string())
-}
-
-pub(crate) fn current_utc_day() -> String {
-    utc_day_from_secs(now_utc_secs())
-}
-
-/// Compute Unix seconds until the next UTC midnight after `from_ms`.
-pub fn secs_until_next_utc_midnight(from_secs: u64) -> u64 {
-    let remaining = SECS_PER_DAY - (from_secs % SECS_PER_DAY);
-    if remaining == 0 { SECS_PER_DAY } else { remaining }
-}
 
 fn pending_file_path(directory: &str, day: &str) -> PathBuf {
     PathBuf::from(directory).join(format!("stream-history-{day}.pending"))
@@ -50,6 +28,7 @@ fn pending_file_path(directory: &str, day: &str) -> PathBuf {
 enum WriterCommand {
     Record(Box<StreamHistoryRecord>),
     Flush(oneshot::Sender<io::Result<()>>),
+    GetBatch(oneshot::Sender<Vec<StreamHistoryRecord>>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -129,6 +108,24 @@ impl StreamHistoryWriter {
     pub fn is_enabled(&self) -> bool {
         self.tx.is_some()
     }
+
+    /// Returns a copy of the current in-memory batch records.
+    /// Async version — sends a command and waits for the response.
+    pub async fn get_current_batch(&self) -> io::Result<Vec<StreamHistoryRecord>> {
+        let Some(tx) = &self.tx else {
+            return Ok(Vec::new());
+        };
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        tx.send(WriterCommand::GetBatch(resp_tx))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "stream history worker is closed"))?;
+
+        resp_rx
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "stream history worker dropped GetBatch response"))
+    }
 }
 
 struct WriterWorker {
@@ -143,7 +140,7 @@ impl WriterWorker {
     }
 
     async fn run(self, mut rx: mpsc::Receiver<WriterCommand>, dropped_events: Arc<AtomicU64>) {
-        let mut state = match WriterState::open(&self.config, self.writer_instance_id) {
+        let mut state = match WriterState::open(&self.config, self.writer_instance_id).await {
             Ok(s) => s,
             Err(e) => {
                 error!("Stream history writer failed to initialize: {e}");
@@ -160,7 +157,7 @@ impl WriterWorker {
                 WriterCommand::Record(record) => {
                     // Day rollover check — use the record's partition day as the target
                     if record.partition_day_utc != state.current_day {
-                        if let Err(e) = state.flush_and_rollover_to(&record.partition_day_utc, &self.config, self.writer_instance_id) {
+                        if let Err(e) = state.flush_and_rollover_to(&record.partition_day_utc, &self.config, self.writer_instance_id).await {
                             error!("Stream history day rollover failed: {e}");
                             let dropped = dropped_events.fetch_add(1, Ordering::Relaxed) + 1;
                             warn!("Stream history record dropped due to rollover failure (total dropped: {dropped})");
@@ -171,21 +168,24 @@ impl WriterWorker {
                     state.push(*record);
 
                     if state.batch.len() >= self.config.stream_history_batch_size {
-                        if let Err(e) = state.flush_batch() {
+                        if let Err(e) = state.flush_batch().await {
                             error!("Stream history batch flush failed: {e}. Dropped events: {}",
                                 dropped_events.load(Ordering::Relaxed));
                         }
                     }
                 }
                 WriterCommand::Flush(resp) => {
-                    let result = state.flush_batch();
+                    let result = state.flush_batch().await;
                     let _ = resp.send(result);
                 }
+                WriterCommand::GetBatch(resp) => {
+                    let _ = resp.send(state.batch.clone());
+                }
                 WriterCommand::Shutdown(resp) => {
-                    if let Err(e) = state.flush_batch() {
+                    if let Err(e) = state.flush_batch().await {
                         error!("Stream history flush on shutdown failed: {e}");
                     }
-                    if let Err(e) = state.finalize() {
+                    if let Err(e) = state.finalize().await {
                         error!("Stream history finalize on shutdown failed: {e}");
                     }
                     info!("Stream history writer shut down. Total blocks: {}, records: {}",
@@ -201,11 +201,9 @@ impl WriterWorker {
 struct WriterState {
     directory: String,
     current_day: String,
-    file: Option<BufWriter<File>>,
+    file: Option<fs::File>,
     file_path: PathBuf,
     batch: Vec<StreamHistoryRecord>,
-    /// Reusable scratch buffer for building block payloads — retains capacity across flushes.
-    payload_buf: Vec<u8>,
     total_block_count: u64,
     total_record_count: u64,
     min_event_ts: Option<u64>,
@@ -213,22 +211,21 @@ struct WriterState {
 }
 
 impl WriterState {
-    fn open(config: &StreamHistoryConfig, writer_instance_id: u64) -> io::Result<Self> {
+    async fn open(config: &StreamHistoryConfig, writer_instance_id: u64) -> io::Result<Self> {
         let day = current_utc_day();
         let dir = &config.stream_history_directory;
 
-        fs::create_dir_all(dir)?;
+        fs::create_dir_all(dir).await?;
 
         let path = pending_file_path(dir, &day);
-        let file = open_or_create_pending_file(&path, &day, writer_instance_id)?;
+        let file = open_or_create_pending_file(&path, &day, writer_instance_id).await?;
 
         Ok(Self {
             directory: dir.clone(),
             current_day: day,
-            file: Some(BufWriter::new(file)),
+            file: Some(file),
             file_path: path,
             batch: Vec::with_capacity(config.stream_history_batch_size),
-            payload_buf: Vec::new(),
             total_block_count: 0,
             total_record_count: 0,
             min_event_ts: None,
@@ -248,15 +245,13 @@ impl WriterState {
     }
 
     /// Flush buffered records to the pending file.
-    /// NOTE: This performs blocking file I/O on the tokio runtime. Acceptable because
-    /// the writer runs on its own task and stream history is best-effort — a slow disk
-    /// only delays history persistence, never the streaming hot path.
-    fn flush_batch(&mut self) -> io::Result<()> {
+    /// Serialization (CPU-bound) runs in `spawn_blocking`; file I/O is fully async.
+    async fn flush_batch(&mut self) -> io::Result<()> {
         if self.batch.is_empty() {
             return Ok(());
         }
 
-        let Some(writer) = self.file.as_mut() else {
+        let Some(file) = self.file.as_mut() else {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "pending file not open"));
         };
 
@@ -269,40 +264,59 @@ impl WriterState {
         let record_count = u32::try_from(self.batch.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "record count too large"))?;
 
-        // Serialize all records directly into the reusable payload buffer.
-        // Each record is prefixed with its length as a u32 BE.
-        // The length slot is reserved first and patched after serialization to avoid a
-        // temporary per-record Vec allocation.
-        self.payload_buf.clear();
-        for record in &self.batch {
-            let len_offset = self.payload_buf.len();
-            self.payload_buf.extend_from_slice(&[0u8; 4]); // placeholder for length
-            rmp_serde::encode::write_named(&mut self.payload_buf, record)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let record_len = self.payload_buf.len() - len_offset - 4;
-            let record_len_u32 = u32::try_from(record_len)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "record too large"))?;
-            self.payload_buf[len_offset..len_offset + 4].copy_from_slice(&record_len_u32.to_be_bytes());
-        }
+        // Serialize all records into the reusable payload buffer, then write
+        // the whole block in one async I/O pass.
+        let batch_records = std::mem::take(&mut self.batch);
+        let (header_bytes, payload_bytes) = match tokio::task::spawn_blocking(move || {
+            let mut payload_buf = Vec::new();
+            for record in &batch_records {
+                let len_offset = payload_buf.len();
+                payload_buf.extend_from_slice(&[0u8; 4]); // placeholder for length
+                if let Err(e) = rmp_serde::encode::write_named(&mut payload_buf, record) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+                }
+                let record_len = payload_buf.len() - len_offset - 4;
+                let Ok(record_len_u32) = u32::try_from(record_len) else {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "record too large"));
+                };
+                payload_buf[len_offset..len_offset + 4].copy_from_slice(&record_len_u32.to_be_bytes());
+            }
 
-        let payload_len = u32::try_from(self.payload_buf.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "block payload too large"))?;
-        let payload_crc = crc32fast::hash(&self.payload_buf);
+            let Ok(payload_len) = u32::try_from(payload_buf.len()) else {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "block payload too large"));
+            };
+            let payload_crc = crc32fast::hash(&payload_buf);
 
-        let block_header = BlockHeaderBody {
-            block_version: 1,
-            record_count,
-            payload_len,
-            first_event_ts_utc: first_ts,
-            last_event_ts_utc: last_ts,
-            payload_crc,
-            flags: 0,
+            let block_header = BlockHeaderBody {
+                block_version: 1,
+                record_count,
+                payload_len,
+                first_event_ts_utc: first_ts,
+                last_event_ts_utc: last_ts,
+                payload_crc,
+                flags: 0,
+            };
+
+            // Serialize the framed block header
+            let mut header_buf = Vec::new();
+            if let Err(e) = write_framed(&mut header_buf, &block_header) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+            }
+
+            Ok((header_buf, payload_buf))
+        }).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(io::Error::other(e)),
         };
 
-        write_block_magic(writer)?;
-        write_framed(writer, &block_header)?;
-        writer.write_all(&self.payload_buf)?;
-        writer.flush()?;
+        // Now write the magic, header, and payload as three separate async write calls.
+        // This parks the task between calls if I/O would block, without blocking any thread.
+        let block_magic = crate::repository::stream_history::BLOCK_MAGIC;
+        file.write_all(&block_magic).await?;
+        file.write_all(&header_bytes).await?;
+        file.write_all(&payload_bytes).await?;
+        file.flush().await?;
 
         self.total_block_count += 1;
         self.total_record_count += u64::from(record_count);
@@ -311,21 +325,21 @@ impl WriterState {
         Ok(())
     }
 
-    fn flush_and_rollover_to(&mut self, target_day: &str, config: &StreamHistoryConfig, writer_instance_id: u64) -> io::Result<()> {
-        self.flush_batch()?;
-        self.finalize()?; // closes and drops the BufWriter; file_path is still valid
+    async fn flush_and_rollover_to(&mut self, target_day: &str, config: &StreamHistoryConfig, writer_instance_id: u64) -> io::Result<()> {
+        self.flush_batch().await?;
+        self.finalize().await?; // closes and drops the File; file_path is still valid
 
         // Archive the just-closed file and apply retention immediately.
         // At this point all pre-rollover records are safely on disk — the first record
         // with a new partition_day_utc triggered this rollover, so no pre-midnight record
         // can arrive after this point. The previous-day file is now complete and safe to archive.
-        finalize_and_archive(&self.file_path, &self.directory, config.stream_history_retention_days);
+        finalize_and_archive(&self.file_path, &self.directory, config.stream_history_retention_days).await;
 
         let new_path = pending_file_path(&self.directory, target_day);
-        let new_file = open_or_create_pending_file(&new_path, target_day, writer_instance_id)?;
+        let new_file = open_or_create_pending_file(&new_path, target_day, writer_instance_id).await?;
 
         self.current_day = target_day.to_string();
-        self.file = Some(BufWriter::new(new_file));
+        self.file = Some(new_file);
         self.file_path = new_path;
         self.total_block_count = 0;
         self.total_record_count = 0;
@@ -335,25 +349,25 @@ impl WriterState {
         Ok(())
     }
 
-    /// Flush writer buffer to OS. Does not compress or archive.
-    fn finalize(&mut self) -> io::Result<()> {
-        if let Some(mut writer) = self.file.take() {
-            writer.flush()?;
+    /// Flush file buffer to OS. Does not compress or archive.
+    async fn finalize(&mut self) -> io::Result<()> {
+        if let Some(mut file) = self.file.take() {
+            file.flush().await?;
         }
         Ok(())
     }
 }
 
 /// Open an existing `.pending` file for appending, or create a new one with the file header.
-fn open_or_create_pending_file(path: &PathBuf, day: &str, writer_instance_id: u64) -> io::Result<File> {
-    if path.exists() {
+async fn open_or_create_pending_file(path: &PathBuf, day: &str, writer_instance_id: u64) -> io::Result<fs::File> {
+    if tokio::fs::metadata(path).await.is_ok() {
         // Continue appending to existing file
-        let file = OpenOptions::new().append(true).open(path)?;
+        let file = OpenOptions::new().append(true).open(path).await?;
         return Ok(file);
     }
 
-    // Create new file with header
-    let mut file = File::create(path)?;
+    // Create new file with header — must be created and written atomically to avoid
+    // a race with finalize_and_archive reading an incomplete header.
     let header = FileHeaderBody {
         container_format_version: CONTAINER_FORMAT_VERSION,
         record_schema_version: RECORD_SCHEMA_VERSION,
@@ -372,17 +386,33 @@ fn open_or_create_pending_file(path: &PathBuf, day: &str, writer_instance_id: u6
         max_event_ts_utc: None,
     };
 
-    write_file_magic(&mut file)?;
-    write_framed(&mut file, &header)?;
-    file.flush()?;
+    let mut header_buf = Vec::new();
+    write_framed(&mut header_buf, &header)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let file_magic = crate::repository::stream_history::FILE_MAGIC;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(&file_magic).await?;
+    file.write_all(&header_buf).await?;
+    file.flush().await?;
 
     Ok(file)
 }
 
 /// Delete daily archive/pending files older than `retention_days`.
-pub fn apply_retention(directory: &str, retention_days: u16) -> io::Result<()> {
+pub async fn apply_retention(directory: &str, retention_days: u16) -> io::Result<()> {
     let dir = PathBuf::from(directory);
-    if !dir.exists() {
+    let metadata = match tokio::fs::metadata(&dir).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !metadata.is_dir() {
         return Ok(());
     }
 
@@ -392,21 +422,23 @@ pub fn apply_retention(directory: &str, retention_days: u16) -> io::Result<()> {
         utc_day_from_secs(cutoff_secs)
     };
 
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
+    let mut entries = tokio::fs::read_dir(&dir).await?;
+    let mut to_delete = Vec::new();
 
-        // Match "stream-history-YYYY-MM-DD.pending" or "stream-history-YYYY-MM-DD.archive.lz4"
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(day) = extract_day_from_filename(&name) {
             if day < cutoff_day.as_str() {
-                let path = entry.path();
-                if let Err(e) = fs::remove_file(&path) {
-                    warn!("Failed to delete old history file {}: {e}", path.display());
-                } else {
-                    info!("Deleted expired history file: {}", path.display());
-                }
+                to_delete.push(entry.path());
             }
+        }
+    }
+
+    for path in to_delete {
+        if let Err(e) = tokio::fs::remove_file(&path).await {
+            warn!("Failed to delete old history file {}: {e}", path.display());
+        } else {
+            info!("Deleted expired history file: {}", path.display());
         }
     }
 
@@ -426,11 +458,13 @@ pub fn extract_day_from_filename(name: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::stream_history::{EventType};
     use crate::repository::{BlockHeaderBody, FileHeaderBody, read_and_verify_block_magic, read_and_verify_file_magic, read_framed};
     use std::io::BufReader;
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
+    use shared::utils::Internable;
+    use crate::model::EventType;
+    use crate::utils::secs_until_next_utc_midnight;
 
     fn test_config(dir: &str, batch_size: usize) -> StreamHistoryConfig {
         StreamHistoryConfig {
@@ -450,11 +484,11 @@ mod tests {
             session_id,
             source_addr: None,
             api_username: Some("user1".to_string()),
-            provider_name: Some("acme".to_string()),
+            provider_name: Some("acme".intern()),
             provider_username: None,
-            input_name: Some("input".to_string()),
+            input_name: Some("input".intern()),
             virtual_id: Some(1),
-            item_type: Some("live".to_string()),
+            item_type: Some("live".intern()),
             title: Some("Test Channel".to_string()),
             group: None,
             country: None,
@@ -484,7 +518,7 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
-            target_id: None,
+            target_name: None,
         }
     }
 
@@ -550,7 +584,7 @@ mod tests {
 
         let day = current_utc_day();
         let pending = tmp.path().join(format!("stream-history-{day}.pending"));
-        let metadata = std::fs::metadata(&pending).unwrap();
+        let metadata = tokio::fs::metadata(&pending).await.unwrap();
         // File should be larger than just the header (a block was written)
         assert!(metadata.len() > 100, "file must contain at least one block (size={})", metadata.len());
     }
@@ -588,7 +622,7 @@ mod tests {
 
         let day = current_utc_day();
         let pending = tmp.path().join(format!("stream-history-{day}.pending"));
-        let metadata = std::fs::metadata(&pending).unwrap();
+        let metadata = tokio::fs::metadata(&pending).await.unwrap();
         assert!(metadata.len() > 100, "partial batch must be flushed to file (size={})", metadata.len());
     }
 
@@ -633,13 +667,6 @@ mod tests {
         let midnight_secs = 1_742_601_600_u64; // some UTC midnight
         let offset = secs_until_next_utc_midnight(midnight_secs - 1);
         assert_eq!(offset, 1);
-    }
-
-    #[test]
-    fn stream_history_retention_extract_day_from_filename() {
-        assert_eq!(extract_day_from_filename("stream-history-2026-03-22.pending"), Some("2026-03-22"));
-        assert_eq!(extract_day_from_filename("stream-history-2026-03-22.archive.lz4"), Some("2026-03-22"));
-        assert_eq!(extract_day_from_filename("unrelated.txt"), None);
     }
 
     #[tokio::test]

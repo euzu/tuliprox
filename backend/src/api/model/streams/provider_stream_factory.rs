@@ -8,7 +8,6 @@ use crate::{
         },
     },
     model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
-    repository::{ConnectFailureReason, FailureStage},
     utils::{
         debug_if_enabled,
         request::{
@@ -42,7 +41,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use shared::utils::DEFAULT_USER_AGENT;
+use shared::utils::{Internable, DEFAULT_USER_AGENT};
+use crate::model::{ConnectFailureReason, FailureStage};
 
 const RETRY_SECONDS: u64 = 5;
 const ERR_MAX_RETRY_COUNT: u32 = 5;
@@ -223,7 +223,7 @@ impl ProviderStreamFactoryOptions {
         std::borrow::Cow::Owned(preview_request_target_for_logging(&self.url, self.provider.as_ref()))
     }
 
-    fn build_connect_failed_stream_info(&self, provider_name: &str) -> Option<StreamInfo> {
+    fn build_connect_failed_stream_info(&self, provider_name: Arc<str>) -> Option<StreamInfo> {
         let username = self.username.as_deref()?;
         let client_ip = self.client_ip.as_deref()?;
         let stream_channel = self.stream_channel.clone()?;
@@ -256,8 +256,14 @@ fn record_provider_open_failure(
     let Some(failure_stage) = stream_options.get_connect_failure_stage() else { return };
     let provider_name = stream_options
         .get_provider()
-        .map_or_else(|| "unknown".to_string(), |provider| provider.name.to_string());
-    let Some(info) = stream_options.build_connect_failed_stream_info(&provider_name) else { return };
+        .map_or_else(|| "unknown".intern(), |provider| provider.name.clone());
+    let Some(info) = stream_options.build_connect_failed_stream_info(provider_name) else { return };
+    // Resolve target_name from target_id using the stable target config name.
+    let target_name = app_state
+        .app_config
+        .get_target_by_id(info.channel.target_id)
+        .as_deref()
+        .map(|t| (&t.name).intern());
     app_state
         .connection_manager
         .record_connect_failed_with_provider_failure(
@@ -266,6 +272,7 @@ fn record_provider_open_failure(
             failure_stage,
             provider_http_status.map(|status| status.as_u16()),
             provider_error_class,
+            target_name,
         );
 }
 
@@ -890,6 +897,7 @@ pub async fn create_provider_stream(
         Ok(None) => None,
         Err(failure) => {
             let status = failure.status();
+            app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
             record_provider_open_failure(
                 app_state,
                 &stream_options,
@@ -1120,11 +1128,11 @@ mod tests {
             connect_failure_stage: Some(FailureStage::ProviderOpen),
         });
 
-        let info = options.build_connect_failed_stream_info("provider-a").expect("history context");
+        let info = options.build_connect_failed_stream_info("provider-a".intern()).expect("history context");
 
         assert_eq!(info.username, "alice");
         assert_eq!(info.client_ip, "203.0.113.9");
-        assert_eq!(info.provider, "provider-a");
+        assert_eq!(info.provider.as_ref(), "provider-a");
         assert_eq!(info.channel.input_name.as_ref(), "input-a");
         assert_eq!(info.channel.virtual_id, 77);
     }

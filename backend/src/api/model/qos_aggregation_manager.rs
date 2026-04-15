@@ -9,24 +9,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::model::AppState;
-use crate::model::Config;
+use crate::model::{Config, ConnectFailureReason, DisconnectReason, EventType, FailureStage, StreamHistoryRecord};
 use crate::repository::{
-    current_utc_day, extract_day_from_filename, now_utc_secs, ConnectFailureReason, DisconnectReason, EventType,
-    FailureStage, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
-    StreamHistoryFileReader, StreamHistoryRecord,
+     extract_day_from_filename,
+     QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
+    StreamHistoryFileReader,
 };
 use tokio_util::sync::CancellationToken;
+use crate::utils::{current_utc_day, now_utc_secs};
 
 const MAX_COMPLETED_DAY_PARTITIONS_PER_RUN: usize = 3;
 
 #[derive(Debug, Clone)]
 struct AggregatedDayEntry {
-    input_name: String,
-    target_id: u16,
-    provider_name: String,
+    input_name: Arc<str>,
+    target_name: Arc<str>,
+    provider_name: Arc<str>,
     provider_id: u32,
     virtual_id: u32,
-    item_type: String,
+    item_type: Arc<str>,
     bucket: QosSnapshotDailyBucket,
 }
 
@@ -382,9 +383,9 @@ fn aggregate_reader_entries<R: io::Read>(
         let Some(stream_identity_key) = record.stream_identity_key.clone() else {
             continue;
         };
-        let (Some(input_name), Some(target_id), Some(provider_name), Some(provider_id), Some(virtual_id), Some(item_type)) = (
+        let (Some(input_name), Some(target_name), Some(provider_name), Some(provider_id), Some(virtual_id), Some(item_type)) = (
             record.input_name.clone(),
-            record.target_id,
+            record.target_name.clone(),
             record.provider_name.clone(),
             record.provider_id,
             record.virtual_id,
@@ -395,7 +396,7 @@ fn aggregate_reader_entries<R: io::Read>(
 
         let entry = entries.entry(stream_identity_key).or_insert_with(|| AggregatedDayEntry {
             input_name,
-            target_id,
+            target_name,
             provider_name,
             provider_id,
             virtual_id,
@@ -472,7 +473,7 @@ fn apply_day_entries(
             day_entries.get(&key).map(|entry| QosSnapshotRecord {
                 stream_identity_key: key.clone(),
                 input_name: entry.input_name.clone(),
-                target_id: entry.target_id,
+                target_name: entry.target_name.clone(),
                 provider_name: entry.provider_name.clone(),
                 provider_id: entry.provider_id,
                 virtual_id: entry.virtual_id,
@@ -524,15 +525,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tempfile::tempdir;
-
-    use crate::model::{Config, QosAggregationConfig, ReverseProxyConfig, StreamHistoryConfig};
+    use shared::utils::Internable;
+    use crate::model::{Config, ConnectFailureReason, DisconnectReason, EventType, FailureStage, QosAggregationConfig, ReverseProxyConfig, StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
     use crate::repository::{
-        current_utc_day, serialize_named, write_block_magic, write_file_magic, write_framed, BlockHeaderBody,
-        CompressionKind, ConnectFailureReason, CONTAINER_FORMAT_VERSION, DisconnectReason, EventType, FailureStage,
+        serialize_named, write_block_magic, write_file_magic, write_framed, BlockHeaderBody,
+        CompressionKind, CONTAINER_FORMAT_VERSION,
         FileHeaderBody, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
-        RecordEncodingKind, RECORD_SCHEMA_VERSION, SOURCE_KIND_STREAM_HISTORY, StreamHistoryRecord,
+        RecordEncodingKind, SOURCE_KIND_STREAM_HISTORY,
     };
-
+    use crate::utils::current_utc_day;
     use super::{fold_record_into_bucket, history_day_revision, qos_aggregation_is_enabled, rebuild_windows, run_aggregation_once};
 
     fn write_pending_history_records(
@@ -605,11 +606,11 @@ mod tests {
             session_id: 42,
             source_addr: None,
             api_username: None,
-            provider_name: Some("provider-a".to_string()),
+            provider_name: Some("provider-a".intern()),
             provider_username: None,
-            input_name: Some("input-a".to_string()),
+            input_name: Some("input-a".intern()),
             virtual_id: Some(33),
-            item_type: Some("live".to_string()),
+            item_type: Some("live".intern()),
             title: None,
             group: None,
             country: None,
@@ -639,7 +640,7 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
-            target_id: Some(11),
+            target_name: None,
         }
     }
 
@@ -707,12 +708,12 @@ mod tests {
     fn rebuild_windows_uses_recent_daily_buckets() {
         let mut snapshot = QosSnapshotRecord {
             stream_identity_key: "stream-a".to_string(),
-            input_name: "input-a".to_string(),
-            target_id: 11,
-            provider_name: "provider-a".to_string(),
+            input_name: "input-a".intern(),
+            target_name: "target-a".intern(),
+            provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".to_string(),
+            item_type: "live".intern(),
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow::default(),
@@ -794,12 +795,12 @@ mod tests {
         let today = current_utc_day();
         let mut connect = base_record(EventType::Connect);
         connect.partition_day_utc = today.clone();
-        connect.input_name = Some("input-a".to_string());
-        connect.provider_name = Some("provider-a".to_string());
+        connect.input_name = Some("input-a".intern());
+        connect.provider_name = Some("provider-a".intern());
         connect.provider_id = Some(22);
         connect.virtual_id = Some(33);
-        connect.item_type = Some("live".to_string());
-        connect.target_id = Some(11);
+        connect.item_type = Some("live".intern());
+        connect.target_name = Some("target-a".intern());
         connect.stream_identity_key = Some("stream-a".to_string());
         connect.shared_joined_existing = Some(false);
         write_pending_history_records(&history_dir, vec![connect]);
@@ -828,12 +829,12 @@ mod tests {
 
         let mut connect = base_record(EventType::Connect);
         connect.partition_day_utc = today.clone();
-        connect.input_name = Some("input-a".to_string());
-        connect.provider_name = Some("provider-a".to_string());
+        connect.input_name = Some("input-a".intern());
+        connect.provider_name = Some("provider-a".intern());
         connect.provider_id = Some(22);
         connect.virtual_id = Some(33);
-        connect.item_type = Some("live".to_string());
-        connect.target_id = Some(11);
+        connect.item_type = Some("live".intern());
+        connect.target_name = Some("target-a".intern());
         connect.stream_identity_key = Some("stream-a".to_string());
         connect.shared_joined_existing = Some(false);
         write_pending_history_records(&history_dir, vec![connect]);
@@ -875,12 +876,12 @@ mod tests {
             connect.partition_day_utc = day.to_string();
             connect.event_ts_utc = connect.event_ts_utc.saturating_add(session_id);
             connect.session_id = session_id;
-            connect.input_name = Some("input-a".to_string());
-            connect.provider_name = Some("provider-a".to_string());
+            connect.input_name = Some("input-a".intern());
+            connect.provider_name = Some("provider-a".intern());
             connect.provider_id = Some(22);
             connect.virtual_id = Some(33);
-            connect.item_type = Some("live".to_string());
-            connect.target_id = Some(11);
+            connect.item_type = Some("live".intern());
+            connect.target_name = Some("target-a".intern());
             connect.stream_identity_key = Some("stream-a".to_string());
             connect.shared_joined_existing = Some(false);
             write_pending_history_records(&history_dir, vec![connect]);

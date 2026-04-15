@@ -7,10 +7,10 @@ use std::path::Path;
 use chrono;
 use regex::Regex;
 use serde::Deserialize;
-
+use crate::model::{ConnectFailureReason, DisconnectReason, EventType, FailureStage, StreamHistoryRecord};
 use crate::repository::{
-    ConnectFailureReason, DisconnectReason, EventType, FailureStage, FileHeaderBody, StreamHistoryFileReader,
-    StreamHistoryRecord, extract_day_from_filename, read_and_verify_file_magic, read_framed,
+    FileHeaderBody, StreamHistoryFileReader,
+    extract_day_from_filename, read_and_verify_file_magic, read_framed,
 };
 
 #[derive(Deserialize)]
@@ -98,7 +98,6 @@ const NUMERIC_FIELDS: &[&str] = &[
     "session_id",
     "virtual_id",
     "provider_id",
-    "target_id",
     "provider_http_status",
     "shared_stream_id",
 ];
@@ -107,6 +106,7 @@ const STRING_FIELDS: &[&str] = &[
     "api_username",
     "provider_name",
     "provider_username",
+    "target_name",
     "input_name",
     "item_type",
     "title",
@@ -270,7 +270,7 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "session_id" => RecordFieldValue::U64(record.session_id),
         "virtual_id" => RecordFieldValue::U64(u64::from(record.virtual_id.unwrap_or(0))),
         "provider_id" => RecordFieldValue::U64(u64::from(record.provider_id.unwrap_or(0))),
-        "target_id" => RecordFieldValue::U64(u64::from(record.target_id.unwrap_or(0))),
+        "target_name" => RecordFieldValue::String(record.target_name.as_deref()),
         "provider_http_status" => RecordFieldValue::U64(u64::from(record.provider_http_status.unwrap_or(0))),
         "shared_stream_id" => RecordFieldValue::U64(record.shared_stream_id.unwrap_or(0)),
         _ => RecordFieldValue::String(None), // Unknown field: no match
@@ -297,21 +297,39 @@ pub(crate) struct HistoryFile {
     pub is_archive: bool,
 }
 
-pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<HistoryFile>> {
-    if !dir.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Stream history directory not found: {}", dir.display()),
-        ));
+pub(crate) async fn discover_files(
+    dir: &Path,
+    time_range: &TimeRange,
+) -> io::Result<Vec<HistoryFile>> {
+    match tokio::fs::metadata(dir).await {
+        Ok(meta) => {
+            if !meta.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Stream history directory not found: {}", dir.display()),
+                ));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Stream history directory not found: {}", dir.display()),
+            ));
+        }
+        Err(e) => return Err(e),
     }
 
     let (range_start, range_end) = *time_range;
     let mut files = Vec::new();
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         let is_archive = name.ends_with(".archive.lz4");
         let is_pending = name.ends_with(".pending");
@@ -342,7 +360,8 @@ pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<V
 
         // File-level skip for archives with known timestamp bounds
         if is_archive {
-            if let (Some(min_ts), Some(max_ts)) = (header.min_event_ts_utc, header.max_event_ts_utc) {
+            if let (Some(min_ts), Some(max_ts)) = (header.min_event_ts_utc, header.max_event_ts_utc)
+            {
                 if max_ts < range_start || min_ts > range_end {
                     continue;
                 }
@@ -358,14 +377,18 @@ pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<V
 
     // Sort: primary by partition_day, secondary archive before pending
     files.sort_by(|a, b| {
-        a.partition_day.cmp(&b.partition_day)
-            .then(b.is_archive.cmp(&a.is_archive)) // true (archive) before false (pending)
+        a.partition_day
+            .cmp(&b.partition_day)
+            .then(b.is_archive.cmp(&a.is_archive))
     });
 
     if files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("No stream history files found in range. Check directory: {}", dir.display()),
+            format!(
+                "No stream history files found in range. Check directory: {}",
+                dir.display()
+            ),
         ));
     }
 
@@ -374,7 +397,7 @@ pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<V
 
 fn read_file_header(path: &Path, is_archive: bool) -> io::Result<FileHeaderBody> {
     if is_archive {
-        let file = std::fs::File::open(path)?;
+        let file = fs::File::open(path)?;
         let decoder = lz4_flex::frame::FrameDecoder::new(file);
         let mut reader = std::io::BufReader::new(decoder);
         read_and_verify_file_magic(&mut reader)?;
@@ -452,7 +475,7 @@ fn stream_output(
     let _ = writeln!(out, "]");
 }
 
-fn run_stream_history_viewer(input: &str) -> Result<(), String> {
+async fn run_stream_history_viewer(input: &str) -> Result<(), String> {
     eprintln!("[INFO] All timestamps interpreted as UTC");
 
     let query = load_query(input)?;
@@ -465,14 +488,14 @@ fn run_stream_history_viewer(input: &str) -> Result<(), String> {
     let dir = query.path.as_deref().unwrap_or("data/stream_history");
     let dir_path = Path::new(dir);
 
-    let files = discover_files(dir_path, &time_range).map_err(|e| e.to_string())?;
+    let files = discover_files(dir_path, &time_range).await.map_err(|e| e.to_string())?;
 
     stream_output(files.as_slice(), &time_range, &filters);
     Ok(())
 }
 
-pub fn stream_history_viewer(input: &str) -> i32 {
-    match run_stream_history_viewer(input) {
+pub async fn stream_history_viewer(input: &str) -> i32 {
+    match run_stream_history_viewer(input).await {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("Error: {err}");
@@ -485,6 +508,7 @@ pub fn stream_history_viewer(input: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use shared::utils::Internable;
     use super::*;
 
     #[test]
@@ -588,10 +612,10 @@ mod tests {
         let filter = CompiledFilter::compile(&raw).unwrap();
 
         let mut record = make_empty_record();
-        record.provider_name = Some("acme-tv".to_string());
+        record.provider_name = Some("acme-tv".intern());
         assert!(filter.matches(&record));
 
-        record.provider_name = Some("other-provider".to_string());
+        record.provider_name = Some("other-provider".intern());
         assert!(!filter.matches(&record));
     }
 
@@ -706,9 +730,9 @@ mod tests {
         assert_eq!(query.to.as_deref(), Some("2026-03-24"));
     }
 
-    #[test]
-    fn test_run_stream_history_viewer_returns_error_instead_of_exiting_on_invalid_query() {
-        let result = run_stream_history_viewer("{not-json");
+    #[tokio::test]
+    async fn test_run_stream_history_viewer_returns_error_instead_of_exiting_on_invalid_query() {
+        let result = run_stream_history_viewer("{not-json").await;
         assert!(result.is_err());
     }
 
@@ -800,7 +824,7 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
-            target_id: None,
+            target_name: None,
         }
     }
 }

@@ -1,20 +1,22 @@
 use crate::{
-    app::components::{DateInput, NoContent, Search, Table, TableDefinition, TextButton},
+    app::components::{Country, DateInput, NoContent, RevealContent, Search, Table, TableDefinition, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
-    services::{StreamHistoryProviderSummary, StreamHistoryQosSnapshot, StreamHistoryRecord},
+    services::{StreamHistoryProviderSummary, StreamHistoryQosSnapshot},
     utils::{format_bytes, format_duration, format_ts},
 };
 use futures::join;
-use shared::model::SearchRequest;
-use std::rc::Rc;
+use shared::model::{SearchRequest, StreamHistoryRecordDto};
+use std::{borrow::Cow, rc::Rc};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-const NUM_COLS: usize = 13;
+const NUM_COLS: usize = 14;
 const SUMMARY_NUM_COLS: usize = 6;
 const QOS_SUMMARY_NUM_COLS: usize = 8;
 const QOS_DETAIL_NUM_COLS: usize = 8;
+
+type HlsSessionKey<'a> = (Option<&'a str>, u64, Option<&'a str>, Option<u32>, Option<&'a str>);
 
 #[derive(Clone, PartialEq)]
 struct ProviderSummaryRow {
@@ -32,7 +34,7 @@ struct QosSummaryRow {
     input_name: String,
     provider_name: String,
     provider_id: u32,
-    target_id: u16,
+    target_name: String,
     item_type: String,
     window_24h: crate::services::StreamHistoryQosSnapshotWindow,
 }
@@ -55,43 +57,158 @@ fn ts_to_date_str(ts: i64) -> String {
 
 fn optional_record_text(value: Option<&str>) -> &str { value.unwrap_or("-") }
 
-fn record_matches(record: &StreamHistoryRecord, filter: &SearchRequest) -> bool {
+/// Returns true if the container indicates an HLS stream (HTTP-based segmented streaming).
+fn is_hls_container(container: Option<&str>) -> bool {
+    matches!(container, Some("mpegts") | Some("fmp4") | Some("hls"))
+}
+
+/// Aggregate HLS records by session key (source_addr + session_id + provider_name + virtual_id + input_name).
+/// HLS streams create many rapid connect/disconnect events for each segment. This function groups them
+/// into logical sessions, showing first connect, last disconnect, and summed bytes.
+///
+/// For non-HLS records, they are passed through unchanged.
+fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<StreamHistoryRecordDto>> {
+    use std::collections::HashMap;
+
+    // Separate HLS and non-HLS records
+    let (hls_records, non_hls): (Vec<_>, Vec<_>) =
+        records.iter().partition(|r| is_hls_container(r.container.as_deref()));
+
+    // Group HLS records by session key
+    let mut sessions: HashMap<HlsSessionKey, Vec<&StreamHistoryRecordDto>> = HashMap::new();
+    for record in hls_records {
+        let key = (
+            record.source_addr.as_deref(),
+            record.session_id,
+            record.provider_name.as_deref(),
+            record.virtual_id,
+            record.input_name.as_deref(),
+        );
+        sessions.entry(key).or_default().push(record.as_ref());
+    }
+
+    // For each session, create aggregated records
+    let mut aggregated = Vec::new();
+
+    // First, add all non-HLS records unchanged
+    aggregated.extend(non_hls.into_iter().cloned());
+
+    // Then, process each HLS session
+    for (_, session_records) in sessions {
+        if session_records.is_empty() {
+            continue;
+        }
+
+        // Sort by timestamp
+        let mut sorted = session_records.clone();
+        sorted.sort_by_key(|r| r.event_ts_utc);
+
+        // Find first connect and last disconnect
+        let first_connect = sorted.iter().find(|r| r.event_type == "connect");
+        let last_disconnect = sorted.iter().rfind(|r| r.event_type == "disconnect");
+
+        // Calculate session duration from first connect to last disconnect
+        let session_duration = if let (Some(fc), Some(ld)) = (first_connect, last_disconnect) {
+            let fc_ts = fc.event_ts_utc;
+            let ld_ts = ld.event_ts_utc;
+            if ld_ts > fc_ts {
+                Some(ld_ts - fc_ts)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Sum bytes from all records in session
+        let total_bytes: u64 = sorted.iter().filter_map(|r| r.bytes_sent).sum();
+
+        // Count intermediate failures (disconnects that are not the last one)
+        let intermediate_failure_count = sorted
+            .iter()
+            .filter(|r| r.event_type == "disconnect" && !std::ptr::eq(*r, last_disconnect.unwrap_or(&sorted[0])))
+            .count();
+
+        // Create aggregated connect record
+        if let Some(first) = first_connect {
+            let mut agg = (*first).clone();
+            agg.event_ts_utc = first.event_ts_utc;
+            agg.session_duration = session_duration;
+            agg.bytes_sent = Some(total_bytes);
+            // Mark the disconnect reason from last disconnect if available
+            if let Some(last) = last_disconnect {
+                agg.disconnect_reason = last.disconnect_reason.clone();
+            }
+            aggregated.push(Rc::new(agg));
+        }
+
+        // If there were intermediate failures, add a failure summary row
+        if intermediate_failure_count > 0 {
+            if let Some(first) = first_connect {
+                let mut failure_row = (*first).clone();
+                failure_row.event_type = String::from("failure");
+                failure_row.event_ts_utc = first.event_ts_utc + 1; // Just after first connect
+                failure_row.session_duration = None;
+                failure_row.bytes_sent = Some(total_bytes);
+                failure_row.disconnect_reason = Some(format!("{} intermediate failures", intermediate_failure_count));
+                aggregated.push(Rc::new(failure_row));
+            }
+        }
+
+        // Add disconnect record if it exists and is different from first connect
+        if let Some(last) = last_disconnect {
+            if !std::ptr::eq(last, first_connect.unwrap_or(&sorted[0])) {
+                let mut disc = (*last).clone();
+                disc.event_ts_utc = last.event_ts_utc;
+                disc.bytes_sent = Some(total_bytes);
+                aggregated.push(Rc::new(disc));
+            }
+        }
+    }
+
+    // Sort by timestamp descending (most recent first)
+    aggregated.sort_by_key(|b| std::cmp::Reverse(b.event_ts_utc));
+    aggregated
+}
+
+fn record_matches(record: &StreamHistoryRecordDto, filter: &SearchRequest) -> bool {
+    if matches!(filter, SearchRequest::Clear) {
+        return true;
+    }
+    let fields = [
+        // Cow::Owned(record.partition_day_utc.to_string()),
+        // Cow::Owned(record.virtual_id.as_ref().map_or_else(String::new, ToString::to_string)),
+        // Cow::Borrowed(record.input_name.as_deref().unwrap_or("")),
+        // Cow::Borrowed(record.video_codec.as_deref().unwrap_or("")),
+        // Cow::Borrowed(record.audio_codec.as_deref().unwrap_or("")),
+        // Cow::Borrowed(record.resolution.as_deref().unwrap_or("")),
+        // Cow::Borrowed(record.target_name.as_deref().unwrap_or("")),
+        // Cow::Borrowed(record.session_duration.as_deref().unwrap_or("")),
+        Cow::Owned(record.event_ts_utc.to_string()),
+        Cow::Borrowed(record.event_type.as_ref()),
+        Cow::Borrowed(record.title.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.group.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.api_username.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.provider_name.as_deref().unwrap_or("")),
+        Cow::Owned(record.provider_id.as_ref().map_or_else(String::new, ToString::to_string)),
+        Cow::Owned(record.bytes_sent.as_ref().map_or_else(String::new, ToString::to_string)),
+        Cow::Owned(record.first_byte_latency_ms.as_ref().map_or_else(String::new, ToString::to_string)),
+        Cow::Borrowed(record.user_agent.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.item_type.as_deref().map_or("", |s| s)),
+        Cow::Borrowed(record.container.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.disconnect_reason.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.source_addr.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.country.as_deref().unwrap_or("")),
+        Cow::Borrowed(record.cluster.as_deref().unwrap_or("")),
+    ];
     match filter {
         SearchRequest::Clear => true,
         SearchRequest::Text(text, _) => {
             let text_lower = text.to_lowercase();
-            let fields = [
-                record.api_username.as_deref().unwrap_or(""),
-                record.title.as_deref().unwrap_or(""),
-                record.provider_name.as_deref().unwrap_or(""),
-                record.user_agent.as_deref().unwrap_or(""),
-                record.item_type.as_deref().unwrap_or(""),
-                record.container.as_deref().unwrap_or(""),
-                record.video_codec.as_deref().unwrap_or(""),
-                record.audio_codec.as_deref().unwrap_or(""),
-                record.resolution.as_deref().unwrap_or(""),
-                record.source_addr.as_deref().unwrap_or(""),
-                record.disconnect_reason.as_deref().unwrap_or(""),
-                record.group.as_deref().unwrap_or(""),
-            ];
             fields.iter().any(|f| f.to_lowercase().contains(&text_lower))
         }
         SearchRequest::Regexp(pattern, _) => {
             if let Ok(re) = shared::model::REGEX_CACHE.get_or_compile(pattern) {
-                let fields = [
-                    record.api_username.as_deref().unwrap_or(""),
-                    record.title.as_deref().unwrap_or(""),
-                    record.provider_name.as_deref().unwrap_or(""),
-                    record.user_agent.as_deref().unwrap_or(""),
-                    record.item_type.as_deref().unwrap_or(""),
-                    record.container.as_deref().unwrap_or(""),
-                    record.video_codec.as_deref().unwrap_or(""),
-                    record.audio_codec.as_deref().unwrap_or(""),
-                    record.resolution.as_deref().unwrap_or(""),
-                    record.source_addr.as_deref().unwrap_or(""),
-                    record.disconnect_reason.as_deref().unwrap_or(""),
-                    record.group.as_deref().unwrap_or(""),
-                ];
                 fields.iter().any(|f| re.is_match(f))
             } else {
                 false
@@ -113,7 +230,7 @@ fn qos_snapshot_matches(snapshot: &StreamHistoryQosSnapshot, filter: &SearchRequ
             ]
             .iter()
             .any(|field| field.to_lowercase().contains(&text_lower))
-                || snapshot.target_id.to_string().contains(&text_lower)
+                || snapshot.target_name.to_lowercase().contains(&text_lower)
                 || snapshot.provider_id.to_string().contains(&text_lower)
                 || snapshot.virtual_id.to_string().contains(&text_lower)
         }
@@ -123,7 +240,7 @@ fn qos_snapshot_matches(snapshot: &StreamHistoryQosSnapshot, filter: &SearchRequ
                     || re.is_match(&snapshot.input_name)
                     || re.is_match(&snapshot.provider_name)
                     || re.is_match(&snapshot.item_type)
-                    || re.is_match(&snapshot.target_id.to_string())
+                    || re.is_match(&snapshot.target_name)
                     || re.is_match(&snapshot.provider_id.to_string())
                     || re.is_match(&snapshot.virtual_id.to_string())
             } else {
@@ -183,7 +300,7 @@ fn qos_summary_rows(snapshots: &[StreamHistoryQosSnapshot]) -> Vec<QosSummaryRow
             input_name: snapshot.input_name.clone(),
             provider_name: snapshot.provider_name.clone(),
             provider_id: snapshot.provider_id,
-            target_id: snapshot.target_id,
+            target_name: snapshot.target_name.clone(),
             item_type: snapshot.item_type.clone(),
             window_24h: snapshot.window_24h.clone(),
         })
@@ -198,7 +315,7 @@ fn qos_detail_rows(snapshot: &StreamHistoryQosSnapshot) -> Vec<QosDetailRow> {
 }
 
 fn has_any_stream_history_content(
-    records: &[Rc<StreamHistoryRecord>],
+    records: &[Rc<StreamHistoryRecordDto>],
     summaries: &[StreamHistoryProviderSummary],
     qos_snapshots: &[StreamHistoryQosSnapshot],
 ) -> bool {
@@ -211,56 +328,12 @@ pub fn StreamHistoryView() -> Html {
     let translate = use_translation();
     let from_date = use_state(|| Some(today_start_ts()));
     let to_date = use_state(|| Some(today_start_ts()));
-    let all_records = use_state(Vec::<Rc<StreamHistoryRecord>>::new);
+    let all_records = use_state(Vec::<Rc<StreamHistoryRecordDto>>::new);
     let summaries = use_state(Vec::<StreamHistoryProviderSummary>::new);
     let qos_snapshots = use_state(Vec::<StreamHistoryQosSnapshot>::new);
     let selected_qos_snapshot = use_state(|| None::<StreamHistoryQosSnapshot>);
     let search_filter = use_state(|| SearchRequest::Clear);
     let loading = use_state(|| false);
-
-    // Load on mount with default date range (today)
-    {
-        let services = services.clone();
-        let all_records = all_records.clone();
-        let summaries = summaries.clone();
-        let qos_snapshots = qos_snapshots.clone();
-        let selected_qos_snapshot = selected_qos_snapshot.clone();
-        let loading = loading.clone();
-        let from = *from_date;
-        let to = *to_date;
-        use_effect_with((), move |_| {
-            let from_str = from.map(ts_to_date_str);
-            let to_str = to.map(ts_to_date_str);
-            loading.set(true);
-            spawn_local(async move {
-                let (history_result, summary_result, qos_result) = join!(
-                    services.stream_history.get_history(from_str.as_deref(), to_str.as_deref()),
-                    services.stream_history.get_summary(from_str.as_deref(), to_str.as_deref()),
-                    services.stream_history.get_qos_snapshots()
-                );
-                match history_result {
-                    Ok(Some(records)) => all_records.set(records.into_iter().map(Rc::new).collect()),
-                    Ok(None) | Err(_) => all_records.set(Vec::new()),
-                }
-                match summary_result {
-                    Ok(Some(items)) => summaries.set(items),
-                    Ok(None) | Err(_) => summaries.set(Vec::new()),
-                }
-                match qos_result {
-                    Ok(Some(items)) => {
-                        selected_qos_snapshot.set(None);
-                        qos_snapshots.set(items);
-                    }
-                    Ok(None) | Err(_) => {
-                        selected_qos_snapshot.set(None);
-                        qos_snapshots.set(Vec::new());
-                    }
-                }
-                loading.set(false);
-            });
-            || ()
-        });
-    }
 
     let handle_from_change = {
         let from_date = from_date.clone();
@@ -320,14 +393,27 @@ pub fn StreamHistoryView() -> Html {
         })
     };
 
+    // Load on mount with default date range (today)
+    {
+        let handle_load = handle_load.clone();
+        use_effect_with((), move |_| {
+            handle_load.emit(String::new());
+            || ()
+        });
+    }
+
     let handle_search = {
         let search_filter = search_filter.clone();
         Callback::from(move |req: SearchRequest| search_filter.set(req))
     };
 
-    let filtered: Rc<Vec<Rc<StreamHistoryRecord>>> =
+    let filtered: Rc<Vec<Rc<StreamHistoryRecordDto>>> =
         use_memo(((*all_records).clone(), (*search_filter).clone()), |(records, filter)| {
-            records.iter().filter(|r| record_matches(r, filter)).cloned().collect::<Vec<_>>()
+            let mut filtered: Vec<Rc<StreamHistoryRecordDto>> =
+                records.iter().filter(|r| record_matches(r, filter)).cloned().collect();
+            filtered.sort_by(|left, right| left.event_ts_utc.cmp(&right.event_ts_utc));
+            // Aggregate HLS records to reduce flooding from rapid connect/disconnect cycles
+            aggregate_hls_records(&filtered)
         });
     let has_any_content = has_any_stream_history_content(&all_records, &summaries, &qos_snapshots);
 
@@ -359,7 +445,7 @@ pub fn StreamHistoryView() -> Html {
     };
 
     let translate_for_table = translate.clone();
-    let table_def: Rc<TableDefinition<StreamHistoryRecord>> = use_memo(filtered.clone(), move |filtered| {
+    let table_def: Rc<TableDefinition<StreamHistoryRecordDto>> = use_memo(filtered.clone(), move |filtered| {
         let translate = translate_for_table.clone();
         TableDefinition {
             items: Some(filtered.clone()),
@@ -371,89 +457,98 @@ pub fn StreamHistoryView() -> Html {
                     0 => translate.t("LABEL.STREAM_HISTORY_TIME"),
                     1 => translate.t("LABEL.STREAM_HISTORY_EVENT"),
                     2 => translate.t("LABEL.USERNAME"),
-                    3 => translate.t("LABEL.TITLE"),
-                    4 => translate.t("LABEL.PROVIDER"),
-                    5 => translate.t("LABEL.DURATION"),
-                    6 => translate.t("LABEL.STREAM_HISTORY_BYTES"),
-                    7 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
-                    8 => translate.t("LABEL.USER_AGENT"),
-                    9 => translate.t("LABEL.TYPE"),
-                    10 => translate.t("LABEL.CONTAINER"),
-                    11 => translate.t("LABEL.STREAM_HISTORY_REASON"),
-                    12 => translate.t("LABEL.STREAM_HISTORY_IP"),
+                    3 => translate.t("LABEL.GROUP"),
+                    4 => translate.t("LABEL.TITLE"),
+                    5 => translate.t("LABEL.PROVIDER"),
+                    6 => translate.t("LABEL.DURATION"),
+                    7 => translate.t("LABEL.STREAM_HISTORY_BYTES"),
+                    8 => translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE"),
+                    9 => translate.t("LABEL.USER_AGENT"),
+                    10 => translate.t("LABEL.TYPE"),
+                    11 => translate.t("LABEL.CONTAINER"),
+                    12 => translate.t("LABEL.STREAM_HISTORY_REASON"),
+                    13 => translate.t("LABEL.STREAM_HISTORY_IP"),
+                    14 => translate.t("LABEL.COUNTRY"),
                     _ => String::new(),
                 };
                 html! { <span>{label}</span> }
             }),
-            render_data_cell: Callback::from(|(_, col, record): (usize, usize, Rc<StreamHistoryRecord>)| match col {
-                0 => html! { <span class="tp__stream-history__cell--time">{format_ts(record.event_ts_utc)}</span> },
-                1 => {
-                    let is_connect = record.event_type == "connect";
-                    let badge_class = if is_connect {
-                        "tp__stream-history__badge tp__stream-history__badge--connect"
-                    } else {
-                        "tp__stream-history__badge tp__stream-history__badge--disconnect"
-                    };
-                    html! { <span class={badge_class}>{record.event_type.clone()}</span> }
-                }
-                2 => html! { <span>{record.api_username.as_deref().unwrap_or("-")}</span> },
-                3 => {
-                    html! { <span class="tp__stream-history__cell--title">{record.title.as_deref().unwrap_or("-")}</span> }
-                }
-                4 => html! {
-                    <span>
-                        {
-                            match (record.provider_name.as_deref(), record.provider_id) {
-                                (Some(name), Some(id)) => format!("{name} (#{id})"),
-                                (Some(name), None) => name.to_string(),
-                                (None, Some(id)) => format!("#{id}"),
-                                (None, None) => String::from("-"),
+            render_data_cell: Callback::from(
+                |(_, col, record): (usize, usize, Rc<StreamHistoryRecordDto>)| match col {
+                    0 => html! { <span class="tp__stream-history__cell--time">{format_ts(record.event_ts_utc)}</span> },
+                    1 => {
+                        let is_connect = record.event_type == "connect";
+                        let badge_class = if is_connect {
+                            "tp__stream-history__badge tp__stream-history__badge--connect"
+                        } else {
+                            "tp__stream-history__badge tp__stream-history__badge--disconnect"
+                        };
+                        html! { <span class={badge_class}>{record.event_type.clone()}</span> }
+                    }
+                    2 => html! { <span>{record.api_username.as_deref().unwrap_or("-")}</span> },
+                    3 => {
+                        html! { <span class="tp__stream-history__cell--title">{record.title.as_deref().unwrap_or("-")}</span> }
+                    }
+                    4 => html! {
+                        <span>
+                            {
+                                match (record.provider_name.as_deref(), record.provider_id) {
+                                    (Some(name), Some(id)) => format!("{name} (#{id})"),
+                                    (Some(name), None) => name.to_string(),
+                                    (None, Some(id)) => format!("#{id}"),
+                                    (None, None) => String::from("-"),
+                                }
                             }
-                        }
-                    </span>
+                        </span>
+                    },
+                    5 => html! {
+                        <span class="tp__stream-history__cell--mono">
+                            {record.session_duration.map(format_duration).unwrap_or_default()}
+                        </span>
+                    },
+                    6 => html! {
+                        <span class="tp__stream-history__cell--mono">
+                            {record.bytes_sent.map(format_bytes).unwrap_or_default()}
+                        </span>
+                    },
+                    7 => html! {
+                        <span class="tp__stream-history__cell--mono">
+                            {record.first_byte_latency_ms.map(|v| v.to_string()).unwrap_or_default()}
+                        </span>
+                    },
+                    8 => html! {
+                        <span class="tp__stream-history__cell--title">
+                        <RevealContent preview={record.user_agent.as_deref().map(|ua| html! {ua})}>{record.user_agent.as_deref()}</RevealContent>
+                        </span>
+                    },
+                    9 => html! {
+                        <span>
+                            {optional_record_text(record.item_type.as_deref())}
+                        </span>
+                    },
+                    10 => html! {
+                        <span>
+                            {optional_record_text(record.container.as_deref())}
+                        </span>
+                    },
+                    11 => html! {
+                        <span>
+                            {record.disconnect_reason.as_deref().unwrap_or("-").replace('_', " ")}
+                        </span>
+                    },
+                    12 => html! {
+                        <span class="tp__stream-history__cell--ip">
+                            {record.source_addr.as_deref().unwrap_or("-")}
+                        </span>
+                    },
+                    13 => html! {
+                        <span class="tp__stream-history__cell--country">
+                            <Country country_code={record.country.clone()} />
+                        </span>
+                    },
+                    _ => html! {},
                 },
-                5 => html! {
-                    <span class="tp__stream-history__cell--mono">
-                        {record.session_duration.map(format_duration).unwrap_or_default()}
-                    </span>
-                },
-                6 => html! {
-                    <span class="tp__stream-history__cell--mono">
-                        {record.bytes_sent.map(format_bytes).unwrap_or_default()}
-                    </span>
-                },
-                7 => html! {
-                    <span class="tp__stream-history__cell--mono">
-                        {record.first_byte_latency_ms.map(|v| v.to_string()).unwrap_or_default()}
-                    </span>
-                },
-                8 => html! {
-                    <span class="tp__stream-history__cell--title">
-                        {optional_record_text(record.user_agent.as_deref())}
-                    </span>
-                },
-                9 => html! {
-                    <span>
-                        {optional_record_text(record.item_type.as_deref())}
-                    </span>
-                },
-                10 => html! {
-                    <span>
-                        {optional_record_text(record.container.as_deref())}
-                    </span>
-                },
-                11 => html! {
-                    <span>
-                        {record.disconnect_reason.as_deref().unwrap_or("-").replace('_', " ")}
-                    </span>
-                },
-                12 => html! {
-                    <span class="tp__stream-history__cell--ip">
-                        {record.source_addr.as_deref().unwrap_or("-")}
-                    </span>
-                },
-                _ => html! {},
-            }),
+            ),
         }
     });
     let translate_for_summary = translate.clone();
@@ -529,7 +624,7 @@ pub fn StreamHistoryView() -> Html {
                         </button>
                     },
                     1 => html! { <span>{format!("{} (#{})", row.provider_name, row.provider_id)}</span> },
-                    2 => html! { <span>{row.target_id}</span> },
+                    2 => html! { <span>{row.target_name.clone()}</span> },
                     3 => html! { <span>{row.item_type.clone()}</span> },
                     4 => {
                         html! { <span>{format!("{} ({})", row.window_24h.score, qos_score_label(row.window_24h.score))}</span> }
@@ -638,7 +733,7 @@ pub fn StreamHistoryView() -> Html {
                     }
                     <div class="tp__stream-history__summary">
                         <h2>{translate.t("LABEL.STREAM_HISTORY")}</h2>
-                        <Table::<StreamHistoryRecord> definition={table_def} />
+                        <Table::<StreamHistoryRecordDto> definition={table_def} />
                     </div>
                 }
             </div>
@@ -676,7 +771,7 @@ mod tests {
         StreamHistoryQosSnapshot {
             stream_identity_key: stream_identity_key.to_string(),
             input_name: "input-a".to_string(),
-            target_id: 1,
+            target_name: "target-a".to_string(),
             provider_name: provider_name.to_string(),
             provider_id: 10,
             virtual_id: 99,
@@ -708,7 +803,7 @@ mod tests {
         let snapshot = StreamHistoryQosSnapshot {
             stream_identity_key: "stream-a".to_string(),
             input_name: "input-a".to_string(),
-            target_id: 1,
+            target_name: "target-a".to_string(),
             provider_name: "provider-a".to_string(),
             provider_id: 10,
             virtual_id: 99,

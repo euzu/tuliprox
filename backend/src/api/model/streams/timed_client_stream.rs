@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::{sleep_until, Instant, Sleep};
+use crate::model::DisconnectReason;
 
 enum TimeoutAction {
     Kick {
@@ -88,7 +89,7 @@ impl Stream for TimedClientStream {
                             &addr,
                             virtual_id,
                             kick_secs,
-                            crate::repository::DisconnectReason::Timeout,
+                            DisconnectReason::Timeout,
                         )
                         .await;
                 });

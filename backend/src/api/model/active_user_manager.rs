@@ -2,7 +2,6 @@ use crate::{
     api::model::{active_provider_manager::ConnectionKind, ActiveProviderManager, CustomVideoStreamType, EventManager, EventMessage},
     auth::Fingerprint,
     model::{Config, ProxyUserCredentials},
-    repository::utc_day_from_secs,
     utils::{debug_if_enabled, GeoIp},
 };
 use arc_swap::ArcSwapOption;
@@ -32,6 +31,7 @@ use std::{
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use crate::api::model::connection_manager::CleanupEvent;
 use tokio_util::sync::CancellationToken;
+use crate::utils::utc_day_from_secs;
 
 const USER_GC_TTL: u64 = 900; // 15 Min
 const USER_CON_TTL: u64 = 1_800; // 30 minutes
@@ -320,7 +320,7 @@ pub struct ActiveUserConnectionParams<'a> {
     pub priority: i8,
     pub soft_priority: i8,
     pub fingerprint: &'a Fingerprint,
-    pub provider: &'a str,
+    pub provider: Arc<str>,
     pub stream_channel: &'a StreamChannel,
     pub user_agent: Cow<'a, str>,
     pub session_token: Option<&'a str>,
@@ -980,7 +980,7 @@ impl ActiveUserManager {
                     // IMPORTANT: `resolve_disconnect_reason` in connection_manager.rs parses
                     // `channel.title` back via `CustomVideoStreamType::from_str` to determine QoS
                     // disconnect reasons. If these values change, update that function too.
-                    stream.provider = String::from("tuliprox");
+                    stream.provider = "tuliprox".intern();
                     stream.channel.title = video_type.to_string().into();
                     stream.channel.group = "".intern();
                     stream.channel.technical = Some(Self::custom_stream_technical_info());
@@ -1084,7 +1084,7 @@ impl ActiveUserManager {
                     stream_info.client_ip.clone_from(&client_ip);
                     stream_info.country_code = self.lookup_country(&client_ip);
                     stream_info.channel = stream_channel.clone();
-                    stream_info.provider = provider.to_string();
+                    stream_info.provider = provider.clone();
                     stream_info.user_agent.clone_from(&user_agent_string);
                     
                     if let Some(started_at) = session_started_at {
@@ -2121,7 +2121,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(1001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-1"),
@@ -2145,7 +2145,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-b",
+                provider: "provider-b".intern(),
                 stream_channel: &test_channel(1002),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-2"),
@@ -2185,7 +2185,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &at_limit_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(1010),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-limit"),
@@ -2206,7 +2206,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &over_limit_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(1011),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-over-1"),
@@ -2226,7 +2226,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &second_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(1012),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-over-2"),
@@ -2263,7 +2263,7 @@ mod tests {
                     priority: 0,
                     soft_priority: 0,
                     fingerprint: &shared_fp,
-                    provider: "provider-a",
+                    provider: "provider-a".intern(),
                     stream_channel: &test_channel(channel_id),
                     user_agent: Cow::Borrowed("ua"),
                     session_token: Some(token),
@@ -2282,7 +2282,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &unique_fp,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(1033),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-33"),
@@ -2320,7 +2320,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &first_fp,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(1041),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-41"),
@@ -2338,7 +2338,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &second_fp,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(1042),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-42"),
@@ -2389,7 +2389,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_adaptive_channel(2014),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-adaptive"),
@@ -2458,7 +2458,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &kicked_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(2015),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-kicked"),
@@ -2475,7 +2475,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &survivor_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(2016),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-survivor"),
@@ -2523,7 +2523,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(2017),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-grace"),
@@ -2578,7 +2578,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &first,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(2001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-hls"),
@@ -2602,7 +2602,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &second,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(2001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-hls"),
@@ -2655,7 +2655,7 @@ mod tests {
                 priority: 8,
                 soft_priority: 8,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(2002),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-prio"),
@@ -2672,7 +2672,7 @@ mod tests {
                 priority: -7,
                 soft_priority: 8,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(2002),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-prio"),
@@ -2706,7 +2706,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(3001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-meter"),
@@ -2727,7 +2727,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-b",
+                provider: "provider-b".intern(),
                 stream_channel: &test_channel(3002),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-meter"),
@@ -2742,7 +2742,7 @@ mod tests {
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].uid, 11);
         assert_eq!(streams[0].meter_uid, 202);
-        assert_eq!(streams[0].provider, "provider-b");
+        assert_eq!(streams[0].provider.as_ref(), "provider-b");
         assert_eq!(streams[0].channel.virtual_id, 3002);
     }
 
@@ -2786,7 +2786,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(4001)
@@ -2820,7 +2820,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &next_fingerprint,
-                provider: "provider-b",
+                provider: "provider-b".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveDash,
                     ..test_channel(4002)
@@ -2880,7 +2880,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(5001)
@@ -2934,7 +2934,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(6001)
@@ -3010,7 +3010,7 @@ mod tests {
                 priority: -1,
                 soft_priority: 9,
                 fingerprint: &normal_fp,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(6002)
@@ -3030,7 +3030,7 @@ mod tests {
                 priority: -5,
                 soft_priority: 9,
                 fingerprint: &soft_fp,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(6003),
                 user_agent: Cow::Borrowed("ua-soft"),
                 session_token: None,
@@ -3101,7 +3101,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fp_a,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(7001)
@@ -3125,7 +3125,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fp_b,
-                provider: "provider-b",
+                provider: "provider-b".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveDash,
                     ..test_channel(7002)
@@ -3185,7 +3185,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(8001)
@@ -3225,7 +3225,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(8002)
@@ -3278,7 +3278,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(8003)
@@ -3361,7 +3361,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(8004)
@@ -3433,7 +3433,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(8004)
@@ -3518,7 +3518,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveHls,
                     ..test_channel(8005)
@@ -3558,7 +3558,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &next_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::LiveDash,
                     ..test_channel(8005)
@@ -3571,7 +3571,7 @@ mod tests {
 
         assert_eq!(second.previous_session_id, Some((forced_old_ts << 32) | u64::from(first.uid)));
         assert!(second.ts > forced_old_ts);
-        assert_eq!(crate::repository::utc_day_from_secs(second.ts), crate::repository::utc_day_from_secs(current_time_secs()));
+        assert_eq!(utc_day_from_secs(second.ts), utc_day_from_secs(current_time_secs()));
     }
 
     #[tokio::test]
@@ -3627,7 +3627,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &stale_fp,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(9201),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: None,
@@ -3645,7 +3645,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fresh_fp,
-                provider: "provider-b",
+                provider: "provider-b".intern(),
                 stream_channel: &test_channel(9202),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: None,
@@ -3761,7 +3761,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_adaptive_channel(7777),
                 user_agent: Cow::Borrowed("player/1.0"),
                 session_token: Some("tok-hls-ts"),
@@ -3835,7 +3835,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &old_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::Live,
                     ..test_channel(9101)
@@ -3903,7 +3903,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &base_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::Video,
                     ..test_channel(9102)
@@ -3926,7 +3926,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &range_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &StreamChannel {
                     item_type: PlaylistItemType::Video,
                     ..test_channel(9102)
@@ -4000,7 +4000,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_channel(9001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: None,
@@ -4163,7 +4163,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &first_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_adaptive_channel(9203),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-normal"),
@@ -4188,7 +4188,7 @@ mod tests {
                 priority: 0,
                 soft_priority: 0,
                 fingerprint: &second_fingerprint,
-                provider: "provider-a",
+                provider: "provider-a".intern(),
                 stream_channel: &test_adaptive_channel(9204),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-soft"),

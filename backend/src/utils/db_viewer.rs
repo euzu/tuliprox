@@ -215,7 +215,7 @@ fn exit_app(code: i32) {
 mod tests {
     use super::dump_qos_snapshot_db;
     use tempfile::tempdir;
-
+    use shared::utils::Internable;
     use crate::repository::{BPlusTree, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow};
 
     #[test]
@@ -226,12 +226,12 @@ mod tests {
         let mut tree = BPlusTree::<String, QosSnapshotRecord>::new();
         let record = QosSnapshotRecord {
             stream_identity_key: "stream-a".to_string(),
-            input_name: "input-a".to_string(),
-            target_id: 11,
-            provider_name: "provider-a".to_string(),
+            input_name: "input-a".intern(),
+            target_name: "target-a".intern(),
+            provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".to_string(),
+            item_type: "live".intern(),
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_001,
             window_24h: QosSnapshotWindow {

@@ -46,7 +46,7 @@ pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
 }
 
 pub fn is_background_transfer_stream(stream: &StreamInfo) -> bool {
-    stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP && stream.provider == BACKGROUND_TRANSFER_PROVIDER
+    stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP && stream.provider.as_ref() == BACKGROUND_TRANSFER_PROVIDER
 }
 
 pub fn filter_visible_streams(
@@ -226,7 +226,7 @@ mod tests {
                 shared_stream_id: None,
                 technical: None,
             },
-            provider: "provider".to_string(),
+            provider: "provider".intern(),
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             client_ip: "127.0.0.1:1234".to_string(),
             user_agent: String::new(),

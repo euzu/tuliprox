@@ -4,7 +4,6 @@ use crate::{
         EventMessage, ProviderHandle, SharedStreamManager,
     },
     model::StreamHistoryConfig,
-    repository::{ConnectFailureReason, DisconnectQos, DisconnectReason, FailureStage, StreamHistoryRecord},
     auth::Fingerprint,
     utils::debug_if_enabled,
 };
@@ -28,6 +27,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, Notify};
+use crate::model::{ConnectFailureReason, DisconnectQos, DisconnectReason, FailureStage, StreamHistoryRecord};
 use crate::repository::{recover_pending_files, StreamHistoryWriter};
 
 // Maximum number of deferred cleanup actions buffered before producers must wait/drop.
@@ -537,7 +537,7 @@ pub struct ConnectionParams<'a> {
     pub priority: i8,
     pub soft_priority: i8,
     pub fingerprint: &'a Fingerprint,
-    pub provider: &'a str,
+    pub provider: Arc<str>,
     pub stream_channel: &'a StreamChannel,
     pub user_agent: Cow<'a, str>,
     pub session_token: Option<&'a str>,
@@ -599,6 +599,11 @@ impl ConnectionManager {
         }
         let new_writer = build_history_writer(config);
         self.history_writer.store(new_writer);
+    }
+
+    /// Returns a reference to the history writer.
+    pub(crate) fn history_writer(&self) -> &Arc<ArcSwapOption<StreamHistoryWriter>> {
+        &self.history_writer
     }
 
     fn spawn_socket_activity_worker(
@@ -920,9 +925,10 @@ impl ConnectionManager {
     }
 
     pub fn record_connect_failed(&self, info: &StreamInfo, reason: ConnectFailureReason, failure_stage: FailureStage) {
-        self.record_connect_failed_with_provider_failure(info, reason, failure_stage, None, None);
+        self.record_connect_failed_with_provider_failure(info, reason, failure_stage, None, None, None);
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub fn record_connect_failed_with_provider_failure(
         &self,
         info: &StreamInfo,
@@ -930,6 +936,7 @@ impl ConnectionManager {
         failure_stage: FailureStage,
         provider_http_status: Option<u16>,
         provider_error_class: Option<&str>,
+        target_name: Option<Arc<str>>,
     ) {
         let guard = self.history_writer.load();
         let Some(writer) = guard.as_ref() else { return };
@@ -939,6 +946,7 @@ impl ConnectionManager {
             reason,
             attempt_uid,
             failure_stage,
+            target_name.clone(),
         )
         .with_provider_failure(provider_http_status, provider_error_class));
     }
@@ -1042,7 +1050,7 @@ fn build_history_writer(config: Option<&StreamHistoryConfig>) -> Option<Arc<Stre
 /// are wire-format identifiers shared with Serialize/Deserialize and the REST API.
 /// If they ever change, update `CustomVideoStreamType::fmt`/`from_str` and this function together.
 fn resolve_disconnect_reason(provider_end_reason: u8, stream_info: &StreamInfo) -> DisconnectReason {
-    if stream_info.provider == "tuliprox" {
+    if stream_info.provider.as_ref() == "tuliprox" {
         if let Ok(video_type) = CustomVideoStreamType::from_str(&stream_info.channel.title) {
             match video_type {
                 CustomVideoStreamType::LowPriorityPreempted => return DisconnectReason::Preempted,
@@ -1140,7 +1148,7 @@ mod tests {
             shared_stream_id: None,
             technical: None,
         };
-        StreamInfo::new(0, 0, "test", &addr, "127.0.0.1", provider, channel, String::new(), None, None)
+        StreamInfo::new(0, 0, "test", &addr, "127.0.0.1", provider.intern(), channel, String::new(), None, None)
     }
 
     fn create_test_app_config() -> AppConfig {

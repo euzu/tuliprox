@@ -275,7 +275,8 @@ pub struct StreamInfo {
     pub meter_uid: u32,
     pub username: String,
     pub channel: StreamChannel,
-    pub provider: String,
+    #[serde(default, with = "arc_str_serde")]
+    pub provider: Arc<str>,
     pub addr: SocketAddr,
     pub client_ip: String,
     #[serde(default)]
@@ -302,7 +303,7 @@ impl StreamInfo {
         username: &str,
         addr: &SocketAddr,
         client_ip: &str,
-        provider: &str,
+        provider: Arc<str>,
         stream_channel: StreamChannel,
         user_agent: String,
         country_code: Option<String>,
@@ -314,7 +315,7 @@ impl StreamInfo {
             meter_uid,
             username: username.to_string(),
             channel: stream_channel,
-            provider: provider.to_string(),
+            provider,
             addr: *addr,
             client_ip: client_ip.to_string(),
             user_agent,

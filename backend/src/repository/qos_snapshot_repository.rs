@@ -1,9 +1,10 @@
+use crate::utils::arc_str_serde;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-
+use std::sync::Arc;
 use crate::repository::{BPlusTree, BPlusTreeUpdate, FlushPolicy};
 
 const SNAPSHOT_FILE_NAME: &str = "qos_snapshot.db";
@@ -54,12 +55,16 @@ pub struct QosSnapshotDailyBucket {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QosSnapshotRecord {
     pub stream_identity_key: String,
-    pub input_name: String,
-    pub target_id: u16,
-    pub provider_name: String,
+    #[serde(with = "arc_str_serde")]
+    pub input_name: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub target_name: Arc<str>,
+    #[serde(with = "arc_str_serde")]
+    pub provider_name: Arc<str>,
     pub provider_id: u32,
     pub virtual_id: u32,
-    pub item_type: String,
+    #[serde(with = "arc_str_serde")]
+    pub item_type: Arc<str>,
     pub updated_at: u64,
     pub last_event_at: u64,
     pub window_24h: QosSnapshotWindow,
@@ -206,7 +211,7 @@ mod tests {
     use std::path::Path;
 
     use tempfile::tempdir;
-
+    use shared::utils::Internable;
     use super::{QosAggregationCheckpoint, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow};
 
     #[test]
@@ -216,12 +221,12 @@ mod tests {
 
         let snapshot = QosSnapshotRecord {
             stream_identity_key: "stream-a".to_string(),
-            input_name: "input-a".to_string(),
-            target_id: 11,
-            provider_name: "provider-a".to_string(),
+            input_name: "input-a".intern(),
+            target_name: "target-a".intern(),
+            provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".to_string(),
+            item_type: "live".intern(),
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow {
@@ -262,12 +267,12 @@ mod tests {
 
         let snapshot = QosSnapshotRecord {
             stream_identity_key: "stream-a".to_string(),
-            input_name: "input-a".to_string(),
-            target_id: 11,
-            provider_name: "provider-a".to_string(),
+            input_name: "input-a".intern(),
+            target_name: "target-a".intern(),
+            provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".to_string(),
+            item_type: "live".intern(),
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow::default(),
@@ -299,12 +304,12 @@ mod tests {
 
         let snapshot = QosSnapshotRecord {
             stream_identity_key: "stream-a".to_string(),
-            input_name: "input-a".to_string(),
-            target_id: 11,
-            provider_name: "provider-a".to_string(),
+            input_name: "input-a".intern(),
+            target_name: "target-a".intern(),
+            provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".to_string(),
+            item_type: "live".intern(),
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow {
