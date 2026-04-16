@@ -234,7 +234,8 @@ mod tests {
     };
     use std::net::SocketAddr;
     use std::io::Cursor;
-    use crate::model::{ConnectFailureReason, DisconnectQos, DisconnectReason, EventType, FailureStage, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
+    use shared::model::{ConnectFailureReason, FailureStage, DisconnectReason, StreamHistoryEventType};
+    use crate::model::{DisconnectQos, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
     use crate::utils::encode_base64_hash;
 
     fn sample_file_header() -> FileHeaderBody {
@@ -272,7 +273,7 @@ mod tests {
     fn sample_connect_record() -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: 1_742_600_001,
             partition_day_utc: "2026-03-22".to_string(),
             session_id: 999,
@@ -282,7 +283,7 @@ mod tests {
             provider_username: Some("acme_user".to_string()),
             input_name: Some("provider-input".intern()),
             virtual_id: Some(1234),
-            item_type: Some("live".intern()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some("News Channel".to_string()),
             group: Some("News".to_string()),
             country: Some("DE".to_string()),
@@ -319,7 +320,7 @@ mod tests {
     fn sample_disconnect_record(session_id: u64) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Disconnect,
+            event_type: StreamHistoryEventType::Disconnect,
             event_ts_utc: 1_742_603_601,
             partition_day_utc: "2026-03-22".to_string(),
             session_id,
@@ -329,7 +330,7 @@ mod tests {
             provider_username: Some("acme_user".to_string()),
             input_name: Some("provider-input".intern()),
             virtual_id: Some(1234),
-            item_type: Some("live".intern()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some("News Channel".to_string()),
             group: Some("News".to_string()),
             country: Some("DE".to_string()),
@@ -433,7 +434,7 @@ mod tests {
         let original = sample_connect_record();
         let bytes = serialize_named(&original).expect("serialize");
         let decoded: StreamHistoryRecord = deserialize_named(&bytes).expect("deserialize");
-        assert_eq!(decoded.event_type, EventType::Connect);
+        assert_eq!(decoded.event_type, StreamHistoryEventType::Connect);
         assert_eq!(decoded.session_id, 999);
         assert_eq!(decoded.api_username.as_deref(), Some("alice"));
         assert!(decoded.disconnect_ts_utc.is_none());
@@ -446,8 +447,8 @@ mod tests {
         connect.session_id = session_id;
         let disconnect = sample_disconnect_record(session_id);
         assert_eq!(connect.session_id, disconnect.session_id);
-        assert_eq!(connect.event_type, EventType::Connect);
-        assert_eq!(disconnect.event_type, EventType::Disconnect);
+        assert_eq!(connect.event_type, StreamHistoryEventType::Connect);
+        assert_eq!(disconnect.event_type, StreamHistoryEventType::Disconnect);
         assert_eq!(disconnect.session_duration, Some(3600));
     }
 
@@ -505,7 +506,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(record.event_type, EventType::ConnectFailed);
+        assert_eq!(record.event_type, StreamHistoryEventType::ConnectFailed);
         assert_eq!(
             record.connect_failure_reason,
             Some(ConnectFailureReason::ProviderConnectionsExhausted)

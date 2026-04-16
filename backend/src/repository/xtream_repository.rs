@@ -1664,7 +1664,7 @@ mod tests {
         XtreamPlaylistItem {
             virtual_id: provider_id,
             provider_id,
-            name: "live".intern(),
+            name: "Live".intern(),
             logo: "".intern(),
             logo_small: "".intern(),
             group: "group".intern(),

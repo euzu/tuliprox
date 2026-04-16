@@ -27,7 +27,7 @@ use shared::{
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
 use std::sync::Arc;
-use crate::model::ConnectFailureReason;
+use shared::model::ConnectFailureReason;
 
 async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoResponse + Send {
     api_req.log_sanitized("m3u_api");

@@ -6,12 +6,12 @@ use crate::{
     utils::{format_bytes, format_duration, format_ts},
 };
 use futures::join;
-use shared::model::{SearchRequest, StreamHistoryRecordDto};
+use shared::model::{DisconnectReason, SearchRequest, StreamHistoryEventType, StreamHistoryRecordDto};
 use std::{borrow::Cow, rc::Rc};
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-const NUM_COLS: usize = 14;
+const NUM_COLS: usize = 15;
 const SUMMARY_NUM_COLS: usize = 6;
 const QOS_SUMMARY_NUM_COLS: usize = 8;
 const QOS_DETAIL_NUM_COLS: usize = 8;
@@ -55,7 +55,8 @@ fn ts_to_date_str(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0).map_or_else(String::new, |dt| dt.format("%Y-%m-%d").to_string())
 }
 
-fn optional_record_text(value: Option<&str>) -> &str { value.unwrap_or("-") }
+fn optional_record_text_str(value: Option<&str>) -> &str { value.unwrap_or("-") }
+fn optional_record_text(value: Option<String>) -> String { value.unwrap_or_else(|| String::from("-")) }
 
 /// Returns true if the container indicates an HLS stream (HTTP-based segmented streaming).
 fn is_hls_container(container: Option<&str>) -> bool {
@@ -104,8 +105,8 @@ fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<Strea
         sorted.sort_by_key(|r| r.event_ts_utc);
 
         // Find first connect and last disconnect
-        let first_connect = sorted.iter().find(|r| r.event_type == "connect");
-        let last_disconnect = sorted.iter().rfind(|r| r.event_type == "disconnect");
+        let first_connect = sorted.iter().find(|r| r.event_type == StreamHistoryEventType::Connect);
+        let last_disconnect = sorted.iter().rfind(|r| r.event_type == StreamHistoryEventType::Disconnect);
 
         // Calculate session duration from first connect to last disconnect
         let session_duration = if let (Some(fc), Some(ld)) = (first_connect, last_disconnect) {
@@ -126,7 +127,10 @@ fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<Strea
         // Count intermediate failures (disconnects that are not the last one)
         let intermediate_failure_count = sorted
             .iter()
-            .filter(|r| r.event_type == "disconnect" && !std::ptr::eq(*r, last_disconnect.unwrap_or(&sorted[0])))
+            .filter(|r| {
+                r.event_type == StreamHistoryEventType::Disconnect
+                    && !std::ptr::eq(*r, last_disconnect.unwrap_or(&sorted[0]))
+            })
             .count();
 
         // Create aggregated connect record
@@ -137,7 +141,7 @@ fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<Strea
             agg.bytes_sent = Some(total_bytes);
             // Mark the disconnect reason from last disconnect if available
             if let Some(last) = last_disconnect {
-                agg.disconnect_reason = last.disconnect_reason.clone();
+                agg.disconnect_reason = last.disconnect_reason;
             }
             aggregated.push(Rc::new(agg));
         }
@@ -146,11 +150,12 @@ fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<Strea
         if intermediate_failure_count > 0 {
             if let Some(first) = first_connect {
                 let mut failure_row = (*first).clone();
-                failure_row.event_type = String::from("failure");
+                failure_row.event_type = StreamHistoryEventType::Failure;
                 failure_row.event_ts_utc = first.event_ts_utc + 1; // Just after first connect
                 failure_row.session_duration = None;
                 failure_row.bytes_sent = Some(total_bytes);
-                failure_row.disconnect_reason = Some(format!("{} intermediate failures", intermediate_failure_count));
+                failure_row.disconnect_reason =
+                    Some(DisconnectReason::IntermediateFailures(intermediate_failure_count));
                 aggregated.push(Rc::new(failure_row));
             }
         }
@@ -185,7 +190,7 @@ fn record_matches(record: &StreamHistoryRecordDto, filter: &SearchRequest) -> bo
         // Cow::Borrowed(record.target_name.as_deref().unwrap_or("")),
         // Cow::Borrowed(record.session_duration.as_deref().unwrap_or("")),
         Cow::Owned(record.event_ts_utc.to_string()),
-        Cow::Borrowed(record.event_type.as_ref()),
+        Cow::Owned(record.event_type.to_string()),
         Cow::Borrowed(record.title.as_deref().unwrap_or("")),
         Cow::Borrowed(record.group.as_deref().unwrap_or("")),
         Cow::Borrowed(record.api_username.as_deref().unwrap_or("")),
@@ -194,9 +199,9 @@ fn record_matches(record: &StreamHistoryRecordDto, filter: &SearchRequest) -> bo
         Cow::Owned(record.bytes_sent.as_ref().map_or_else(String::new, ToString::to_string)),
         Cow::Owned(record.first_byte_latency_ms.as_ref().map_or_else(String::new, ToString::to_string)),
         Cow::Borrowed(record.user_agent.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.item_type.as_deref().map_or("", |s| s)),
+        Cow::Owned(record.item_type.as_ref().map_or_else(String::new, ToString::to_string)),
         Cow::Borrowed(record.container.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.disconnect_reason.as_deref().unwrap_or("")),
+        Cow::Owned(record.disconnect_reason.as_ref().map_or_else(String::new, ToString::to_string)),
         Cow::Borrowed(record.source_addr.as_deref().unwrap_or("")),
         Cow::Borrowed(record.country.as_deref().unwrap_or("")),
         Cow::Borrowed(record.cluster.as_deref().unwrap_or("")),
@@ -409,11 +414,11 @@ pub fn StreamHistoryView() -> Html {
 
     let filtered: Rc<Vec<Rc<StreamHistoryRecordDto>>> =
         use_memo(((*all_records).clone(), (*search_filter).clone()), |(records, filter)| {
-            let mut filtered: Vec<Rc<StreamHistoryRecordDto>> =
-                records.iter().filter(|r| record_matches(r, filter)).cloned().collect();
-            filtered.sort_by(|left, right| left.event_ts_utc.cmp(&right.event_ts_utc));
-            // Aggregate HLS records to reduce flooding from rapid connect/disconnect cycles
-            aggregate_hls_records(&filtered)
+            let mut sorted: Vec<Rc<StreamHistoryRecordDto>> = records.to_vec();
+            sorted.sort_by_key(|r| r.event_ts_utc);
+            // Aggregate HLS records first on the full dataset so connect/disconnect pairs are complete
+            let aggregated = aggregate_hls_records(&sorted);
+            aggregated.into_iter().filter(|r| record_matches(r, filter)).collect()
         });
     let has_any_content = has_any_stream_history_content(&all_records, &summaries, &qos_snapshots);
 
@@ -477,19 +482,22 @@ pub fn StreamHistoryView() -> Html {
                 |(_, col, record): (usize, usize, Rc<StreamHistoryRecordDto>)| match col {
                     0 => html! { <span class="tp__stream-history__cell--time">{format_ts(record.event_ts_utc)}</span> },
                     1 => {
-                        let is_connect = record.event_type == "connect";
+                        let is_connect = record.event_type == StreamHistoryEventType::Connect;
                         let badge_class = if is_connect {
                             "tp__stream-history__badge tp__stream-history__badge--connect"
                         } else {
                             "tp__stream-history__badge tp__stream-history__badge--disconnect"
                         };
-                        html! { <span class={badge_class}>{record.event_type.clone()}</span> }
+                        html! { <span class={badge_class}>{record.event_type.to_string()}</span> }
                     }
                     2 => html! { <span>{record.api_username.as_deref().unwrap_or("-")}</span> },
                     3 => {
+                        html! { <span class="tp__stream-history__cell--title">{record.group.as_deref().unwrap_or("-")}</span> }
+                    }
+                    4 => {
                         html! { <span class="tp__stream-history__cell--title">{record.title.as_deref().unwrap_or("-")}</span> }
                     }
-                    4 => html! {
+                    5 => html! {
                         <span>
                             {
                                 match (record.provider_name.as_deref(), record.provider_id) {
@@ -501,47 +509,47 @@ pub fn StreamHistoryView() -> Html {
                             }
                         </span>
                     },
-                    5 => html! {
+                    6 => html! {
                         <span class="tp__stream-history__cell--mono">
                             {record.session_duration.map(format_duration).unwrap_or_default()}
                         </span>
                     },
-                    6 => html! {
+                    7 => html! {
                         <span class="tp__stream-history__cell--mono">
                             {record.bytes_sent.map(format_bytes).unwrap_or_default()}
                         </span>
                     },
-                    7 => html! {
+                    8 => html! {
                         <span class="tp__stream-history__cell--mono">
                             {record.first_byte_latency_ms.map(|v| v.to_string()).unwrap_or_default()}
                         </span>
                     },
-                    8 => html! {
+                    9 => html! {
                         <span class="tp__stream-history__cell--title">
                         <RevealContent preview={record.user_agent.as_deref().map(|ua| html! {ua})}>{record.user_agent.as_deref()}</RevealContent>
                         </span>
                     },
-                    9 => html! {
-                        <span>
-                            {optional_record_text(record.item_type.as_deref())}
-                        </span>
-                    },
                     10 => html! {
                         <span>
-                            {optional_record_text(record.container.as_deref())}
+                            {optional_record_text(record.item_type.as_ref().map(ToString::to_string))}
                         </span>
                     },
                     11 => html! {
                         <span>
-                            {record.disconnect_reason.as_deref().unwrap_or("-").replace('_', " ")}
+                            {optional_record_text_str(record.container.as_deref())}
                         </span>
                     },
                     12 => html! {
+                        <span>
+                            {record.disconnect_reason.as_ref().map(ToString::to_string).unwrap_or_else(|| String::from("-")).replace('_', " ")}
+                        </span>
+                    },
+                    13 => html! {
                         <span class="tp__stream-history__cell--ip">
                             {record.source_addr.as_deref().unwrap_or("-")}
                         </span>
                     },
-                    13 => html! {
+                    14 => html! {
                         <span class="tp__stream-history__cell--country">
                             <Country country_code={record.country.clone()} />
                         </span>
@@ -743,7 +751,7 @@ pub fn StreamHistoryView() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{optional_record_text, provider_summary_rows, qos_detail_rows, qos_score_label, top_qos_snapshots};
+    use super::{optional_record_text_str, provider_summary_rows, qos_detail_rows, qos_score_label, top_qos_snapshots};
     use crate::services::{StreamHistoryProviderSummary, StreamHistoryQosSnapshot, StreamHistoryQosSnapshotWindow};
     use shared::model::SearchRequest;
 
@@ -854,8 +862,8 @@ mod tests {
 
     #[test]
     fn optional_record_text_preserves_value_or_dash_fallback() {
-        assert_eq!(optional_record_text(Some("Lavf53.32.100")), "Lavf53.32.100");
-        assert_eq!(optional_record_text(Some("live")), "live");
-        assert_eq!(optional_record_text(None), "-");
+        assert_eq!(optional_record_text_str(Some("Lavf53.32.100")), "Lavf53.32.100");
+        assert_eq!(optional_record_text_str(Some("live")), "live");
+        assert_eq!(optional_record_text_str(None), "-");
     }
 }

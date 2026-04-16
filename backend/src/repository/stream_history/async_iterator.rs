@@ -49,7 +49,7 @@ impl StreamHistoryStream {
     async fn read_files_async(
         dir: &str,
         time_range: &TimeRange,
-        filters: &CompiledFilter,
+        filters: &Arc<CompiledFilter>,
         tx: mpsc::Sender<StreamHistoryRecord>,
     ) {
         let files = match discover_files(Path::new(dir), time_range).await {
@@ -63,36 +63,19 @@ impl StreamHistoryStream {
 
         for file in &files {
             if file.is_archive {
-                // Archive files: LZ4 decompression is sync-only — use spawn_blocking
+                // Archive files: LZ4 decompression is sync-only — use spawn_blocking.
+                // The blocking task sends directly into the async channel via blocking_send(),
+                // avoiding the deadlock that would occur with an intermediate std::sync::mpsc
+                // channel whose bounded sender blocks before the async side starts draining.
                 let file_path = file.path.clone();
                 let time_range_val = *time_range;
+                let tx_clone = tx.clone();
+                let filters_clone = Arc::clone(filters);
                 let result = tokio::task::spawn_blocking(move || {
-                    Self::read_archive_file(&file_path, time_range_val)
+                    Self::read_archive_file(&file_path, time_range_val, &filters_clone, &tx_clone);
                 }).await;
-                match result {
-                    Ok(iter) => {
-                        for result in iter {
-                            match result {
-                                Ok(record) => {
-                                    if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
-                                        continue;
-                                    }
-                                    if !filters.matches(&record) {
-                                        continue;
-                                    }
-                                    if tx.send(record).await.is_err() {
-                                        return; // Receiver dropped
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!("Failed to read archive record: {e}");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Archive read task panicked: {e}");
-                    }
+                if let Err(e) = result {
+                    log::error!("Archive read task failed: {e}");
                 }
             } else {
                 // Pending files: fully async using AsyncStreamHistoryPendingReader
@@ -126,20 +109,42 @@ impl StreamHistoryStream {
     }
 
     /// Read a LZ4 archive file (runs in `spawn_blocking`).
-    /// Collects into Vec because `dyn Iterator` is not Send, and `lz4_flex` is sync-only anyway.
+    /// Streams records incrementally via `blocking_send` into the async channel,
+    /// so memory usage stays bounded regardless of archive size.
     #[allow(dead_code)]
     fn read_archive_file(
         path: &Path,
         time_range: TimeRange,
-    ) -> Vec<std::io::Result<StreamHistoryRecord>> {
+        filters: &CompiledFilter,
+        tx: &mpsc::Sender<StreamHistoryRecord>,
+    ) {
+        let (range_start, range_end) = time_range;
         let (reader, _) = match StreamHistoryFileReader::from_archive(path, Some(time_range)) {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("Failed to open archive {}: {e}", path.display());
-                return Vec::new();
+                return;
             }
         };
-        reader.collect()
+        for result in reader {
+            match result {
+                Ok(record) => {
+                    if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
+                        continue;
+                    }
+                    if !filters.matches(&record) {
+                        continue;
+                    }
+                    if tx.blocking_send(record).is_err() {
+                        // Receiver dropped, stop sending
+                        return;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to read archive record: {e}");
+                }
+            }
+        }
     }
 }
 

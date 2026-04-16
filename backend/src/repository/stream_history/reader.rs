@@ -440,13 +440,14 @@ mod tests {
     use crate::repository::stream_history::storage::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use shared::model::StreamHistoryEventType;
     use shared::utils::Internable;
-    use crate::model::{EventType, RECORD_SCHEMA_VERSION};
+    use crate::model::{RECORD_SCHEMA_VERSION};
 
     fn make_test_record(ts: u64, username: &str) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: ts,
             partition_day_utc: "2026-03-22".to_string(),
             session_id: 1,

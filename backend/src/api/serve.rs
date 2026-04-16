@@ -161,7 +161,7 @@ async fn handle_connection<M, S>(
                 Ok(signal) = addr_close_rx.recv() => {
                     match signal {
                         CloseConnectionSignal::WithReason(msg, reason) if msg == addr => {
-                            connection_manager_clone.release_connection_with_reason(&addr, &reason).await;
+                            connection_manager_clone.release_connection_with_reason(&addr, reason).await;
                             debug!("Forced client close {msg} reason={reason:?}");
                             conn.as_mut().graceful_shutdown();
                             break;

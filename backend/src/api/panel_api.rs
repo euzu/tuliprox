@@ -46,7 +46,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use crate::model::DisconnectReason;
+use shared::model::DisconnectReason;
 
 #[derive(Debug, Clone)]
 struct AccountCredentials {

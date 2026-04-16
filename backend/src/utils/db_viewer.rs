@@ -215,6 +215,7 @@ fn exit_app(code: i32) {
 mod tests {
     use super::dump_qos_snapshot_db;
     use tempfile::tempdir;
+    use shared::model::PlaylistItemType;
     use shared::utils::Internable;
     use crate::repository::{BPlusTree, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow};
 
@@ -231,7 +232,7 @@ mod tests {
             provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".intern(),
+            item_type: PlaylistItemType::Live,
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_001,
             window_24h: QosSnapshotWindow {

@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::{sleep_until, Instant, Sleep};
-use crate::model::DisconnectReason;
+use shared::model::DisconnectReason;
 
 enum TimeoutAction {
     Kick {

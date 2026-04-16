@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use shared::model::PlaylistItemType;
 use crate::repository::{BPlusTree, BPlusTreeUpdate, FlushPolicy};
 
 const SNAPSHOT_FILE_NAME: &str = "qos_snapshot.db";
@@ -63,8 +64,7 @@ pub struct QosSnapshotRecord {
     pub provider_name: Arc<str>,
     pub provider_id: u32,
     pub virtual_id: u32,
-    #[serde(with = "arc_str_serde")]
-    pub item_type: Arc<str>,
+    pub item_type: PlaylistItemType,
     pub updated_at: u64,
     pub last_event_at: u64,
     pub window_24h: QosSnapshotWindow,
@@ -211,6 +211,7 @@ mod tests {
     use std::path::Path;
 
     use tempfile::tempdir;
+    use shared::model::PlaylistItemType;
     use shared::utils::Internable;
     use super::{QosAggregationCheckpoint, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow};
 
@@ -226,7 +227,7 @@ mod tests {
             provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".intern(),
+            item_type: PlaylistItemType::Live,
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow {
@@ -272,7 +273,7 @@ mod tests {
             provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".intern(),
+            item_type: PlaylistItemType::Live,
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow::default(),
@@ -309,7 +310,7 @@ mod tests {
             provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".intern(),
+            item_type: PlaylistItemType::Live,
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow {

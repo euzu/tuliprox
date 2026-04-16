@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-
+use std::sync::Arc;
 use chrono;
 use regex::Regex;
 use serde::Deserialize;
-use crate::model::{ConnectFailureReason, DisconnectReason, EventType, FailureStage, StreamHistoryRecord};
+use shared::utils::Internable;
+use crate::model::{StreamHistoryRecord};
 use crate::repository::{
     FileHeaderBody, StreamHistoryFileReader,
     extract_day_from_filename, read_and_verify_file_magic, read_framed,
@@ -174,7 +175,12 @@ impl CompiledFilter {
                     FilterValue::Regex(re) => re.is_match(s),
                     FilterValue::NumericExact(_) => false,
                 },
-                RecordFieldValue::String(None) => false,
+                RecordFieldValue::ArcStr(Some(s)) => match value {
+                    FilterValue::Exact(v) => s.as_ref().eq_ignore_ascii_case(v),
+                    FilterValue::Regex(re) => re.is_match(s.as_ref()),
+                    FilterValue::NumericExact(_) => false,
+                },
+                RecordFieldValue::String(None) | RecordFieldValue::ArcStr(None) => false,
                 RecordFieldValue::U64(n) => match value {
                     FilterValue::NumericExact(v) => n == *v,
                     _ => false,
@@ -186,24 +192,18 @@ impl CompiledFilter {
 
 enum RecordFieldValue<'a> {
     String(Option<&'a str>),
+    ArcStr(Option<Arc<str>>),
     U64(u64),
 }
 
 fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordFieldValue<'a> {
     match field {
-        "event_type" => {
-            let s = match record.event_type {
-                EventType::Connect => "connect",
-                EventType::ConnectFailed => "connect_failed",
-                EventType::Disconnect => "disconnect",
-            };
-            RecordFieldValue::String(Some(s))
-        }
+        "event_type" => RecordFieldValue::ArcStr(Some(record.event_type.to_string().intern())),
         "api_username" => RecordFieldValue::String(record.api_username.as_deref()),
         "provider_name" => RecordFieldValue::String(record.provider_name.as_deref()),
         "provider_username" => RecordFieldValue::String(record.provider_username.as_deref()),
         "input_name" => RecordFieldValue::String(record.input_name.as_deref()),
-        "item_type" => RecordFieldValue::String(record.item_type.as_deref()),
+        "item_type" => RecordFieldValue::ArcStr(record.item_type.as_ref().map(ToString::to_string).map(Internable::intern)),
         "title" => RecordFieldValue::String(record.title.as_deref()),
         "group" => RecordFieldValue::String(record.group.as_deref()),
         "country" => RecordFieldValue::String(record.country.as_deref()),
@@ -214,48 +214,9 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
                 .shared_joined_existing
                 .map(|shared| if shared { "true" } else { "false" }),
         ),
-        "disconnect_reason" => {
-            // Match against serde rename_all = "snake_case" names
-            RecordFieldValue::String(record.disconnect_reason.as_ref().map(|r| match r {
-                DisconnectReason::Cleanup => "cleanup",
-                DisconnectReason::ClientClosed => "client_closed",
-                DisconnectReason::ClientKicked => "client_kicked",
-                DisconnectReason::Provisioning => "provisioning",
-                DisconnectReason::ServerError => "server_error",
-                DisconnectReason::Timeout => "timeout",
-                DisconnectReason::DayRollover => "day_rollover",
-                DisconnectReason::Shutdown => "shutdown",
-                DisconnectReason::Unknown => "unknown",
-                DisconnectReason::ProviderError => "provider_error",
-                DisconnectReason::ProviderClosed => "provider_closed",
-                DisconnectReason::Preempted => "preempted",
-                DisconnectReason::SessionExpired => "session_expired",
-                DisconnectReason::UserConnectionsExhausted => "user_connections_exhausted",
-                DisconnectReason::ProviderConnectionsExhausted => "provider_connections_exhausted",
-            }))
-        }
-        "connect_failure_reason" => {
-            RecordFieldValue::String(record.connect_failure_reason.as_ref().map(|r| match r {
-                ConnectFailureReason::UserAccountExpired => "user_account_expired",
-                ConnectFailureReason::UserConnectionsExhausted => "user_connections_exhausted",
-                ConnectFailureReason::ProviderConnectionsExhausted => "provider_connections_exhausted",
-                ConnectFailureReason::ProviderError => "provider_error",
-                ConnectFailureReason::ProviderClosed => "provider_closed",
-                ConnectFailureReason::ChannelUnavailable => "channel_unavailable",
-                ConnectFailureReason::Preempted => "preempted",
-                ConnectFailureReason::SessionExpired => "session_expired",
-                ConnectFailureReason::Provisioning => "provisioning",
-            }))
-        }
-        "failure_stage" => {
-            RecordFieldValue::String(record.failure_stage.as_ref().map(|stage| match stage {
-                FailureStage::Admission => "admission",
-                FailureStage::ProviderOpen => "provider_open",
-                FailureStage::FirstByte => "first_byte",
-                FailureStage::Streaming => "streaming",
-                FailureStage::SessionReconnect => "session_reconnect",
-            }))
-        }
+        "disconnect_reason" => RecordFieldValue::ArcStr(record.disconnect_reason.as_ref().map(|r| r.to_string().intern())),
+        "connect_failure_reason" => RecordFieldValue::ArcStr(record.connect_failure_reason.as_ref().map(|r| r.to_string().intern())),
+        "failure_stage" => RecordFieldValue::ArcStr(record.failure_stage.as_ref().map(|r| r.to_string().intern())),
         "provider_error_class" => RecordFieldValue::String(record.provider_error_class.as_deref()),
         "user_agent" => RecordFieldValue::String(record.user_agent.as_deref()),
         "cluster" => RecordFieldValue::String(record.cluster.as_deref()),
@@ -350,10 +311,15 @@ pub(crate) async fn discover_files(
         }
 
         // Read file header for archive-level timestamp bounds
-        let header = match read_file_header(&path, is_archive) {
-            Ok(h) => h,
-            Err(e) => {
+        let path_clone = path.clone();
+        let header = match tokio::task::spawn_blocking(move || read_file_header(&path_clone, is_archive)).await {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
                 eprintln!("Warning: skipping {}: {e}", path.display());
+                continue;
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping {} (task failed): {e}", path.display());
                 continue;
             }
         };
@@ -508,6 +474,7 @@ pub async fn stream_history_viewer(input: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use shared::model::{DisconnectReason, StreamHistoryEventType, FailureStage};
     use shared::utils::Internable;
     use super::*;
 
@@ -784,7 +751,7 @@ mod tests {
     fn make_empty_record() -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: 1,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: 0,
             partition_day_utc: String::new(),
             session_id: 0,
