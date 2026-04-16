@@ -1,14 +1,10 @@
 use serde::{Deserialize, Serialize};
 use shared::error::to_io_error;
 use std::io::{self, Read, Write};
-use shared::model::StreamInfo;
-use crate::repository::{now_utc_secs, utc_day_from_secs};
-use crate::utils::encode_base64_hash;
 
 pub const FILE_MAGIC: [u8; 8] = *b"STRHIST\x01";
 pub const BLOCK_MAGIC: [u8; 4] = *b"BLK\x01";
 pub const CONTAINER_FORMAT_VERSION: u8 = 1;
-pub const RECORD_SCHEMA_VERSION: u8 = 1;
 pub const SOURCE_KIND_STREAM_HISTORY: &str = "stream_history";
 pub const MAX_FRAME_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
 /// Maximum allowed block payload size when reading. Prevents memory exhaustion on corrupt/malicious input during magic-recovery.
@@ -28,60 +24,6 @@ pub enum RecordEncodingKind {
     MessagePackNamed,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventType {
-    Connect,
-    ConnectFailed,
-    Disconnect,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectFailureReason {
-    UserAccountExpired,
-    UserConnectionsExhausted,
-    ProviderConnectionsExhausted,
-    ProviderError,
-    ProviderClosed,
-    ChannelUnavailable,
-    Preempted,
-    SessionExpired,
-    Provisioning,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailureStage {
-    Admission,
-    ProviderOpen,
-    FirstByte,
-    Streaming,
-    SessionReconnect,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisconnectReason {
-    Cleanup,
-    ClientClosed,
-    ClientKicked,
-    Provisioning,
-    ServerError,
-    Timeout,
-    /// Reserved for future day-split logic: emitted at midnight for sessions that span
-    /// two calendar days so the previous day's file gets a closing record.
-    /// Not yet emitted — sessions crossing midnight have their disconnect in the new day's file.
-    DayRollover,
-    Shutdown,
-    Unknown,
-    ProviderError,
-    ProviderClosed,
-    Preempted,
-    SessionExpired,
-    UserConnectionsExhausted,
-    ProviderConnectionsExhausted,
-}
 
 /// Serialized as `MessagePack` named (map encoding) for schema evolution safety.
 ///
@@ -129,208 +71,6 @@ pub struct BlockHeaderBody {
     /// CRC32 of the record payload bytes that follow this header.
     pub payload_crc: u32,
     pub flags: u8,
-}
-
-/// A single stream lifecycle event record (connect or disconnect).
-///
-/// Privacy: must never contain passwords, tokens, or credential-bearing URLs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamHistoryRecord {
-    pub schema_version: u8,
-    pub event_type: EventType,
-    /// Unix timestamp seconds UTC of when this event occurred.
-    pub event_ts_utc: u64,
-    /// UTC calendar day of this event, e.g. `"2026-03-22"`.
-    pub partition_day_utc: String,
-    /// Stable correlation id shared between the connect and disconnect events of the same session.
-    pub session_id: u64,
-    pub source_addr: Option<String>,
-    // User and provider identity (no passwords, no tokens)
-    pub api_username: Option<String>,
-    pub provider_name: Option<String>,
-    /// Provider-side username (e.g. Xtream account). Always `None` until `StreamInfo`
-    /// carries the provider credential — at which point populate from there.
-    pub provider_username: Option<String>,
-    pub input_name: Option<String>,
-    // Stream metadata
-    pub virtual_id: Option<u32>,
-    pub item_type: Option<String>,
-    pub title: Option<String>,
-    pub group: Option<String>,
-    pub country: Option<String>,
-    // QoS metadata
-    pub user_agent: Option<String>,
-    pub shared: Option<bool>,
-    pub shared_joined_existing: Option<bool>,
-    pub shared_stream_id: Option<u64>,
-    pub provider_id: Option<u32>,
-    pub cluster: Option<String>,
-    pub container: Option<String>,
-    pub stream_url_hash: Option<String>,
-    pub stream_identity_key: Option<String>,
-    pub video_codec: Option<String>,
-    pub audio_codec: Option<String>,
-    pub audio_channels: Option<String>,
-    pub resolution: Option<String>,
-    pub fps: Option<String>,
-    // Session summary — populated on disconnect.
-    // bytes_sent and first_byte_latency_ms are None for shared streams (meter serves
-    // multiple clients; per-session totals are not meaningful in that case).
-    pub connect_ts_utc: Option<u64>,
-    pub disconnect_ts_utc: Option<u64>,
-    pub session_duration: Option<u64>,
-    pub bytes_sent: Option<u64>,
-    pub first_byte_latency_ms: Option<u64>,
-    pub provider_reconnect_count: Option<u8>,
-    pub failure_stage: Option<FailureStage>,
-    pub provider_http_status: Option<u16>,
-    pub provider_error_class: Option<String>,
-    pub connect_failure_reason: Option<ConnectFailureReason>,
-    pub disconnect_reason: Option<DisconnectReason>,
-    /// Set when this connect event continues a session that was split by a `DayRollover`.
-    /// Always `None` until the `DayRollover` mechanism is implemented.
-    pub previous_session_id: Option<u64>,
-    /// Target config id — identifies the failover bundle this stream belongs to.
-    pub target_id: Option<u16>,
-}
-
-/// `QoS` metrics collected at disconnect time, passed as a bundle to avoid growing the signature.
-#[derive(Debug, Default)]
-pub struct DisconnectQos {
-    pub bytes_sent: Option<u64>,
-    pub first_byte_latency_ms: Option<u64>,
-    pub provider_reconnect_count: Option<u8>,
-}
-
-impl StreamHistoryRecord {
-    fn build_stream_identity_key(info: &StreamInfo) -> Option<String> {
-        if info.channel.input_name.is_empty() {
-            return None;
-        }
-        let mut raw = String::with_capacity(info.channel.input_name.len() + 32);
-        raw.push_str(info.channel.input_name.as_ref());
-        raw.push('|');
-        raw.push_str(&info.channel.target_id.to_string());
-        raw.push('|');
-        raw.push_str(&info.channel.provider_id.to_string());
-        raw.push('|');
-        raw.push_str(&info.channel.virtual_id.to_string());
-        raw.push('|');
-        raw.push_str(&info.channel.item_type.to_string());
-        Some(encode_base64_hash(&raw))
-    }
-
-    /// Build a common base from a `StreamInfo`, leaving event-specific fields to the caller.
-    /// `event_ts` is the authoritative timestamp — `partition_day_utc` is derived from it
-    /// so both fields are always consistent.
-    fn base(info: &StreamInfo, event_ts: u64) -> Self {
-        Self {
-            schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect, // overridden by callers
-            event_ts_utc: event_ts,
-            partition_day_utc: utc_day_from_secs(event_ts),
-            // Combine connect-timestamp (upper 32 bits) with uid (lower 32 bits).
-            // This prevents session_id collision across server restarts and uid wrap-around.
-            // Both Connect and Disconnect derive this from the same StreamInfo, so they match.
-            session_id: (info.ts << 32) | u64::from(info.uid),
-            source_addr: Some(info.client_ip.clone()),
-            api_username: Some(info.username.clone()),
-            provider_name: Some(info.provider.clone()),
-            provider_username: None,
-            input_name: if info.channel.input_name.is_empty() {
-                None
-            } else {
-                Some(info.channel.input_name.to_string())
-            },
-            virtual_id: Some(info.channel.virtual_id),
-            item_type: Some(info.channel.item_type.to_string()),
-            title: Some(info.channel.title.to_string()),
-            group: Some(info.channel.group.to_string()),
-            country: info.country_code.clone(),
-            user_agent: if info.user_agent.is_empty() { None } else { Some(info.user_agent.clone()) },
-            shared: Some(info.channel.shared),
-            shared_joined_existing: info.channel.shared_joined_existing,
-            shared_stream_id: info.channel.shared_stream_id,
-            provider_id: Some(info.channel.provider_id),
-            cluster: Some(info.channel.cluster.to_string()),
-            container: info.channel.technical.as_ref().and_then(|t| if t.container.is_empty() { None } else { Some(t.container.clone()) }),
-            stream_url_hash: if info.channel.url.is_empty() {
-                None
-            } else {
-                Some(encode_base64_hash(info.channel.url.as_ref()))
-            },
-            stream_identity_key: Self::build_stream_identity_key(info),
-            video_codec: info.channel.technical.as_ref().and_then(|t| if t.video_codec.is_empty() { None } else { Some(t.video_codec.clone()) }),
-            audio_codec: info.channel.technical.as_ref().and_then(|t| if t.audio_codec.is_empty() { None } else { Some(t.audio_codec.clone()) }),
-            audio_channels: info.channel.technical.as_ref().and_then(|t| if t.audio_channels.is_empty() { None } else { Some(t.audio_channels.clone()) }),
-            resolution: info.channel.technical.as_ref().and_then(|t| if t.resolution.is_empty() { None } else { Some(t.resolution.clone()) }),
-            fps: info.channel.technical.as_ref().and_then(|t| if t.fps.is_empty() { None } else { Some(t.fps.clone()) }),
-            connect_ts_utc: None,
-            disconnect_ts_utc: None,
-            session_duration: None,
-            bytes_sent: None,
-            first_byte_latency_ms: None,
-            provider_reconnect_count: None,
-            failure_stage: None,
-            provider_http_status: None,
-            provider_error_class: None,
-            connect_failure_reason: None,
-            disconnect_reason: None,
-            previous_session_id: None,
-            target_id: Some(info.channel.target_id),
-        }
-    }
-
-    pub fn from_connect(info: &StreamInfo) -> Self {
-        let mut record = Self::base(info, info.ts);
-        record.event_type = EventType::Connect;
-        record.connect_ts_utc = Some(info.ts);
-        record.previous_session_id = info.previous_session_id;
-        record
-    }
-
-    pub fn from_connect_failed(
-        info: &StreamInfo,
-        reason: ConnectFailureReason,
-        attempt_uid: u32,
-        failure_stage: FailureStage,
-    ) -> Self {
-        let event_ts = now_utc_secs();
-        let mut record = Self::base(info, event_ts);
-        record.event_type = EventType::ConnectFailed;
-        record.session_id = (event_ts << 32) | u64::from(attempt_uid);
-        record.failure_stage = Some(failure_stage);
-        record.connect_failure_reason = Some(reason);
-        record
-    }
-
-    pub fn with_provider_failure(mut self, provider_http_status: Option<u16>, provider_error_class: Option<&str>) -> Self {
-        self.provider_http_status = provider_http_status;
-        self.provider_error_class = provider_error_class.map(ToString::to_string);
-        self
-    }
-
-    /// Extra `QoS` fields carried as a struct to keep the signature stable.
-    pub fn from_disconnect(
-        info: &StreamInfo,
-        reason: DisconnectReason,
-        qos: &DisconnectQos,
-        failure_stage: Option<FailureStage>,
-    ) -> Self {
-        let now_secs = now_utc_secs();
-        let connect_secs = info.ts;
-        let mut record = Self::base(info, now_secs);
-        record.event_type = EventType::Disconnect;
-        record.connect_ts_utc = Some(connect_secs);
-        record.disconnect_ts_utc = Some(now_secs);
-        record.session_duration = Some(now_secs.saturating_sub(connect_secs));
-        record.bytes_sent = qos.bytes_sent;
-        record.first_byte_latency_ms = qos.first_byte_latency_ms;
-        record.provider_reconnect_count = qos.provider_reconnect_count;
-        record.failure_stage = failure_stage;
-        record.disconnect_reason = Some(reason);
-        record
-    }
 }
 
 /// Serialize a value to `MessagePack` using **named (map) encoding** for schema evolution safety.
@@ -425,6 +165,66 @@ pub fn read_and_verify_block_magic<R: Read>(reader: &mut R) -> io::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Async variants for use with `tokio::io::AsyncRead`
+// Used by `AsyncStreamHistoryPendingReader` in `reader.rs`
+// ---------------------------------------------------------------------------
+
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+/// Async version of `read_and_verify_file_magic` for `tokio::io::AsyncRead`.
+pub async fn async_read_and_verify_file_magic<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<()> {
+    let mut magic = [0u8; 8];
+    reader.read_exact(&mut magic).await?;
+    if magic != FILE_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid file magic: {magic:02X?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Async version of `read_and_verify_block_magic` for `tokio::io::AsyncRead`.
+pub async fn async_read_and_verify_block_magic<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<()> {
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic).await?;
+    if magic != BLOCK_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid block magic: {magic:02X?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Async version of `read_framed` for `tokio::io::AsyncRead`.
+/// Reads: [len: u32 BE][payload][crc32: u32 BE], verifies CRC, deserializes.
+pub async fn async_read_framed<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(reader: &mut R) -> io::Result<T> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 || len > MAX_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid frame size: {len} (max {MAX_FRAME_SIZE})"),
+        ));
+    }
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload).await?;
+    let mut crc_buf = [0u8; 4];
+    reader.read_exact(&mut crc_buf).await?;
+    let expected_crc = u32::from_be_bytes(crc_buf);
+    let actual_crc = crc32fast::hash(&payload);
+    if actual_crc != expected_crc {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("CRC mismatch: expected {expected_crc:#010x}, got {actual_crc:#010x}"),
+        ));
+    }
+    deserialize_named(&payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +234,9 @@ mod tests {
     };
     use std::net::SocketAddr;
     use std::io::Cursor;
+    use shared::model::{ConnectFailureReason, FailureStage, DisconnectReason, StreamHistoryEventType};
+    use crate::model::{DisconnectQos, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
+    use crate::utils::encode_base64_hash;
 
     fn sample_file_header() -> FileHeaderBody {
         FileHeaderBody {
@@ -470,17 +273,17 @@ mod tests {
     fn sample_connect_record() -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: 1_742_600_001,
             partition_day_utc: "2026-03-22".to_string(),
             session_id: 999,
             source_addr: Some("192.0.2.1:12345".to_string()),
             api_username: Some("alice".to_string()),
-            provider_name: Some("acme-tv".to_string()),
+            provider_name: Some("acme-tv".intern()),
             provider_username: Some("acme_user".to_string()),
-            input_name: Some("provider-input".to_string()),
+            input_name: Some("provider-input".intern()),
             virtual_id: Some(1234),
-            item_type: Some("live".to_string()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some("News Channel".to_string()),
             group: Some("News".to_string()),
             country: Some("DE".to_string()),
@@ -510,24 +313,24 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
-            target_id: Some(1),
+            target_name: None,
         }
     }
 
     fn sample_disconnect_record(session_id: u64) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Disconnect,
+            event_type: StreamHistoryEventType::Disconnect,
             event_ts_utc: 1_742_603_601,
             partition_day_utc: "2026-03-22".to_string(),
             session_id,
             source_addr: Some("192.0.2.1:12345".to_string()),
             api_username: Some("alice".to_string()),
-            provider_name: Some("acme-tv".to_string()),
+            provider_name: Some("acme-tv".intern()),
             provider_username: Some("acme_user".to_string()),
-            input_name: Some("provider-input".to_string()),
+            input_name: Some("provider-input".intern()),
             virtual_id: Some(1234),
-            item_type: Some("live".to_string()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some("News Channel".to_string()),
             group: Some("News".to_string()),
             country: Some("DE".to_string()),
@@ -557,7 +360,7 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: Some(DisconnectReason::ClientClosed),
             previous_session_id: None,
-            target_id: Some(1),
+            target_name: None,
         }
     }
 
@@ -569,7 +372,7 @@ mod tests {
             "alice",
             &addr,
             "192.0.2.1",
-            "acme-tv",
+            "acme-tv".intern(),
             StreamChannel {
                 target_id: 1,
                 virtual_id: 1234,
@@ -631,7 +434,7 @@ mod tests {
         let original = sample_connect_record();
         let bytes = serialize_named(&original).expect("serialize");
         let decoded: StreamHistoryRecord = deserialize_named(&bytes).expect("deserialize");
-        assert_eq!(decoded.event_type, EventType::Connect);
+        assert_eq!(decoded.event_type, StreamHistoryEventType::Connect);
         assert_eq!(decoded.session_id, 999);
         assert_eq!(decoded.api_username.as_deref(), Some("alice"));
         assert!(decoded.disconnect_ts_utc.is_none());
@@ -644,8 +447,8 @@ mod tests {
         connect.session_id = session_id;
         let disconnect = sample_disconnect_record(session_id);
         assert_eq!(connect.session_id, disconnect.session_id);
-        assert_eq!(connect.event_type, EventType::Connect);
-        assert_eq!(disconnect.event_type, EventType::Disconnect);
+        assert_eq!(connect.event_type, StreamHistoryEventType::Connect);
+        assert_eq!(disconnect.event_type, StreamHistoryEventType::Disconnect);
         assert_eq!(disconnect.session_duration, Some(3600));
     }
 
@@ -700,9 +503,10 @@ mod tests {
             ConnectFailureReason::ProviderConnectionsExhausted,
             77,
             FailureStage::Admission,
+            None,
         );
 
-        assert_eq!(record.event_type, EventType::ConnectFailed);
+        assert_eq!(record.event_type, StreamHistoryEventType::ConnectFailed);
         assert_eq!(
             record.connect_failure_reason,
             Some(ConnectFailureReason::ProviderConnectionsExhausted)
@@ -726,6 +530,7 @@ mod tests {
             ConnectFailureReason::ProviderConnectionsExhausted,
             77,
             FailureStage::Admission,
+            None,
         );
 
         assert_eq!(record.failure_stage, Some(FailureStage::Admission));
@@ -740,6 +545,7 @@ mod tests {
             ConnectFailureReason::ChannelUnavailable,
             77,
             FailureStage::ProviderOpen,
+            None,
         )
         .with_provider_failure(Some(503), Some("http_5xx"));
 

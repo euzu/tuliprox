@@ -4,7 +4,6 @@ use crate::{
         EventMessage, ProviderHandle, SharedStreamManager,
     },
     model::StreamHistoryConfig,
-    repository::{ConnectFailureReason, DisconnectQos, DisconnectReason, FailureStage, StreamHistoryRecord},
     auth::Fingerprint,
     utils::debug_if_enabled,
 };
@@ -28,6 +27,8 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, Notify};
+use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage};
+use crate::model::{DisconnectQos, StreamHistoryRecord};
 use crate::repository::{recover_pending_files, StreamHistoryWriter};
 
 // Maximum number of deferred cleanup actions buffered before producers must wait/drop.
@@ -272,13 +273,13 @@ pub(crate) enum CleanupEvent {
 }
 
 async fn handle_release_connection(deps: &CleanupWorkerDeps, addr: SocketAddr) {
-    release_connection_with_reason_from_deps(deps, &addr, &DisconnectReason::Cleanup, true).await;
+    release_connection_with_reason_from_deps(deps, &addr, DisconnectReason::Cleanup, true).await;
 }
 
 async fn release_connection_with_reason(
     connection_manager: &ConnectionManager,
     addr: &SocketAddr,
-    reason: &DisconnectReason,
+    reason: DisconnectReason,
     send_shared_stop_signal: bool,
 ) {
     release_connection_parts(
@@ -298,7 +299,7 @@ async fn release_connection_with_reason(
 async fn release_connection_with_reason_from_deps(
     deps: &CleanupWorkerDeps,
     addr: &SocketAddr,
-    reason: &DisconnectReason,
+    reason: DisconnectReason,
     send_shared_stop_signal: bool,
 ) {
     release_connection_parts(
@@ -324,7 +325,7 @@ async fn release_connection_parts(
     capacity_notify: &Arc<Notify>,
     history_writer: &Arc<ArcSwapOption<StreamHistoryWriter>>,
     addr: &SocketAddr,
-    reason: &DisconnectReason,
+    reason: DisconnectReason,
     send_shared_stop_signal: bool,
 ) {
     let removed = if matches!(reason, DisconnectReason::ClientKicked) {
@@ -452,7 +453,7 @@ async fn handle_adaptive_session_expired(deps: &CleanupWorkerDeps, stream_info: 
     emit_disconnect_record(
         &deps.history_writer,
         &stream_info,
-        &DisconnectReason::SessionExpired,
+        DisconnectReason::SessionExpired,
         &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
         None,
         None,
@@ -481,7 +482,7 @@ async fn release_stream_with_disconnect(
     emit_disconnect_record(
         &deps.history_writer,
         &stream_info,
-        &reason,
+        reason,
         &DisconnectQos { bytes_sent, first_byte_latency_ms, provider_reconnect_count },
         provider_error_class,
         provider_http_status,
@@ -537,7 +538,7 @@ pub struct ConnectionParams<'a> {
     pub priority: i8,
     pub soft_priority: i8,
     pub fingerprint: &'a Fingerprint,
-    pub provider: &'a str,
+    pub provider: Arc<str>,
     pub stream_channel: &'a StreamChannel,
     pub user_agent: Cow<'a, str>,
     pub session_token: Option<&'a str>,
@@ -599,6 +600,11 @@ impl ConnectionManager {
         }
         let new_writer = build_history_writer(config);
         self.history_writer.store(new_writer);
+    }
+
+    /// Returns a reference to the history writer.
+    pub(crate) fn history_writer(&self) -> &Arc<ArcSwapOption<StreamHistoryWriter>> {
+        &self.history_writer
     }
 
     fn spawn_socket_activity_worker(
@@ -868,16 +874,16 @@ impl ConnectionManager {
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) {
-        release_connection_with_reason(self, addr, &DisconnectReason::ClientClosed, true).await;
+        release_connection_with_reason(self, addr, DisconnectReason::ClientClosed, true).await;
     }
 
-    pub async fn release_connection_with_reason(&self, addr: &SocketAddr, reason: &DisconnectReason) {
+    pub async fn release_connection_with_reason(&self, addr: &SocketAddr, reason: DisconnectReason) {
         release_connection_with_reason(self, addr, reason, true).await;
     }
 
     pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) {
         let _ = self.close_connection_with_reason(addr, DisconnectReason::ClientKicked);
-        release_connection_with_reason(self, addr, &DisconnectReason::ClientKicked, true).await;
+        release_connection_with_reason(self, addr, DisconnectReason::ClientKicked, true).await;
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {
@@ -893,7 +899,7 @@ impl ConnectionManager {
             emit_disconnect_record(
                 &self.history_writer,
                 &stream_info,
-                &DisconnectReason::ClientClosed,
+                DisconnectReason::ClientClosed,
                 &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
                 None,
                 None,
@@ -919,10 +925,6 @@ impl ConnectionManager {
             .unwrap_or(1)
     }
 
-    pub fn record_connect_failed(&self, info: &StreamInfo, reason: ConnectFailureReason, failure_stage: FailureStage) {
-        self.record_connect_failed_with_provider_failure(info, reason, failure_stage, None, None);
-    }
-
     pub fn record_connect_failed_with_provider_failure(
         &self,
         info: &StreamInfo,
@@ -930,6 +932,7 @@ impl ConnectionManager {
         failure_stage: FailureStage,
         provider_http_status: Option<u16>,
         provider_error_class: Option<&str>,
+        target_name: Option<Arc<str>>,
     ) {
         let guard = self.history_writer.load();
         let Some(writer) = guard.as_ref() else { return };
@@ -939,6 +942,7 @@ impl ConnectionManager {
             reason,
             attempt_uid,
             failure_stage,
+            target_name,
         )
         .with_provider_failure(provider_http_status, provider_error_class));
     }
@@ -956,7 +960,7 @@ impl ConnectionManager {
             emit_disconnect_record(
                 &self.history_writer,
                 &stream_info,
-                &DisconnectReason::Shutdown,
+                DisconnectReason::Shutdown,
                 &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
                 None,
                 None,
@@ -1042,7 +1046,7 @@ fn build_history_writer(config: Option<&StreamHistoryConfig>) -> Option<Arc<Stre
 /// are wire-format identifiers shared with Serialize/Deserialize and the REST API.
 /// If they ever change, update `CustomVideoStreamType::fmt`/`from_str` and this function together.
 fn resolve_disconnect_reason(provider_end_reason: u8, stream_info: &StreamInfo) -> DisconnectReason {
-    if stream_info.provider == "tuliprox" {
+    if stream_info.provider.as_ref() == "tuliprox" {
         if let Ok(video_type) = CustomVideoStreamType::from_str(&stream_info.channel.title) {
             match video_type {
                 CustomVideoStreamType::LowPriorityPreempted => return DisconnectReason::Preempted,
@@ -1075,7 +1079,7 @@ fn emit_connect_record(writer: &ArcSwapOption<StreamHistoryWriter>, info: &Strea
 fn emit_disconnect_record(
     writer: &ArcSwapOption<StreamHistoryWriter>,
     info: &StreamInfo,
-    reason: &DisconnectReason,
+    reason: DisconnectReason,
     qos: &DisconnectQos,
     provider_error_class: Option<&str>,
     provider_http_status: Option<u16>,
@@ -1085,7 +1089,7 @@ fn emit_disconnect_record(
     w.send_record(
         StreamHistoryRecord::from_disconnect(
             info,
-            reason.clone(),
+            reason,
             qos,
             resolve_disconnect_failure_stage(info, reason, qos),
         )
@@ -1093,7 +1097,7 @@ fn emit_disconnect_record(
     );
 }
 
-fn resolve_disconnect_failure_stage(info: &StreamInfo, reason: &DisconnectReason, qos: &DisconnectQos) -> Option<FailureStage> {
+fn resolve_disconnect_failure_stage(info: &StreamInfo, reason: DisconnectReason, qos: &DisconnectQos) -> Option<FailureStage> {
     match reason {
         DisconnectReason::ProviderError | DisconnectReason::ProviderClosed => {
             if !info.channel.shared && qos.first_byte_latency_ms.is_none() {
@@ -1140,7 +1144,7 @@ mod tests {
             shared_stream_id: None,
             technical: None,
         };
-        StreamInfo::new(0, 0, "test", &addr, "127.0.0.1", provider, channel, String::new(), None, None)
+        StreamInfo::new(0, 0, "test", &addr, "127.0.0.1", provider.intern(), channel, String::new(), None, None)
     }
 
     fn create_test_app_config() -> AppConfig {
@@ -1401,7 +1405,7 @@ mod tests {
         assert_eq!(
             resolve_disconnect_failure_stage(
                 &make_stream_info("some_provider", "Some Channel"),
-                &DisconnectReason::ClientKicked,
+                DisconnectReason::ClientKicked,
                 &DisconnectQos::default(),
             ),
             None
@@ -1413,7 +1417,7 @@ mod tests {
         assert_eq!(
             resolve_disconnect_failure_stage(
                 &make_stream_info("some_provider", "Some Channel"),
-                &DisconnectReason::Provisioning,
+                DisconnectReason::Provisioning,
                 &DisconnectQos::default(),
             ),
             None
@@ -1488,7 +1492,7 @@ mod tests {
         assert_eq!(
             resolve_disconnect_failure_stage(
                 &make_stream_info("some_provider", "Some Channel"),
-                &DisconnectReason::ProviderError,
+                DisconnectReason::ProviderError,
                 &DisconnectQos { first_byte_latency_ms: Some(150), ..Default::default() },
             ),
             Some(FailureStage::Streaming)
@@ -1500,7 +1504,7 @@ mod tests {
         assert_eq!(
             resolve_disconnect_failure_stage(
                 &make_stream_info("some_provider", "Some Channel"),
-                &DisconnectReason::SessionExpired,
+                DisconnectReason::SessionExpired,
                 &DisconnectQos::default(),
             ),
             Some(FailureStage::SessionReconnect)
@@ -1512,7 +1516,7 @@ mod tests {
         assert_eq!(
             resolve_disconnect_failure_stage(
                 &make_stream_info("some_provider", "Some Channel"),
-                &DisconnectReason::ProviderError,
+                DisconnectReason::ProviderError,
                 &DisconnectQos::default(),
             ),
             Some(FailureStage::FirstByte)
@@ -1526,7 +1530,7 @@ mod tests {
         assert_eq!(
             resolve_disconnect_failure_stage(
                 &info,
-                &DisconnectReason::ProviderError,
+                DisconnectReason::ProviderError,
                 &DisconnectQos::default(),
             ),
             Some(FailureStage::Streaming)

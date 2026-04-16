@@ -32,6 +32,8 @@ use std::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+use shared::utils::Internable;
+use shared::model::FailureStage;
 
 /// Discriminates which byte-stream the client is consuming at any moment.
 /// Stored as `u8` in an `AtomicU8` for lock-free access inside `poll_next`.
@@ -447,7 +449,7 @@ fn create_deferred_provider_open_future(
             username: None,
             client_ip: Some(&fingerprint.client_ip),
             stream_channel: Some(stream_channel),
-            connect_failure_stage: Some(crate::repository::FailureStage::ProviderOpen),
+            connect_failure_stage: Some(FailureStage::ProviderOpen),
         },
     );
     provider_stream_factory_options.set_provider(input.get_resolve_provider(stream_url.as_ref()));
@@ -711,7 +713,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     }
     let grant_user_grace_period = connection_permission == UserConnectionPermission::GracePeriod;
     let username = user.username.as_str();
-    let provider_name = stream_details.provider_name.as_deref().unwrap_or("");
+    let provider_name = stream_details.provider_name.clone().unwrap_or_else(||"unknown".intern());
 
     let user_agent = req_headers.get(USER_AGENT).map(|h| String::from_utf8_lossy(h.as_bytes())).unwrap_or_default();
 

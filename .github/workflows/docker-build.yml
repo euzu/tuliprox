@@ -150,14 +150,15 @@ jobs:
           (github.event_name == 'workflow_dispatch' && github.event.inputs.branch != 'master')
         id: version_commit
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "euzu"
+          git config user.email "euzu@proton.me"
           git add .
           if git diff --cached --quiet; then
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
           else
             VERSION=$(grep '^version' backend/Cargo.toml | head -n1 | cut -d'"' -f2)
             git commit -m "ci: bump version v$VERSION"
+            git tag -a "v$VERSION" -m "ci: tag version v$VERSION"
             echo "did_commit=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -221,8 +222,8 @@ jobs:
           ) &&
           steps.version_commit.outputs.did_commit == 'true'
         run: |
-          # Use origin HEAD to push to the correct remote branch
-          git push origin HEAD
+          # Use origin HEAD to push to the correct remote branch, and push tags
+          git push origin HEAD --tags
 
       - name: Publish release bundles to GitHub Release
         if: >-

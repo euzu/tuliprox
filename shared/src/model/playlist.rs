@@ -85,16 +85,27 @@ impl TryFrom<PlaylistItemType> for XtreamCluster {
 #[repr(u8)]
 pub enum PlaylistItemType {
     #[default]
+    #[serde(alias = "live")]
     Live = 1,
+    #[serde(alias = "video")]
     Video = 2,
-    Series = 3,     //  xtream series description
+    #[serde(alias = "series")]
+    Series = 3, //  xtream series description
+    #[serde(alias = "series_info")]
     SeriesInfo = 4, //  xtream series info fetched for series description
+    #[serde(alias = "catchup")]
     Catchup = 5,
+    #[serde(alias = "live_unknown")]
     LiveUnknown = 6, // No Provider id
-    LiveHls = 7,     // m3u8 entry
-    LiveDash = 8,    // mpd
+    #[serde(alias = "live_hls")]
+    LiveHls = 7, // m3u8 entry
+    #[serde(alias = "live_dash")]
+    LiveDash = 8, // mpd
+    #[serde(alias = "local_video")]
     LocalVideo = 9,
+    #[serde(alias = "local_series")]
     LocalSeries = 10,
+    #[serde(alias = "local_series_info")]
     LocalSeriesInfo = 11,
 }
 

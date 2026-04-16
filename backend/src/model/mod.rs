@@ -6,6 +6,7 @@ mod healthcheck;
 mod config;
 mod input_source;
 pub mod messaging;
+mod stream_history;
 
 pub use self::playlist::*;
 pub use self::mapping::*;
@@ -16,3 +17,4 @@ pub use shared::model::xtream_const::*;
 pub use self::config::*;
 pub use self::input_source::*;
 pub use self::messaging::*;
+pub use self::stream_history::*;

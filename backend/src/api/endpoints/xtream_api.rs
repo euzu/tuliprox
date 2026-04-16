@@ -62,6 +62,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use shared::model::ConnectFailureReason;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ApiStreamContext {
@@ -277,9 +278,9 @@ async fn xtream_player_api_stream(
             fingerprint,
             &user,
             create_stream_channel_with_type(target.id, &pli, pli.item_type),
-            pli.input_name.as_ref(),
+            pli.input_name.clone(),
             req_headers,
-            crate::repository::ConnectFailureReason::UserAccountExpired,
+            ConnectFailureReason::UserAccountExpired,
         );
     }
 
@@ -382,9 +383,9 @@ async fn xtream_player_api_stream(
                 fingerprint,
                 &user,
                 create_stream_channel_with_type(target.id, &pli, item_type),
-                &session.provider,
+                session.provider.clone(),
                 req_headers,
-                crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+                ConnectFailureReason::UserConnectionsExhausted,
             );
         }
 
@@ -394,9 +395,9 @@ async fn xtream_player_api_stream(
                 fingerprint,
                 &user,
                 create_stream_channel_with_type(target.id, &pli, item_type),
-                &session.provider,
+                session.provider.clone(),
                 req_headers,
-                crate::repository::ConnectFailureReason::ProviderConnectionsExhausted,
+                ConnectFailureReason::ProviderConnectionsExhausted,
             );
         }
 
@@ -409,7 +410,7 @@ async fn xtream_player_api_stream(
                 app_state,
                 session,
                 stream_channel,
-                crate::api::api_utils::ForceStreamRequestContext {
+                api_utils::ForceStreamRequestContext {
                     req_headers,
                     input: &input,
                     user: &user,
@@ -468,9 +469,9 @@ async fn xtream_player_api_stream(
             fingerprint,
             &user,
             create_stream_channel_with_type(target.id, &pli, item_type),
-            input.name.as_ref(),
+            input.name.clone(),
             req_headers,
-            crate::repository::ConnectFailureReason::UserConnectionsExhausted,
+            ConnectFailureReason::UserConnectionsExhausted,
         );
     }
 

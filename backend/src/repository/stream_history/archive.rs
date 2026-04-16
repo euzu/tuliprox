@@ -1,9 +1,9 @@
 use crate::repository::stream_history::{
     BlockHeaderBody, CompressionKind, FileHeaderBody, RecordEncodingKind, BLOCK_MAGIC, CONTAINER_FORMAT_VERSION,
-    RECORD_SCHEMA_VERSION, SOURCE_KIND_STREAM_HISTORY, read_and_verify_file_magic, read_framed,
+    SOURCE_KIND_STREAM_HISTORY, read_and_verify_file_magic, read_framed,
     write_file_magic, write_framed,
 };
-use crate::repository::stream_history::writer::{apply_retention, current_utc_day, now_utc_secs};
+use crate::repository::stream_history::writer::apply_retention;
 use lz4_flex::frame::FrameEncoder;
 use log::{info, warn};
 use std::{
@@ -11,6 +11,9 @@ use std::{
     io::{self, BufReader, Read, Seek},
     path::{Path, PathBuf},
 };
+use tokio::task::spawn_blocking;
+use crate::model::RECORD_SCHEMA_VERSION;
+use crate::utils::{current_utc_day, now_utc_secs};
 
 struct PendingSummary {
     header: FileHeaderBody,
@@ -111,7 +114,7 @@ pub fn archive_pending_file(path: &Path) -> io::Result<PathBuf> {
 
     // Stream the block data from the pending file
     let mut pending = File::open(path)?;
-    pending.seek(std::io::SeekFrom::Start(summary.blocks_start))?;
+    pending.seek(io::SeekFrom::Start(summary.blocks_start))?;
     io::copy(&mut pending, &mut lz4)?;
 
     lz4.finish().map_err(io::Error::other)?;
@@ -187,15 +190,22 @@ pub fn recover_pending_files(directory: &str) -> io::Result<()> {
 }
 
 /// Called by the writer on day rollover or shutdown: flush, archive, apply retention.
-pub fn finalize_and_archive(pending_path: &Path, directory: &str, retention_days: u16) {
-    if !pending_path.exists() {
+/// `archive_pending_file` (lz4 compression + file I/O) runs in `spawn_blocking` since it's CPU-bound;
+/// `apply_retention` is fully async.
+pub async fn finalize_and_archive(pending_path: &Path, directory: &str, retention_days: u16) {
+    let path_buf = pending_path.to_path_buf();
+    let path_buf_2 = path_buf.clone();
+    let path_exists = tokio::fs::metadata(&path_buf).await.is_ok();
+    if !path_exists {
         return;
     }
-    match archive_pending_file(pending_path) {
-        Ok(p) => info!("Finalized archive: {}", p.display()),
-        Err(e) => warn!("Failed to archive pending file {}: {e}", pending_path.display()),
+    let archive_result = spawn_blocking(move || archive_pending_file(&path_buf)).await;
+    match archive_result {
+        Ok(Ok(p)) => info!("Finalized archive: {}", p.display()),
+        Ok(Err(e)) => warn!("Failed to archive pending file {}: {e}", path_buf_2.display()),
+        Err(e) => warn!("Failed to archive pending file (join error): {e}"),
     }
-    if let Err(e) = apply_retention(directory, retention_days) {
+    if let Err(e) = apply_retention(directory, retention_days).await {
         warn!("Retention cleanup failed: {e}");
     }
 }
@@ -205,13 +215,15 @@ mod tests {
     use super::*;
     use std::io::Write;
     use crate::repository::stream_history::{
-        CompressionKind, EventType, RECORD_SCHEMA_VERSION, StreamHistoryRecord, read_and_verify_file_magic,
+        CompressionKind, read_and_verify_file_magic,
         read_framed, serialize_named, write_block_magic,
     };
-    use crate::repository::stream_history::writer::{StreamHistoryWriter, now_utc_secs, current_utc_day};
-    use crate::model::StreamHistoryConfig;
+    use crate::repository::stream_history::writer::{StreamHistoryWriter};
+    use crate::model::{StreamHistoryConfig, StreamHistoryRecord};
     use lz4_flex::frame::FrameDecoder;
     use tempfile::TempDir;
+    use shared::model::{PlaylistItemType, StreamHistoryEventType};
+    use shared::utils::Internable;
 
     fn test_config(dir: &str, batch_size: usize) -> StreamHistoryConfig {
         StreamHistoryConfig {
@@ -225,17 +237,17 @@ mod tests {
     fn make_record(session_id: u64) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: now_utc_secs(),
             partition_day_utc: current_utc_day(),
             session_id,
             source_addr: None,
             api_username: Some("alice".to_string()),
-            provider_name: Some("acme".to_string()),
+            provider_name: Some("acme".intern()),
             provider_username: None,
-            input_name: Some("input".to_string()),
+            input_name: Some("input".intern()),
             virtual_id: Some(1),
-            item_type: Some("live".to_string()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some("Test".to_string()),
             group: None,
             country: None,
@@ -265,14 +277,14 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
-            target_id: None,
+            target_name: None,
         }
     }
 
     /// Write a minimal `.pending` file and return its path.
     fn write_test_pending(dir: &Path, day: &str, records: &[StreamHistoryRecord]) -> PathBuf {
         use crate::repository::stream_history::{
-            BlockHeaderBody, CONTAINER_FORMAT_VERSION, RECORD_SCHEMA_VERSION, CompressionKind,
+            BlockHeaderBody, CONTAINER_FORMAT_VERSION, CompressionKind,
             RecordEncodingKind, SOURCE_KIND_STREAM_HISTORY,
         };
 

@@ -90,7 +90,7 @@ fn download_task_to_stream_with_ts(download: &FileDownloadDto, ts: u64) -> Strea
             shared_stream_id: None,
             technical: None,
         },
-        provider: BACKGROUND_TRANSFER_PROVIDER.to_string(),
+        provider: BACKGROUND_TRANSFER_PROVIDER.intern(),
         addr: download_stream_addr(uid),
         client_ip: BACKGROUND_TRANSFER_CLIENT_IP.to_string(),
         user_agent: "Tuliprox download worker".to_string(),
@@ -347,7 +347,7 @@ mod tests {
                 shared_stream_id: None,
                 technical: None,
             },
-            provider: "provider".to_string(),
+            provider: "provider".intern(),
             addr: addr.parse::<SocketAddr>().unwrap_or_else(|_| unreachable!()),
             client_ip: "127.0.0.1".to_string(),
             user_agent: "ua".to_string(),
@@ -440,7 +440,7 @@ mod tests {
         apply_downloads_snapshot(&mut streams, &response);
 
         assert_eq!(streams.len(), 1);
-        assert_eq!(streams[0].provider, "Download Manager");
+        assert_eq!(streams[0].provider.as_ref(), "Download Manager");
         assert_eq!(streams[0].client_ip, "background-task");
         assert_eq!(streams[0].channel.item_type, PlaylistItemType::Video);
     }

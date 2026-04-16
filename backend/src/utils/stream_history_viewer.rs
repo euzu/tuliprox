@@ -3,14 +3,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-
+use std::sync::Arc;
 use chrono;
 use regex::Regex;
 use serde::Deserialize;
-
+use shared::utils::Internable;
+use crate::model::{StreamHistoryRecord};
 use crate::repository::{
-    ConnectFailureReason, DisconnectReason, EventType, FailureStage, FileHeaderBody, StreamHistoryFileReader,
-    StreamHistoryRecord, extract_day_from_filename, read_and_verify_file_magic, read_framed,
+    FileHeaderBody, StreamHistoryFileReader,
+    extract_day_from_filename, read_and_verify_file_magic, read_framed,
 };
 
 #[derive(Deserialize)]
@@ -98,7 +99,6 @@ const NUMERIC_FIELDS: &[&str] = &[
     "session_id",
     "virtual_id",
     "provider_id",
-    "target_id",
     "provider_http_status",
     "shared_stream_id",
 ];
@@ -107,6 +107,7 @@ const STRING_FIELDS: &[&str] = &[
     "api_username",
     "provider_name",
     "provider_username",
+    "target_name",
     "input_name",
     "item_type",
     "title",
@@ -174,7 +175,12 @@ impl CompiledFilter {
                     FilterValue::Regex(re) => re.is_match(s),
                     FilterValue::NumericExact(_) => false,
                 },
-                RecordFieldValue::String(None) => false,
+                RecordFieldValue::ArcStr(Some(s)) => match value {
+                    FilterValue::Exact(v) => s.as_ref().eq_ignore_ascii_case(v),
+                    FilterValue::Regex(re) => re.is_match(s.as_ref()),
+                    FilterValue::NumericExact(_) => false,
+                },
+                RecordFieldValue::String(None) | RecordFieldValue::ArcStr(None) => false,
                 RecordFieldValue::U64(n) => match value {
                     FilterValue::NumericExact(v) => n == *v,
                     _ => false,
@@ -186,24 +192,18 @@ impl CompiledFilter {
 
 enum RecordFieldValue<'a> {
     String(Option<&'a str>),
+    ArcStr(Option<Arc<str>>),
     U64(u64),
 }
 
 fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordFieldValue<'a> {
     match field {
-        "event_type" => {
-            let s = match record.event_type {
-                EventType::Connect => "connect",
-                EventType::ConnectFailed => "connect_failed",
-                EventType::Disconnect => "disconnect",
-            };
-            RecordFieldValue::String(Some(s))
-        }
+        "event_type" => RecordFieldValue::ArcStr(Some(record.event_type.to_string().intern())),
         "api_username" => RecordFieldValue::String(record.api_username.as_deref()),
         "provider_name" => RecordFieldValue::String(record.provider_name.as_deref()),
         "provider_username" => RecordFieldValue::String(record.provider_username.as_deref()),
         "input_name" => RecordFieldValue::String(record.input_name.as_deref()),
-        "item_type" => RecordFieldValue::String(record.item_type.as_deref()),
+        "item_type" => RecordFieldValue::ArcStr(record.item_type.as_ref().map(ToString::to_string).map(Internable::intern)),
         "title" => RecordFieldValue::String(record.title.as_deref()),
         "group" => RecordFieldValue::String(record.group.as_deref()),
         "country" => RecordFieldValue::String(record.country.as_deref()),
@@ -214,48 +214,9 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
                 .shared_joined_existing
                 .map(|shared| if shared { "true" } else { "false" }),
         ),
-        "disconnect_reason" => {
-            // Match against serde rename_all = "snake_case" names
-            RecordFieldValue::String(record.disconnect_reason.as_ref().map(|r| match r {
-                DisconnectReason::Cleanup => "cleanup",
-                DisconnectReason::ClientClosed => "client_closed",
-                DisconnectReason::ClientKicked => "client_kicked",
-                DisconnectReason::Provisioning => "provisioning",
-                DisconnectReason::ServerError => "server_error",
-                DisconnectReason::Timeout => "timeout",
-                DisconnectReason::DayRollover => "day_rollover",
-                DisconnectReason::Shutdown => "shutdown",
-                DisconnectReason::Unknown => "unknown",
-                DisconnectReason::ProviderError => "provider_error",
-                DisconnectReason::ProviderClosed => "provider_closed",
-                DisconnectReason::Preempted => "preempted",
-                DisconnectReason::SessionExpired => "session_expired",
-                DisconnectReason::UserConnectionsExhausted => "user_connections_exhausted",
-                DisconnectReason::ProviderConnectionsExhausted => "provider_connections_exhausted",
-            }))
-        }
-        "connect_failure_reason" => {
-            RecordFieldValue::String(record.connect_failure_reason.as_ref().map(|r| match r {
-                ConnectFailureReason::UserAccountExpired => "user_account_expired",
-                ConnectFailureReason::UserConnectionsExhausted => "user_connections_exhausted",
-                ConnectFailureReason::ProviderConnectionsExhausted => "provider_connections_exhausted",
-                ConnectFailureReason::ProviderError => "provider_error",
-                ConnectFailureReason::ProviderClosed => "provider_closed",
-                ConnectFailureReason::ChannelUnavailable => "channel_unavailable",
-                ConnectFailureReason::Preempted => "preempted",
-                ConnectFailureReason::SessionExpired => "session_expired",
-                ConnectFailureReason::Provisioning => "provisioning",
-            }))
-        }
-        "failure_stage" => {
-            RecordFieldValue::String(record.failure_stage.as_ref().map(|stage| match stage {
-                FailureStage::Admission => "admission",
-                FailureStage::ProviderOpen => "provider_open",
-                FailureStage::FirstByte => "first_byte",
-                FailureStage::Streaming => "streaming",
-                FailureStage::SessionReconnect => "session_reconnect",
-            }))
-        }
+        "disconnect_reason" => RecordFieldValue::ArcStr(record.disconnect_reason.as_ref().map(|r| r.to_string().intern())),
+        "connect_failure_reason" => RecordFieldValue::ArcStr(record.connect_failure_reason.as_ref().map(|r| r.to_string().intern())),
+        "failure_stage" => RecordFieldValue::ArcStr(record.failure_stage.as_ref().map(|r| r.to_string().intern())),
         "provider_error_class" => RecordFieldValue::String(record.provider_error_class.as_deref()),
         "user_agent" => RecordFieldValue::String(record.user_agent.as_deref()),
         "cluster" => RecordFieldValue::String(record.cluster.as_deref()),
@@ -270,7 +231,7 @@ fn get_record_field<'a>(record: &'a StreamHistoryRecord, field: &str) -> RecordF
         "session_id" => RecordFieldValue::U64(record.session_id),
         "virtual_id" => RecordFieldValue::U64(u64::from(record.virtual_id.unwrap_or(0))),
         "provider_id" => RecordFieldValue::U64(u64::from(record.provider_id.unwrap_or(0))),
-        "target_id" => RecordFieldValue::U64(u64::from(record.target_id.unwrap_or(0))),
+        "target_name" => RecordFieldValue::String(record.target_name.as_deref()),
         "provider_http_status" => RecordFieldValue::U64(u64::from(record.provider_http_status.unwrap_or(0))),
         "shared_stream_id" => RecordFieldValue::U64(record.shared_stream_id.unwrap_or(0)),
         _ => RecordFieldValue::String(None), // Unknown field: no match
@@ -297,21 +258,39 @@ pub(crate) struct HistoryFile {
     pub is_archive: bool,
 }
 
-pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<Vec<HistoryFile>> {
-    if !dir.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Stream history directory not found: {}", dir.display()),
-        ));
+pub(crate) async fn discover_files(
+    dir: &Path,
+    time_range: &TimeRange,
+) -> io::Result<Vec<HistoryFile>> {
+    match tokio::fs::metadata(dir).await {
+        Ok(meta) => {
+            if !meta.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Stream history directory not found: {}", dir.display()),
+                ));
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Stream history directory not found: {}", dir.display()),
+            ));
+        }
+        Err(e) => return Err(e),
     }
 
     let (range_start, range_end) = *time_range;
     let mut files = Vec::new();
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         let is_archive = name.ends_with(".archive.lz4");
         let is_pending = name.ends_with(".pending");
@@ -332,17 +311,23 @@ pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<V
         }
 
         // Read file header for archive-level timestamp bounds
-        let header = match read_file_header(&path, is_archive) {
-            Ok(h) => h,
-            Err(e) => {
+        let path_clone = path.clone();
+        let header = match tokio::task::spawn_blocking(move || read_file_header(&path_clone, is_archive)).await {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
                 eprintln!("Warning: skipping {}: {e}", path.display());
+                continue;
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping {} (task failed): {e}", path.display());
                 continue;
             }
         };
 
         // File-level skip for archives with known timestamp bounds
         if is_archive {
-            if let (Some(min_ts), Some(max_ts)) = (header.min_event_ts_utc, header.max_event_ts_utc) {
+            if let (Some(min_ts), Some(max_ts)) = (header.min_event_ts_utc, header.max_event_ts_utc)
+            {
                 if max_ts < range_start || min_ts > range_end {
                     continue;
                 }
@@ -358,14 +343,18 @@ pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<V
 
     // Sort: primary by partition_day, secondary archive before pending
     files.sort_by(|a, b| {
-        a.partition_day.cmp(&b.partition_day)
-            .then(b.is_archive.cmp(&a.is_archive)) // true (archive) before false (pending)
+        a.partition_day
+            .cmp(&b.partition_day)
+            .then(b.is_archive.cmp(&a.is_archive))
     });
 
     if files.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("No stream history files found in range. Check directory: {}", dir.display()),
+            format!(
+                "No stream history files found in range. Check directory: {}",
+                dir.display()
+            ),
         ));
     }
 
@@ -374,7 +363,7 @@ pub(crate) fn discover_files(dir: &Path, time_range: &TimeRange) -> io::Result<V
 
 fn read_file_header(path: &Path, is_archive: bool) -> io::Result<FileHeaderBody> {
     if is_archive {
-        let file = std::fs::File::open(path)?;
+        let file = fs::File::open(path)?;
         let decoder = lz4_flex::frame::FrameDecoder::new(file);
         let mut reader = std::io::BufReader::new(decoder);
         read_and_verify_file_magic(&mut reader)?;
@@ -452,7 +441,7 @@ fn stream_output(
     let _ = writeln!(out, "]");
 }
 
-fn run_stream_history_viewer(input: &str) -> Result<(), String> {
+async fn run_stream_history_viewer(input: &str) -> Result<(), String> {
     eprintln!("[INFO] All timestamps interpreted as UTC");
 
     let query = load_query(input)?;
@@ -465,14 +454,14 @@ fn run_stream_history_viewer(input: &str) -> Result<(), String> {
     let dir = query.path.as_deref().unwrap_or("data/stream_history");
     let dir_path = Path::new(dir);
 
-    let files = discover_files(dir_path, &time_range).map_err(|e| e.to_string())?;
+    let files = discover_files(dir_path, &time_range).await.map_err(|e| e.to_string())?;
 
     stream_output(files.as_slice(), &time_range, &filters);
     Ok(())
 }
 
-pub fn stream_history_viewer(input: &str) -> i32 {
-    match run_stream_history_viewer(input) {
+pub async fn stream_history_viewer(input: &str) -> i32 {
+    match run_stream_history_viewer(input).await {
         Ok(()) => 0,
         Err(err) => {
             eprintln!("Error: {err}");
@@ -485,6 +474,8 @@ pub fn stream_history_viewer(input: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use shared::model::{DisconnectReason, StreamHistoryEventType, FailureStage};
+    use shared::utils::Internable;
     use super::*;
 
     #[test]
@@ -588,10 +579,10 @@ mod tests {
         let filter = CompiledFilter::compile(&raw).unwrap();
 
         let mut record = make_empty_record();
-        record.provider_name = Some("acme-tv".to_string());
+        record.provider_name = Some("acme-tv".intern());
         assert!(filter.matches(&record));
 
-        record.provider_name = Some("other-provider".to_string());
+        record.provider_name = Some("other-provider".intern());
         assert!(!filter.matches(&record));
     }
 
@@ -706,9 +697,9 @@ mod tests {
         assert_eq!(query.to.as_deref(), Some("2026-03-24"));
     }
 
-    #[test]
-    fn test_run_stream_history_viewer_returns_error_instead_of_exiting_on_invalid_query() {
-        let result = run_stream_history_viewer("{not-json");
+    #[tokio::test]
+    async fn test_run_stream_history_viewer_returns_error_instead_of_exiting_on_invalid_query() {
+        let result = run_stream_history_viewer("{not-json").await;
         assert!(result.is_err());
     }
 
@@ -760,7 +751,7 @@ mod tests {
     fn make_empty_record() -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: 1,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: 0,
             partition_day_utc: String::new(),
             session_id: 0,
@@ -800,7 +791,7 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
-            target_id: None,
+            target_name: None,
         }
     }
 }

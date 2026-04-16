@@ -3,11 +3,14 @@ use std::io::{self, BufReader, Read};
 use std::path::Path;
 
 use lz4_flex::frame::FrameDecoder;
-
+use tokio::fs::File as TokioFile;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader as TokioBufReader};
+use crate::model::StreamHistoryRecord;
 use crate::repository::stream_history::storage::{
     read_and_verify_file_magic, read_and_verify_block_magic, read_framed,
-    deserialize_named, FileHeaderBody, BlockHeaderBody, StreamHistoryRecord,
+    deserialize_named, FileHeaderBody, BlockHeaderBody,
     BLOCK_MAGIC, MAX_BLOCK_PAYLOAD_SIZE,
+    async_read_and_verify_file_magic, async_read_and_verify_block_magic, async_read_framed,
 };
 
 pub struct StreamHistoryFileReader<R: Read> {
@@ -160,7 +163,7 @@ impl<R: Read> StreamHistoryFileReader<R> {
                     // by the underlying reader yet — chain them before self.reader.
                     let tail_start = (i + 4).saturating_sub(carry_len);
                     let tail = &scan_buf[tail_start..n];
-                    let mut chained = io::Cursor::new(tail).chain(&mut self.reader);
+                    let mut chained = std::io::Read::chain(io::Cursor::new(tail), &mut self.reader);
 
                     let block_header: BlockHeaderBody = match read_framed::<_, BlockHeaderBody>(&mut chained) {
                         Ok(h) if (h.payload_len as usize) <= MAX_BLOCK_PAYLOAD_SIZE => {
@@ -266,17 +269,185 @@ impl<R: Read> Iterator for StreamHistoryFileReader<R> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Async pending file reader — uses tokio for non-blocking I/O
+// ---------------------------------------------------------------------------
+
+/// Async reader for `.pending` stream history files.
+///
+/// Uses `tokio::fs::File` + `tokio::io::BufReader` for fully async I/O.
+/// Exposes `next_record()` as a public async fn — call it in a loop in the
+/// spawned reader task rather than trying to implement Stream (which would
+/// require async-stream or a state machine in `poll_next`).
+///
+/// NOTE: This does NOT support magic recovery — pending files are append-only
+/// and blocks are read sequentially. If a block is corrupt the stream stops.
+pub struct AsyncStreamHistoryPendingReader {
+    reader: TokioBufReader<TokioFile>,
+    time_range: Option<(u64, u64)>,
+    current_block_remaining: u32,
+    payload_buf: Vec<u8>,
+    payload_offset: usize,
+    done: bool,
+    file_path: String,
+}
+
+impl AsyncStreamHistoryPendingReader {
+    /// Open a pending file and verify its header.
+    pub async fn open(path: &Path, time_range: Option<(u64, u64)>) -> io::Result<(Self, FileHeaderBody)> {
+        let file = TokioFile::open(path).await?;
+        let mut reader = TokioBufReader::new(file);
+        async_read_and_verify_file_magic(&mut reader).await?;
+        let header: FileHeaderBody = async_read_framed(&mut reader).await?;
+        Ok((Self {
+            reader,
+            time_range,
+            current_block_remaining: 0,
+            payload_buf: Vec::new(),
+            payload_offset: 0,
+            done: false,
+            file_path: path.display().to_string(),
+        }, header))
+    }
+
+    /// Skip `len` bytes by seeking forward from current position.
+    async fn skip_payload(&mut self, len: u32) -> io::Result<()> {
+        self.reader.seek(tokio::io::SeekFrom::Current(i64::from(len))).await?;
+        Ok(())
+    }
+
+    /// Read and validate the next block header, then load the full payload into `payload_buf`.
+    async fn read_next_block(&mut self) -> io::Result<Option<()>> {
+        loop {
+            match async_read_and_verify_block_magic(&mut self.reader).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => {
+                    eprintln!("Warning: {}: corrupt block magic: {e}", self.file_path);
+                    self.done = true;
+                    return Ok(None);
+                }
+            }
+
+            let block_header: BlockHeaderBody = match async_read_framed(&mut self.reader).await {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("Warning: {}: corrupt block header: {e}", self.file_path);
+                    self.done = true;
+                    return Ok(None);
+                }
+            };
+
+            // Block-level time-range skip
+            if let Some((start, end)) = self.time_range {
+                if block_header.last_event_ts_utc < start || block_header.first_event_ts_utc > end {
+                    if let Err(e) = self.skip_payload(block_header.payload_len).await {
+                        if e.kind() == io::ErrorKind::UnexpectedEof {
+                            self.done = true;
+                            return Ok(None);
+                        }
+                        return Err(e);
+                    }
+                    continue;
+                }
+            }
+
+            // OOM protection
+            if block_header.payload_len as usize > MAX_BLOCK_PAYLOAD_SIZE {
+                eprintln!("Warning: {}: block payload_len {} exceeds MAX_BLOCK_PAYLOAD_SIZE, skipping",
+                    self.file_path, block_header.payload_len);
+                if let Err(e) = self.skip_payload(block_header.payload_len).await {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        self.done = true;
+                        return Ok(None);
+                    }
+                    return Err(e);
+                }
+                continue;
+            }
+
+            self.payload_buf.resize(block_header.payload_len as usize, 0);
+            self.reader.read_exact(&mut self.payload_buf).await?;
+
+            let actual_crc = crc32fast::hash(&self.payload_buf);
+            if actual_crc != block_header.payload_crc {
+                eprintln!("Warning: {}: payload CRC mismatch, stopping", self.file_path);
+                self.done = true;
+                return Ok(None);
+            }
+
+            self.current_block_remaining = block_header.record_count;
+            self.payload_offset = 0;
+            return Ok(Some(()));
+        }
+    }
+
+    /// Fetch the next record, or `None` on EOF / error.
+    pub async fn next_record(&mut self) -> Option<io::Result<StreamHistoryRecord>> {
+        if self.done {
+            return None;
+        }
+
+        loop {
+            if self.current_block_remaining > 0 {
+                if self.payload_offset + 4 > self.payload_buf.len() {
+                    eprintln!("Warning: {}: truncated record length", self.file_path);
+                    self.current_block_remaining = 0;
+                    continue;
+                }
+                let mut record_len_bytes = [0u8; 4];
+                record_len_bytes.copy_from_slice(&self.payload_buf[self.payload_offset..self.payload_offset + 4]);
+                let record_len = u32::from_be_bytes(record_len_bytes) as usize;
+                self.payload_offset += 4;
+
+                if self.payload_offset + record_len > self.payload_buf.len() {
+                    eprintln!("Warning: {}: truncated record data", self.file_path);
+                    self.current_block_remaining = 0;
+                    continue;
+                }
+
+                let record_bytes = &self.payload_buf[self.payload_offset..self.payload_offset + record_len];
+                self.payload_offset += record_len;
+                self.current_block_remaining -= 1;
+
+                match deserialize_named(record_bytes) {
+                    Ok(record) => return Some(Ok(record)),
+                    Err(e) => {
+                        eprintln!("Warning: {}: failed to deserialize record: {e}", self.file_path);
+                        continue;
+                    }
+                }
+            }
+
+            match self.read_next_block().await {
+                Ok(Some(())) => {} // Got block, loop back
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::repository::stream_history::storage::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use shared::model::StreamHistoryEventType;
+    use shared::utils::Internable;
+    use crate::model::{RECORD_SCHEMA_VERSION};
 
     fn make_test_record(ts: u64, username: &str) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: ts,
             partition_day_utc: "2026-03-22".to_string(),
             session_id: 1,
@@ -284,7 +455,7 @@ mod tests {
             api_username: Some(username.to_string()),
             provider_name: None,
             provider_username: None,
-            input_name: Some("input".to_string()),
+            input_name: Some("input".intern()),
             virtual_id: None,
             item_type: None,
             title: None,
@@ -316,7 +487,7 @@ mod tests {
             connect_failure_reason: None,
             disconnect_reason: None,
             previous_session_id: None,
-            target_id: None,
+            target_name: None,
         }
     }
 
