@@ -219,9 +219,10 @@ mod tests {
         read_framed, serialize_named, write_block_magic,
     };
     use crate::repository::stream_history::writer::{StreamHistoryWriter};
-    use crate::model::{EventType, StreamHistoryConfig, StreamHistoryRecord};
+    use crate::model::{StreamHistoryConfig, StreamHistoryRecord};
     use lz4_flex::frame::FrameDecoder;
     use tempfile::TempDir;
+    use shared::model::{PlaylistItemType, StreamHistoryEventType};
     use shared::utils::Internable;
 
     fn test_config(dir: &str, batch_size: usize) -> StreamHistoryConfig {
@@ -236,7 +237,7 @@ mod tests {
     fn make_record(session_id: u64) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect,
+            event_type: StreamHistoryEventType::Connect,
             event_ts_utc: now_utc_secs(),
             partition_day_utc: current_utc_day(),
             session_id,
@@ -246,7 +247,7 @@ mod tests {
             provider_username: None,
             input_name: Some("input".intern()),
             virtual_id: Some(1),
-            item_type: Some("live".intern()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some("Test".to_string()),
             group: None,
             country: None,

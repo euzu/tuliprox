@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream as TokioStream;
 use crate::model::StreamHistoryRecord;
+use std::sync::mpsc as sync_mpsc;
 
 /// Async stream of stream history records.
 /// NOTE: The stream implementation is ready but not yet wired to the API.
@@ -63,30 +64,26 @@ impl StreamHistoryStream {
 
         for file in &files {
             if file.is_archive {
-                // Archive files: LZ4 decompression is sync-only — use spawn_blocking
+                // Archive files: LZ4 decompression is sync-only — use spawn_blocking.
+                // Use a sync channel to stream records incrementally instead of collecting.
                 let file_path = file.path.clone();
                 let time_range_val = *time_range;
+                let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel(1024);
                 let result = tokio::task::spawn_blocking(move || {
-                    Self::read_archive_file(&file_path, time_range_val)
+                    Self::read_archive_file(&file_path, time_range_val, &sync_tx);
                 }).await;
                 match result {
-                    Ok(iter) => {
-                        for result in iter {
-                            match result {
-                                Ok(record) => {
-                                    if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
-                                        continue;
-                                    }
-                                    if !filters.matches(&record) {
-                                        continue;
-                                    }
-                                    if tx.send(record).await.is_err() {
-                                        return; // Receiver dropped
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!("Failed to read archive record: {e}");
-                                }
+                    Ok(()) => {
+                        // Receive records from the sync channel and forward to async channel
+                        for record in sync_rx {
+                            if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
+                                continue;
+                            }
+                            if !filters.matches(&record) {
+                                continue;
+                            }
+                            if tx.send(record).await.is_err() {
+                                return; // Receiver dropped
                             }
                         }
                     }
@@ -126,20 +123,34 @@ impl StreamHistoryStream {
     }
 
     /// Read a LZ4 archive file (runs in `spawn_blocking`).
-    /// Collects into Vec because `dyn Iterator` is not Send, and `lz4_flex` is sync-only anyway.
+    /// Streams records incrementally via a sync channel instead of collecting into Vec,
+    /// so memory usage stays bounded regardless of archive size.
     #[allow(dead_code)]
     fn read_archive_file(
         path: &Path,
         time_range: TimeRange,
-    ) -> Vec<std::io::Result<StreamHistoryRecord>> {
+        tx: &sync_mpsc::SyncSender<StreamHistoryRecord>,
+    ) {
         let (reader, _) = match StreamHistoryFileReader::from_archive(path, Some(time_range)) {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("Failed to open archive {}: {e}", path.display());
-                return Vec::new();
+                return;
             }
         };
-        reader.collect()
+        for result in reader {
+            match result {
+                Ok(record) => {
+                    if tx.send(record).is_err() {
+                        // Receiver dropped, stop sending
+                        return;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to read archive record: {e}");
+                }
+            }
+        }
     }
 }
 

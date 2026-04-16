@@ -1,66 +1,10 @@
 use crate::utils::arc_str_option_serde;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use shared::model::{StreamHistoryRecordDto, StreamInfo};
-use shared::utils::Internable;
+use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType, StreamHistoryRecordDto, StreamInfo};
 use crate::utils::{encode_base64_hash, now_utc_secs, utc_day_from_secs};
 
 pub const RECORD_SCHEMA_VERSION: u8 = 1;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventType {
-    Connect,
-    ConnectFailed,
-    Disconnect,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectFailureReason {
-    UserAccountExpired,
-    UserConnectionsExhausted,
-    ProviderConnectionsExhausted,
-    ProviderError,
-    ProviderClosed,
-    ChannelUnavailable,
-    Preempted,
-    SessionExpired,
-    Provisioning,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailureStage {
-    Admission,
-    ProviderOpen,
-    FirstByte,
-    Streaming,
-    SessionReconnect,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisconnectReason {
-    Cleanup,
-    ClientClosed,
-    ClientKicked,
-    Provisioning,
-    ServerError,
-    Timeout,
-    /// Reserved for future day-split logic: emitted at midnight for sessions that span
-    /// two calendar days so the previous day's file gets a closing record.
-    /// Not yet emitted — sessions crossing midnight have their disconnect in the new day's file.
-    DayRollover,
-    Shutdown,
-    Unknown,
-    ProviderError,
-    ProviderClosed,
-    Preempted,
-    SessionExpired,
-    UserConnectionsExhausted,
-    ProviderConnectionsExhausted,
-}
 
 /// A single stream lifecycle event record (connect or disconnect).
 ///
@@ -68,7 +12,7 @@ pub enum DisconnectReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamHistoryRecord {
     pub schema_version: u8,
-    pub event_type: EventType,
+    pub event_type: StreamHistoryEventType,
     /// Unix timestamp seconds UTC of when this event occurred.
     pub event_ts_utc: u64,
     /// UTC calendar day of this event, e.g. `"2026-03-22"`.
@@ -87,8 +31,7 @@ pub struct StreamHistoryRecord {
     pub input_name: Option<Arc<str>>,
     // Stream metadata
     pub virtual_id: Option<u32>,
-    #[serde(default, with = "arc_str_option_serde")]
-    pub item_type: Option<Arc<str>>,
+    pub item_type: Option<PlaylistItemType>,
     pub title: Option<String>,
     pub group: Option<String>,
     pub country: Option<String>,
@@ -161,7 +104,7 @@ impl StreamHistoryRecord {
     fn base(info: &StreamInfo, event_ts: u64) -> Self {
         Self {
             schema_version: RECORD_SCHEMA_VERSION,
-            event_type: EventType::Connect, // overridden by callers
+            event_type: StreamHistoryEventType::Connect, // overridden by callers
             event_ts_utc: event_ts,
             partition_day_utc: utc_day_from_secs(event_ts),
             // Combine connect-timestamp (upper 32 bits) with uid (lower 32 bits).
@@ -178,7 +121,7 @@ impl StreamHistoryRecord {
                 Some(info.channel.input_name.clone())
             },
             virtual_id: Some(info.channel.virtual_id),
-            item_type: Some(info.channel.item_type.to_string().intern()),
+            item_type: Some(info.channel.item_type),
             title: Some(info.channel.title.to_string()),
             group: Some(info.channel.group.to_string()),
             country: info.country_code.clone(),
@@ -218,7 +161,7 @@ impl StreamHistoryRecord {
 
     pub fn from_connect(info: &StreamInfo) -> Self {
         let mut record = Self::base(info, info.ts);
-        record.event_type = EventType::Connect;
+        record.event_type = StreamHistoryEventType::Connect;
         record.connect_ts_utc = Some(info.ts);
         record.previous_session_id = info.previous_session_id;
         record
@@ -233,7 +176,7 @@ impl StreamHistoryRecord {
     ) -> Self {
         let event_ts = now_utc_secs();
         let mut record = Self::base(info, event_ts);
-        record.event_type = EventType::ConnectFailed;
+        record.event_type = StreamHistoryEventType::ConnectFailed;
         record.session_id = (event_ts << 32) | u64::from(attempt_uid);
         record.failure_stage = Some(failure_stage);
         record.connect_failure_reason = Some(reason);
@@ -257,7 +200,7 @@ impl StreamHistoryRecord {
         let now_secs = now_utc_secs();
         let connect_secs = info.ts;
         let mut record = Self::base(info, now_secs);
-        record.event_type = EventType::Disconnect;
+        record.event_type = StreamHistoryEventType::Disconnect;
         record.connect_ts_utc = Some(connect_secs);
         record.disconnect_ts_utc = Some(now_secs);
         record.session_duration = Some(now_secs.saturating_sub(connect_secs));
@@ -273,11 +216,7 @@ impl StreamHistoryRecord {
 impl From<&StreamHistoryRecord> for StreamHistoryRecordDto {
     fn from(record: &StreamHistoryRecord) -> Self {
         Self {
-            event_type: match record.event_type {
-                EventType::Connect => "connect".to_string(),
-                EventType::ConnectFailed => "connect_failed".to_string(),
-                EventType::Disconnect => "disconnect".to_string(),
-            },
+            event_type: record.event_type,
             event_ts_utc: record.event_ts_utc,
             partition_day_utc: record.partition_day_utc.clone(),
             session_id: record.session_id,
@@ -286,7 +225,7 @@ impl From<&StreamHistoryRecord> for StreamHistoryRecordDto {
             provider_name: record.provider_name.clone(),
             input_name: record.input_name.clone(),
             virtual_id: record.virtual_id,
-            item_type: record.item_type.clone(),
+            item_type: record.item_type,
             title: record.title.clone(),
             group: record.group.clone(),
             country: record.country.clone(),
@@ -298,23 +237,9 @@ impl From<&StreamHistoryRecord> for StreamHistoryRecordDto {
             video_codec: record.video_codec.clone(),
             audio_codec: record.audio_codec.clone(),
             resolution: record.resolution.clone(),
-            disconnect_reason: record.disconnect_reason.as_ref().map(|r| match r {
-                DisconnectReason::Cleanup => "cleanup".to_string(),
-                DisconnectReason::ClientClosed => "client_closed".to_string(),
-                DisconnectReason::ClientKicked => "client_kicked".to_string(),
-                DisconnectReason::Provisioning => "provisioning".to_string(),
-                DisconnectReason::ServerError => "server_error".to_string(),
-                DisconnectReason::Timeout => "timeout".to_string(),
-                DisconnectReason::DayRollover => "day_rollover".to_string(),
-                DisconnectReason::Shutdown => "shutdown".to_string(),
-                DisconnectReason::Unknown => "unknown".to_string(),
-                DisconnectReason::ProviderError => "provider_error".to_string(),
-                DisconnectReason::ProviderClosed => "provider_closed".to_string(),
-                DisconnectReason::Preempted => "preempted".to_string(),
-                DisconnectReason::SessionExpired => "session_expired".to_string(),
-                DisconnectReason::UserConnectionsExhausted => "user_connections_exhausted".to_string(),
-                DisconnectReason::ProviderConnectionsExhausted => "provider_connections_exhausted".to_string(),
-            }),
+            failure_stage: record.failure_stage,
+            connect_failure_reason: record.connect_failure_reason,
+            disconnect_reason: record.disconnect_reason,
             session_duration: record.session_duration,
             bytes_sent: record.bytes_sent,
             first_byte_latency_ms: record.first_byte_latency_ms,

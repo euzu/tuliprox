@@ -7,11 +7,11 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-
+use shared::model::StreamHistoryEventType;
 use crate::api::api_utils::json_or_bin_response;
 use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::model::AppState;
-use crate::model::{EventType, StreamHistoryRecord};
+use crate::model::{StreamHistoryRecord};
 use crate::repository::{QosSnapshotRecord, QosSnapshotRepository, StreamHistoryFileReader};
 use crate::utils::stream_history_viewer::{
     discover_files, resolve_time_range, CompiledFilter,
@@ -173,22 +173,17 @@ pub(crate) async fn stream_history_summary_query(
         Vec::new()
     };
 
-    let file_iter = collect_records_iter(&history_dir, time_range, filters_arc).await;
+    let file_iter = match collect_records_iter(&history_dir, time_range, filters_arc).await {
+        Ok(iter) => iter,
+        Err(e) => {
+            log::error!("Failed to discover stream history files for summary: {e}");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to discover history files: {e}"));
+        }
+    };
 
-    let combined = batch_records.into_iter().chain(file_iter.into_iter().flatten());
+    let combined = batch_records.into_iter().chain(file_iter);
     let summaries = aggregate_provider_summaries_from_iter(combined);
     json_or_bin_response(accept.as_deref(), &summaries).into_response()
-    // match result {
-    //     Ok(Ok(summaries)) => ,
-    //     Ok(Err(e)) => {
-    //         if e.kind() == io::ErrorKind::NotFound {
-    //             json_or_bin_response(accept.as_deref(), &Vec::<ProviderSummary>::new()).into_response()
-    //         } else {
-    //             error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to summarize history: {e}"))
-    //         }
-    //     }
-    //     Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("History summary task failed: {e}")),
-    // }
 }
 
 pub(crate) async fn qos_snapshot_query(
@@ -388,7 +383,7 @@ pub(crate) fn aggregate_provider_summaries(
         let provider_name = record.provider_name.clone().unwrap_or_else(|| Arc::from("unknown"));
         let acc = by_provider.entry(provider_name).or_default();
         acc.session_count = acc.session_count.saturating_add(1);
-        if matches!(record.event_type, EventType::Disconnect) {
+        if matches!(record.event_type, StreamHistoryEventType::Disconnect) {
             acc.disconnect_count = acc.disconnect_count.saturating_add(1);
         }
         acc.total_bytes_sent = acc.total_bytes_sent.saturating_add(record.bytes_sent.unwrap_or(0));
@@ -438,7 +433,7 @@ pub fn aggregate_provider_summaries_from_iter<I: Iterator<Item=StreamHistoryReco
         let provider_name = record.provider_name.unwrap_or_else(|| Arc::from("unknown"));
         let acc = by_provider.entry(provider_name).or_default();
         acc.session_count = acc.session_count.saturating_add(1);
-        if matches!(record.event_type, EventType::Disconnect) {
+        if matches!(record.event_type, StreamHistoryEventType::Disconnect) {
             acc.disconnect_count = acc.disconnect_count.saturating_add(1);
         }
         acc.total_bytes_sent = acc.total_bytes_sent.saturating_add(record.bytes_sent.unwrap_or(0));
@@ -495,7 +490,7 @@ impl CompiledQosSnapshotFilter {
             .is_none_or(|value| snapshot.stream_identity_key == *value)
             && self.input_name.as_ref().is_none_or(|value| snapshot.input_name.as_ref() == value)
             && self.provider_name.as_ref().is_none_or(|value| snapshot.provider_name.as_ref() == value)
-            && self.item_type.as_ref().is_none_or(|value| snapshot.item_type.as_ref() == value)
+            && self.item_type.as_ref().is_none_or(|value| snapshot.item_type.as_str() == value)
             && self.target_name.as_ref().is_none_or(|value| snapshot.target_name.as_ref() == value)
     }
 }
@@ -533,8 +528,9 @@ fn load_qos_snapshot(storage_dir: &str, stream_identity_key: &str) -> io::Result
 
 #[cfg(test)]
 mod tests {
+    use shared::model::{DisconnectReason, PlaylistItemType};
     use super::*;
-    use crate::model::{DisconnectReason, QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig};
+    use crate::model::{QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig};
     use crate::repository::{
         QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow,
     };
@@ -549,7 +545,7 @@ mod tests {
     ) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: 1,
-            event_type: EventType::Disconnect,
+            event_type: StreamHistoryEventType::Disconnect,
             event_ts_utc: 1,
             partition_day_utc: String::from("2026-03-22"),
             session_id: 1,
@@ -559,7 +555,7 @@ mod tests {
             provider_username: None,
             input_name: Some("input".intern()),
             virtual_id: Some(1),
-            item_type: Some("live".intern()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some(String::from("Title")),
             group: None,
             country: None,
@@ -624,7 +620,7 @@ mod tests {
             provider_name: provider_name.intern(),
             provider_id: 1,
             virtual_id: 101,
-            item_type: "live".intern(),
+            item_type: PlaylistItemType::Live,
             updated_at: 100,
             last_event_at: 99,
             window_24h: QosSnapshotWindow {
@@ -647,7 +643,7 @@ mod tests {
 
         let mut raw = HashMap::new();
         raw.insert("provider_name".to_string(), "provider-b".to_string());
-        raw.insert("target_id".to_string(), "2".to_string());
+        raw.insert("target_name".to_string(), "target-b".to_string());
         let filter = CompiledQosSnapshotFilter::compile(&raw).expect("qos snapshot filter should compile");
 
         let mut filtered = snapshots

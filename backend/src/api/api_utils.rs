@@ -346,7 +346,7 @@ macro_rules! try_result_not_found {
 use crate::api::panel_api::{can_provision_on_exhausted, create_panel_api_provisioning_stream_details};
 pub use internal_server_error;
 use shared::error::TuliproxError;
-use shared::model::AdmissionStrategy;
+use shared::model::{AdmissionStrategy, ConnectFailureReason, FailureStage};
 use shared::utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
 pub use try_option_bad_request;
 pub use try_option_forbidden;
@@ -354,7 +354,6 @@ pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
 pub use try_unwrap_body;
-use crate::model::{ConnectFailureReason, FailureStage};
 use crate::utils::LRUResourceCache;
 
 pub fn get_server_time() -> String {

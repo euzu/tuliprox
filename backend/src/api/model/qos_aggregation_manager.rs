@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::model::AppState;
-use crate::model::{Config, ConnectFailureReason, DisconnectReason, EventType, FailureStage, StreamHistoryRecord};
+use crate::model::{Config, StreamHistoryRecord};
 use crate::repository::{
      extract_day_from_filename,
      QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
     StreamHistoryFileReader,
 };
 use tokio_util::sync::CancellationToken;
+use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType};
 use crate::utils::{current_utc_day, now_utc_secs};
 
 const MAX_COMPLETED_DAY_PARTITIONS_PER_RUN: usize = 3;
@@ -27,7 +28,7 @@ struct AggregatedDayEntry {
     provider_name: Arc<str>,
     provider_id: u32,
     virtual_id: u32,
-    item_type: Arc<str>,
+    item_type: PlaylistItemType,
     bucket: QosSnapshotDailyBucket,
 }
 
@@ -137,14 +138,14 @@ pub(crate) fn run_aggregation_once(
 
 pub(crate) fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, record: &StreamHistoryRecord) {
     match record.event_type {
-        EventType::Connect => {
+        StreamHistoryEventType::Connect => {
             if record.shared_joined_existing.unwrap_or(false) {
                 return;
             }
             bucket.connect_count = bucket.connect_count.saturating_add(1);
             bucket.last_success_ts = Some(bucket.last_success_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
         }
-        EventType::ConnectFailed => {
+        StreamHistoryEventType::ConnectFailed => {
             bucket.connect_failed_count = bucket.connect_failed_count.saturating_add(1);
             if matches!(
                 record.connect_failure_reason,
@@ -157,7 +158,7 @@ pub(crate) fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, recor
             }
             bucket.last_failure_ts = Some(bucket.last_failure_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
         }
-        EventType::Disconnect => {
+        StreamHistoryEventType::Disconnect => {
             if matches!(record.failure_stage, Some(FailureStage::FirstByte)) {
                 bucket.first_byte_failure_count = bucket.first_byte_failure_count.saturating_add(1);
             }
@@ -195,6 +196,9 @@ pub(crate) fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, recor
                 bucket.last_failure_ts =
                     Some(bucket.last_failure_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
             }
+        },
+        StreamHistoryEventType::Failure => {
+            // TODO StreamHistoryEventType::Failure
         }
     }
 }
@@ -389,7 +393,7 @@ fn aggregate_reader_entries<R: io::Read>(
             record.provider_name.clone(),
             record.provider_id,
             record.virtual_id,
-            record.item_type.clone(),
+            record.item_type,
         ) else {
             continue;
         };
@@ -477,7 +481,7 @@ fn apply_day_entries(
                 provider_name: entry.provider_name.clone(),
                 provider_id: entry.provider_id,
                 virtual_id: entry.virtual_id,
-                item_type: entry.item_type.clone(),
+                item_type: entry.item_type,
                 updated_at: now_utc_secs(),
                 last_event_at: 0,
                 window_24h: QosSnapshotWindow::default(),
@@ -490,6 +494,12 @@ fn apply_day_entries(
         };
 
         if let Some(entry) = day_entries.get(&key) {
+            snapshot.input_name = entry.input_name.clone();
+            snapshot.target_name = entry.target_name.clone();
+            snapshot.provider_name = entry.provider_name.clone();
+            snapshot.provider_id = entry.provider_id;
+            snapshot.virtual_id = entry.virtual_id;
+            snapshot.item_type = entry.item_type;
             snapshot.daily_buckets.insert(day_utc.to_string(), entry.bucket.clone());
             snapshot.last_event_at = max_opt(Some(snapshot.last_event_at), max_opt(entry.bucket.last_success_ts, entry.bucket.last_failure_ts)).unwrap_or(snapshot.last_event_at);
         } else {
@@ -525,8 +535,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tempfile::tempdir;
+    use shared::model::{FailureStage, ConnectFailureReason, DisconnectReason, PlaylistItemType, StreamHistoryEventType};
     use shared::utils::Internable;
-    use crate::model::{Config, ConnectFailureReason, DisconnectReason, EventType, FailureStage, QosAggregationConfig, ReverseProxyConfig, StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
+    use crate::model::{Config, QosAggregationConfig, ReverseProxyConfig, StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
     use crate::repository::{
         serialize_named, write_block_magic, write_file_magic, write_framed, BlockHeaderBody,
         CompressionKind, CONTAINER_FORMAT_VERSION,
@@ -597,7 +608,7 @@ mod tests {
         file.flush().expect("pending file should flush");
     }
 
-    fn base_record(event_type: EventType) -> StreamHistoryRecord {
+    fn base_record(event_type: StreamHistoryEventType) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: 1,
             event_type,
@@ -610,7 +621,7 @@ mod tests {
             provider_username: None,
             input_name: Some("input-a".intern()),
             virtual_id: Some(33),
-            item_type: Some("live".intern()),
+            item_type: Some(PlaylistItemType::Live),
             title: None,
             group: None,
             country: None,
@@ -648,9 +659,9 @@ mod tests {
     fn fold_record_into_bucket_tracks_connect_and_connect_failed() {
         let mut bucket = QosSnapshotDailyBucket::default();
 
-        fold_record_into_bucket(&mut bucket, &base_record(EventType::Connect));
+        fold_record_into_bucket(&mut bucket, &base_record(StreamHistoryEventType::Connect));
 
-        let mut failed = base_record(EventType::ConnectFailed);
+        let mut failed = base_record(StreamHistoryEventType::ConnectFailed);
         failed.connect_failure_reason = Some(ConnectFailureReason::ProviderConnectionsExhausted);
         fold_record_into_bucket(&mut bucket, &failed);
 
@@ -664,13 +675,13 @@ mod tests {
     fn fold_record_into_bucket_tracks_disconnect_failure_stages() {
         let mut bucket = QosSnapshotDailyBucket::default();
 
-        let mut first_byte = base_record(EventType::Disconnect);
+        let mut first_byte = base_record(StreamHistoryEventType::Disconnect);
         first_byte.failure_stage = Some(FailureStage::FirstByte);
         first_byte.disconnect_reason = Some(DisconnectReason::ProviderError);
         first_byte.first_byte_latency_ms = Some(250);
         fold_record_into_bucket(&mut bucket, &first_byte);
 
-        let mut streaming = base_record(EventType::Disconnect);
+        let mut streaming = base_record(StreamHistoryEventType::Disconnect);
         streaming.failure_stage = Some(FailureStage::Streaming);
         streaming.disconnect_reason = Some(DisconnectReason::ProviderClosed);
         streaming.session_duration = Some(900);
@@ -689,7 +700,7 @@ mod tests {
     async fn history_day_revision_tracks_seconds_and_file_length() {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path();
-        let record = base_record(EventType::Connect);
+        let record = base_record(StreamHistoryEventType::Connect);
         write_pending_history_records(history_dir, vec![record.clone(), record]);
 
         let history_dir_copy = history_dir.to_path_buf();
@@ -713,7 +724,7 @@ mod tests {
             provider_name: "provider-a".intern(),
             provider_id: 22,
             virtual_id: 33,
-            item_type: "live".intern(),
+            item_type: PlaylistItemType::Live,
             updated_at: 1_700_000_000,
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow::default(),
@@ -793,13 +804,13 @@ mod tests {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path().join("stream_history");
         let today = current_utc_day();
-        let mut connect = base_record(EventType::Connect);
+        let mut connect = base_record(StreamHistoryEventType::Connect);
         connect.partition_day_utc = today.clone();
         connect.input_name = Some("input-a".intern());
         connect.provider_name = Some("provider-a".intern());
         connect.provider_id = Some(22);
         connect.virtual_id = Some(33);
-        connect.item_type = Some("live".intern());
+        connect.item_type = Some(PlaylistItemType::Live);
         connect.target_name = Some("target-a".intern());
         connect.stream_identity_key = Some("stream-a".to_string());
         connect.shared_joined_existing = Some(false);
@@ -827,13 +838,13 @@ mod tests {
         let history_dir = temp.path().join("stream_history");
         let today = current_utc_day();
 
-        let mut connect = base_record(EventType::Connect);
+        let mut connect = base_record(StreamHistoryEventType::Connect);
         connect.partition_day_utc = today.clone();
         connect.input_name = Some("input-a".intern());
         connect.provider_name = Some("provider-a".intern());
         connect.provider_id = Some(22);
         connect.virtual_id = Some(33);
-        connect.item_type = Some("live".intern());
+        connect.item_type = Some(PlaylistItemType::Live);
         connect.target_name = Some("target-a".intern());
         connect.stream_identity_key = Some("stream-a".to_string());
         connect.shared_joined_existing = Some(false);
@@ -872,7 +883,7 @@ mod tests {
             ("2036-04-03", 3_u64),
             ("2036-04-04", 4_u64),
         ] {
-            let mut connect = base_record(EventType::Connect);
+            let mut connect = base_record(StreamHistoryEventType::Connect);
             connect.partition_day_utc = day.to_string();
             connect.event_ts_utc = connect.event_ts_utc.saturating_add(session_id);
             connect.session_id = session_id;
@@ -880,7 +891,7 @@ mod tests {
             connect.provider_name = Some("provider-a".intern());
             connect.provider_id = Some(22);
             connect.virtual_id = Some(33);
-            connect.item_type = Some("live".intern());
+            connect.item_type = Some(PlaylistItemType::Live);
             connect.target_name = Some("target-a".intern());
             connect.stream_identity_key = Some("stream-a".to_string());
             connect.shared_joined_existing = Some(false);

@@ -25,7 +25,7 @@ use shared::{
 };
 use std::sync::Arc;
 use url::Url;
-use crate::model::ConnectFailureReason;
+use shared::model::ConnectFailureReason;
 
 const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
 #EXT-X-VERSION:3
@@ -496,13 +496,18 @@ async fn hls_api_stream(
         session.permission = connection_permission;
         session.connection_kind = Some(connection_kind);
         if connection_permission == UserConnectionPermission::Exhausted {
+            let provider = if session.provider.is_empty() {
+              session.provider.clone()
+            } else {
+                input.name.clone()
+            };
             let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, &session.stream_url).await;
             return admission_failure_response(
                 &app_state,
                 &fingerprint,
                 &user,
                 stream_channel,
-                input.name.clone(),
+                provider,
                 &req_headers,
                 ConnectFailureReason::UserConnectionsExhausted,
             );

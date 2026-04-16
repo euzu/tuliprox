@@ -1,7 +1,7 @@
 use crate::{hooks::use_service_context, i18n::use_translation, utils::t_safe};
 use yew::{classes, component, html, AttrValue, Html, Properties};
 
-fn display_country_code(code: Option<&str>) -> Option<String> {
+pub fn display_country_code(code: Option<&str>) -> Option<String> {
     let normalized = code?.trim().to_ascii_uppercase();
     let is_iso_country = normalized.len() == 2 && normalized.as_bytes().iter().all(|byte| byte.is_ascii_alphabetic());
     if is_iso_country {

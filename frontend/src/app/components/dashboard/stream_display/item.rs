@@ -3,7 +3,7 @@ use super::{
     meter::{MeterDisplayKind, StreamMeterBadge},
 };
 use crate::{
-    app::components::{AppIcon, Chip, Country, RevealContent, ToggleSwitch},
+    app::components::{country::display_country_code, AppIcon, Chip, Country, RevealContent, ToggleSwitch},
     i18n::use_translation,
     utils::format_duration,
 };
@@ -70,7 +70,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.CLIENT_IP")}</span>
                         <span class="tp__stream-display__stat-value tp__stream-display__stat-value--ip">{client_ip.clone()}</span>
                     </div>
-                    if stream.country_code.as_ref().is_some_and(|c| !c.is_empty()) {
+                    if display_country_code(stream.country_code.as_deref()).is_some() {
                         <div class="tp__stream-display__stat tp__stream-display__stat--country">
                             <span class="tp__stream-display__stat-label">{translate.t("LABEL.COUNTRY")}</span>
                             <span class="tp__stream-display__stat-value">

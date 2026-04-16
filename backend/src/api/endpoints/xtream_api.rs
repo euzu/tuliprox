@@ -62,7 +62,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use crate::model::ConnectFailureReason;
+use shared::model::ConnectFailureReason;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ApiStreamContext {

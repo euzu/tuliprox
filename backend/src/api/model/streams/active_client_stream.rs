@@ -33,7 +33,7 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use shared::utils::Internable;
-use crate::model::FailureStage;
+use shared::model::FailureStage;
 
 /// Discriminates which byte-stream the client is consuming at any moment.
 /// Stored as `u8` in an `AtomicU8` for lock-free access inside `poll_next`.

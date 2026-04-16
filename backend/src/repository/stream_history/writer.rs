@@ -266,10 +266,11 @@ impl WriterState {
 
         // Serialize all records into the reusable payload buffer, then write
         // the whole block in one async I/O pass.
-        let batch_records = std::mem::take(&mut self.batch);
+        // The batch is cloned for serialization; self.batch is only cleared after all I/O succeeds.
+        let batch_snapshot = self.batch.clone();
         let (header_bytes, payload_bytes) = match tokio::task::spawn_blocking(move || {
             let mut payload_buf = Vec::new();
-            for record in &batch_records {
+            for record in &batch_snapshot {
                 let len_offset = payload_buf.len();
                 payload_buf.extend_from_slice(&[0u8; 4]); // placeholder for length
                 if let Err(e) = rmp_serde::encode::write_named(&mut payload_buf, record) {
@@ -360,48 +361,53 @@ impl WriterState {
 
 /// Open an existing `.pending` file for appending, or create a new one with the file header.
 async fn open_or_create_pending_file(path: &PathBuf, day: &str, writer_instance_id: u64) -> io::Result<fs::File> {
-    if tokio::fs::metadata(path).await.is_ok() {
-        // Continue appending to existing file
-        let file = OpenOptions::new().append(true).open(path).await?;
-        return Ok(file);
-    }
-
-    // Create new file with header — must be created and written atomically to avoid
-    // a race with finalize_and_archive reading an incomplete header.
-    let header = FileHeaderBody {
-        container_format_version: CONTAINER_FORMAT_VERSION,
-        record_schema_version: RECORD_SCHEMA_VERSION,
-        source_kind: SOURCE_KIND_STREAM_HISTORY.to_string(),
-        created_at_ts_utc: now_utc_secs(),
-        partition_day_ts_utc: day.to_string(),
-        writer_instance_id,
-        host_id: std::env::var("HOSTNAME").ok(),
-        compression_kind: CompressionKind::None,
-        finalized: false,
-        record_encoding_kind: RecordEncodingKind::MessagePackNamed,
-        finalized_at_ts_utc: None,
-        total_block_count: None,
-        total_record_count: None,
-        min_event_ts_utc: None,
-        max_event_ts_utc: None,
+    // Atomically try to create a new file first. If it already exists,
+    // open with append mode instead. This avoids TOCTOU races where
+    // finalize_and_archive might create/finalize the file between our
+    // metadata check and open call.
+    let file = match OpenOptions::new().write(true).create_new(true).open(path).await {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // File already exists, open for appending
+            OpenOptions::new().append(true).open(path).await?
+        }
+        Err(e) => return Err(e),
     };
 
-    let mut header_buf = Vec::new();
-    write_framed(&mut header_buf, &header)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    // If we created a new file (empty), write the header.
+    // For existing files the header was already written at creation time.
+    if file.metadata().await.map_or(0, |m| m.len()) == 0 {
+        let header = FileHeaderBody {
+            container_format_version: CONTAINER_FORMAT_VERSION,
+            record_schema_version: RECORD_SCHEMA_VERSION,
+            source_kind: SOURCE_KIND_STREAM_HISTORY.to_string(),
+            created_at_ts_utc: now_utc_secs(),
+            partition_day_ts_utc: day.to_string(),
+            writer_instance_id,
+            host_id: std::env::var("HOSTNAME").ok(),
+            compression_kind: CompressionKind::None,
+            finalized: false,
+            record_encoding_kind: RecordEncodingKind::MessagePackNamed,
+            finalized_at_ts_utc: None,
+            total_block_count: None,
+            total_record_count: None,
+            min_event_ts_utc: None,
+            max_event_ts_utc: None,
+        };
 
-    let file_magic = crate::repository::stream_history::FILE_MAGIC;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(path)
-        .await?;
-    file.write_all(&file_magic).await?;
-    file.write_all(&header_buf).await?;
-    file.flush().await?;
+        let mut header_buf = Vec::new();
+        write_framed(&mut header_buf, &header)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    Ok(file)
+        let file_magic = crate::repository::stream_history::FILE_MAGIC;
+        let mut f = file;
+        f.write_all(&file_magic).await?;
+        f.write_all(&header_buf).await?;
+        f.flush().await?;
+        Ok(f)
+    } else {
+        Ok(file)
+    }
 }
 
 /// Delete daily archive/pending files older than `retention_days`.
@@ -462,8 +468,8 @@ mod tests {
     use std::io::BufReader;
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
+    use shared::model::{PlaylistItemType, StreamHistoryEventType};
     use shared::utils::Internable;
-    use crate::model::EventType;
     use crate::utils::secs_until_next_utc_midnight;
 
     fn test_config(dir: &str, batch_size: usize) -> StreamHistoryConfig {
@@ -475,7 +481,7 @@ mod tests {
         }
     }
 
-    fn make_record(session_id: u64, event_type: EventType) -> StreamHistoryRecord {
+    fn make_record(session_id: u64, event_type: StreamHistoryEventType) -> StreamHistoryRecord {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
             event_type,
@@ -488,7 +494,7 @@ mod tests {
             provider_username: None,
             input_name: Some("input".intern()),
             virtual_id: Some(1),
-            item_type: Some("live".intern()),
+            item_type: Some(PlaylistItemType::Live),
             title: Some("Test Channel".to_string()),
             group: None,
             country: None,
@@ -526,7 +532,7 @@ mod tests {
     async fn stream_history_writer_disabled_accepts_records_silently() {
         let writer = StreamHistoryWriter::new_disabled();
         // Must not panic
-        writer.send_record(make_record(1, EventType::Connect));
+        writer.send_record(make_record(1, StreamHistoryEventType::Connect));
         writer.flush().await.expect("flush on disabled writer");
         writer.shutdown().await;
         assert_eq!(writer.dropped_events.load(Ordering::Relaxed), 0);
@@ -549,7 +555,7 @@ mod tests {
 
         // Send 3 records (< batch_size=4), no file blocks should be written yet
         for i in 0..3_u64 {
-            writer.send_record(make_record(i, EventType::Connect));
+            writer.send_record(make_record(i, StreamHistoryEventType::Connect));
         }
 
         // Explicit flush — must not error even if no block written
@@ -571,14 +577,14 @@ mod tests {
 
         // Send exactly batch_size records — triggers one block write
         for i in 0..batch_size as u64 {
-            writer.send_record(make_record(i, EventType::Connect));
+            writer.send_record(make_record(i, StreamHistoryEventType::Connect));
         }
 
         // Give the worker time to process
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // Send one more and flush to ensure previous batch was processed
-        writer.send_record(make_record(99, EventType::Disconnect));
+        writer.send_record(make_record(99, StreamHistoryEventType::Disconnect));
         writer.flush().await.expect("flush ok");
         writer.shutdown().await;
 
@@ -613,7 +619,7 @@ mod tests {
 
         // Send 3 records (well below batch_size=100)
         for i in 0..3_u64 {
-            writer.send_record(make_record(i, EventType::Connect));
+            writer.send_record(make_record(i, StreamHistoryEventType::Connect));
         }
 
         // Explicit flush must write the partial batch to disk
@@ -632,15 +638,15 @@ mod tests {
         let config = test_config(tmp.path().to_str().unwrap(), 100);
         let writer = StreamHistoryWriter::new(&config);
 
-        let mut late = make_record(1, EventType::Connect);
+        let mut late = make_record(1, StreamHistoryEventType::Connect);
         late.event_ts_utc = 3_000;
         late.partition_day_utc = "1970-01-01".to_string();
 
-        let mut early = make_record(2, EventType::Connect);
+        let mut early = make_record(2, StreamHistoryEventType::Connect);
         early.event_ts_utc = 1_000;
         early.partition_day_utc = "1970-01-01".to_string();
 
-        let mut middle = make_record(3, EventType::Connect);
+        let mut middle = make_record(3, StreamHistoryEventType::Connect);
         middle.event_ts_utc = 2_000;
         middle.partition_day_utc = "1970-01-01".to_string();
 
