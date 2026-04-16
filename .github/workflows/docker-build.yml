@@ -156,9 +156,9 @@ jobs:
           if git diff --cached --quiet; then
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
           else
-            VERSION=$(grep '^version' backend/Cargo.toml | head -n1 | cut -d'"' -f2)
+            VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml | head -n1)
             git commit -m "ci: bump version v$VERSION"
-            git tag -a "v$VERSION" -m "ci: tag version v$VERSION"
+            git tag -a "v$VERSION" -m "v$VERSION"
             echo "did_commit=true" >> "$GITHUB_OUTPUT"
           fi
 
