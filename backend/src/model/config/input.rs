@@ -2,6 +2,7 @@ use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
 use crate::repository::get_csv_file_path;
 use chrono::Utc;
 use log::warn;
+use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
 use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto, XtreamCluster};
@@ -41,6 +42,8 @@ pub struct ConfigInputOptions {
     pub resolve_delay: u16,
     pub probe_delay: u16,
     pub probe_live_interval_hours: u32,
+    pub resolve_filter: Option<Filter>,
+    pub probe_filter: Option<Filter>,
 }
 
 macros::from_impl!(ConfigInputOptions);
@@ -87,6 +90,8 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             resolve_delay: dto.resolve_delay,
             probe_delay: dto.probe_delay,
             probe_live_interval_hours: dto.probe_live_interval_hours,
+            resolve_filter: dto.t_resolve_filter.clone(),
+            probe_filter: dto.t_probe_filter.clone(),
         }
     }
 }
@@ -1113,7 +1118,7 @@ mod tests {
         let mut input = ConfigInput {
             name: "xtream_batch_missing_root_url".into(),
             input_type: InputType::XtreamBatch,
-            url: "".to_string(),
+            url: String::new(),
             enabled: true,
             aliases: Some(vec![ConfigInputAlias {
                 id: 1,

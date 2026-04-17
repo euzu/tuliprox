@@ -13,7 +13,7 @@ use log::{error, trace};
 use shared::{
     model::{
         Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
-        PERM_ALL, ROLE_ADMIN, PROTOCOL_VERSION,
+        PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN,
     },
     utils::{concat_path_leading_slash, default_kick_secs},
 };
@@ -505,8 +505,10 @@ mod tests {
 
     #[test]
     fn test_websocket_runtime_events_denied_for_default_permissions() {
-        let mut mem = ProtocolHandlerMemory::default();
-        mem.role = UserRole::User;
+        let mem = ProtocolHandlerMemory {
+            role: UserRole::User,
+            ..ProtocolHandlerMemory::default()
+        };
 
         assert!(!websocket_can_receive_runtime_events(
             &mem,

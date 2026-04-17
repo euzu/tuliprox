@@ -561,7 +561,7 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
     activate_unbound_session: bool,
     eviction_reentry_guard: EvictionReentryGuard<'_>,
 ) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>) {
-    use crate::api::model::{AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext, evaluate_strategy};
+    use crate::api::model::{evaluate_strategy, AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext};
     use shared::model::UserConnectionPermission;
 
     let admission = get_admission_for_request(
@@ -573,7 +573,7 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
         session_token,
         activate_unbound_session,
     )
-    .await;
+        .await;
 
     if admission.permission != UserConnectionPermission::Exhausted {
         return (admission, None);
@@ -610,7 +610,7 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
                     eviction_reentry_guard,
                     &target.addr,
                 )
-                .await
+                    .await
                 {
                     debug!(
                         "Skipping eviction strategy {strategy:?} for recently evicted request of user {username} targeting {}",
@@ -633,7 +633,7 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
                     session_token,
                     activate_unbound_session,
                 )
-                .await;
+                    .await;
                 if retry_admission.permission == UserConnectionPermission::Allowed {
                     return (retry_admission, None);
                 }
@@ -722,7 +722,7 @@ async fn activate_session_before_stream_open(
             EvictionReentryGuard::Session(session_token)
         },
     )
-    .await;
+        .await;
 
     (admission, grace_mode, created_placeholder)
 }
@@ -905,10 +905,10 @@ fn get_grace_period_millis(
 ) -> u64 {
     if config_grace_period_millis > 0
         && (
-            matches!(stream_response_params, ProviderStreamState::GracePeriod(_, _)) // provider grace period
+        matches!(stream_response_params, ProviderStreamState::GracePeriod(_, _)) // provider grace period
             || connection_permission == UserConnectionPermission::GracePeriod
-            // user grace period
-        )
+        // user grace period
+    )
     {
         config_grace_period_millis
     } else {
@@ -952,7 +952,7 @@ async fn create_stream_response_details(
             session_owner,
         },
     )
-    .await;
+        .await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -1063,7 +1063,7 @@ async fn create_stream_response_details(
                         &app_state.http_client.load(),
                         provider_stream_factory_options,
                     )
-                    .await
+                        .await
                     {
                         None => (None, None),
                         Some((stream, info)) => (Some(stream), info),
@@ -1241,7 +1241,7 @@ fn is_throttled_stream(item_type: PlaylistItemType, throttle_kbps: usize) -> boo
 
 fn prepare_body_stream<S>(app_state: &Arc<AppState>, item_type: PlaylistItemType, stream: S) -> axum::body::Body
 where
-    S: futures::Stream<Item = Result<bytes::Bytes, StreamError>> + Send + 'static,
+    S: futures::Stream<Item=Result<bytes::Bytes, StreamError>> + Send + 'static,
 {
     let throttle_kbps = usize::try_from(get_stream_throttle(app_state)).unwrap_or_default();
     let body_stream = if is_throttled_stream(item_type, throttle_kbps) {
@@ -1304,7 +1304,7 @@ pub async fn force_provider_stream_response(
         Some(user_session.token.as_str()),
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
     )
-    .await
+        .await
     {
         Ok(stream_details) => stream_details,
         Err(err) => {
@@ -1327,7 +1327,7 @@ pub async fn force_provider_stream_response(
             stream_details.stream.is_some(),
             stream_details.has_deferred_provider_open(),
         )
-        .await;
+            .await;
         let provider_response =
             stream_details.stream_info.as_ref().map(|(h, sc, url, cvt)| (h.clone(), *sc, url.clone(), *cvt));
         if ctx.session_reservation_ttl_secs > 0 {
@@ -1358,7 +1358,7 @@ pub async fn force_provider_stream_response(
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
         })
-        .await;
+            .await;
 
         let (status_code, header_map) = get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
         let mut response = axum::response::Response::builder().status(status_code);
@@ -1439,7 +1439,7 @@ pub async fn stream_response(
             socket_bound: item_type.uses_socket_bound_session(),
         },
     )
-    .await;
+        .await;
     let grace_mode = resolved_grace_mode.or(grace_mode);
     connection_permission = final_admission.permission;
     connection_kind = final_admission.kind.unwrap_or(connection_kind);
@@ -1462,7 +1462,7 @@ pub async fn stream_response(
                 session_token,
                 req_headers,
             )
-            .await
+                .await
             {
                 return value.into_response();
             }
@@ -1483,7 +1483,7 @@ pub async fn stream_response(
                 session_token,
                 req_headers,
             )
-            .await
+                .await
             {
                 debug_if_enabled!(
                     "Opportunistic shared stream reuse for {}",
@@ -1515,7 +1515,7 @@ pub async fn stream_response(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-        .into_response();
+            .into_response();
     }
 
     let stream_options = get_stream_options(app_state);
@@ -1540,7 +1540,7 @@ pub async fn stream_response(
         Some(session_token),
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
     )
-    .await
+        .await
     {
         Ok(stream_details) => stream_details,
         Err(err) => {
@@ -1589,7 +1589,7 @@ pub async fn stream_response(
             stream_details.stream.is_some(),
             stream_details.has_deferred_provider_open(),
         )
-        .await;
+            .await;
 
         let mut is_stream_shared = share_stream && !stream_details.has_deferred_provider_open();
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
@@ -1624,7 +1624,7 @@ pub async fn stream_response(
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
         })
-        .await;
+            .await;
         let stream_resp = if is_stream_shared {
             debug_if_enabled!(
                 "Streaming shared stream request from {}",
@@ -1643,7 +1643,7 @@ pub async fn stream_response(
                 connection_priority_for_kind(user, connection_kind),
                 connection_kind,
             )
-            .await
+                .await
             {
                 let (status_code, header_map) =
                     get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
@@ -1862,7 +1862,7 @@ async fn try_shared_stream_response_if_any(
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
     )
-    .await
+        .await
     {
         debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
         if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
@@ -1910,8 +1910,8 @@ async fn try_shared_stream_response_if_any(
                 meter_uid: metering.meter_uid,
                 meter_stream: metering.meter_stream,
             })
-            .await
-            .boxed();
+                .await
+                .boxed();
             let mut response = axum::response::Response::builder().status(status_code);
             for (key, value) in &header_map {
                 response = response.header(key, value);
@@ -1948,15 +1948,15 @@ pub async fn local_stream_response(
         let allow_session_reopen = if let Some(session_token) = playback_session_token {
             user.max_connections > 0
                 && app_state
-                    .active_users
-                    .connection_permission_for_session(
-                        &user.username,
-                        user.max_connections,
-                        user.soft_connections,
-                        session_token,
-                    )
-                    .await
-                    != UserConnectionPermission::Exhausted
+                .active_users
+                .connection_permission_for_session(
+                    &user.username,
+                    user.max_connections,
+                    user.soft_connections,
+                    session_token,
+                )
+                .await
+                != UserConnectionPermission::Exhausted
         } else {
             false
         };
@@ -1976,7 +1976,7 @@ pub async fn local_stream_response(
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-            .into_response();
+                .into_response();
         }
         connection_permission = UserConnectionPermission::Allowed;
     }
@@ -2080,7 +2080,7 @@ pub async fn local_stream_response(
                 socket_bound: pli.item_type.uses_socket_bound_session(),
             },
         )
-        .await;
+            .await;
         grace_mode = resolved_grace_mode;
         connection_permission = final_admission.permission;
         connection_kind = final_admission.kind.unwrap_or(connection_kind);
@@ -2095,7 +2095,7 @@ pub async fn local_stream_response(
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-            .into_response();
+                .into_response();
         }
     }
     let mut grace_period_options = app_state.get_grace_options();
@@ -2144,7 +2144,7 @@ pub async fn local_stream_response(
         meter_uid: 0,
         meter_stream: false,
     })
-    .await;
+        .await;
 
     let mut response = Response::new(axum::body::Body::from_stream(stream));
 
@@ -2322,7 +2322,7 @@ async fn fetch_resource_with_retry(
                 default_user_agent.as_deref(),
             )
         })
-        .await
+            .await
     else {
         return None;
     };
@@ -2367,8 +2367,8 @@ pub async fn resource_response(
                 mime_type.unwrap_or_else(|| mime::APPLICATION_OCTET_STREAM.to_string()),
                 Some("public, max-age=14400"),
             )
-            .await
-            .into_response();
+                .await
+                .into_response();
         }
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));
@@ -2458,7 +2458,7 @@ pub fn json_or_bin_response<T: Serialize>(accept: Option<&str>, data: &T) -> imp
 
 pub fn stream_json_or_bin_response<P>(
     accept: Option<&str>,
-    data: Box<dyn Iterator<Item = P> + Send>,
+    data: Box<dyn Iterator<Item=P> + Send>,
 ) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
@@ -2472,7 +2472,7 @@ where
 pub fn stream_json_or_bin_response_stream<P, S>(accept: Option<&str>, data: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
-    S: Stream<Item = P> + Send + Unpin + 'static,
+    S: Stream<Item=P> + Send + Unpin + 'static,
 {
     if accept.is_some_and(|a| a.contains(CONTENT_TYPE_CBOR)) {
         return stream_bin_array_stream(data);
@@ -2504,13 +2504,13 @@ pub(crate) fn should_allow_exhausted_shared_reconnect(
 ) -> bool {
     share_stream
         && user_session.is_some_and(|session| {
-            session.permission != UserConnectionPermission::Exhausted
-                && session.virtual_id == requested_virtual_id
-                && session.stream_url.as_ref() == requested_stream_url
-        })
+        session.permission != UserConnectionPermission::Exhausted
+            && session.virtual_id == requested_virtual_id
+            && session.stream_url.as_ref() == requested_stream_url
+    })
 }
 
-pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response
+pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item=P> + Send>) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
 {
@@ -2538,7 +2538,7 @@ where
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
 
-pub fn stream_bin_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response
+pub fn stream_bin_array<P>(iter: Box<dyn Iterator<Item=P> + Send>) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
 {
@@ -2562,11 +2562,11 @@ where
             // CBOR: start indefinite-length array
             Ok::<_, Infallible>(Bytes::from_static(&[0x9f]))
         })
-        .chain(stream)
-        .chain(stream::once(async {
-            // CBOR: end indefinite-length array
-            Ok::<_, Infallible>(Bytes::from_static(&[0xff]))
-        })),
+            .chain(stream)
+            .chain(stream::once(async {
+                // CBOR: end indefinite-length array
+                Ok::<_, Infallible>(Bytes::from_static(&[0xff]))
+            })),
     );
 
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
@@ -2575,7 +2575,7 @@ where
 pub fn stream_json_array_stream<P, S>(stream: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
-    S: Stream<Item = P> + Send + Unpin + 'static,
+    S: Stream<Item=P> + Send + Unpin + 'static,
 {
     let stream = stream::unfold((stream, true), |(mut stream, first)| async move {
         match stream.next().await {
@@ -2604,7 +2604,7 @@ where
 pub fn stream_bin_array_stream<P, S>(stream: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
-    S: Stream<Item = P> + Send + Unpin + 'static,
+    S: Stream<Item=P> + Send + Unpin + 'static,
 {
     let stream = stream::unfold(stream, |mut stream| async move {
         match stream.next().await {
@@ -2675,10 +2675,10 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{HeaderMap, Response, StatusCode};
+    use crate::model::StreamHistoryConfig;
     use crate::{
         api::model::{
-            AppState, CancelTokens, ActiveProviderManager, ActiveUserManager, ConnectionManager, EventManager, MetadataUpdateManager,
+            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager, MetadataUpdateManager,
             PlaylistStorageState, SharedStreamManager,
         },
         auth::Fingerprint,
@@ -2686,9 +2686,10 @@ mod tests {
             AppConfig, Config, ConfigInput, ConfigInputAlias, ConfigTarget, MediaToolCapabilities, ProcessTargets,
             ProxyUserCredentials, SourcesConfig,
         },
-        utils::{GeoIp, FileLockManager},
+        utils::{FileLockManager, GeoIp},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
+    use axum::http::{HeaderMap, Response, StatusCode};
     use bytes::Bytes;
     use futures::stream;
     use shared::{
@@ -2698,7 +2699,6 @@ mod tests {
     };
     use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
     use tokio::sync::mpsc;
-    use crate::model::StreamHistoryConfig;
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -2822,7 +2822,7 @@ mod tests {
                 session_owner: Some("vod-session"),
             },
         )
-        .await;
+            .await;
         assert!(strict.provider_handle.is_none(), "strict provider affinity should not allocate a different provider");
         assert!(
             matches!(strict.provider_stream_state, ProviderStreamState::Custom(_)),
@@ -2843,12 +2843,9 @@ mod tests {
                 session_owner: Some("live-session"),
             },
         )
-        .await;
-        let fallback_provider = match fallback.provider_stream_state {
-            ProviderStreamState::Available(Some(provider_name), _)
-            | ProviderStreamState::GracePeriod(Some(provider_name), _) => provider_name,
-            _ => panic!("fallback-enabled request should allocate a provider"),
-        };
+            .await;
+        let (ProviderStreamState::Available(Some(fallback_provider), _) | ProviderStreamState::GracePeriod(Some(fallback_provider), _)) = fallback.provider_stream_state else
+        { panic!("fallback-enabled request should allocate a provider") };
         assert_eq!(fallback_provider.as_ref(), "provider_2");
 
         app_state.active_provider.release_connection(&busy_addr).await;
@@ -2868,7 +2865,7 @@ mod tests {
             socket_bound: false,
             active_addrs: vec!["127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!())],
             ts: 1,
-            started_at:1,
+            started_at: 1,
             permission: UserConnectionPermission::Allowed,
             counted: false,
         };
@@ -3103,19 +3100,21 @@ mod tests {
     }
 
     fn create_test_app_state_with_stream_config(stream: crate::model::StreamConfig) -> Arc<AppState> {
-        let mut config = Config::default();
-        config.reverse_proxy = Some(crate::model::ReverseProxyConfig {
-            resource_rewrite_disabled: false,
-            rewrite_secret: [0; 16],
-            resource_retry: crate::model::ResourceRetryConfig::default(),
-            disabled_header: None,
-            stream: Some(stream),
-            cache: None,
-            rate_limit: None,
-            geoip: None,
-            stream_history: None,
-            qos_aggregation: None,
-        });
+        let config = Config {
+            reverse_proxy: Some(crate::model::ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: crate::model::ResourceRetryConfig::default(),
+                disabled_header: None,
+                stream: Some(stream),
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+                stream_history: None,
+                qos_aggregation: None,
+            }),
+            ..Config::default()
+        };
 
         let mut app_cfg = create_test_app_config();
         app_cfg.config = Arc::new(ArcSwap::from_pointee(config));
@@ -3318,7 +3317,7 @@ mod tests {
             false,
             EvictionReentryGuard::Session("tok-third"),
         )
-        .await;
+            .await;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
@@ -3379,7 +3378,7 @@ mod tests {
             false,
             EvictionReentryGuard::Session("vod-session"),
         )
-        .await;
+            .await;
         assert_eq!(session_based.0.permission, UserConnectionPermission::Allowed);
 
         let connection_based = resolve_admission_with_strategies(
@@ -3394,7 +3393,7 @@ mod tests {
             false,
             EvictionReentryGuard::Session("vod-session"),
         )
-        .await;
+            .await;
         assert_eq!(connection_based.0.permission, UserConnectionPermission::Exhausted);
     }
 
@@ -3482,7 +3481,7 @@ mod tests {
             false,
             EvictionReentryGuard::SocketPlayback { virtual_id: 9001 },
         )
-        .await;
+            .await;
 
         assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
         assert_eq!(grace_mode, None);
@@ -3575,7 +3574,7 @@ mod tests {
             false,
             EvictionReentryGuard::SocketPlayback { virtual_id: 9103 },
         )
-        .await;
+            .await;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert!(app_state.active_users.active_streams().await.is_empty());
@@ -3664,7 +3663,7 @@ mod tests {
             false,
             EvictionReentryGuard::Session("session-other"),
         )
-        .await;
+            .await;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(grace_mode, None);
@@ -3755,7 +3754,7 @@ mod tests {
             false,
             EvictionReentryGuard::SocketPlayback { virtual_id: 9201 },
         )
-        .await;
+            .await;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
@@ -3808,8 +3807,8 @@ mod tests {
             None,
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "local file streaming should register an active stream");
@@ -3819,8 +3818,7 @@ mod tests {
     #[tokio::test]
     async fn local_stream_response_rechecks_limits_before_registering_socket_bound_streams() {
         let mut app_cfg = create_test_app_config();
-        let mut config = Config::default();
-        config.user_access_control = true;
+        let config = Config { user_access_control: true, ..Config::default() };
         app_cfg.config = Arc::new(ArcSwap::from_pointee(config));
         let app_state = create_test_app_state_for_config(Arc::new(app_cfg));
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -3868,8 +3866,8 @@ mod tests {
             Some(&first_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         let _second_response = local_stream_response(
             &second_fingerprint,
@@ -3884,8 +3882,8 @@ mod tests {
             Some(&second_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         assert_eq!(app_state.active_users.user_connections(&user.username).await, 1);
         assert_eq!(app_state.active_users.active_streams().await.len(), 1);
@@ -3929,7 +3927,7 @@ mod tests {
             0,
             crate::api::model::ConnectionKind::Normal,
         )
-        .await;
+            .await;
         assert!(registered.is_some(), "shared stream should register");
 
         let mut user = ProxyUserCredentials::default();
@@ -3986,8 +3984,8 @@ mod tests {
             false,
             None,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let session_admission = app_state
@@ -4039,8 +4037,8 @@ mod tests {
             None,
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         assert!(!should_compress_response(&response));
     }
@@ -4089,8 +4087,8 @@ mod tests {
             Some(playback_session_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         let _second_response = local_stream_response(
             &second_fingerprint,
@@ -4105,8 +4103,8 @@ mod tests {
             Some(playback_session_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "stable playback token should reuse the tracked local connection");
@@ -4160,8 +4158,8 @@ mod tests {
             Some(playback_session_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         let second_response = local_stream_response(
             &second_fingerprint,
@@ -4176,8 +4174,8 @@ mod tests {
             Some(playback_session_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         assert_eq!(second_response.status(), StatusCode::OK);
 
@@ -4234,8 +4232,8 @@ mod tests {
             Some(playback_session_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         let second_response = local_stream_response(
             &second_fingerprint,
@@ -4250,8 +4248,8 @@ mod tests {
             Some(playback_session_token),
             false,
         )
-        .await
-        .into_response();
+            .await
+            .into_response();
 
         assert_eq!(second_response.status(), StatusCode::OK);
 
@@ -4315,8 +4313,8 @@ mod tests {
             true,
             EvictionReentryGuard::Session("tok-hls-first"),
         )
-        .await
-        .0;
+            .await
+            .0;
         let second_admission = resolve_admission_with_strategies(
             &app_state,
             &user.username,
@@ -4329,8 +4327,8 @@ mod tests {
             true,
             EvictionReentryGuard::Session("tok-hls-second"),
         )
-        .await
-        .0;
+            .await
+            .0;
 
         assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(second_admission.permission, UserConnectionPermission::Exhausted);

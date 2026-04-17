@@ -92,7 +92,7 @@ impl SourcesConfigDto {
         let mut input_credentials = HashSet::new();
         // Prepare global inputs
         for input in &mut self.inputs {
-            input_index = input.prepare(input_index, include_computed, provider_names)?;
+            input_index = input.prepare(input_index, include_computed, provider_names, prepared_templates)?;
             if let (Some(username), Some(password)) = (input.username.as_ref(), input.password.as_ref()) {
                 let key = (username, password);
                 if !input_credentials.insert(key) {

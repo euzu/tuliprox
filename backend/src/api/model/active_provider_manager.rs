@@ -2152,7 +2152,7 @@ mod tests {
         {
             let connections = manager.connections.read().await;
             let tree = connections.priority_index.get(&input_name);
-            let is_empty = tree.is_none_or(|t| t.is_empty());
+            let is_empty = tree.is_none_or(std::collections::BTreeMap::is_empty);
             assert!(is_empty, "index should be empty after releasing all connections");
         }
 

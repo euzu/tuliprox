@@ -192,21 +192,6 @@ fn inject_nonce_with_parser(html: String, nonce_b64: &str) -> String {
     lol_html::rewrite_str(&html, settings).unwrap_or(html)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::api_user_can_access_web_ui;
-
-    #[test]
-    fn rejects_api_user_when_ui_is_disabled() {
-        assert!(!api_user_can_access_web_ui(false));
-    }
-
-    #[test]
-    fn allows_api_user_when_ui_is_enabled() {
-        assert!(api_user_can_access_web_ui(true));
-    }
-}
-
 async fn index(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse + Send {
@@ -431,4 +416,19 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
             ),
         )
         .nest(&format!("/{web_ui_path}/"), web_ui_router)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_user_can_access_web_ui;
+
+    #[test]
+    fn rejects_api_user_when_ui_is_disabled() {
+        assert!(!api_user_can_access_web_ui(false));
+    }
+
+    #[test]
+    fn allows_api_user_when_ui_is_enabled() {
+        assert!(api_user_can_access_web_ui(true));
+    }
 }

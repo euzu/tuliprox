@@ -12,13 +12,13 @@ use std::time::Duration;
 use crate::api::model::AppState;
 use crate::model::{Config, StreamHistoryRecord};
 use crate::repository::{
-     extract_day_from_filename,
-     QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
+    extract_day_from_filename,
+    QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
     StreamHistoryFileReader,
 };
-use tokio_util::sync::CancellationToken;
-use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType};
 use crate::utils::{current_utc_day, now_utc_secs};
+use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType};
+use tokio_util::sync::CancellationToken;
 
 const MAX_COMPLETED_DAY_PARTITIONS_PER_RUN: usize = 3;
 
@@ -41,10 +41,10 @@ pub(in crate::api) fn qos_aggregation_is_enabled(config: &Config) -> bool {
         .is_some_and(|qos| {
             qos.enabled
                 && config
-                    .reverse_proxy
-                    .as_ref()
-                    .and_then(|rp| rp.stream_history.as_ref())
-                    .is_some_and(|history| history.stream_history_enabled)
+                .reverse_proxy
+                .as_ref()
+                .and_then(|rp| rp.stream_history.as_ref())
+                .is_some_and(|history| history.stream_history_enabled)
         })
 }
 
@@ -197,7 +197,7 @@ pub(crate) fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, recor
                 bucket.last_failure_ts =
                     Some(bucket.last_failure_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
             }
-        },
+        }
         StreamHistoryEventType::Failure => {
             // Failure events represent intermediate disconnects within an HLS session.
             // Count them as runtime aborts since they reflect streaming failures.
@@ -544,22 +544,24 @@ struct HistoryDayFile {
 mod tests {
     use std::collections::BTreeMap;
 
-    use tempfile::tempdir;
-    use shared::model::{FailureStage, ConnectFailureReason, DisconnectReason, PlaylistItemType, StreamHistoryEventType};
-    use shared::utils::Internable;
-    use crate::model::{Config, QosAggregationConfig, ReverseProxyConfig, StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
+    use super::{fold_record_into_bucket, history_day_revision, qos_aggregation_is_enabled, rebuild_windows, run_aggregation_once};
+    use crate::model::{Config, QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig, StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
     use crate::repository::{
         serialize_named, write_block_magic, write_file_magic, write_framed, BlockHeaderBody,
-        CompressionKind, CONTAINER_FORMAT_VERSION,
-        FileHeaderBody, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
-        RecordEncodingKind, SOURCE_KIND_STREAM_HISTORY,
+        CompressionKind, FileHeaderBody,
+        QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow, RecordEncodingKind,
+        CONTAINER_FORMAT_VERSION, SOURCE_KIND_STREAM_HISTORY,
     };
     use crate::utils::current_utc_day;
-    use super::{fold_record_into_bucket, history_day_revision, qos_aggregation_is_enabled, rebuild_windows, run_aggregation_once};
+    use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType};
+    use shared::utils::Internable;
+    use tempfile::tempdir;
+    use std::io::Write as _;
+
 
     fn write_pending_history_records(
         history_dir: &std::path::Path,
-        records: Vec<StreamHistoryRecord>,
+        records: &[StreamHistoryRecord],
     ) {
         if records.is_empty() {
             return;
@@ -593,7 +595,7 @@ mod tests {
         let mut payload = Vec::new();
         let mut first_ts = u64::MAX;
         let mut last_ts = 0_u64;
-        for record in &records {
+        for record in records {
             first_ts = first_ts.min(record.event_ts_utc);
             last_ts = last_ts.max(record.event_ts_utc);
             let encoded = serialize_named(record).expect("record should serialize");
@@ -613,7 +615,6 @@ mod tests {
         };
         write_block_magic(&mut file).expect("block magic should write");
         write_framed(&mut file, &block_header).expect("block header should write");
-        use std::io::Write as _;
         file.write_all(&payload).expect("payload should write");
         file.flush().expect("pending file should flush");
     }
@@ -723,7 +724,7 @@ mod tests {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path();
         let record = base_record(StreamHistoryEventType::Connect);
-        write_pending_history_records(history_dir, vec![record.clone(), record]);
+        write_pending_history_records(history_dir, &[record.clone(), record]);
 
         let history_dir_copy = history_dir.to_path_buf();
         let revision = tokio::task::spawn_blocking(move || history_day_revision(&history_dir_copy, "2026-04-02"))
@@ -791,25 +792,27 @@ mod tests {
 
     #[test]
     fn qos_aggregation_is_enabled_requires_stream_history() {
-        let mut config = Config::default();
-        config.reverse_proxy = Some(ReverseProxyConfig {
-            resource_rewrite_disabled: false,
-            rewrite_secret: [0; 16],
-            resource_retry: Default::default(),
-            disabled_header: None,
-            stream: None,
-            cache: None,
-            rate_limit: None,
-            geoip: None,
-            stream_history: Some(StreamHistoryConfig {
-                stream_history_enabled: false,
-                ..Default::default()
+        let mut config = Config {
+            reverse_proxy: Some(ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: ResourceRetryConfig::default(),
+                disabled_header: None,
+                stream: None,
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+                stream_history: Some(StreamHistoryConfig {
+                    stream_history_enabled: false,
+                    ..Default::default()
+                }),
+                qos_aggregation: Some(QosAggregationConfig {
+                    enabled: true,
+                    interval_secs: 300,
+                }),
             }),
-            qos_aggregation: Some(QosAggregationConfig {
-                enabled: true,
-                interval_secs: 300,
-            }),
-        });
+            ..Config::default()
+        };
 
         assert!(!qos_aggregation_is_enabled(&config));
 
@@ -836,14 +839,14 @@ mod tests {
         connect.target_name = Some("target-a".intern());
         connect.stream_identity_key = Some("stream-a".to_string());
         connect.shared_joined_existing = Some(false);
-        write_pending_history_records(&history_dir, vec![connect]);
+        write_pending_history_records(&history_dir, &[connect]);
 
         let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
-        
+
         let repo_c = repo.clone();
         let h_dir = history_dir.clone();
-        let t_day = today.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c, &h_dir, &t_day))
+        let now = today.clone();
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c, &h_dir, &now))
             .await.unwrap().expect("aggregation should succeed");
 
         let snapshot = repo
@@ -870,20 +873,20 @@ mod tests {
         connect.target_name = Some("target-a".intern());
         connect.stream_identity_key = Some("stream-a".to_string());
         connect.shared_joined_existing = Some(false);
-        write_pending_history_records(&history_dir, vec![connect]);
+        write_pending_history_records(&history_dir, &[connect]);
 
         let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
 
         let repo_c1 = repo.clone();
         let h_dir1 = history_dir.clone();
         let t_day1 = today.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c1, &h_dir1, &t_day1))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, &t_day1))
             .await.unwrap().expect("first aggregation should succeed");
 
         let repo_c2 = repo.clone();
         let h_dir2 = history_dir.clone();
         let t_day2 = today.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c2, &h_dir2, &t_day2))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, &t_day2))
             .await.unwrap().expect("second aggregation should succeed");
 
         let snapshot = repo
@@ -917,16 +920,16 @@ mod tests {
             connect.target_name = Some("target-a".intern());
             connect.stream_identity_key = Some("stream-a".to_string());
             connect.shared_joined_existing = Some(false);
-            write_pending_history_records(&history_dir, vec![connect]);
+            write_pending_history_records(&history_dir, &[connect]);
         }
 
         let repo = std::sync::Arc::new(QosSnapshotRepository::open(temp.path()).expect("repo should open"));
 
         let repo_c1 = repo.clone();
         let h_dir1 = history_dir.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c1, &h_dir1, "2036-04-05"))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, "2036-04-05"))
             .await.unwrap().expect("first aggregation should succeed");
-            
+
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");
         assert_eq!(checkpoint.last_completed_day_utc.as_deref(), Some("2036-04-03"));
 
@@ -939,9 +942,9 @@ mod tests {
 
         let repo_c2 = repo.clone();
         let h_dir2 = history_dir.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&*repo_c2, &h_dir2, "2036-04-05"))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, "2036-04-05"))
             .await.unwrap().expect("second aggregation should succeed");
-            
+
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");
         assert_eq!(checkpoint.last_completed_day_utc.as_deref(), Some("2036-04-04"));
 

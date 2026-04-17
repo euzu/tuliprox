@@ -3,7 +3,7 @@ use crate::library::metadata::{EpisodeMetadata, MediaMetadata, MetadataCacheEntr
 use crate::library::metadata_resolver::MetadataResolver;
 use crate::library::metadata_storage::MetadataStorage;
 use crate::library::scanner::LibraryScanner;
-use crate::library::{MediaGroup, MediaGrouper, thumbnail::{self, ThumbnailExtractor}};
+use crate::library::{thumbnail::{self, ThumbnailExtractor}, MediaGroup, MediaGrouper};
 use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
 use crate::utils::ffmpeg::{FfmpegExecutor, ProbeUrlOutcome};
 use log::{debug, error, info, warn};
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-type FfprobeAvailabilityFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+type FfprobeAvailabilityFuture = Pin<Box<dyn Future<Output=bool> + Send>>;
 type FfprobeAvailabilityChecker = Arc<dyn Fn() -> FfprobeAvailabilityFuture + Send + Sync>;
 
 // Action taken when processing a file
@@ -238,22 +238,22 @@ impl LibraryProcessor {
 
     // TODO: Implement enrich_metadata_with_ffprobe to add technical info (resolution, codecs) from local files
     //fn enrich_metadata_with_ffprobe(&self, _metadata: &mut MediaMetadata, _file_path: &str, _can_probe: bool) {
-        //if !can_probe { return; }
+    //if !can_probe { return; }
 
-        // let _url = format!("file://{file_path}"); // Simple file URL for ffmpeg
-        //
-        // // TODO: Logic for series episodes iteration
-        //  match metadata {
-        //      MediaMetadata::Movie(_movie) => {
-        //          // Currently we don't have fields in MovieMetadata to store tech info
-        //          // But we could add them. For now, let's just log.
-        //          // In the future this should update the metadata struct.
-        //          debug!("Probe logic for local movie {} not yet fully integrated into Metadata struct", file_path);
-        //      }
-        //      MediaMetadata::Series(_) => {
-        //          // Series handle episodes separately
-        //      }
-        //  }
+    // let _url = format!("file://{file_path}"); // Simple file URL for ffmpeg
+    //
+    // // TODO: Logic for series episodes iteration
+    //  match metadata {
+    //      MediaMetadata::Movie(_movie) => {
+    //          // Currently we don't have fields in MovieMetadata to store tech info
+    //          // But we could add them. For now, let's just log.
+    //          // In the future this should update the metadata struct.
+    //          debug!("Probe logic for local movie {} not yet fully integrated into Metadata struct", file_path);
+    //      }
+    //      MediaMetadata::Series(_) => {
+    //          // Series handle episodes separately
+    //      }
+    //  }
     //}
 
     // Processes a single video file
@@ -783,11 +783,13 @@ mod tests {
         );
         processor.app_config = None;
 
-        let mut metadata_update = MetadataUpdateConfig::default();
-        metadata_update.ffprobe = crate::model::FfprobeConfig::from(&FfprobeConfigDto {
-            enabled: true,
-            ..FfprobeConfigDto::default()
-        });
+        let metadata_update = MetadataUpdateConfig {
+            ffprobe: crate::model::FfprobeConfig::from(&FfprobeConfigDto {
+                enabled: true,
+                ..FfprobeConfigDto::default()
+            }),
+            ..MetadataUpdateConfig::default()
+        };
         processor.metadata_update_config = Some(metadata_update);
 
         assert!(!processor.is_local_ffprobe_enabled().await);

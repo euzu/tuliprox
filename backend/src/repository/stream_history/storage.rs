@@ -417,6 +417,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn stream_history_block_header_round_trip() {
         let payload = b"test_payload";
         let payload_crc = crc32fast::hash(payload);

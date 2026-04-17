@@ -945,10 +945,7 @@ mod tests {
         drop(state);
 
         let first = timeout(Duration::from_secs(2), stream.next()).await;
-        let maybe_chunk = match first {
-            Ok(v) => v,
-            Err(_) => panic!("timed out waiting for fallback chunk"),
-        };
+        let Ok(maybe_chunk) = first else { panic!("timed out waiting for fallback chunk") };
         let chunk = match maybe_chunk {
             Some(Ok(bytes)) => bytes,
             Some(Err(err)) => panic!("fallback stream returned error: {err}"),

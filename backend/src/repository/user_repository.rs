@@ -393,6 +393,7 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     pub async fn save_target_user() {
         let user =
             TargetUser {

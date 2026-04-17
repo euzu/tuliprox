@@ -3863,6 +3863,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn vod_session_survives_overlapping_and_seek_sockets() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
@@ -4100,6 +4101,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn binding_reserved_sessions_keeps_hard_and_soft_counts_stable() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());

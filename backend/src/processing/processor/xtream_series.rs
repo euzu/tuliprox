@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use shared::foundation::ValueProvider;
 use shared::utils::default_probe_user_priority;
 
 create_resolve_options_function_for_xtream_target!(series);
@@ -193,10 +194,20 @@ fn queue_background_series_info(
 
     let input = fpl.input;
     let input_name_arc = input.name.clone();
+    // Extract filter before iterating to avoid borrow conflict
+    let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
 
     for pli in fpl.items_mut() {
         if !filter(pli) {
             continue;
+        }
+
+        // If input has a resolve filter and this item doesn't match, skip processing
+        if let Some(r_filter) = resolve_filter {
+            let provider = ValueProvider { pli, match_as_ascii: false };
+            if !r_filter.filter(&provider) {
+                continue;
+            }
         }
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
@@ -277,9 +288,20 @@ async fn process_immediate_series_info(
         SeriesProbeSettings::from_metadata_update(config.metadata_update.as_ref())
     };
 
+    // Extract filter before iterating to avoid borrow conflict
+    let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
+
     for pli in fpl.items_mut() {
         if !filter(pli) {
             continue;
+        }
+
+        // If input has a resolve filter and this item doesn't match, skip processing
+        if let Some(r_filter) = resolve_filter {
+            let provider = ValueProvider { pli, match_as_ascii: false };
+            if !r_filter.filter(&provider) {
+                continue;
+            }
         }
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {

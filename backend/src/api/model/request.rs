@@ -403,7 +403,7 @@ mod tests {
             super::ParseBodyError::PayloadTooLarge(msg) => {
                 assert!(msg.contains("body too large"), "unexpected error: {msg}");
             }
-            other => panic!("unexpected error: {other:?}"),
+            other@ super::ParseBodyError::BadRequest(_) => panic!("unexpected error: {other:?}"),
         }
     }
 
@@ -416,11 +416,7 @@ mod tests {
             .body(Body::from(oversized))
             .expect("request should build");
 
-        let response = match super::UserApiRequestQueryOrBody::from_request(request, &()).await {
-            Ok(_) => panic!("oversized body should reject extractor"),
-            Err(response) => response,
-        };
-
+        let Err(response) = super::UserApiRequestQueryOrBody::from_request(request, &()).await else { panic!("oversized body should reject extractor") };
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 

@@ -1618,14 +1618,14 @@ mod tests {
             ..VideoStreamProperties::default()
         }));
         let old_props = StreamProperties::Video(Box::new(VideoStreamProperties {
-            tmdb: Some(317981),
+            tmdb: Some(317_981),
             ..VideoStreamProperties::default()
         }));
 
         let changed = merge_preserved_stream_properties(&mut new_props, &old_props);
         assert!(changed);
         match new_props {
-            StreamProperties::Video(video) => assert_eq!(video.tmdb, Some(317981)),
+            StreamProperties::Video(video) => assert_eq!(video.tmdb, Some(317_981)),
             _ => panic!("expected video properties"),
         }
     }

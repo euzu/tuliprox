@@ -795,14 +795,14 @@ mod tests {
                 header: PlaylistItemHeader { title: Arc::from("HD"), source_ordinal: 2, ..Default::default() },
             }],
         );
-        let group_uhd = make_group(
+        let group_ultra_hd = make_group(
             2,
             "uhd",
             vec![PlaylistItem {
                 header: PlaylistItemHeader { title: Arc::from("UHD"), source_ordinal: 3, ..Default::default() },
             }],
         );
-        let group_fhd = make_group(
+        let group_full_hd = make_group(
             3,
             "fhd",
             vec![PlaylistItem {
@@ -822,7 +822,7 @@ mod tests {
             filter: Filter::default(),
         };
 
-        let mut groups = vec![group_hd, group_uhd, group_fhd];
+        let mut groups = vec![group_hd, group_ultra_hd, group_full_hd];
         sort_groups(&mut groups, &[group_sort], false);
 
         let sorted = groups.iter().map(|group| group.channels[0].header.title.clone()).collect::<Vec<_>>();

@@ -346,6 +346,7 @@ mod tests {
         let mut block_table = vec![FlagBlockEntry { offset: 0, compressed_len: 0, raw_len: 0 }; BLOCK_COUNT];
         let mut compressed_blocks = Vec::new();
 
+        #[allow(clippy::needless_range_loop)]
         for block_id in 0..BLOCK_COUNT {
             let mut raw_block = Vec::new();
             for (code, svg) in flags {

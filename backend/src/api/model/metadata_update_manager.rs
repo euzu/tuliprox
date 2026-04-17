@@ -17,6 +17,7 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
+use shared::utils::default_probe_user_priority;
 use shared::{
     create_bitset,
     error::TuliproxError,
@@ -39,7 +40,6 @@ use std::{
 };
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
-use shared::utils::default_probe_user_priority;
 
 const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
@@ -603,7 +603,6 @@ enum SubmitTaskResult {
 }
 
 impl MetadataUpdateManager {
-
     pub fn new(cancel_token: CancellationToken) -> Self {
         Self {
             workers: DashMap::new(),
@@ -945,7 +944,7 @@ impl MetadataUpdateManager {
                 max_queue_size,
                 task_to_queue.clone(),
             )
-            .await
+                .await
             {
                 SubmitTaskResult::QueuedOrMerged => return,
                 SubmitTaskResult::QueueFull => {
@@ -1490,7 +1489,7 @@ impl InputWorker {
                         &mut self.db_handles,
                         &mut self.failed_clusters,
                     )
-                    .await
+                        .await
                 };
 
                 match task_result {
@@ -2616,7 +2615,7 @@ impl InputWorker {
                         input_name,
                         updates,
                     )
-                    .await
+                        .await
                     {
                         error!("Failed to flush VOD batch for input {input_name}: {e}");
                     }
@@ -2639,7 +2638,7 @@ impl InputWorker {
                         input_name,
                         updates,
                     )
-                    .await
+                        .await
                     {
                         error!("Failed to flush Series batch for input {input_name}: {e}");
                     }
@@ -2662,7 +2661,7 @@ impl InputWorker {
                         input_name,
                         updates,
                     )
-                    .await
+                        .await
                     {
                         error!("Failed to flush Live batch for input {input_name}: {e}");
                     }
@@ -2911,7 +2910,7 @@ impl InputWorker {
                 }
                 updates
             })
-            .await
+                .await
             {
                 Ok(updates) => updates,
                 Err(err) => {
@@ -2969,7 +2968,7 @@ impl InputWorker {
                 }
                 updates
             })
-            .await
+                .await
             {
                 Ok(updates) => updates,
                 Err(err) => {
@@ -3027,7 +3026,7 @@ impl InputWorker {
                 }
                 updates
             })
-            .await
+                .await
             {
                 Ok(updates) => updates,
                 Err(err) => {
@@ -3094,7 +3093,7 @@ impl InputWorker {
                     let query = match spawn_blocking_limited(move || {
                         BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&file_path)
                     })
-                    .await
+                        .await
                     {
                         Ok(Ok(query)) => Some(query),
                         Ok(Err(err)) => {
@@ -3146,7 +3145,7 @@ impl InputWorker {
                     let mut guard = query.lock();
                     guard.query_zero_copy(&stream_id).ok().flatten()
                 })
-                .await
+                    .await
                 {
                     Ok(item) => item,
                     Err(err) => {
@@ -3276,7 +3275,7 @@ impl InputWorker {
                         db_handles,
                         failed_clusters,
                     )
-                    .await
+                        .await
                 }
             } else {
                 Self::execute_task_inner_static(
@@ -3291,7 +3290,7 @@ impl InputWorker {
                     db_handles,
                     failed_clusters,
                 )
-                .await
+                    .await
             }
         };
         let needs_probe_timeout = Self::is_probe_task(task)
@@ -3407,7 +3406,7 @@ impl InputWorker {
                     Some(&tmdb_and_date_present),
                     Some(&probe_pending),
                 )
-                .await
+                    .await
                 {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
@@ -3463,7 +3462,7 @@ impl InputWorker {
                     Some(&tmdb_and_date_present),
                     Some(&probe_pending),
                 )
-                .await
+                    .await
                 {
                     Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
@@ -3492,7 +3491,7 @@ impl InputWorker {
                     active_handle,
                     &app_state.active_provider,
                 )
-                .await
+                    .await
                 {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
@@ -3521,13 +3520,13 @@ impl InputWorker {
                     active_handle,
                     probe_priority,
                 )
-                .await?;
+                    .await?;
 
                 match outcome {
                     GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok((false, false)),
-                      GenericProbeOutcome::ProbeFailed => Err(shared::error::TuliproxError::Config(format!(
+                    GenericProbeOutcome::ProbeFailed => Err(shared::error::TuliproxError::Config(format!(
                         "Probe stream task failed for key {task_key:?} ({probe_identifier})"
-                      ))),
+                    ))),
                 }
             }
         }
@@ -3796,7 +3795,7 @@ mod tests {
             queue_size,
             task_initial,
         )
-        .await;
+            .await;
 
         let task_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
@@ -3812,7 +3811,7 @@ mod tests {
             queue_size,
             task_merge,
         )
-        .await;
+            .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Vod(42));
@@ -3856,7 +3855,7 @@ mod tests {
             queue_size,
             initial,
         )
-        .await;
+            .await;
 
         let identical_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
@@ -3872,7 +3871,7 @@ mod tests {
             queue_size,
             identical_merge,
         )
-        .await;
+            .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Vod(42));
@@ -3908,7 +3907,7 @@ mod tests {
             queue_size,
             initial,
         )
-        .await;
+            .await;
 
         let merged_in = UpdateTask::ProbeStream {
             probe_scope: Arc::from("scope_a"),
@@ -3926,7 +3925,7 @@ mod tests {
             queue_size,
             merged_in,
         )
-        .await;
+            .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Stream { scope: Arc::from("scope_a"), id: Arc::from("uid_1") });
@@ -3983,7 +3982,7 @@ mod tests {
             MetadataUpdateRuntimeSettings::default().max_queue_size,
             incoming_task,
         )
-        .await;
+            .await;
 
         assert_eq!(result, SubmitTaskResult::ChannelClosed);
         assert!(!pending_tasks.contains_key(&key));
@@ -4103,8 +4102,10 @@ mod tests {
         }
 
         let mut worker = create_test_worker("input_d", tx, rx, pending_tasks.clone(), pending_task_count);
-        let mut runtime_settings = MetadataUpdateRuntimeSettings::default();
-        runtime_settings.no_change_cache_ttl_secs = 1;
+        let runtime_settings = MetadataUpdateRuntimeSettings {
+            no_change_cache_ttl_secs: 1,
+            ..MetadataUpdateRuntimeSettings::default()
+        };
 
         let stale_instant = Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
         worker.recently_completed_no_change.insert(
