@@ -202,6 +202,16 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_resource_url_returns_unchanged_for_empty_logo() {
+        let secret = [7u8; 16];
+        let item = sample_item("");
+
+        let rewritten = rewrite_resource_url(&secret, "/api/v1/playlist/resource", item);
+
+        assert_eq!(rewritten.logo.as_ref(), "");
+    }
+
+    #[test]
     fn rewrite_resource_url_wraps_external_urls() {
         let secret = [7u8; 16];
         let item = sample_item("https://example.com/poster.jpg");

@@ -276,8 +276,8 @@ impl ConfigInputOptionsDto {
             && is_default_probe_delay_secs(&self.probe_delay)
             && !self.probe_live
             && is_default_probe_live_interval(&self.probe_live_interval_hours)
-            && self.resolve_filter.is_none()
-            && self.probe_filter.is_none()
+            && self.resolve_filter.as_ref().is_none_or(|s| s.trim().is_empty())
+            && self.probe_filter.as_ref().is_none_or(|s| s.trim().is_empty())
     }
 
     pub fn clean(&mut self) {

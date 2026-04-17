@@ -40,10 +40,6 @@ pub enum InputRow {
 #[derive(Properties, PartialEq, Clone)]
 pub struct InputTableProps {
     pub inputs: Option<Vec<Rc<InputRow>>>,
-    #[prop_or_default]
-    pub on_edit: Option<Callback<Rc<ConfigInputDto>>>,
-    #[prop_or_default]
-    pub on_delete: Option<Callback<String>>,
 }
 
 #[component]
