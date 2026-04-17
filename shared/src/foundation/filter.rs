@@ -600,53 +600,7 @@ pub fn apply_templates_to_pattern(
 
     if let Some(templates) = templates_list {
         for template in templates {
-            match &template.value {
-                TemplateValue::Single(val) => match new_pattern {
-                    TemplateValue::Single(ref mut pat) => {
-                        let replaced = pat.replace(&template.placeholder, val);
-                        if replaced != *pat {
-                            *pat = replaced;
-                        }
-                    }
-                    TemplateValue::Multi(ref mut pats) => {
-                        for pat in pats.iter_mut() {
-                            let replaced = pat.replace(&template.placeholder, val);
-                            if replaced != *pat {
-                                *pat = replaced;
-                            }
-                        }
-                    }
-                },
-
-                TemplateValue::Multi(ref multi_vals) => {
-                    new_pattern = match &new_pattern {
-                        TemplateValue::Single(pat) => {
-                            let mut new_values = IndexSet::new();
-                            for val in multi_vals {
-                                if pat.contains(&template.placeholder) {
-                                    new_values.insert(pat.replace(&template.placeholder, val));
-                                } else {
-                                    new_values.insert(pat.clone());
-                                }
-                            }
-                            TemplateValue::Multi(new_values.into_iter().collect())
-                        }
-                        TemplateValue::Multi(pats) => {
-                            let mut new_values = IndexSet::new();
-                            for val in multi_vals {
-                                for pat in pats {
-                                    if pat.contains(&template.placeholder) {
-                                        new_values.insert(pat.replace(&template.placeholder, val));
-                                    } else {
-                                        new_values.insert(pat.clone());
-                                    }
-                                }
-                            }
-                            TemplateValue::Multi(new_values.into_iter().collect())
-                        }
-                    };
-                }
-            }
+            new_pattern = apply_dependency_template_value(new_pattern, &template.placeholder, &template.value);
         }
     }
 
@@ -958,5 +912,26 @@ mod tests {
                 "adult".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn prepare_templates_promotes_single_template_to_multi_for_multi_dependency() {
+        let mut templates = vec![
+            PatternTemplate {
+                name: "BASE".to_string(),
+                value: TemplateValue::Multi(vec!["a".to_string(), "b".to_string()]),
+                placeholder: String::new(),
+            },
+            PatternTemplate {
+                name: "URL".to_string(),
+                value: TemplateValue::Single("!BASE!/stream".to_string()),
+                placeholder: String::new(),
+            },
+        ];
+
+        let prepared = prepare_templates(&mut templates).expect("templates should prepare");
+        let url = prepared.iter().find(|template| template.name == "URL").expect("URL template");
+
+        assert_eq!(url.value, TemplateValue::Multi(vec!["a/stream".to_string(), "b/stream".to_string()]));
     }
 }

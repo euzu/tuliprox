@@ -921,7 +921,7 @@ fn should_defer_provider_open_for_grace_hold(
     provider_grace_active: bool,
     hold_stream: bool,
     item_type: PlaylistItemType,
-    session_owner: Option<&str>,
+    is_reopen: bool,
 ) -> bool {
     if !(provider_grace_active && hold_stream) {
         return false;
@@ -932,10 +932,10 @@ fn should_defer_provider_open_for_grace_hold(
     // was introduced later and breaks players like libmpv during seek/reopen retries.
     // Keep hold-stream behavior for live/admission paths, but restore direct-open behavior
     // for provider-affine on-demand session reopens.
-    !(!item_type.is_live() && item_type.requires_provider_affinity() && session_owner.is_some())
+    !(!item_type.is_live() && item_type.requires_provider_affinity() && is_reopen)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn create_stream_response_details(
     app_state: &Arc<AppState>,
     stream_options: &StreamOptions,
@@ -954,6 +954,7 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
+    is_reopen: bool,
     session_owner: Option<&str>,
     grace_hold_override: Option<bool>,
 ) -> Result<StreamDetails, TuliproxError> {
@@ -1039,7 +1040,7 @@ async fn create_stream_response_details(
                 provider_grace_active,
                 grace_period_options.hold_stream,
                 item_type,
-                session_owner,
+                is_reopen,
             ) {
                 if let Some(provider_name) = guard_provider_name.as_ref() {
                     app_state.active_provider.is_over_limit(provider_name).await
@@ -1329,6 +1330,7 @@ pub async fn force_provider_stream_response(
         stream_channel.virtual_id,
         connection_priority_for_kind(ctx.user, connection_kind),
         connection_kind,
+        true,
         Some(user_session.token.as_str()),
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
     )
@@ -1565,6 +1567,7 @@ pub async fn stream_response(
         stream_channel.virtual_id,
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
+        false,
         Some(session_token),
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
     )
@@ -4603,31 +4606,31 @@ mod tests {
             true,
             true,
             PlaylistItemType::LiveHls,
-            Some("live-session")
-        ));
-        assert!(!should_defer_provider_open_for_grace_hold(
-            true,
-            true,
-            PlaylistItemType::Video,
-            Some("vod-session")
-        ));
-        assert!(!should_defer_provider_open_for_grace_hold(
-            true,
-            true,
-            PlaylistItemType::Catchup,
-            Some("catchup-session")
+            false
         ));
         assert!(should_defer_provider_open_for_grace_hold(
             true,
             true,
             PlaylistItemType::Video,
-            None
+            false
+        ));
+        assert!(!should_defer_provider_open_for_grace_hold(
+            true,
+            true,
+            PlaylistItemType::Catchup,
+            true
+        ));
+        assert!(!should_defer_provider_open_for_grace_hold(
+            true,
+            true,
+            PlaylistItemType::Video,
+            true
         ));
         assert!(!should_defer_provider_open_for_grace_hold(
             true,
             false,
             PlaylistItemType::Video,
-            Some("vod-session")
+            true
         ));
     }
 

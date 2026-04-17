@@ -260,9 +260,6 @@ async fn xtream_player_api_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let resolved_stream_ext = resolve_xtream_playback_extension(stream_ext, &pli);
-    let stream_ext = resolved_stream_ext.as_deref();
-
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
         true,
@@ -329,6 +326,9 @@ async fn xtream_player_api_stream(
         .await
         .into_response();
     }
+
+    let resolved_stream_ext = resolve_xtream_playback_extension(stream_ext, &pli);
+    let stream_ext = resolved_stream_ext.as_deref();
 
     let (cluster, item_type) = if stream_req.context == ApiStreamContext::Timeshift {
         (XtreamCluster::Video, PlaylistItemType::Catchup)
@@ -1771,5 +1771,20 @@ mod tests {
         pli.xtream_cluster = XtreamCluster::Live;
 
         assert_eq!(resolve_xtream_playback_extension(Some(".m3u8"), &pli).as_deref(), Some(".m3u8"));
+    }
+
+    #[test]
+    fn catchup_playback_extension_preserves_requested_adaptive_extension_for_underlying_live_item() {
+        let mut pli = create_test_vod_item(
+            "provider://strong/live/user/pass/813563.ts",
+            "ts",
+            PlaylistItemType::Live,
+        );
+        pli.xtream_cluster = XtreamCluster::Live;
+
+        assert_eq!(
+            resolve_xtream_playback_extension(Some(".m3u8"), &pli).as_deref(),
+            Some(".m3u8")
+        );
     }
 }
