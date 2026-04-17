@@ -173,12 +173,6 @@ async fn process_immediate_vod_info(
             continue;
         }
 
-        let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
-            ProviderIdType::Id(uid)
-        } else {
-            ProviderIdType::from(&*pli.header.id)
-        };
-
         // If input has a filter and this item doesn't match, skip processing
         if let Some(r_filter) = resolve_filter {
             let provider = ValueProvider { pli, match_as_ascii: false };
@@ -186,6 +180,12 @@ async fn process_immediate_vod_info(
                 continue;
             }
         }
+
+        let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
+            ProviderIdType::Id(uid)
+        } else {
+            ProviderIdType::from(&*pli.header.id)
+        };
 
         let reasons = check_resolve_reasons(&resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
