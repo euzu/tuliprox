@@ -630,7 +630,7 @@ mod tests {
         }];
 
         for (idx, channel) in playlist[0].channels.iter_mut().enumerate() {
-            let uuid = channel.header.uuid.clone();
+            let uuid = channel.header.uuid;
             let provider_id = channel.header.get_provider_id().unwrap_or_default();
             let item_type = channel.header.item_type;
             channel.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, 0);

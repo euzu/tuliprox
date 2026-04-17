@@ -700,6 +700,7 @@ mod tests {
         utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH},
     };
     use std::sync::Arc;
+    use shared::model::TemplateDefinitionDto;
 
     #[test]
     fn require_matching_revision_rejects_missing_if_match_header() {
@@ -745,7 +746,7 @@ mod tests {
                 templates: Some(vec![]),
             },
             mappings: None,
-            templates: Some(Default::default()),
+            templates: Some(TemplateDefinitionDto::default()),
             api_proxy: Some(ApiProxyConfigDto {
                 server: vec![ApiProxyServerInfoDto {
                     name: String::from("main"),
@@ -820,7 +821,7 @@ mod tests {
             providers: None,
         };
 
-        let input_source = build_xtream_login_input_source(&request, &[provider.clone()])
+        let input_source = build_xtream_login_input_source(&request, std::slice::from_ref(&provider))
             .expect("provider url should resolve against runtime providers");
 
         assert_eq!(input_source.url, "provider://b1g/player_api.php?username=demo&password=secret");
@@ -874,7 +875,7 @@ mod tests {
         assert_eq!(input_source.url, "provider://strong/player_api.php?username=bubble&password=gum");
         assert_eq!(input_source.provider.as_ref().map(|provider| provider.name.as_ref()), Some("strong"));
         assert_eq!(
-            input_source.provider.as_ref().and_then(|provider| provider.urls.first()).map(|url| url.as_ref()),
+            input_source.provider.as_ref().and_then(|provider| provider.urls.first()).map(std::convert::AsRef::as_ref),
             Some("http://request.example")
         );
     }

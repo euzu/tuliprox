@@ -296,7 +296,7 @@ mod tests {
         let home_dir = config_dir.join("home");
         fs::create_dir_all(&home_dir).await.expect("home dir");
 
-        let config_yml = r#"
+        let config_yml = r"
 storage_dir: data
 api:
   host: 0.0.0.0
@@ -309,7 +309,7 @@ proxy:
   url: http://proxy.example
   username: proxy-user
   password: proxy-pass
-"#;
+";
         let source_yml = r#"
 inputs:
   - name: demo

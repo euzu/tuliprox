@@ -321,7 +321,7 @@ mod tests {
     use shared::{
         model::{
             ActiveUserConnectionChange, DownloadsDelta, DownloadsResponse, FileDownloadDto, PlaylistItemType,
-            StatusCheck, StreamChannel, StreamInfo, TaskKindDto, TaskPriorityDto, TransferStatusDto, XtreamCluster,
+            StreamChannel, StreamInfo, TaskKindDto, TaskPriorityDto, TransferStatusDto, XtreamCluster,
         },
         utils::Internable,
     };
@@ -393,13 +393,15 @@ mod tests {
 
     #[test]
     fn test_connections_zero_clears_stale_stream_rows() {
-        let mut status = StatusCheck::default();
-        status.active_users = 1;
-        status.active_user_connections = 1;
-        status.active_user_streams = vec![
-            test_stream(1, "127.0.0.1:1234", Some("tok-a"), PlaylistItemType::Video),
-            test_stream(2, "127.0.0.1:5678", Some("tok-b"), PlaylistItemType::Series),
-        ];
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![
+                test_stream(1, "127.0.0.1:1234", Some("tok-a"), PlaylistItemType::Video),
+                test_stream(2, "127.0.0.1:5678", Some("tok-b"), PlaylistItemType::Series),
+            ],
+            ..Default::default()
+        };
 
         apply_active_user_change(&mut status, ActiveUserConnectionChange::Connections(0, 0));
 

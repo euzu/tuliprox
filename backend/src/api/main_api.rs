@@ -389,73 +389,6 @@ async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
     }
 }
 
-#[cfg(not(unix))]
-async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
-    tokio::signal::ctrl_c().await?;
-    Ok("Ctrl+C")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
-    use crate::api::model::DownloadQueue;
-    use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
-
-    fn temp_state_file(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
-    }
-
-    #[test]
-    fn corrupt_downloads_state_path_is_unique_for_rapid_calls() {
-        let state_file = temp_state_file("corrupt_downloads_unique");
-
-        let first = corrupt_downloads_state_path(&state_file);
-        let second = corrupt_downloads_state_path(&state_file);
-
-        assert_ne!(first, second);
-    }
-
-    #[tokio::test]
-    async fn recover_persisted_downloads_state_renames_corrupt_file_and_continues() {
-        let state_file = temp_state_file("corrupt_downloads_state");
-        std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
-        let corrupt_dir = state_file.parent().expect("state dir").to_path_buf();
-        let expected_prefix = format!(
-            "{}_corrupt.",
-            state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem")
-        );
-        let expected_extension = state_file.extension().and_then(|ext| ext.to_str()).expect("state ext");
-        let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
-
-        recover_persisted_downloads_state(&downloads).await.expect("recovery should continue");
-
-        assert!(!state_file.exists());
-        let matching_corrupt_paths = std::fs::read_dir(&corrupt_dir)
-            .expect("read corrupt dir")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(&expected_prefix) && name.ends_with(expected_extension))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(matching_corrupt_paths.len(), 1);
-        assert!(downloads.queue.lock().await.is_empty());
-        assert!(downloads.scheduled.read().await.is_empty());
-        assert!(downloads.active.read().await.is_none());
-        assert!(downloads.finished.read().await.is_empty());
-
-        for path in matching_corrupt_paths {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {
     let cfg = &app_state.app_config;
     let update_on_boot = {
@@ -897,4 +830,71 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
             }
         }
     });
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
+    tokio::signal::ctrl_c().await?;
+    Ok("Ctrl+C")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
+    use crate::api::model::DownloadQueue;
+    use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+
+    fn temp_state_file(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
+    }
+
+    #[test]
+    fn corrupt_downloads_state_path_is_unique_for_rapid_calls() {
+        let state_file = temp_state_file("corrupt_downloads_unique");
+
+        let first = corrupt_downloads_state_path(&state_file);
+        let second = corrupt_downloads_state_path(&state_file);
+
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn recover_persisted_downloads_state_renames_corrupt_file_and_continues() {
+        let state_file = temp_state_file("corrupt_downloads_state");
+        std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
+        let corrupt_dir = state_file.parent().expect("state dir").to_path_buf();
+        let expected_prefix = format!(
+            "{}_corrupt.",
+            state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem")
+        );
+        let expected_extension = state_file.extension().and_then(|ext| ext.to_str()).expect("state ext");
+        let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+
+        recover_persisted_downloads_state(&downloads).await.expect("recovery should continue");
+
+        assert!(!state_file.exists());
+        let matching_corrupt_paths = std::fs::read_dir(&corrupt_dir)
+            .expect("read corrupt dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&expected_prefix) && name.ends_with(expected_extension))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching_corrupt_paths.len(), 1);
+        assert!(downloads.queue.lock().await.is_empty());
+        assert!(downloads.scheduled.read().await.is_empty());
+        assert!(downloads.active.read().await.is_none());
+        assert!(downloads.finished.read().await.is_empty());
+
+        for path in matching_corrupt_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }

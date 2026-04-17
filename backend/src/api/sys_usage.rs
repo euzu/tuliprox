@@ -658,7 +658,7 @@ mod tests {
     fn test_net_tracker_reports_bytes_per_second() {
         let mut tracker = super::NetTracker::new();
         let _ = tracker.sample(1000, 500);
-        tracker.last_sample_at = tracker.last_sample_at.map(|instant| instant - Duration::from_secs(2));
+        tracker.last_sample_at = tracker.last_sample_at.map(|instant| instant.checked_sub(Duration::from_secs(2)).unwrap());
         let (rx_rate, tx_rate) = tracker.sample(3000, 1500);
         assert!((999.0..=1001.0).contains(&rx_rate));
         assert!((499.0..=501.0).contains(&tx_rate));

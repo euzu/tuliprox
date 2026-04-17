@@ -2,7 +2,8 @@ use super::PanelApiConfigDto;
 use crate::{
     check_input_connections, check_input_credentials,
     error::TuliproxError,
-    model::EpgConfigDto,
+    foundation::{get_filter, Filter},
+    model::{EpgConfigDto, PatternTemplate},
     utils::{
         arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
         default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
@@ -222,6 +223,10 @@ pub struct ConfigInputOptionsDto {
         skip_serializing_if = "is_default_probe_live_interval"
     )]
     pub probe_live_interval_hours: u32,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub resolve_filter: Option<String>,
+    #[serde(skip)]
+    pub t_resolve_filter: Option<Filter>,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -242,6 +247,8 @@ impl Default for ConfigInputOptionsDto {
             probe_delay: default_probe_delay_secs(),
             probe_live: false,
             probe_live_interval_hours: default_probe_live_interval(),
+            resolve_filter: None,
+            t_resolve_filter: None,
         }
     }
 }
@@ -263,6 +270,7 @@ impl ConfigInputOptionsDto {
             && is_default_probe_delay_secs(&self.probe_delay)
             && !self.probe_live
             && is_default_probe_live_interval(&self.probe_live_interval_hours)
+            && self.resolve_filter.is_none()
     }
 
     pub fn clean(&mut self) {
@@ -281,6 +289,15 @@ impl ConfigInputOptionsDto {
         self.probe_delay = default_probe_delay_secs();
         self.probe_live = false;
         self.probe_live_interval_hours = default_probe_live_interval();
+        self.resolve_filter = None;
+        self.t_resolve_filter = None;
+    }
+
+    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+        if let Some(raw_filter) = &self.resolve_filter {
+            self.t_resolve_filter = Some(get_filter(raw_filter, templates)?);
+        }
+        Ok(())
     }
 }
 
@@ -546,6 +563,7 @@ impl ConfigInputDto {
         index: u16,
         _include_computed: bool,
         provider_names: &HashSet<String>,
+        templates: Option<&[PatternTemplate]>,
     ) -> Result<u16, TuliproxError> {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
@@ -645,6 +663,11 @@ impl ConfigInputDto {
                     check_provider_scheme_url!(url, provider_names);
                 }
             }
+        }
+
+        // Prepare filter options
+        if let Some(options) = self.options.as_mut() {
+            options.prepare(templates)?;
         }
 
         Ok(current_index)
@@ -1198,7 +1221,8 @@ mod tests {
         };
 
         dto.prepare_type().expect("prepare type should succeed");
-        dto.prepare(0, true, &HashSet::new()).expect("prepare should succeed and infer batch type from batch:// URL");
+        dto.prepare(0, true, &HashSet::new(), None)
+            .expect("prepare should succeed and infer batch type from batch:// URL");
         assert_eq!(dto.input_type, InputType::XtreamBatch);
     }
 
@@ -1224,7 +1248,7 @@ mod tests {
 
         dto.prepare_type().expect("prepare type should normalize non-batch URL to xtream");
         assert_eq!(dto.input_type, InputType::Xtream);
-        dto.prepare(0, true, &HashSet::new()).expect("prepare should succeed for regular URL with aliases");
+        dto.prepare(0, true, &HashSet::new(), None).expect("prepare should succeed for regular URL with aliases");
         assert_eq!(dto.input_type, InputType::Xtream);
     }
 
@@ -1239,7 +1263,8 @@ mod tests {
             ..ConfigInputDto::default()
         };
 
-        dto.prepare(0, true, &HashSet::new()).expect("batch:// input must be normalized before credential validation");
+        dto.prepare(0, true, &HashSet::new(), None)
+            .expect("batch:// input must be normalized before credential validation");
         assert_eq!(dto.input_type, InputType::XtreamBatch);
     }
 
@@ -1264,7 +1289,7 @@ mod tests {
         };
 
         let err = dto
-            .prepare(0, true, &HashSet::new())
+            .prepare(0, true, &HashSet::new(), None)
             .expect_err("prepare should treat provider:// URL as regular input (non-batch) and validate provider");
         assert!(err.to_string().contains("Provider name myprovider is not defined"), "Error: {err}");
     }
@@ -1290,7 +1315,7 @@ mod tests {
         };
 
         let err = dto
-            .prepare(0, true, &HashSet::new())
+            .prepare(0, true, &HashSet::new(), None)
             .expect_err("prepare must require root input url even when aliases are present");
         assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
         assert!(err.to_string().contains("xtream_missing_root_url"), "Error: {err}");
@@ -1314,8 +1339,9 @@ mod tests {
             ..ConfigInputDto::default()
         };
 
-        let err =
-            dto.prepare(0, true, &HashSet::new()).expect_err("prepare must require root credentials for non-batch URL");
+        let err = dto
+            .prepare(0, true, &HashSet::new(), None)
+            .expect_err("prepare must require root credentials for non-batch URL");
         assert!(err.to_string().contains("for input type xtream: username and password are mandatory"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_missing_root_creds"), "Error: {err}");
     }
@@ -1341,7 +1367,7 @@ mod tests {
         };
 
         let err = dto
-            .prepare(0, true, &HashSet::new())
+            .prepare(0, true, &HashSet::new(), None)
             .expect_err("prepare must reject root credentials when using batch:// for xtream-batch");
         assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_with_root_creds"), "Error: {err}");
@@ -1376,7 +1402,8 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        let err = dto.prepare(0, true, &HashSet::new()).expect_err("should reject vod_source=staged for M3U staged");
+        let err =
+            dto.prepare(0, true, &HashSet::new(), None).expect_err("should reject vod_source=staged for M3U staged");
         assert!(err.to_string().contains("Staged M3U input cannot provide VOD or Series"), "Error: {err}");
     }
 
@@ -1395,7 +1422,8 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        let err = dto.prepare(0, true, &HashSet::new()).expect_err("should reject series_source=staged for M3U staged");
+        let err =
+            dto.prepare(0, true, &HashSet::new(), None).expect_err("should reject series_source=staged for M3U staged");
         assert!(err.to_string().contains("Staged M3U input cannot provide VOD or Series"), "Error: {err}");
     }
 
@@ -1418,7 +1446,7 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        dto.prepare(0, true, &HashSet::new()).expect("xtream staged with all cluster sources should succeed");
+        dto.prepare(0, true, &HashSet::new(), None).expect("xtream staged with all cluster sources should succeed");
     }
 
     #[test]
@@ -1441,8 +1469,9 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        let err =
-            dto.prepare(0, true, &HashSet::new()).expect_err("expected validation error for missing staged source");
+        let err = dto
+            .prepare(0, true, &HashSet::new(), None)
+            .expect_err("expected validation error for missing staged source");
         assert!(err.to_string().contains("no cluster source uses 'staged'"), "Error: {err}");
     }
 
@@ -1468,7 +1497,7 @@ mod tests {
         });
 
         let err = dto
-            .prepare(0, true, &HashSet::new())
+            .prepare(0, true, &HashSet::new(), None)
             .expect_err("skipped staged cluster must not satisfy staged-source requirement");
         assert!(err.to_string().contains("no cluster source uses 'staged'"), "Error: {err}");
     }
@@ -1489,7 +1518,7 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        dto.prepare(0, true, &HashSet::new())
+        dto.prepare(0, true, &HashSet::new(), None)
             .expect("staged M3U vod_source=staged is valid when VOD cluster is skipped");
     }
 
@@ -1511,7 +1540,7 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        dto.prepare(0, true, &HashSet::new())
+        dto.prepare(0, true, &HashSet::new(), None)
             .expect("disabled staged input should not enforce cluster source validation");
     }
 
@@ -1532,7 +1561,7 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        dto.prepare(0, true, &HashSet::new())
+        dto.prepare(0, true, &HashSet::new(), None)
             .expect("disabled staged input should not enforce staged M3U cluster validation");
     }
 
@@ -1551,7 +1580,7 @@ mod tests {
             ..StagedInputDto::default()
         });
 
-        dto.prepare(0, true, &HashSet::new())
+        dto.prepare(0, true, &HashSet::new(), None)
             .expect("disabled staged input should not enforce provider URL validation");
     }
 
@@ -1584,5 +1613,43 @@ mod tests {
         assert!(staged.live_source.is_none());
         assert!(staged.vod_source.is_none());
         assert!(staged.series_source.is_none());
+    }
+
+    #[test]
+    fn test_config_input_options_dto_filter_prepare_parses_valid_filter() {
+        let mut dto = ConfigInputOptionsDto {
+            resolve_filter: Some(r#"name ~ "test""#.to_string()),
+            ..ConfigInputOptionsDto::default()
+        };
+        dto.prepare(None).expect("valid filter should parse");
+        assert!(dto.t_resolve_filter.is_some());
+    }
+
+    #[test]
+    fn test_config_input_options_dto_filter_prepare_rejects_invalid_filter() {
+        let mut dto = ConfigInputOptionsDto {
+            resolve_filter: Some(r#"name ~ "["#.to_string()), // invalid regex
+            ..ConfigInputOptionsDto::default()
+        };
+        let result = dto.prepare(None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_input_options_dto_filter_prepare_with_unknown_template_placeholder() {
+        let mut dto = ConfigInputOptionsDto {
+            resolve_filter: Some(r#"name ~ "!UNKNOWN!""#.to_string()),
+            ..ConfigInputOptionsDto::default()
+        };
+        let result = dto.prepare(None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown template placeholder"));
+    }
+
+    #[test]
+    fn test_config_input_options_dto_filter_none_prepares_successfully() {
+        let mut dto = ConfigInputOptionsDto { resolve_filter: None, ..ConfigInputOptionsDto::default() };
+        dto.prepare(None).expect("None filter should prepare successfully");
+        assert!(dto.t_resolve_filter.is_none());
     }
 }

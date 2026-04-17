@@ -1,16 +1,17 @@
+use crate::utils::LRUResourceCache;
 use crate::{
     api::{
         config_watch::exec_config_watch,
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
+        model::active_user_manager::ConnectionAdmission,
         model::provider_dns_manager::exec_provider_dns,
         model::{
-            qos_aggregation_manager::exec_qos_aggregation,
-            metadata_update_manager::MetadataUpdateManager, ActiveProviderManager, ActiveUserManager,
+            metadata_update_manager::MetadataUpdateManager,
+            qos_aggregation_manager::exec_qos_aggregation, ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
             UpdateGuard,
         },
         scheduler::exec_scheduler,
-        model::active_user_manager::ConnectionAdmission,
     },
     model::{
         AppConfig, Config, ConfigProvider, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig,
@@ -40,7 +41,6 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use crate::utils::LRUResourceCache;
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {
@@ -663,7 +663,7 @@ impl AppState {
             || proxy_env_present()
     }
 
-    pub fn get_encrypt_secret(&self) -> [u8;16] {
+    pub fn get_encrypt_secret(&self) -> [u8; 16] {
         self.app_config
             .get_reverse_proxy_rewrite_secret()
             .unwrap_or(self.app_config.encrypt_secret)
@@ -705,7 +705,7 @@ fn should_use_manual_redirect_for_proxy(proxy_url: &str) -> bool {
 
 fn should_use_manual_redirects_for_env_vars<I, K, V>(vars: I) -> bool
 where
-    I: IntoIterator<Item = (K, V)>,
+    I: IntoIterator<Item=(K, V)>,
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
@@ -956,17 +956,19 @@ mod tests {
 
     #[test]
     fn qos_aggregation_changed_detects_stream_history_batch_size_changes() {
-        let mut old_config = Config::default();
-        old_config.reverse_proxy = Some(crate::model::ReverseProxyConfig::from(&ReverseProxyConfigDto {
-            stream_history: Some(StreamHistoryConfigDto {
-                stream_history_enabled: true,
-                stream_history_batch_size: 64,
-                stream_history_retention_days: 7,
-                stream_history_directory: "/tmp/history".to_string(),
-            }),
-            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 60 }),
-            ..Default::default()
-        }));
+        let old_config = Config {
+            reverse_proxy: Some(crate::model::ReverseProxyConfig::from(&ReverseProxyConfigDto {
+                stream_history: Some(StreamHistoryConfigDto {
+                    stream_history_enabled: true,
+                    stream_history_batch_size: 64,
+                    stream_history_retention_days: 7,
+                    stream_history_directory: "/tmp/history".to_string(),
+                }),
+                qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 60 }),
+                ..Default::default()
+            })),
+            ..Config::default()
+        };
 
         let mut new_config = old_config.clone();
         if let Some(reverse_proxy) = new_config.reverse_proxy.as_mut() {

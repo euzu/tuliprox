@@ -483,14 +483,14 @@ mod tests {
         let ts = parse_date_or_datetime("2026-03-22").unwrap();
         // 2026-03-22 00:00:00 UTC
         assert_eq!(ts, chrono::NaiveDate::from_ymd_opt(2026, 3, 22).unwrap()
-            .and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as u64);
+            .and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp().cast_unsigned());
     }
 
     #[test]
     fn test_parse_datetime_no_seconds() {
         let ts = parse_date_or_datetime("2026-03-22 14:30").unwrap();
         let expected = chrono::NaiveDate::from_ymd_opt(2026, 3, 22).unwrap()
-            .and_hms_opt(14, 30, 0).unwrap().and_utc().timestamp() as u64;
+            .and_hms_opt(14, 30, 0).unwrap().and_utc().timestamp().cast_unsigned();
         assert_eq!(ts, expected);
     }
 
@@ -498,7 +498,7 @@ mod tests {
     fn test_parse_datetime_with_seconds() {
         let ts = parse_date_or_datetime("2026-03-22 14:30:45").unwrap();
         let expected = chrono::NaiveDate::from_ymd_opt(2026, 3, 22).unwrap()
-            .and_hms_opt(14, 30, 45).unwrap().and_utc().timestamp() as u64;
+            .and_hms_opt(14, 30, 45).unwrap().and_utc().timestamp().cast_unsigned();
         assert_eq!(ts, expected);
     }
 

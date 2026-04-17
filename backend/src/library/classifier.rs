@@ -210,7 +210,7 @@ mod tests {
                 assert_eq!(season, 2);
                 assert_eq!(episode, 5);
             }
-            _ => panic!("Expected Series classification"),
+            MediaClassification::Movie { .. } => panic!("Expected Series classification"),
         }
         // Counter should record next episode after the parsed one (key is lowercased)
         assert_eq!(counters[&("breaking bad".to_string(), 2)], 6);
@@ -259,15 +259,15 @@ mod tests {
         // ShowA and ShowB each start at episode 1 independently
         match ca1 {
             MediaClassification::Series { episode, .. } => assert_eq!(episode, 1),
-            _ => panic!("Expected Series"),
+            MediaClassification::Movie { .. } => panic!("Expected Series"),
         }
         match cb1 {
             MediaClassification::Series { episode, .. } => assert_eq!(episode, 1),
-            _ => panic!("Expected Series"),
+            MediaClassification::Movie { .. } => panic!("Expected Series"),
         }
         match ca2 {
             MediaClassification::Series { episode, .. } => assert_eq!(episode, 2),
-            _ => panic!("Expected Series"),
+            MediaClassification::Movie { .. } => panic!("Expected Series"),
         }
     }
 

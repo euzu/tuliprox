@@ -282,6 +282,7 @@ mod tests {
     }
 
     /// Write a minimal `.pending` file and return its path.
+    #[allow(clippy::cast_possible_truncation)]
     fn write_test_pending(dir: &Path, day: &str, records: &[StreamHistoryRecord]) -> PathBuf {
         use crate::repository::stream_history::{
             BlockHeaderBody, CONTAINER_FORMAT_VERSION, CompressionKind,

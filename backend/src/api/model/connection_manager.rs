@@ -1248,9 +1248,10 @@ mod tests {
 
         sender.enqueue(2_u8);
         for _ in 0..50 {
-            let state = super::lock_backpressure_state(sender.state.as_ref());
-            let ready = state.overflow.is_empty() && state.draining;
-            drop(state);
+            let ready = {
+                let state = super::lock_backpressure_state(sender.state.as_ref());
+                state.overflow.is_empty() && state.draining
+            };
             if ready {
                 break;
             }

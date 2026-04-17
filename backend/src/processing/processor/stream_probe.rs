@@ -403,7 +403,7 @@ mod tests {
             panic!("expected video properties");
         };
         let details = video.details.as_ref().unwrap_or_else(|| unreachable!());
-        assert_eq!(details.duration_secs.as_deref().map(|value| value.as_ref()), Some("1541"));
+        assert_eq!(details.duration_secs.as_deref().map(std::convert::AsRef::as_ref), Some("1541"));
         assert_eq!(details.bitrate, 3_100_000);
     }
 }

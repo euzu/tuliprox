@@ -552,9 +552,9 @@ mod tests {
 
         let seasons = series.details.as_ref().and_then(|details| details.seasons.as_ref()).expect("seasons missing");
         let season = seasons.first().expect("season missing");
-        assert_eq!(season.cover.as_deref().map(|v| v.as_ref()), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
-        assert_eq!(season.cover_tmdb.as_deref().map(|v| v.as_ref()), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
-        assert_eq!(season.cover_big.as_deref().map(|v| v.as_ref()), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
+        assert_eq!(season.cover.as_deref(), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
+        assert_eq!(season.cover_tmdb.as_deref(), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
+        assert_eq!(season.cover_big.as_deref(), Some("/api/v1/library/thumbnail/series-thumb-uuid"));
         assert!(season.overview.is_none());
     }
 
@@ -612,11 +612,11 @@ mod tests {
         };
         let details = video.details.as_ref().expect("details missing");
 
-        assert_eq!(details.video.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"hevc\"}"));
-        assert_eq!(details.audio.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"aac\"}"));
-        assert_eq!(details.duration_secs.as_deref().map(|value| value.as_ref()), Some("5430"));
-        assert_eq!(details.duration.as_deref().map(|value| value.as_ref()), Some("01:30:30"));
-        assert_eq!(details.runtime.as_deref().map(|value| value.as_ref()), Some("5430"));
+        assert_eq!(details.video.as_deref(), Some("{\"codec_name\":\"hevc\"}"));
+        assert_eq!(details.audio.as_deref(), Some("{\"codec_name\":\"aac\"}"));
+        assert_eq!(details.duration_secs.as_deref(), Some("5430"));
+        assert_eq!(details.duration.as_deref(), Some("01:30:30"));
+        assert_eq!(details.runtime.as_deref(), Some("5430"));
         assert_eq!(details.bitrate, 8_200_000);
     }
 
@@ -651,8 +651,8 @@ mod tests {
         let episodes = series.details.as_ref().and_then(|details| details.episodes.as_ref()).expect("episodes missing");
         let episode = episodes.first().expect("episode missing");
 
-        assert_eq!(episode.video.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"h264\"}"));
-        assert_eq!(episode.audio.as_deref().map(|value| value.as_ref()), Some("{\"codec_name\":\"ac3\"}"));
+        assert_eq!(episode.video.as_deref(), Some("{\"codec_name\":\"h264\"}"));
+        assert_eq!(episode.audio.as_deref(), Some("{\"codec_name\":\"ac3\"}"));
         assert_eq!(episode.duration_secs, 1_541);
         assert_eq!(episode.duration.as_ref(), "00:25:41");
         assert_eq!(episode.bitrate, 3_100_000);

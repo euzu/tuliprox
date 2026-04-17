@@ -1,3 +1,4 @@
+use super::filtered_playlist_source::FilteredPlaylistSource;
 use crate::{
     api::{
         model::{
@@ -29,7 +30,6 @@ use crate::{
         debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream, StepMeasure, StepMeasureCallback,
     },
 };
-use super::filtered_playlist_source::FilteredPlaylistSource;
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
@@ -231,10 +231,10 @@ fn map_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget) -> Optio
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
     let valid_mappings = mappings.iter().filter(|m| m.mapper.as_ref().is_some_and(|v| !v.is_empty()));
-    let iter: Box<dyn Iterator<Item = PlaylistItem>> = Box::new(source.into_items());
+    let iter: Box<dyn Iterator<Item=PlaylistItem>> = Box::new(source.into_items());
     let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
         Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
-            as Box<dyn Iterator<Item = PlaylistItem>>
+            as Box<dyn Iterator<Item=PlaylistItem>>
     });
     let mut next_groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     let mut grp_id: u32 = 0;
@@ -464,7 +464,7 @@ async fn playlist_download_from_input(
                 input,
                 Some(xtream_clusters_to_download.as_slice()),
             )
-            .await;
+                .await;
             xtream_error_count = xtream_errors.len();
             playlist.extend(xtream_playlist);
             all_errors.extend(xtream_errors);
@@ -490,7 +490,7 @@ async fn playlist_download_from_input(
                     input,
                     Some(xtream_clusters_to_download.as_slice()),
                 )
-                .await;
+                    .await;
                 let xtream_error_count = e.len();
                 (p, e, persisted, 0, xtream_error_count)
             }
@@ -658,7 +658,7 @@ async fn process_source(
                         &mut errors,
                         consume_input_source,
                     )
-                    .await
+                        .await
                     {
                         Ok(()) => {
                             target_stats.push(TargetStats::success(&target.name));
@@ -1133,7 +1133,7 @@ async fn process_playlist_for_target(
             target,
             ctx.playlist_state.as_ref(),
         )
-        .await;
+            .await;
         step.stop("Persisting playlists");
         log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
         result
@@ -1256,7 +1256,18 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     let mut queued_live_count = 0usize;
     let mut queued_stream_count = 0usize;
 
+    // Extract filter before iterating to avoid borrow conflict
+    let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
+
     for item in fpl.items() {
+        // If input has a filter and this item doesn't match, skip probing
+        if let Some(r_filter) = resolve_filter {
+            let provider = ValueProvider { pli: &item, match_as_ascii: false };
+            if !r_filter.filter(&provider) {
+                continue;
+            }
+        }
+
         if !is_probe_supported_item_type(item.header.item_type) {
             continue;
         }
@@ -1436,8 +1447,8 @@ async fn process_watch(
                 .filter(|pl| watches.iter().any(|r| r.is_match(&pl.title)))
                 .map(|pl| process_group_watch(app_config, client, &target.name, pl)),
         )
-        .for_each_concurrent(16, |f| f)
-        .await;
+            .for_each_concurrent(16, |f| f)
+            .await;
 
         true
     } else {
@@ -1522,7 +1533,7 @@ pub async fn exec_processing(
         max_update_duration,
         std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind(),
     )
-    .await;
+        .await;
     let (stats, errors) = match process_result {
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
@@ -1593,6 +1604,8 @@ pub async fn exec_processing(
 mod tests {
     use super::*;
     use crate::model::StagedInput;
+    use shared::foundation::{get_filter, ValueProvider};
+    use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType};
     use shared::utils::Internable;
 
     fn item_with_props(props: StreamProperties) -> PlaylistItem {
@@ -1769,5 +1782,44 @@ mod tests {
         let filtered_groups = filtered.take_groups();
         assert_eq!(filtered_groups.len(), 1);
         assert_eq!(filtered_groups[0].xtream_cluster, XtreamCluster::Video);
+    }
+
+
+    fn make_test_item(name: &str, item_type: PlaylistItemType) -> PlaylistItem {
+        let header = PlaylistItemHeader {
+            name: name.into(),
+            group: "Test Group".intern(),
+            item_type,
+            ..Default::default()
+        };
+        PlaylistItem { header }
+    }
+
+    #[test]
+    fn test_filter_evalutes_correctly() {
+        let filter = get_filter(r#"name ~ "Allowed""#, None).unwrap();
+
+        let allowed_item = make_test_item("Allowed Channel", PlaylistItemType::Live);
+        let denied_item = make_test_item("Denied Channel", PlaylistItemType::Live);
+
+        let allowed_provider = ValueProvider { pli: &allowed_item, match_as_ascii: false };
+        let denied_provider = ValueProvider { pli: &denied_item, match_as_ascii: false };
+
+        assert!(filter.filter(&allowed_provider));
+        assert!(!filter.filter(&denied_provider));
+    }
+
+    #[test]
+    fn test_filter_with_type_comparison() {
+        let filter = get_filter("type = vod", None).unwrap();
+
+        let vod_item = make_test_item("Test Movie", PlaylistItemType::Video);
+        let live_item = make_test_item("Test Channel", PlaylistItemType::Live);
+
+        let vod_provider = ValueProvider { pli: &vod_item, match_as_ascii: false };
+        let live_provider = ValueProvider { pli: &live_item, match_as_ascii: false };
+
+        assert!(filter.filter(&vod_provider));
+        assert!(!filter.filter(&live_provider));
     }
 }

@@ -492,6 +492,7 @@ mod tests {
     }
 
     /// Helper: write a valid pending file with given records into a temp file
+    #[allow(clippy::cast_possible_truncation)]
     fn write_test_pending_file(records: &[StreamHistoryRecord]) -> NamedTempFile {
         let tmp = NamedTempFile::new().unwrap();
         let mut f = tmp.as_file().try_clone().unwrap();
@@ -625,10 +626,11 @@ mod tests {
         // Should not panic, just yield no records or an error
         let results: Vec<_> = reader.collect();
         // Either empty or contains an error — but no panic
-        assert!(results.is_empty() || results.iter().any(|r| r.is_err()));
+        assert!(results.is_empty() || results.iter().any(std::result::Result::is_err));
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn test_magic_recovery_oom_protection() {
         // Test that we don't OOM when block header has oversized payload_len
         // and that we can continue reading after skipping it
@@ -683,7 +685,7 @@ mod tests {
 
         // The iterator may be empty after graceful recovery, but it must never yield
         // a successfully decoded record from this corrupt truncated payload.
-        assert!(results.iter().all(|r| r.is_err()));
+        assert!(results.iter().all(std::result::Result::is_err));
     }
 
     // Additional test for lz4 archive round-trip:

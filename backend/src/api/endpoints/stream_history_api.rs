@@ -3,20 +3,20 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use serde::{Deserialize, Serialize};
-use shared::model::StreamHistoryEventType;
 use crate::api::api_utils::json_or_bin_response;
 use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::model::AppState;
-use crate::model::{StreamHistoryRecord};
+use crate::model::StreamHistoryRecord;
 use crate::repository::{QosSnapshotRecord, QosSnapshotRepository, StreamHistoryFileReader};
 use crate::utils::stream_history_viewer::{
     discover_files, resolve_time_range, CompiledFilter,
     StreamHistoryQuery, TimeRange,
 };
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde::{Deserialize, Serialize};
+use shared::model::StreamHistoryEventType;
 
 #[derive(Deserialize)]
 pub(crate) struct HistoryQueryParams {
@@ -276,7 +276,7 @@ impl Iterator for RecordFileIter {
         loop {
             if self.current_iter.is_none() {
                 let file = self.files.next()?;
-                let iter: Box<dyn Iterator<Item = io::Result<StreamHistoryRecord>>> = if file.is_archive {
+                let iter: Box<dyn Iterator<Item=io::Result<StreamHistoryRecord>>> = if file.is_archive {
                     match StreamHistoryFileReader::from_archive(&file.path, Some(self.time_range)) {
                         Ok((r, _)) => Box::new(r),
                         Err(e) => {
@@ -528,12 +528,12 @@ fn load_qos_snapshot(storage_dir: &str, stream_identity_key: &str) -> io::Result
 
 #[cfg(test)]
 mod tests {
-    use shared::model::{DisconnectReason, PlaylistItemType};
     use super::*;
     use crate::model::{QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig};
     use crate::repository::{
         QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow,
     };
+    use shared::model::{DisconnectReason, PlaylistItemType};
     use shared::utils::Internable;
 
     fn make_record(
@@ -657,23 +657,25 @@ mod tests {
 
     #[test]
     fn get_qos_storage_directory_requires_enabled_qos_aggregation() {
-        let mut cfg = crate::model::Config::default();
-        cfg.storage_dir = "/var/lib/tuliprox".to_string();
-        cfg.reverse_proxy = Some(ReverseProxyConfig {
-            resource_rewrite_disabled: false,
-            rewrite_secret: [0; 16],
-            resource_retry: ResourceRetryConfig::default(),
-            disabled_header: None,
-            stream: None,
-            cache: None,
-            rate_limit: None,
-            geoip: None,
-            stream_history: None,
-            qos_aggregation: Some(QosAggregationConfig {
-                enabled: false,
-                interval_secs: 300,
+        let mut cfg = crate::model::Config {
+            storage_dir: "/var/lib/tuliprox".to_string(),
+            reverse_proxy: Some(ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: ResourceRetryConfig::default(),
+                disabled_header: None,
+                stream: None,
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+                stream_history: None,
+                qos_aggregation: Some(QosAggregationConfig {
+                    enabled: false,
+                    interval_secs: 300,
+                }),
             }),
-        });
+            ..crate::model::Config::default()
+        };
 
         assert!(get_qos_storage_directory_from_config(&cfg).is_none());
 

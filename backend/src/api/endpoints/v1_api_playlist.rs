@@ -36,6 +36,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             resolve_delay: shared::utils::default_resolve_delay_secs(),
             probe_delay: shared::utils::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
+            resolve_filter: None,
         }),
         ..Default::default()
     }
@@ -55,6 +56,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             resolve_delay: shared::utils::default_resolve_delay_secs(),
             probe_delay: shared::utils::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
+            resolve_filter: None,
         }),
         ..Default::default()
     }
@@ -583,6 +585,27 @@ pub fn v1_api_playlist_register_with_permissions(
     )
 }
 
+async fn playlist_episode_item(
+    axum::extract::Path(virtual_id): axum::extract::Path<String>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
+) -> impl IntoResponse + Send {
+    if let PlaylistRequest::Target(target_id) = playlist_req {
+        if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
+            if target.has_output(TargetType::Xtream) {
+                if let Ok(vid) = virtual_id.parse::<u32>() {
+                    if let Ok(pli) =
+                        xtream_get_item_for_stream_id(vid, &app_state, &target, Some(XtreamCluster::Series)).await
+                    {
+                        return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
+                    }
+                }
+            }
+        }
+    }
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::resolve_provider_url_for_request;
@@ -612,6 +635,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
+    use shared::model::ProcessingOrder;
 
     /// Generate an XMLTV datetime string in the format `YYYYMMDDHHmmss +0000`
     /// offset by `hours_from_now` hours from the current time.
@@ -762,7 +786,7 @@ mod tests {
             mapping_ids: None,
             mapping: Arc::default(),
             favourites: None,
-            processing_order: Default::default(),
+            processing_order: ProcessingOrder::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -825,7 +849,7 @@ mod tests {
             mapping_ids: None,
             mapping: Arc::default(),
             favourites: None,
-            processing_order: Default::default(),
+            processing_order: ProcessingOrder::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -875,7 +899,7 @@ mod tests {
             mapping_ids: None,
             mapping: Arc::default(),
             favourites: None,
-            processing_order: Default::default(),
+            processing_order: ProcessingOrder::default(),
             watch: None,
             use_memory_cache: false,
         });
@@ -1062,7 +1086,7 @@ mod tests {
         assert_eq!(channels[0].id.as_ref(), "demo.channel");
         assert_eq!(channels[0].programmes.len(), 1);
         assert_eq!(
-            channels[0].programmes[0].title.as_ref().map(|title| title.as_ref()),
+            channels[0].programmes[0].title.as_ref().map(std::convert::AsRef::as_ref),
             Some("Morning Show")
         );
     }
@@ -1184,6 +1208,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn playlist_epg_input_route_merges_multiple_cached_sources_by_priority() {
         let temp_dir = tempdir().expect("temp dir");
         let provider = ConfigProvider::from(&ConfigProviderDto {
@@ -1355,25 +1380,4 @@ mod tests {
         assert!(body_text.contains("Second Show"), "{body_text}");
         assert!(!body_text.contains("Secondary Show"), "{body_text}");
     }
-}
-
-async fn playlist_episode_item(
-    axum::extract::Path(virtual_id): axum::extract::Path<String>,
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
-) -> impl IntoResponse + Send {
-    if let PlaylistRequest::Target(target_id) = playlist_req {
-        if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
-            if target.has_output(TargetType::Xtream) {
-                if let Ok(vid) = virtual_id.parse::<u32>() {
-                    if let Ok(pli) =
-                        xtream_get_item_for_stream_id(vid, &app_state, &target, Some(XtreamCluster::Series)).await
-                    {
-                        return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
-                    }
-                }
-            }
-        }
-    }
-    axum::http::StatusCode::NO_CONTENT.into_response()
 }

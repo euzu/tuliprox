@@ -208,6 +208,7 @@ fn load_snapshot_tree(path: &Path) -> io::Result<BPlusTree<String, QosSnapshotRe
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     use tempfile::tempdir;
@@ -238,7 +239,7 @@ mod tests {
             },
             window_7d: QosSnapshotWindow::default(),
             window_30d: QosSnapshotWindow::default(),
-            daily_buckets: Default::default(),
+            daily_buckets: BTreeMap::default(),
         };
 
         repo.put_snapshot(&snapshot).expect("put snapshot should succeed");
@@ -279,7 +280,7 @@ mod tests {
             window_24h: QosSnapshotWindow::default(),
             window_7d: QosSnapshotWindow::default(),
             window_30d: QosSnapshotWindow::default(),
-            daily_buckets: Default::default(),
+            daily_buckets: BTreeMap::default(),
         };
 
         repo.put_snapshot(&snapshot).expect("put snapshot should succeed");
@@ -321,7 +322,7 @@ mod tests {
             },
             window_7d: QosSnapshotWindow::default(),
             window_30d: QosSnapshotWindow::default(),
-            daily_buckets: Default::default(),
+            daily_buckets: BTreeMap::default(),
         };
 
         repo.put_snapshot(&snapshot).expect("put snapshot should succeed");

@@ -31,6 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use shared::foundation::ValueProvider;
 use shared::utils::default_probe_user_priority;
 
 create_resolve_options_function_for_xtream_target!(vod);
@@ -164,6 +165,9 @@ async fn process_immediate_vod_info(
     let mut processed_count = 0;
     let mut last_log_time = Instant::now();
 
+    // Extract filter before iterating to avoid borrow conflict
+    let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
+
     for pli in fpl.items_mut() {
         if !filter(pli) {
             continue;
@@ -174,6 +178,14 @@ async fn process_immediate_vod_info(
         } else {
             ProviderIdType::from(&*pli.header.id)
         };
+
+        // If input has a filter and this item doesn't match, skip processing
+        if let Some(r_filter) = resolve_filter {
+            let provider = ValueProvider { pli, match_as_ascii: false };
+            if !r_filter.filter(&provider) {
+                continue;
+            }
+        }
 
         let reasons = check_resolve_reasons(&resolve_options, do_probe, resolve_tmdb_enabled, pli);
 
@@ -429,9 +441,19 @@ fn queue_background_vod_info(
     };
 
     let input = fpl.input;
+    // Extract filter before iterating to avoid borrow conflict
+    let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
     for pli in fpl.items_mut() {
         if !filter(pli) {
             continue;
+        }
+
+        // If input has a filter and this item doesn't match, skip processing
+        if let Some(r_filter) = resolve_filter {
+            let provider = ValueProvider { pli, match_as_ascii: false };
+            if !r_filter.filter(&provider) {
+                continue;
+            }
         }
 
         let provider_id = if let Ok(uid) = pli.header.id.parse::<u32>() {
