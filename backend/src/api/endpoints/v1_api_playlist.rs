@@ -37,6 +37,7 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
             probe_delay: shared::utils::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
             resolve_filter: None,
+            probe_filter: None,
         }),
         ..Default::default()
     }
@@ -57,6 +58,7 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
             probe_delay: shared::utils::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
             resolve_filter: None,
+            probe_filter: None,
         }),
         ..Default::default()
     }

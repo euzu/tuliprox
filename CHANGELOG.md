@@ -7,9 +7,7 @@
 ## 🌟 New Features
 
 - **Input Resolve Filter**: Added `resolve_filter` option to input configuration to selectively resolve only entries matching a filter expression.
-  - Filter expressions use the same syntax as the general mapping DSL.
-  - Allows narrowing resolve scope to specific series seasons or named entries without skipping entire inputs.
-  - Configurable via Web UI in the input options panel under the Resolve section.
+- **Input Probe Filter**: Added `probe_filter` option to input configuration to selectively resolve only entries matching a filter expression.
 - **Soft Connections And Soft Priority**: API users can now be configured with `soft_connections` and `soft_priority`.
   - Soft connections allow a user to consume additional preemptible provider slots above `max_connections`.
   - `soft_priority` is only applied while a connection is using a soft slot; once a regular slot becomes available again, the running connection  

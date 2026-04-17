@@ -43,6 +43,7 @@ pub struct ConfigInputOptions {
     pub probe_delay: u16,
     pub probe_live_interval_hours: u32,
     pub resolve_filter: Option<Filter>,
+    pub probe_filter: Option<Filter>,
 }
 
 macros::from_impl!(ConfigInputOptions);
@@ -90,6 +91,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             probe_delay: dto.probe_delay,
             probe_live_interval_hours: dto.probe_live_interval_hours,
             resolve_filter: dto.t_resolve_filter.clone(),
+            probe_filter: dto.t_probe_filter.clone(),
         }
     }
 }

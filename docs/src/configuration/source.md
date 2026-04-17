@@ -219,6 +219,7 @@ specific provider.
 | `probe_live_interval_hours`            | Int      | `120`   | Interval after which a Live stream is re-analyzed (Important as backup streams often change resolutions).                                                                       |
 | `resolve_delay` / `probe_delay`        | Int      | `2`     | **Ban Protection:** Hard wait time (in seconds) between API or Probe requests to the *same* provider! Prevents API spamming.                                                    |
 | `resolve_filter`                       | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                      |
+| `probe_filter`                         | String   | -       | Filter expression to selectively probe only entries matching the conditio. Uses the same Filter syntax.                                                                         |
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.

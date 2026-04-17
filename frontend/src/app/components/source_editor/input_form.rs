@@ -78,6 +78,7 @@ const LABEL_RESOLVE_DELAY_SEC: &str = "LABEL.RESOLVE_DELAY_SEC";
 const LABEL_PROBE_DELAY_SEC: &str = "LABEL.PROBE_DELAY_SEC";
 const LABEL_RESOLVE_BACKGROUND: &str = "LABEL.RESOLVE_BACKGROUND";
 const LABEL_RESOLVE_FILTER: &str = "LABEL.RESOLVE_FILTER";
+const LABEL_PROBE_FILTER: &str = "LABEL.PROBE_FILTER";
 const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
 const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
@@ -206,6 +207,7 @@ generate_form_reducer!(
       ProbeSeries => probe_series: bool,
       ProbeLiveIntervalHours => probe_live_interval_hours: u32,
       ResolveFilter => resolve_filter: Option<String>,
+      ProbeFilter => probe_filter: Option<String>,
     }
 );
 
@@ -794,6 +796,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         { config_field_custom!(translate.t(LABEL_PROBE_DELAY_SEC), input_options_state.form.probe_delay.to_string()) }
                         { config_field_custom!(translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), input_options_state.form.probe_live_interval_hours.to_string()) }
                         </div>
+                        { config_field_optional!(input_options_state.form, translate.t(LABEL_PROBE_FILTER), probe_filter) }
                     </TitledCard>
                     </>
                 })}
@@ -862,6 +865,14 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     { edit_field_number_u16!(input_options_state, translate.t(LABEL_PROBE_DELAY_SEC), probe_delay,  ConfigInputOptionsFormAction::ProbeDelay) }
                     { edit_field_number_u32!(input_options_state, translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), probe_live_interval_hours,  ConfigInputOptionsFormAction::ProbeLiveIntervalHours) }
                     </div>
+                    { config_field_child!(translate.t(LABEL_PROBE_FILTER), "INPUT_FORM.PROBE_FILTER", {
+                        let input_options_state_filter = input_options_state.clone();
+                        html! {
+                            <FilterInput filter={input_options_state.form.probe_filter.clone().unwrap_or_default()} on_change={Callback::from(move |new_filter: Option<String>| {
+                                input_options_state_filter.dispatch(ConfigInputOptionsFormAction::ProbeFilter(new_filter));
+                            })} />
+                        }
+                    })}
                 </TitledCard>
                 </>
             })}

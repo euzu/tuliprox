@@ -227,6 +227,10 @@ pub struct ConfigInputOptionsDto {
     pub resolve_filter: Option<String>,
     #[serde(skip)]
     pub t_resolve_filter: Option<Filter>,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub probe_filter: Option<String>,
+    #[serde(skip)]
+    pub t_probe_filter: Option<Filter>,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -249,6 +253,8 @@ impl Default for ConfigInputOptionsDto {
             probe_live_interval_hours: default_probe_live_interval(),
             resolve_filter: None,
             t_resolve_filter: None,
+            probe_filter: None,
+            t_probe_filter: None,
         }
     }
 }
@@ -271,6 +277,7 @@ impl ConfigInputOptionsDto {
             && !self.probe_live
             && is_default_probe_live_interval(&self.probe_live_interval_hours)
             && self.resolve_filter.is_none()
+            && self.probe_filter.is_none()
     }
 
     pub fn clean(&mut self) {
@@ -291,11 +298,16 @@ impl ConfigInputOptionsDto {
         self.probe_live_interval_hours = default_probe_live_interval();
         self.resolve_filter = None;
         self.t_resolve_filter = None;
+        self.probe_filter = None;
+        self.t_probe_filter = None;
     }
 
     pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.resolve_filter {
             self.t_resolve_filter = Some(get_filter(raw_filter, templates)?);
+        }
+        if let Some(raw_filter) = &self.probe_filter {
+            self.t_probe_filter = Some(get_filter(raw_filter, templates)?);
         }
         Ok(())
     }
