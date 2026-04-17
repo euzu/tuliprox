@@ -138,6 +138,11 @@
 
 ## 🐛 Fixes
 
+- **Template Expansion Efficiency**: Optimized `template.yml` / `template.d` multi-template expansion so sequence-style templates no longer
+  duplicate unrelated entries during dependency resolution.
+  - Sequence templates still resolve correctly and preserve order.
+  - Missing-template and cyclic-dependency validation remains unchanged.
+  - This reduces config/Web UI load cost for larger nested template collections.
 - **Shutdown Diagnostics**: Stream-history shutdown now reports dead worker situations instead of silently swallowing them.
 - **Release Workflow Safety**:
   - `master` releases now refuse to build non-release versions when the patch component is not `0`.

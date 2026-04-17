@@ -492,6 +492,61 @@ fn build_dependency_graph(templates: &Vec<PatternTemplate>) -> Result<DirectedGr
     Ok(graph)
 }
 
+fn apply_dependency_template_value(
+    template_value: TemplateValue,
+    placeholder: &str,
+    dependency_value: &TemplateValue,
+) -> TemplateValue {
+    match dependency_value {
+        TemplateValue::Single(dep_val) => match template_value {
+            TemplateValue::Single(templ_val) => {
+                if templ_val.contains(placeholder) {
+                    TemplateValue::Single(templ_val.replace(placeholder, dep_val.as_str()))
+                } else {
+                    TemplateValue::Single(templ_val)
+                }
+            }
+            TemplateValue::Multi(templ_vals) => {
+                let mut new_values = IndexSet::new();
+                for templ_val in templ_vals {
+                    if templ_val.contains(placeholder) {
+                        new_values.insert(templ_val.replace(placeholder, dep_val.as_str()));
+                    } else {
+                        new_values.insert(templ_val);
+                    }
+                }
+                TemplateValue::Multi(new_values.into_iter().collect())
+            }
+        },
+        TemplateValue::Multi(dep_vals) => match template_value {
+            TemplateValue::Single(templ_val) => {
+                if templ_val.contains(placeholder) {
+                    let mut new_values = IndexSet::new();
+                    for dep_val in dep_vals {
+                        new_values.insert(templ_val.replace(placeholder, dep_val.as_str()));
+                    }
+                    TemplateValue::Multi(new_values.into_iter().collect())
+                } else {
+                    TemplateValue::Single(templ_val)
+                }
+            }
+            TemplateValue::Multi(templ_vals) => {
+                let mut new_values = IndexSet::new();
+                for templ_val in templ_vals {
+                    if templ_val.contains(placeholder) {
+                        for dep_val in dep_vals {
+                            new_values.insert(templ_val.replace(placeholder, dep_val.as_str()));
+                        }
+                    } else {
+                        new_values.insert(templ_val);
+                    }
+                }
+                TemplateValue::Multi(new_values.into_iter().collect())
+            }
+        },
+    }
+}
+
 pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<PatternTemplate>, TuliproxError> {
     let mut seen_template_names: HashSet<&str> = HashSet::with_capacity(templates.len());
     for template in templates.iter() {
@@ -520,58 +575,7 @@ pub fn prepare_templates(templates: &mut Vec<PatternTemplate>) -> Result<Vec<Pat
                             TuliproxError::FilterParse(format!("Failed to load template {dep_templ_name}"))
                         })?;
                         let dep_templ = template_map.get_mut(dep_templ_name).unwrap();
-                        templ_value = match dep_value {
-                            TemplateValue::Single(dep_val) => match templ_value {
-                                TemplateValue::Single(templ_val) => {
-                                    if templ_val.contains(&dep_templ.placeholder) {
-                                        TemplateValue::Single(
-                                            templ_val.replace(&dep_templ.placeholder, dep_val.as_str()),
-                                        )
-                                    } else {
-                                        TemplateValue::Single(templ_val)
-                                    }
-                                }
-                                TemplateValue::Multi(templ_vals) => {
-                                    let mut new_values = vec![];
-                                    for val in templ_vals {
-                                        if val.contains(&dep_templ.placeholder) {
-                                            new_values.push(val.replace(&dep_templ.placeholder, dep_val.as_str()));
-                                        } else {
-                                            new_values.push(val);
-                                        }
-                                    }
-                                    TemplateValue::Multi(new_values)
-                                }
-                            },
-                            TemplateValue::Multi(dep_vals) => match templ_value {
-                                TemplateValue::Single(templ_val) => {
-                                    let mut new_values = vec![];
-                                    for dep_val in dep_vals {
-                                        if templ_val.contains(&dep_templ.placeholder) {
-                                            new_values
-                                                .push(templ_val.replace(&dep_templ.placeholder, dep_val.as_str()));
-                                        } else {
-                                            new_values.push(templ_val.clone());
-                                        }
-                                    }
-                                    TemplateValue::Multi(new_values)
-                                }
-                                TemplateValue::Multi(templ_vals) => {
-                                    let mut new_values = vec![];
-                                    for dep_val in dep_vals {
-                                        for templ_val in &templ_vals {
-                                            if templ_val.contains(&dep_templ.placeholder) {
-                                                new_values
-                                                    .push(templ_val.replace(&dep_templ.placeholder, dep_val.as_str()));
-                                            } else {
-                                                new_values.push(templ_val.clone());
-                                            }
-                                        }
-                                    }
-                                    TemplateValue::Multi(new_values)
-                                }
-                            },
-                        };
+                        templ_value = apply_dependency_template_value(templ_value, &dep_templ.placeholder, dep_value);
                     }
                     template_values.insert(template_name.clone(), templ_value);
                 }
@@ -685,8 +689,11 @@ pub fn apply_templates_to_pattern_single(
 #[cfg(test)]
 mod tests {
     use crate::{
-        foundation::filter::{get_filter, ValueProvider},
-        model::{PlaylistItem, PlaylistItemHeader},
+        foundation::{
+            filter::{get_filter, ValueProvider},
+            prepare_templates,
+        },
+        model::{PatternTemplate, PlaylistItem, PlaylistItemHeader, TemplateValue},
         utils::{Internable, CONSTANTS},
     };
 
@@ -894,5 +901,62 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Unknown template placeholder(s) in filter"));
         assert!(msg.contains("!UNKNOWN_FILTER!"));
+    }
+
+    #[test]
+    fn prepare_templates_does_not_duplicate_unrelated_multi_entries() {
+        let mut templates = vec![
+            PatternTemplate {
+                name: "A".to_string(),
+                value: TemplateValue::Multi(vec!["a1".to_string(), "a2".to_string()]),
+                placeholder: String::new(),
+            },
+            PatternTemplate {
+                name: "SEQ".to_string(),
+                value: TemplateValue::Multi(vec!["!A!".to_string(), "literal".to_string()]),
+                placeholder: String::new(),
+            },
+        ];
+
+        let prepared = prepare_templates(&mut templates).expect("templates should prepare");
+        let seq = prepared.iter().find(|template| template.name == "SEQ").expect("SEQ template");
+
+        assert_eq!(seq.value, TemplateValue::Multi(vec!["a1".to_string(), "a2".to_string(), "literal".to_string()]));
+    }
+
+    #[test]
+    fn prepare_templates_concatenates_sequence_templates_without_cartesian_blowup() {
+        let mut templates = vec![
+            PatternTemplate {
+                name: "UK".to_string(),
+                value: TemplateValue::Multi(vec!["uk1".to_string(), "uk2".to_string()]),
+                placeholder: String::new(),
+            },
+            PatternTemplate {
+                name: "US".to_string(),
+                value: TemplateValue::Multi(vec!["us1".to_string(), "us2".to_string(), "us3".to_string()]),
+                placeholder: String::new(),
+            },
+            PatternTemplate {
+                name: "SEQ".to_string(),
+                value: TemplateValue::Multi(vec!["!UK!".to_string(), "!US!".to_string(), "adult".to_string()]),
+                placeholder: String::new(),
+            },
+        ];
+
+        let prepared = prepare_templates(&mut templates).expect("templates should prepare");
+        let seq = prepared.iter().find(|template| template.name == "SEQ").expect("SEQ template");
+
+        assert_eq!(
+            seq.value,
+            TemplateValue::Multi(vec![
+                "uk1".to_string(),
+                "uk2".to_string(),
+                "us1".to_string(),
+                "us2".to_string(),
+                "us3".to_string(),
+                "adult".to_string(),
+            ])
+        );
     }
 }
