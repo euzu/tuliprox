@@ -135,6 +135,7 @@
   - Sensitive values (passwords, secrets, tokens, API keys) are automatically redacted.
   - Includes prepared `config.yml`, `source.yml`, loaded mappings/templates/api-proxy sections, and resolved paths.
 - **CVD-Friendly Theme**: Web UI now includes a CVD (color vision deficiency) friendly theme option.
+- Stream Display display now the user comment.
 
 ## 🐛 Fixes
 

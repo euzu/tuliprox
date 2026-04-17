@@ -191,6 +191,10 @@
     color: var(--stream-tech-chip-video-codec-color);
   }
 
+  &__user-comment {
+    color: var(--modest-text-color);
+  }
+
   &__channel_type {
     font-weight: bold;
     color: var(--stream-tech-chip-audio-codec-color);

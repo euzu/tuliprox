@@ -3,7 +3,10 @@ use super::{
     meter::{MeterDisplayKind, StreamMeterBadge},
 };
 use crate::{
-    app::components::{country::display_country_code, AppIcon, Chip, Country, RevealContent, ToggleSwitch},
+    app::{
+        components::{country::display_country_code, AppIcon, Chip, Country, RevealContent, ToggleSwitch},
+        ConfigContext,
+    },
     i18n::use_translation,
     utils::format_duration,
 };
@@ -25,6 +28,7 @@ pub struct StreamDisplayItemProps {
 #[component]
 pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
     let translate = use_translation();
+    let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let stream = props.stream.clone();
     let is_background_transfer = is_background_transfer_stream(&stream);
     let chips = build_technical_chips(stream.channel.item_type, stream.channel.technical.as_ref());
@@ -34,6 +38,22 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
         let stream = stream.clone();
         let on_popup_click = props.on_popup_click.clone();
         Callback::from(move |event: MouseEvent| on_popup_click.emit((stream.clone(), event)))
+    };
+
+    let get_user_comment = {
+        let config_ctx = config_ctx.clone();
+        Callback::from(move |username: &str| {
+            if let Some(api_proxy) = config_ctx.api_proxy.as_ref() {
+                for target_user in &api_proxy.user {
+                    for credential in &target_user.credentials {
+                        if credential.username == username {
+                            return credential.comment.clone();
+                        }
+                    }
+                }
+            }
+            None
+        })
     };
 
     html! {
@@ -50,11 +70,12 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         <div class="tp__stream-display__title-block">
                             <div class="tp__stream-display__title">{stream.channel.title.to_string()}</div>
                             <div class="tp__stream-display__subtitle">
-                                <span class="tp__stream-display__username"> {stream.username.clone()}</span>
-                                {" • "}
                                 <span class="tp__stream-display__channel_type">{render_cluster(&stream.channel)}</span>
                                 {" • "}
                                 <span class="tp__stream-display__provider">{stream.provider.clone()}</span>
+                                {" • "}
+                                <span class="tp__stream-display__username"> {stream.username.clone()}</span>
+                                <span class="tp__stream-display__user-comment"> {get_user_comment.emit(stream.username.as_str()).map(|c| format!("({c})"))}</span>
                             </div>
                         </div>
                     </div>
