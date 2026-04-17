@@ -448,7 +448,7 @@ fn queue_background_vod_info(
             continue;
         }
 
-        // If input has a filter and this item doesn't match, skip processing
+        // If input has a resolve filter and this item doesn't match, skip processing
         if let Some(r_filter) = resolve_filter {
             let provider = ValueProvider { pli, match_as_ascii: false };
             if !r_filter.filter(&provider) {

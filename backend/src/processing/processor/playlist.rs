@@ -1256,28 +1256,42 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     let mut queued_live_count = 0usize;
     let mut queued_stream_count = 0usize;
 
-    // Extract filter before iterating to avoid borrow conflict
-    let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
+    let probe_filter = fpl.input.options.as_ref().and_then(|o| o.probe_filter.as_ref());
 
     for item in fpl.items() {
-        // If input has a filter and this item doesn't match, skip probing
-        if let Some(r_filter) = resolve_filter {
-            let provider = ValueProvider { pli: &item, match_as_ascii: false };
-            if !r_filter.filter(&provider) {
-                continue;
-            }
-        }
 
         if !is_probe_supported_item_type(item.header.item_type) {
             continue;
         }
-
         match item.header.item_type {
             PlaylistItemType::Live => {
                 if !probe_live_enabled {
                     continue;
                 }
+            }
+            PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
+                if !probe_vod_enabled {
+                    continue;
+                }
+            }
+            PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
+                if !probe_series_enabled {
+                    continue;
+                }
+            }
+            _ => continue,
+        }
 
+        // If input has a probe filter and this item doesn't match, skip probing
+        if let Some(p_filter) = probe_filter {
+            let provider = ValueProvider { pli: &item, match_as_ascii: false };
+            if !p_filter.filter(&provider) {
+                continue;
+            }
+        }
+
+        match item.header.item_type {
+            PlaylistItemType::Live => {
                 if let Some((probe_delay, interval_secs, cutoff_ts)) = live_probe_settings {
                     if needs_live_probe(&item, cutoff_ts) {
                         if let Some(provider_id) = provider_id_from_item(&item) {
@@ -1312,18 +1326,12 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                 // generic probe path to keep behaviour consistent with non-xtream outputs.
             }
             PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
-                if !probe_vod_enabled {
-                    continue;
-                }
                 // Xtream outputs handle VOD probe as part of the resolve pipeline (after resolve).
                 if xtream_probe_handled {
                     continue;
                 }
             }
             PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
-                if !probe_series_enabled {
-                    continue;
-                }
                 // Xtream outputs handle Series probe as part of the resolve pipeline (after resolve).
                 if xtream_probe_handled {
                     continue;
