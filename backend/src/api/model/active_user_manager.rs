@@ -1833,7 +1833,7 @@ impl ActiveUserManager {
     }
 
     fn should_preserve_session_stream(stream: &StreamInfo) -> bool {
-        stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
+        stream.session_token.is_some() && is_stable_session_stream(stream)
     }
 
     fn is_preserved_stream_expired(
@@ -3977,6 +3977,97 @@ mod tests {
         let connection_data = connections.by_key.get("user1").expect("user connection data");
         assert_eq!(connection_data.sessions[0].addr, base_addr);
         assert_eq!(connection_data.streams[0].addr, base_addr);
+    }
+
+    #[tokio::test]
+    async fn catchup_release_connection_preserves_logical_stream_until_session_expires() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55141".parse().unwrap();
+        let next_addr: SocketAddr = "127.0.0.1:55142".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-catchup-1".to_string(), "127.0.0.1".to_string(), addr);
+        let next_fingerprint = Fingerprint::new("fp-catchup-2".to_string(), "127.0.0.1".to_string(), next_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user-catchup");
+        user.max_connections = 1;
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-catchup",
+                virtual_id: 9103,
+                provider: "provider-a",
+                stream_url: "http://localhost/archive.ts",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let first = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 304,
+                meter_uid: 404,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::Catchup,
+                    ..test_channel(9103)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-catchup"),
+            })
+            .await
+            .expect("initial catchup stream should register");
+
+        let released = manager.release_connection(&addr).await;
+        assert!(released.addr_removed);
+        assert!(
+            released.removed_streams.is_empty(),
+            "catchup stream should remain logically active between range requests"
+        );
+
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert!(streams[0].preserved);
+        assert_eq!(streams[0].uid, first.uid);
+
+        manager.add_connection(&next_addr).await;
+        let second = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 305,
+                meter_uid: 405,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &next_fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::Catchup,
+                    ..test_channel(9103)
+                },
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-catchup"),
+            })
+            .await
+            .expect("catchup stream should reconnect");
+
+        assert_eq!(second.uid, first.uid);
+        assert_eq!(second.started_at, first.started_at);
+        assert!(!second.preserved);
     }
 
     #[tokio::test]

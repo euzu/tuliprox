@@ -192,11 +192,11 @@ async fn m3u_api_stream(
             fingerprint,
             &user.username,
             virtual_id,
-            !is_session_based_playback(pli.item_type, Some(extension)),
+            crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, Some(extension)),
         )
     };
     let eviction_reentry_guard = if pli.item_type == PlaylistItemType::Catchup
-        || is_session_based_playback(pli.item_type, Some(extension))
+        || !crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, Some(extension))
     {
         crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
     } else {

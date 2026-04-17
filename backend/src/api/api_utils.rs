@@ -47,6 +47,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     io::SeekFrom,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -916,7 +917,25 @@ fn get_grace_period_millis(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn should_defer_provider_open_for_grace_hold(
+    provider_grace_active: bool,
+    hold_stream: bool,
+    item_type: PlaylistItemType,
+    is_reopen: bool,
+) -> bool {
+    if !(provider_grace_active && hold_stream) {
+        return false;
+    }
+
+    // v3.3.0 opened provider-affine VOD/Series/Catchup reopens immediately, even when
+    // provider grace was temporarily in effect. Parking these requests in GracePending
+    // was introduced later and breaks players like libmpv during seek/reopen retries.
+    // Keep hold-stream behavior for live/admission paths, but restore direct-open behavior
+    // for provider-affine on-demand session reopens.
+    !(!item_type.is_live() && item_type.requires_provider_affinity() && is_reopen)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn create_stream_response_details(
     app_state: &Arc<AppState>,
     stream_options: &StreamOptions,
@@ -935,6 +954,7 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
+    is_reopen: bool,
     session_owner: Option<&str>,
     grace_hold_override: Option<bool>,
 ) -> Result<StreamDetails, TuliproxError> {
@@ -1016,7 +1036,12 @@ async fn create_stream_response_details(
                 sanitize_sensitive_info(guard_provider_name.as_deref().unwrap_or("?")),
                 sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
             );
-            let defer_provider_stream_until_grace_check = if provider_grace_active && grace_period_options.hold_stream {
+            let defer_provider_stream_until_grace_check = if should_defer_provider_open_for_grace_hold(
+                provider_grace_active,
+                grace_period_options.hold_stream,
+                item_type,
+                is_reopen,
+            ) {
                 if let Some(provider_name) = guard_provider_name.as_ref() {
                     app_state.active_provider.is_over_limit(provider_name).await
                 } else {
@@ -1268,9 +1293,13 @@ pub async fn force_provider_stream_response(
     let connection_permission = UserConnectionPermission::Allowed;
     let item_type = stream_channel.item_type;
 
-    // Release the existing provider connection for this session before acquiring a new one.
-    // This is critical for users with a connection limit of 1 to avoid "Provider exhausted" or provider-side 502/509 errors during seeking.
-    app_state.connection_manager.release_provider_connection(&user_session.addr).await;
+    // Release every stale provider slot and actively close every stale session socket before
+    // reacquiring. Otherwise the previous stream can linger long enough that repeated hold
+    // requests are abandoned by the client before provider capacity becomes visible again.
+    for addr in session_reacquire_cleanup_addrs(user_session, &fingerprint.addr) {
+        app_state.connection_manager.release_provider_connection(&addr).await;
+        let _ = app_state.connection_manager.close_connection_signal(&addr);
+    }
 
     // Provider-affine playback must stay on the same provider account across seeks/range reconnects.
     // Only non-affine sessions may fall back to a different account in the same lineup.
@@ -1301,6 +1330,7 @@ pub async fn force_provider_stream_response(
         stream_channel.virtual_id,
         connection_priority_for_kind(ctx.user, connection_kind),
         connection_kind,
+        true,
         Some(user_session.token.as_str()),
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
     )
@@ -1537,6 +1567,7 @@ pub async fn stream_response(
         stream_channel.virtual_id,
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
+        false,
         Some(session_token),
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
     )
@@ -2494,6 +2525,23 @@ pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, vir
 
 pub(crate) fn is_session_based_playback(item_type: PlaylistItemType, extension: Option<&str>) -> bool {
     item_type.is_live_adaptive() || matches!(extension, Some(ext) if ext == HLS_EXT || ext == DASH_EXT)
+}
+
+pub(crate) fn is_socket_bound_playback_session(item_type: PlaylistItemType, extension: Option<&str>) -> bool {
+    item_type.uses_socket_bound_session() && !is_session_based_playback(item_type, extension)
+}
+
+fn session_reacquire_cleanup_addrs(user_session: &UserSession, current_addr: &SocketAddr) -> Vec<SocketAddr> {
+    let mut addrs = Vec::with_capacity(user_session.active_addrs.len().saturating_add(1));
+    if user_session.addr != *current_addr {
+        addrs.push(user_session.addr);
+    }
+    for addr in &user_session.active_addrs {
+        if *addr != *current_addr && !addrs.contains(addr) {
+            addrs.push(*addr);
+        }
+    }
+    addrs
 }
 
 pub(crate) fn should_allow_exhausted_shared_reconnect(
@@ -4513,6 +4561,77 @@ mod tests {
         assert_ne!(logical, socket_bound);
         assert!(logical.contains(&fingerprint.key));
         assert!(socket_bound.contains(&fingerprint.addr.to_string()));
+    }
+
+    #[test]
+    fn socket_bound_playback_session_matches_only_plain_live_playback() {
+        assert!(is_socket_bound_playback_session(PlaylistItemType::Live, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Live, Some(HLS_EXT)));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Live, Some(DASH_EXT)));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::LiveHls, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Video, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Series, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Catchup, None));
+    }
+
+    #[test]
+    fn session_reacquire_cleanup_addrs_excludes_current_and_deduplicates() {
+        let primary: SocketAddr = "127.0.0.1:55191".parse().unwrap_or_else(|_| unreachable!());
+        let overlap: SocketAddr = "127.0.0.1:55192".parse().unwrap_or_else(|_| unreachable!());
+        let seek: SocketAddr = "127.0.0.1:55193".parse().unwrap_or_else(|_| unreachable!());
+        let session = UserSession {
+            token: "tok-vod".to_string(),
+            virtual_id: 9001,
+            provider: "provider-a".intern(),
+            stream_url: "http://localhost/movie.mkv".intern(),
+            addr: seek,
+            socket_bound: false,
+            active_addrs: vec![primary, overlap, seek, overlap],
+            ts: 1,
+            started_at: 1,
+            permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            counted: true,
+        };
+
+        assert_eq!(
+            session_reacquire_cleanup_addrs(&session, &seek),
+            vec![primary, overlap]
+        );
+    }
+
+    #[test]
+    fn grace_hold_defers_live_but_not_provider_affine_session_reopens() {
+        assert!(should_defer_provider_open_for_grace_hold(
+            true,
+            true,
+            PlaylistItemType::LiveHls,
+            false
+        ));
+        assert!(should_defer_provider_open_for_grace_hold(
+            true,
+            true,
+            PlaylistItemType::Video,
+            false
+        ));
+        assert!(!should_defer_provider_open_for_grace_hold(
+            true,
+            true,
+            PlaylistItemType::Catchup,
+            true
+        ));
+        assert!(!should_defer_provider_open_for_grace_hold(
+            true,
+            true,
+            PlaylistItemType::Video,
+            true
+        ));
+        assert!(!should_defer_provider_open_for_grace_hold(
+            true,
+            false,
+            PlaylistItemType::Video,
+            true
+        ));
     }
 
     #[tokio::test]

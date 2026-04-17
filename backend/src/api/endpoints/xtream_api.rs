@@ -260,9 +260,6 @@ async fn xtream_player_api_stream(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let container_ext = pli.get_container_extension().map(|e| concat_string!(".", e.as_ref()));
-    let stream_ext = stream_ext.filter(|s| !s.is_empty()).or(container_ext.as_deref());
-
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
         true,
@@ -330,6 +327,9 @@ async fn xtream_player_api_stream(
         .into_response();
     }
 
+    let resolved_stream_ext = resolve_xtream_playback_extension(stream_ext, &pli);
+    let stream_ext = resolved_stream_ext.as_deref();
+
     let (cluster, item_type) = if stream_req.context == ApiStreamContext::Timeshift {
         (XtreamCluster::Video, PlaylistItemType::Catchup)
     } else {
@@ -339,11 +339,7 @@ async fn xtream_player_api_stream(
     debug_if_enabled!(
         "ID chain for xtream endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
         stream_req.stream_id);
-    let container_ext = pli.get_container_extension().map(|ext| concat_string!(".", ext.as_ref()));
-    let requested_extension = stream_ext
-        .filter(|ext| !ext.is_empty())
-        .or(container_ext.as_deref())
-        .unwrap_or_default();
+    let requested_extension = resolve_xtream_playback_extension(stream_ext, &pli).unwrap_or_default();
 
     // Derive the playback extension from get_query_path so session semantics match
     // the actual path it will route. Falls back to requested_extension when empty.
@@ -364,11 +360,11 @@ async fn xtream_player_api_stream(
             fingerprint,
             &user.username,
             virtual_id,
-            !is_session_based_playback(item_type, Some(playback_ext)),
+            crate::api::api_utils::is_socket_bound_playback_session(item_type, Some(playback_ext)),
         )
     };
     let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
-        || is_session_based_playback(item_type, Some(playback_ext))
+        || !crate::api::api_utils::is_socket_bound_playback_session(item_type, Some(playback_ext))
     {
         crate::api::api_utils::EvictionReentryGuard::Session(&session_key)
     } else {
@@ -582,6 +578,21 @@ pub(crate) fn get_query_path(
     (query_path, extension)
 }
 
+fn resolve_xtream_playback_extension(stream_ext: Option<&str>, pli: &XtreamPlaylistItem) -> Option<String> {
+    let requested_extension = stream_ext.filter(|ext| !ext.is_empty()).map(ToString::to_string);
+    let canonical_extension = pli
+        .get_container_extension()
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| concat_string!(".", ext.as_ref()))
+        .or_else(|| extract_extension_from_url(&pli.url).and_then(|ext| (!ext.is_empty()).then_some(ext)));
+
+    if pli.item_type.is_live() {
+        requested_extension.or(canonical_extension)
+    } else {
+        canonical_extension.or(requested_extension)
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 // Used by webui
 async fn xtream_player_api_stream_with_token(
@@ -635,15 +646,12 @@ async fn xtream_player_api_stream_with_token(
             .into_response();
         }
 
-        let container_ext = pli.get_container_extension().map(|e| concat_string!(".", e.as_ref()));
-        let requested_extension = stream_ext
-            .filter(|s| !s.is_empty())
-            .or(container_ext.as_deref());
+        let requested_extension = resolve_xtream_playback_extension(stream_ext, &pli);
 
         let (query_path, playback_ext) =
-            get_query_path(stream_req.action_path, requested_extension, &pli, app_state);
+            get_query_path(stream_req.action_path, requested_extension.as_deref(), &pli, app_state);
         let playback_ext: Option<&str> = if playback_ext.is_empty() {
-            requested_extension
+            requested_extension.as_deref()
         } else {
             Some(&*playback_ext)
         };
@@ -653,7 +661,7 @@ async fn xtream_player_api_stream_with_token(
             fingerprint,
             "webui",
             virtual_id,
-            !is_session_request,
+            crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, playback_ext),
         );
 
         // TODO how should we use fixed provider for hls in multi provider config?
@@ -1537,8 +1545,52 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{resolve_xtream_playback_extension, XtreamApiTimeShiftRequest};
     use crate::api::model::UserApiRequest;
-    use super::XtreamApiTimeShiftRequest;
+    use shared::{
+        model::{PlaylistItemType, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem},
+        utils::Internable,
+    };
+    use std::sync::Arc;
+
+    fn create_test_vod_item(url: &str, container_extension: &str, item_type: PlaylistItemType) -> XtreamPlaylistItem {
+        XtreamPlaylistItem {
+            virtual_id: 176141,
+            provider_id: 813563,
+            name: "Test".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "".intern(),
+            title: "".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: Arc::<str>::from(url),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Video,
+            additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                name: "Test".intern(),
+                category_id: 0,
+                stream_id: 813563,
+                stream_icon: "".intern(),
+                direct_source: "".intern(),
+                custom_sid: None,
+                added: "".intern(),
+                container_extension: container_extension.intern(),
+                rating: None,
+                rating_5based: None,
+                stream_type: Some("movie".intern()),
+                trailer: None,
+                tmdb: None,
+                is_adult: 0,
+                details: None,
+            }))),
+            item_type,
+            category_id: 0,
+            input_name: "strong".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+        }
+    }
 
     #[test]
     fn post_query_only_request_prefers_query_when_form_is_missing() {
@@ -1696,5 +1748,43 @@ mod tests {
         assert_eq!(api_req.stream_id, "7");
         assert_eq!(api_req.duration, "120");
         assert_eq!(api_req.start, "path-start");
+    }
+
+    #[test]
+    fn non_live_playback_extension_prefers_canonical_item_extension_over_client_override() {
+        let pli = create_test_vod_item(
+            "provider://strong/movie/user/pass/813563.mp4",
+            "mp4",
+            PlaylistItemType::Video,
+        );
+
+        assert_eq!(resolve_xtream_playback_extension(Some(".mkv"), &pli).as_deref(), Some(".mp4"));
+    }
+
+    #[test]
+    fn live_playback_extension_keeps_client_requested_extension() {
+        let mut pli = create_test_vod_item(
+            "provider://strong/live/user/pass/813563.ts",
+            "ts",
+            PlaylistItemType::Live,
+        );
+        pli.xtream_cluster = XtreamCluster::Live;
+
+        assert_eq!(resolve_xtream_playback_extension(Some(".m3u8"), &pli).as_deref(), Some(".m3u8"));
+    }
+
+    #[test]
+    fn catchup_playback_extension_preserves_requested_adaptive_extension_for_underlying_live_item() {
+        let mut pli = create_test_vod_item(
+            "provider://strong/live/user/pass/813563.ts",
+            "ts",
+            PlaylistItemType::Live,
+        );
+        pli.xtream_cluster = XtreamCluster::Live;
+
+        assert_eq!(
+            resolve_xtream_playback_extension(Some(".m3u8"), &pli).as_deref(),
+            Some(".m3u8")
+        );
     }
 }

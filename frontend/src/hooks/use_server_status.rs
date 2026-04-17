@@ -30,7 +30,7 @@ fn find_stream_update_index(streams: &[StreamInfo], updated_stream: &StreamInfo)
         return Some(index);
     }
 
-    if updated_stream.channel.item_type.is_live_adaptive() {
+    if updated_stream.session_token.is_some() && updated_stream.channel.item_type.requires_provider_affinity() {
         if let Some(session_token) = updated_stream.session_token.as_deref() {
             if let Some(index) =
                 streams.iter().position(|stream| stream.session_token.as_deref() == Some(session_token))
@@ -364,6 +364,14 @@ mod tests {
     fn test_find_stream_update_index_prefers_adaptive_session_token_over_addr() {
         let existing = test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls);
         let updated = test_stream(1, "127.0.0.1:5678", Some("tok-hls"), PlaylistItemType::LiveDash);
+
+        assert_eq!(find_stream_update_index(&[existing], &updated), Some(0));
+    }
+
+    #[test]
+    fn test_find_stream_update_index_prefers_catchup_session_token_over_addr() {
+        let existing = test_stream(3, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        let updated = test_stream(3, "127.0.0.1:5678", Some("tok-catchup"), PlaylistItemType::Catchup);
 
         assert_eq!(find_stream_update_index(&[existing], &updated), Some(0));
     }
