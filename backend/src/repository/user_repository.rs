@@ -1,20 +1,22 @@
+use crate::model::Config;
 use crate::model::PlaylistXtreamCategory;
 use crate::model::{AppConfig, ProxyUserCredentials, TargetUser};
-use crate::model::Config;
-use crate::repository::BPlusTree;
 use crate::repository::storage_const;
 use crate::repository::xtream_get_playlist_categories;
+use crate::repository::BPlusTree;
 use crate::utils;
 use crate::utils::{file_exists_async, json_write_documents_to_file};
 use chrono::Local;
 use log::error;
-use shared::model::{PlaylistBouquetDto, PlaylistClusterBouquetDto, ProxyType, ProxyUserStatus, TargetType, XtreamCluster};
+use shared::model::{
+    ClusterFlags, PlaylistBouquetDto, PlaylistClusterBouquetDto, ProxyType, ProxyUserStatus, TargetType, XtreamCluster,
+};
 use std::collections::{HashMap, HashSet};
 use std::io::Error;
 use std::path::{Path, PathBuf};
 use tokio::task;
 
-// V4 (current): added soft_connections and soft_priority. V1/V2/V3 are migrated to V4 at startup
+// V5 (current): added output_clusters. V1-V4 are migrated to V5 at startup
 // by `bplustree_migration::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredProxyUserCredentials {
@@ -30,6 +32,7 @@ struct StoredProxyUserCredentials {
     pub exp_date: Option<i64>,
     pub max_connections: Option<u32>,
     pub status: Option<ProxyUserStatus>,
+    pub output_clusters: ClusterFlags,
     pub ui_enabled: bool,
     pub comment: Option<String>,
     pub priority: Option<i8>,
@@ -52,6 +55,7 @@ impl StoredProxyUserCredentials {
             exp_date: proxy.exp_date,
             max_connections: if proxy.max_connections > 0 { Some(proxy.max_connections) } else { None },
             status: proxy.status,
+            output_clusters: proxy.output_clusters,
             ui_enabled: proxy.ui_enabled,
             comment: proxy.comment.clone(),
             priority: if proxy.priority != 0 { Some(proxy.priority) } else { None },
@@ -73,6 +77,7 @@ impl StoredProxyUserCredentials {
             exp_date: stored.exp_date,
             max_connections: stored.max_connections.unwrap_or_default(),
             status: stored.status,
+            output_clusters: stored.output_clusters,
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
             priority: stored.priority.unwrap_or(0),
@@ -88,7 +93,10 @@ pub fn get_api_user_db_path(cfg: &AppConfig) -> PathBuf {
     PathBuf::from(&paths.config_path).join(storage_const::API_USER_DB_FILE)
 }
 
-fn add_target_user_to_user_tree(target_users: &[TargetUser], user_tree: &mut BPlusTree<String, StoredProxyUserCredentials>) {
+fn add_target_user_to_user_tree(
+    target_users: &[TargetUser],
+    user_tree: &mut BPlusTree<String, StoredProxyUserCredentials>,
+) {
     for target_user in target_users {
         for user in &target_user.credentials {
             let store_user: StoredProxyUserCredentials = StoredProxyUserCredentials::from(user, &target_user.target);
@@ -104,15 +112,15 @@ pub async fn merge_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Res
         let path = path.clone();
         move || BPlusTree::load(&path).unwrap_or_else(|_| BPlusTree::new())
     })
-        .await
-        .map_err(|err| Error::other(format!("Failed to load user db: {err}")))?;
+    .await
+    .map_err(|err| Error::other(format!("Failed to load user db: {err}")))?;
     add_target_user_to_user_tree(target_users, &mut user_tree);
     let result = task::spawn_blocking({
         let path = path.clone();
         move || user_tree.store(&path)
     })
-        .await
-        .map_err(|err| Error::other(format!("Failed to store user db: {err}")))?;
+    .await
+    .map_err(|err| Error::other(format!("Failed to store user db: {err}")))?;
     drop(write_lock);
     result
 }
@@ -122,7 +130,11 @@ pub async fn merge_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Res
 /// Will panic if `backup_dir` is not given
 pub async fn backup_api_user_db_file(cfg: &AppConfig, path: &Path) {
     if let Some(backup_dir) = cfg.config.load().backup_dir.as_ref() {
-        let backup_path = PathBuf::from(backup_dir).join(format!("{}_{}", storage_const::API_USER_DB_FILE, Local::now().format("%Y%m%d_%H%M%S")));
+        let backup_path = PathBuf::from(backup_dir).join(format!(
+            "{}_{}",
+            storage_const::API_USER_DB_FILE,
+            Local::now().format("%Y%m%d_%H%M%S")
+        ));
         let lock = cfg.file_locks.read_lock(path).await;
         let copy_result = tokio::fs::copy(path, &backup_path).await;
         drop(lock);
@@ -141,7 +153,9 @@ pub async fn store_api_user(cfg: &AppConfig, target_users: &[TargetUser]) -> Res
     let result = task::spawn_blocking({
         let path = path.clone();
         move || user_tree.store(&path)
-    }).await.map_err(|err| Error::other(format!("Failed to store user db: {err}")))?;
+    })
+    .await
+    .map_err(|err| Error::other(format!("Failed to store user db: {err}")))?;
     drop(write_lock);
     result
 }
@@ -187,18 +201,36 @@ fn ensure_user_storage_path(cfg: &Config, username: &str) -> Option<PathBuf> {
 }
 
 fn user_get_live_bouquet_path(user_storage_path: &Path, target: TargetType) -> PathBuf {
-    user_storage_path.join(PathBuf::from(format!("{}_{}", target.to_string().to_lowercase(), storage_const::USER_LIVE_BOUQUET)))
+    user_storage_path.join(PathBuf::from(format!(
+        "{}_{}",
+        target.to_string().to_lowercase(),
+        storage_const::USER_LIVE_BOUQUET
+    )))
 }
 
 fn user_get_vod_bouquet_path(user_storage_path: &Path, target: TargetType) -> PathBuf {
-    user_storage_path.join(PathBuf::from(format!("{}_{}", target.to_string().to_lowercase(), storage_const::USER_VOD_BOUQUET)))
+    user_storage_path.join(PathBuf::from(format!(
+        "{}_{}",
+        target.to_string().to_lowercase(),
+        storage_const::USER_VOD_BOUQUET
+    )))
 }
 
 fn user_get_series_bouquet_path(user_storage_path: &Path, target: TargetType) -> PathBuf {
-    user_storage_path.join(PathBuf::from(format!("{}_{}", target.to_string().to_lowercase(), storage_const::USER_SERIES_BOUQUET)))
+    user_storage_path.join(PathBuf::from(format!(
+        "{}_{}",
+        target.to_string().to_lowercase(),
+        storage_const::USER_SERIES_BOUQUET
+    )))
 }
 
-async fn save_xtream_user_bouquet_for_target(config: &Config, target_name: &str, storage_path: &Path, cluster: XtreamCluster, bouquet: Option<&Vec<String>>) -> Result<(), Error> {
+async fn save_xtream_user_bouquet_for_target(
+    config: &Config,
+    target_name: &str,
+    storage_path: &Path,
+    cluster: XtreamCluster,
+    bouquet: Option<&Vec<String>>,
+) -> Result<(), Error> {
     let bouquet_path = match cluster {
         XtreamCluster::Live => user_get_live_bouquet_path(storage_path, TargetType::Xtream),
         XtreamCluster::Video => user_get_vod_bouquet_path(storage_path, TargetType::Xtream),
@@ -231,7 +263,12 @@ async fn save_xtream_user_bouquet_for_target(config: &Config, target_name: &str,
     Ok(())
 }
 
-async fn save_m3u_user_bouquet_for_target(storage_path: &Path, target: TargetType, cluster: XtreamCluster, bouquet: Option<&Vec<String>>) -> Result<(), Error> {
+async fn save_m3u_user_bouquet_for_target(
+    storage_path: &Path,
+    target: TargetType,
+    cluster: XtreamCluster,
+    bouquet: Option<&Vec<String>>,
+) -> Result<(), Error> {
     let bouquet_path = match cluster {
         XtreamCluster::Live => user_get_live_bouquet_path(storage_path, target),
         XtreamCluster::Video => user_get_vod_bouquet_path(storage_path, target),
@@ -240,32 +277,87 @@ async fn save_m3u_user_bouquet_for_target(storage_path: &Path, target: TargetTyp
     match bouquet {
         Some(bouquet_categories) => {
             let categories = bouquet_categories.clone();
-                json_write_documents_to_file(&bouquet_path, &categories).await.map_err(|err| Error::other(format!("Failed to write m3u bouquet file: {err}")))?;
+            json_write_documents_to_file(&bouquet_path, &categories)
+                .await
+                .map_err(|err| Error::other(format!("Failed to write m3u bouquet file: {err}")))?;
         }
-        None => if bouquet_path.exists() {
-            tokio::fs::remove_file(bouquet_path).await?;
+        None => {
+            if bouquet_path.exists() {
+                tokio::fs::remove_file(bouquet_path).await?;
+            }
         }
     }
 
     Ok(())
 }
 
-async fn save_user_bouquet_for_target(config: &Config, target_name: &str, storage_path: &Path, target: TargetType, bouquet: Option<&PlaylistClusterBouquetDto>) -> Result<(), Error> {
+async fn save_user_bouquet_for_target(
+    config: &Config,
+    target_name: &str,
+    storage_path: &Path,
+    target: TargetType,
+    bouquet: Option<&PlaylistClusterBouquetDto>,
+) -> Result<(), Error> {
     if target == TargetType::Xtream {
-        save_xtream_user_bouquet_for_target(config, target_name, storage_path, XtreamCluster::Live, bouquet.and_then(|b| b.live.as_ref())).await?;
-        save_xtream_user_bouquet_for_target(config, target_name, storage_path, XtreamCluster::Video, bouquet.and_then(|b| b.vod.as_ref())).await?;
-        save_xtream_user_bouquet_for_target(config, target_name, storage_path, XtreamCluster::Series, bouquet.and_then(|b| b.series.as_ref())).await?;
+        save_xtream_user_bouquet_for_target(
+            config,
+            target_name,
+            storage_path,
+            XtreamCluster::Live,
+            bouquet.and_then(|b| b.live.as_ref()),
+        )
+        .await?;
+        save_xtream_user_bouquet_for_target(
+            config,
+            target_name,
+            storage_path,
+            XtreamCluster::Video,
+            bouquet.and_then(|b| b.vod.as_ref()),
+        )
+        .await?;
+        save_xtream_user_bouquet_for_target(
+            config,
+            target_name,
+            storage_path,
+            XtreamCluster::Series,
+            bouquet.and_then(|b| b.series.as_ref()),
+        )
+        .await?;
     } else {
-        save_m3u_user_bouquet_for_target(storage_path, target, XtreamCluster::Live, bouquet.and_then(|b| b.live.as_ref())).await?;
-        save_m3u_user_bouquet_for_target(storage_path, target, XtreamCluster::Video, bouquet.and_then(|b| b.vod.as_ref())).await?;
-        save_m3u_user_bouquet_for_target(storage_path, target, XtreamCluster::Series, bouquet.and_then(|b| b.series.as_ref())).await?;
+        save_m3u_user_bouquet_for_target(
+            storage_path,
+            target,
+            XtreamCluster::Live,
+            bouquet.and_then(|b| b.live.as_ref()),
+        )
+        .await?;
+        save_m3u_user_bouquet_for_target(
+            storage_path,
+            target,
+            XtreamCluster::Video,
+            bouquet.and_then(|b| b.vod.as_ref()),
+        )
+        .await?;
+        save_m3u_user_bouquet_for_target(
+            storage_path,
+            target,
+            XtreamCluster::Series,
+            bouquet.and_then(|b| b.series.as_ref()),
+        )
+        .await?;
     }
     Ok(())
 }
 
-pub async fn save_user_bouquet(cfg: &Config, target_name: &str, username: &str, bouquet: &PlaylistBouquetDto) -> Result<(), Error> {
+pub async fn save_user_bouquet(
+    cfg: &Config,
+    target_name: &str,
+    username: &str,
+    bouquet: &PlaylistBouquetDto,
+) -> Result<(), Error> {
     if let Some(storage_path) = ensure_user_storage_path(cfg, username) {
-        save_user_bouquet_for_target(cfg, target_name, &storage_path, TargetType::Xtream, bouquet.xtream.as_ref()).await?;
+        save_user_bouquet_for_target(cfg, target_name, &storage_path, TargetType::Xtream, bouquet.xtream.as_ref())
+            .await?;
         save_user_bouquet_for_target(cfg, target_name, &storage_path, TargetType::M3u, bouquet.m3u.as_ref()).await?;
         Ok(())
     } else {
@@ -289,32 +381,42 @@ pub async fn load_user_bouquet_as_json(cfg: &Config, username: &str, target: Tar
         if storage_path.exists() {
             let live_content = load_user_bouquet_from_file(&user_get_live_bouquet_path(&storage_path, target)).await;
             let vod_content = load_user_bouquet_from_file(&user_get_vod_bouquet_path(&storage_path, target)).await;
-            let series_content = load_user_bouquet_from_file(&user_get_series_bouquet_path(&storage_path, target)).await;
+            let series_content =
+                load_user_bouquet_from_file(&user_get_series_bouquet_path(&storage_path, target)).await;
             let (live, vod, series) = if target == TargetType::Xtream {
-                (convert_xtream_user_bouquet(live_content),
-                 convert_xtream_user_bouquet(vod_content),
-                 convert_xtream_user_bouquet(series_content))
+                (
+                    convert_xtream_user_bouquet(live_content),
+                    convert_xtream_user_bouquet(vod_content),
+                    convert_xtream_user_bouquet(series_content),
+                )
             } else {
                 (live_content, vod_content, series_content)
             };
-            return Some(format!(r#"{{"live": {}, "vod": {}, "series": {} }}"#,
-                                live.unwrap_or("null".to_string()),
-                                vod.unwrap_or("null".to_string()),
-                                series.unwrap_or("null".to_string()),
+            return Some(format!(
+                r#"{{"live": {}, "vod": {}, "series": {} }}"#,
+                live.unwrap_or("null".to_string()),
+                vod.unwrap_or("null".to_string()),
+                series.unwrap_or("null".to_string()),
             ));
         }
     }
     None
 }
 
-async fn user_get_cluster_bouquet(cfg: &Config, username: &str, target: TargetType, cluster: XtreamCluster) -> Option<String> {
+async fn user_get_cluster_bouquet(
+    cfg: &Config,
+    username: &str,
+    target: TargetType,
+    cluster: XtreamCluster,
+) -> Option<String> {
     if let Some(storage_path) = get_user_storage_path(cfg, username) {
         if storage_path.exists() {
             return load_user_bouquet_from_file(&match cluster {
                 XtreamCluster::Live => user_get_live_bouquet_path(&storage_path, target),
                 XtreamCluster::Video => user_get_vod_bouquet_path(&storage_path, target),
                 XtreamCluster::Series => user_get_series_bouquet_path(&storage_path, target),
-            }).await;
+            })
+            .await;
         }
     }
     None
@@ -345,7 +447,13 @@ pub(crate) async fn user_get_series_bouquet(cfg: &Config, username: &str, target
 /// * `None` - No filtering applied
 ///
 /// TODO xtream converts ids to u32 again, separate m3u and xtream handling
-pub async fn user_get_bouquet_filter(config: &Config, username: &str, category_id: Option<u32>, target: TargetType, cluster: XtreamCluster) -> Option<HashSet<String>> {
+pub async fn user_get_bouquet_filter(
+    config: &Config,
+    username: &str,
+    category_id: Option<u32>,
+    target: TargetType,
+    cluster: XtreamCluster,
+) -> Option<HashSet<String>> {
     if let Some(cid) = category_id {
         if cid > 0 {
             return Some(HashSet::from([cid.to_string()]));
@@ -380,103 +488,105 @@ pub async fn user_get_bouquet_filter(config: &Config, username: &str, category_i
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::MediaToolCapabilities;
     use crate::utils::FileLockManager;
     use arc_swap::{ArcSwap, ArcSwapAny};
-    use shared::model::{ConfigPaths, ProxyType, ProxyUserStatus};
+    use shared::model::{ClusterFlags, ConfigPaths, ProxyType, ProxyUserStatus};
     use std::env::temp_dir;
-    use tempfile::tempdir;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     pub async fn save_target_user() {
-        let user =
-            TargetUser {
-                target: "test".to_string(),
-                credentials: vec![
-                    ProxyUserCredentials {
-                        username: "Test".to_string(),
-                        password: "Test".to_string(),
-                        token: Some("Test".to_string()),
-                        proxy: ProxyType::Reverse(None),
-                        server: Some("default".to_string()),
-                        epg_timeshift: None,
-                        epg_request_timeshift: None,
-                        created_at: None,
-                        exp_date: Some(1_672_705_545),
-                        max_connections: 1,
-                        status: Some(ProxyUserStatus::Active),
-                        ui_enabled: true,
-                        comment: None,
-                        priority: 0,
-                        soft_connections: 0,
-                        soft_priority: 0,
-                        t_is_api_user: false,
-                    },
-                    ProxyUserCredentials {
-                        username: "Test2".to_string(),
-                        password: "Test".to_string(),
-                        token: Some("Test".to_string()),
-                        proxy: ProxyType::Reverse(None),
-                        server: Some("default".to_string()),
-                        epg_timeshift: None,
-                        epg_request_timeshift: None,
-                        created_at: None,
-                        exp_date: Some(1_672_705_545),
-                        max_connections: 1,
-                        status: Some(ProxyUserStatus::Expired),
-                        ui_enabled: true,
-                        comment: None,
-                        priority: 0,
-                        soft_connections: 0,
-                        soft_priority: 0,
-                        t_is_api_user: false,
-                    },
-                    ProxyUserCredentials {
-                        username: "Test3".to_string(),
-                        password: "Test".to_string(),
-                        token: Some("Test".to_string()),
-                        proxy: ProxyType::Reverse(None),
-                        server: Some("default".to_string()),
-                        epg_timeshift: None,
-                        epg_request_timeshift: None,
-                        created_at: None,
-                        exp_date: Some(1_672_705_545),
-                        max_connections: 1,
-                        status: Some(ProxyUserStatus::Expired),
-                        ui_enabled: true,
-                        comment: None,
-                        priority: 0,
-                        soft_connections: 0,
-                        soft_priority: 0,
-                        t_is_api_user: false,
-                    },
-                    ProxyUserCredentials {
-                        username: "Test4".to_string(),
-                        password: "Test".to_string(),
-                        token: Some("Test".to_string()),
-                        proxy: ProxyType::Reverse(None),
-                        server: Some("default".to_string()),
-                        epg_timeshift: None,
-                        epg_request_timeshift: None,
-                        created_at: None,
-                        exp_date: Some(1_672_705_545),
-                        max_connections: 1,
-                        status: Some(ProxyUserStatus::Expired),
-                        ui_enabled: true,
-                        comment: None,
-                        priority: -10, // non-zero priority to verify round-trip serialization
-                        soft_connections: 2,
-                        soft_priority: -3,
-                        t_is_api_user: false,
-                    }
-                ],
-            };
+        let user = TargetUser {
+            target: "test".to_string(),
+            credentials: vec![
+                ProxyUserCredentials {
+                    username: "Test".to_string(),
+                    password: "Test".to_string(),
+                    token: Some("Test".to_string()),
+                    proxy: ProxyType::Reverse(None),
+                    server: Some("default".to_string()),
+                    epg_timeshift: None,
+                    epg_request_timeshift: None,
+                    created_at: None,
+                    exp_date: Some(1_672_705_545),
+                    max_connections: 1,
+                    status: Some(ProxyUserStatus::Active),
+                    output_clusters: ClusterFlags::all(),
+                    ui_enabled: true,
+                    comment: None,
+                    priority: 0,
+                    soft_connections: 0,
+                    soft_priority: 0,
+                    t_is_api_user: false,
+                },
+                ProxyUserCredentials {
+                    username: "Test2".to_string(),
+                    password: "Test".to_string(),
+                    token: Some("Test".to_string()),
+                    proxy: ProxyType::Reverse(None),
+                    server: Some("default".to_string()),
+                    epg_timeshift: None,
+                    epg_request_timeshift: None,
+                    created_at: None,
+                    exp_date: Some(1_672_705_545),
+                    max_connections: 1,
+                    status: Some(ProxyUserStatus::Expired),
+                    output_clusters: ClusterFlags::all(),
+                    ui_enabled: true,
+                    comment: None,
+                    priority: 0,
+                    soft_connections: 0,
+                    soft_priority: 0,
+                    t_is_api_user: false,
+                },
+                ProxyUserCredentials {
+                    username: "Test3".to_string(),
+                    password: "Test".to_string(),
+                    token: Some("Test".to_string()),
+                    proxy: ProxyType::Reverse(None),
+                    server: Some("default".to_string()),
+                    epg_timeshift: None,
+                    epg_request_timeshift: None,
+                    created_at: None,
+                    exp_date: Some(1_672_705_545),
+                    max_connections: 1,
+                    status: Some(ProxyUserStatus::Expired),
+                    output_clusters: ClusterFlags::all(),
+                    ui_enabled: true,
+                    comment: None,
+                    priority: 0,
+                    soft_connections: 0,
+                    soft_priority: 0,
+                    t_is_api_user: false,
+                },
+                ProxyUserCredentials {
+                    username: "Test4".to_string(),
+                    password: "Test".to_string(),
+                    token: Some("Test".to_string()),
+                    proxy: ProxyType::Reverse(None),
+                    server: Some("default".to_string()),
+                    epg_timeshift: None,
+                    epg_request_timeshift: None,
+                    created_at: None,
+                    exp_date: Some(1_672_705_545),
+                    max_connections: 1,
+                    status: Some(ProxyUserStatus::Expired),
+                    output_clusters: ClusterFlags::Live | ClusterFlags::Vod,
+                    ui_enabled: true,
+                    comment: None,
+                    priority: -10, // non-zero priority to verify round-trip serialization
+                    soft_connections: 2,
+                    soft_priority: -3,
+                    t_is_api_user: false,
+                },
+            ],
+        };
 
         let cfg = AppConfig {
             config: Arc::new(ArcSwapAny::default()),
@@ -515,6 +625,7 @@ mod tests {
         assert_eq!(test4.priority, -10);
         assert_eq!(test4.soft_connections, 2);
         assert_eq!(test4.soft_priority, -3);
+        assert_eq!(test4.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
     }
 
     #[tokio::test]

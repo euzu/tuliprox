@@ -18,6 +18,7 @@ user:
         password: localsecret
         token: "77417"
         proxy: reverse
+        output_clusters: [live, vod, series]
         server: default
         exp_date: 0
         max_connections: 0
@@ -28,6 +29,7 @@ user:
         password: externalsecret
         token: "77418"
         proxy: reverse
+        output_clusters: [live, vod, series]
         server: external
         exp_date: 0
         max_connections: 0

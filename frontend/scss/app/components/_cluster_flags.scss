@@ -2,15 +2,15 @@
    display: flex;
    flex-flow: row nowrap;
 
-   span {
+   > span {
       cursor: pointer;
    }
 
-   span:not(:first-child) {
+   > span:not(:first-child) {
       border-top-left-radius: 0  !important;
       border-bottom-left-radius: 0  !important;
    }
-   span:not(:last-child) {
+   > span:not(:last-child) {
       border-top-right-radius: 0 !important;
       border-bottom-right-radius: 0  !important;
    }
@@ -19,5 +19,26 @@
       color: var(--tag-active-color);
       background-color: var(--tag-active-background-color);
       border-color: var(--tag-active-border-color);
+   }
+
+   &--short {
+      .tp__cluster-flags-input__outer {
+         cursor: default;
+      }
+
+      .tp__cluster-flags-input__mixed {
+         display: flex;
+         flex-flow: row nowrap;
+      }
+
+      .tp__cluster-flags-input__mixed > span:not(:first-child) {
+         border-top-left-radius: 0;
+         border-bottom-left-radius: 0;
+      }
+
+      .tp__cluster-flags-input__mixed > span:not(:last-child) {
+         border-top-right-radius: 0;
+         border-bottom-right-radius: 0;
+      }
    }
 }

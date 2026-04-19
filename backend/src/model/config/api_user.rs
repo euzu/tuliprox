@@ -4,11 +4,18 @@ use arc_swap::access::Access;
 use arc_swap::ArcSwap;
 use chrono::Local;
 use log::debug;
-use shared::model::{ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto, UserConnectionPermission};
+use shared::model::{
+    ClusterFlags, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto, UserConnectionPermission,
+    XtreamCluster,
+};
 use std::sync::Arc;
 use zeroize::Zeroize;
 
-#[derive(Debug, Clone, Default)]
+fn default_output_clusters() -> ClusterFlags {
+    ClusterFlags::all()
+}
+
+#[derive(Debug, Clone)]
 pub struct ProxyUserCredentials {
     pub username: String,
     pub password: String,
@@ -21,6 +28,7 @@ pub struct ProxyUserCredentials {
     pub exp_date: Option<i64>,
     pub max_connections: u32,
     pub status: Option<ProxyUserStatus>,
+    pub output_clusters: ClusterFlags,
     pub ui_enabled: bool,
     pub comment: Option<String>,
     pub priority: i8,
@@ -44,6 +52,7 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             exp_date: dto.exp_date,
             max_connections: dto.max_connections,
             status: dto.status,
+            output_clusters: dto.output_clusters,
             ui_enabled: dto.ui_enabled,
             comment: dto.comment.clone(),
             priority: dto.priority,
@@ -68,6 +77,7 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             exp_date: instance.exp_date,
             max_connections: instance.max_connections,
             status: instance.status,
+            output_clusters: instance.output_clusters,
             ui_enabled: instance.ui_enabled,
             comment: instance.comment.clone(),
             priority: instance.priority,
@@ -102,7 +112,7 @@ impl ProxyUserCredentials {
 
             if let Some(status) = &self.status {
                 if !matches!(status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
-                    debug!("User access denied, status invalid: {status} for user: {}",self.username);
+                    debug!("User access denied, status invalid: {status} for user: {}", self.username);
                     return false;
                 }
             } // NO STATUS SET, ok admins fault, we take this as a valid status
@@ -113,6 +123,18 @@ impl ProxyUserCredentials {
     #[inline]
     pub fn permission_denied(&self, app_state: &AppState) -> bool {
         !self.has_permissions(app_state)
+    }
+
+    pub fn allows_cluster(&self, cluster: XtreamCluster) -> bool {
+        match cluster {
+            XtreamCluster::Live => self.output_clusters.contains(ClusterFlags::Live),
+            XtreamCluster::Video => self.output_clusters.contains(ClusterFlags::Vod),
+            XtreamCluster::Series => self.output_clusters.contains(ClusterFlags::Series),
+        }
+    }
+
+    pub fn allows_item_type(&self, item_type: shared::model::PlaylistItemType) -> bool {
+        XtreamCluster::try_from(item_type).map_or(true, |cluster| self.allows_cluster(cluster))
     }
 
     pub async fn connection_permission(&self, app_state: &AppState) -> UserConnectionPermission {
@@ -135,6 +157,31 @@ impl Drop for ProxyUserCredentials {
     }
 }
 
+impl Default for ProxyUserCredentials {
+    fn default() -> Self {
+        Self {
+            username: String::new(),
+            password: String::new(),
+            token: None,
+            proxy: ProxyType::default(),
+            server: None,
+            epg_timeshift: None,
+            epg_request_timeshift: None,
+            created_at: None,
+            exp_date: None,
+            max_connections: 0,
+            status: None,
+            output_clusters: default_output_clusters(),
+            ui_enabled: true,
+            comment: None,
+            priority: 0,
+            soft_connections: 0,
+            soft_priority: 0,
+            t_is_api_user: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TargetUser {
     pub target: String,
@@ -144,37 +191,24 @@ pub struct TargetUser {
 macros::from_impl!(TargetUser);
 impl From<&TargetUserDto> for TargetUser {
     fn from(dto: &TargetUserDto) -> Self {
-        Self {
-            target: dto.target.clone(),
-            credentials: dto.credentials.iter().map(Into::into).collect(),
-        }
+        Self { target: dto.target.clone(), credentials: dto.credentials.iter().map(Into::into).collect() }
     }
 }
 
 impl From<&TargetUser> for TargetUserDto {
     fn from(instance: &TargetUser) -> Self {
-        Self {
-            target: instance.target.clone(),
-            credentials: instance.credentials.iter().map(Into::into).collect(),
-        }
+        Self { target: instance.target.clone(), credentials: instance.credentials.iter().map(Into::into).collect() }
     }
 }
 
 impl TargetUser {
-    pub fn get_target_name(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Option<(&ProxyUserCredentials, &str)> {
+    pub fn get_target_name(&self, username: &str, password: &str) -> Option<(&ProxyUserCredentials, &str)> {
         self.credentials
             .iter()
             .find(|c| c.matches(username, password))
             .map(|credentials| (credentials, self.target.as_str()))
     }
     pub fn get_target_name_by_token(&self, token: &str) -> Option<(&ProxyUserCredentials, &str)> {
-        self.credentials
-            .iter()
-            .find(|c| c.matches_token(token))
-            .map(|credentials| (credentials, self.target.as_str()))
+        self.credentials.iter().find(|c| c.matches_token(token)).map(|credentials| (credentials, self.target.as_str()))
     }
 }

@@ -1,14 +1,14 @@
 use crate::model::{macros, AppConfig, Config, ProxyUserCredentials, TargetUser};
 use crate::repository::{backup_api_user_db_file, get_api_user_db_path, load_api_user, merge_api_user};
+use crate::utils;
+use crate::utils::file_exists_async;
+use arc_swap::access::Access;
+use arc_swap::ArcSwap;
 use log::debug;
+use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigPaths, TargetUserDto};
 use std::cmp::PartialEq;
 use std::fs;
 use std::sync::Arc;
-use arc_swap::access::Access;
-use arc_swap::ArcSwap;
-use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigPaths, TargetUserDto};
-use crate::{utils};
-use crate::utils::file_exists_async;
 
 const API_USER: &str = "api";
 const TEST_USER: &str = "test";
@@ -63,7 +63,7 @@ impl ApiProxyServerInfo {
 
         match &self.path {
             None => base_url,
-            Some(path) => format!("{base_url}/{}", path.trim_matches('/'))
+            Some(path) => format!("{base_url}/{}", path.trim_matches('/')),
         }
     }
 }
@@ -101,6 +101,21 @@ impl From<&ApiProxyConfig> for ApiProxyConfigDto {
 }
 
 impl ApiProxyConfig {
+    async fn backfill_output_clusters_to_file(&self, cfg: &AppConfig, errors: &mut Vec<String>) {
+        if self.user.is_empty() {
+            return;
+        }
+        let paths = <Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&cfg.paths);
+        let api_proxy_file = paths.api_proxy_file_path.as_str();
+        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&cfg.config);
+        let backup_dir = config.get_backup_dir();
+        if let Err(err) =
+            utils::save_api_proxy(api_proxy_file, backup_dir.as_ref(), &ApiProxyConfigDto::from(self)).await
+        {
+            errors.push(format!("Error saving api proxy file: {err}"));
+        }
+    }
+
     // we have the option to store user in the config file or in the user_db
     // When we switch from one to other we need to migrate the existing data.
     /// # Panics
@@ -117,7 +132,10 @@ impl ApiProxyConfig {
                     let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&cfg.config);
                     let backup_dir = config.get_backup_dir();
                     self.user = vec![];
-                    if let Err(err) = utils::save_api_proxy(api_proxy_file, backup_dir.as_ref(), &ApiProxyConfigDto::from(&*self)).await {
+                    if let Err(err) =
+                        utils::save_api_proxy(api_proxy_file, backup_dir.as_ref(), &ApiProxyConfigDto::from(&*self))
+                            .await
+                    {
                         errors.push(format!("Error saving api proxy file: {err}"));
                     }
                 }
@@ -132,6 +150,7 @@ impl ApiProxyConfig {
                 }
             }
         } else {
+            self.backfill_output_clusters_to_file(cfg, errors).await;
             let user_db_path = get_api_user_db_path(cfg);
             if file_exists_async(&user_db_path).await {
                 // we can't have user defined in db file.
@@ -152,7 +171,9 @@ impl ApiProxyConfig {
 
                 let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&cfg.config);
                 let backup_dir = config.get_backup_dir();
-                if let Err(err) = utils::save_api_proxy(api_proxy_file, backup_dir.as_ref(), &ApiProxyConfigDto::from(&*self)).await {
+                if let Err(err) =
+                    utils::save_api_proxy(api_proxy_file, backup_dir.as_ref(), &ApiProxyConfigDto::from(&*self)).await
+                {
                     errors.push(format!("Error saving api proxy file: {err}"));
                 } else {
                     backup_api_user_db_file(cfg, &user_db_path).await;
@@ -162,20 +183,14 @@ impl ApiProxyConfig {
         }
     }
 
-    pub fn get_target_name(
-        &self,
-        username: &str,
-        password: &str,
-    ) -> Option<(ProxyUserCredentials, String)> {
+    pub fn get_target_name(&self, username: &str, password: &str) -> Option<(ProxyUserCredentials, String)> {
         for target_user in &self.user {
-            if let Some((credentials, target_name)) =
-                target_user.get_target_name(username, password)
-            {
+            if let Some((credentials, target_name)) = target_user.get_target_name(username, password) {
                 return Some((credentials.clone(), target_name.to_string()));
             }
         }
         if log::log_enabled!(log::Level::Debug) && !username.eq(API_USER) {
-           debug!("Could not find any target for user {username}");
+            debug!("Could not find any target for user {username}");
         }
         None
     }
@@ -190,7 +205,9 @@ impl ApiProxyConfig {
     }
 
     pub fn get_user_credentials(&self, username: &str) -> Option<ProxyUserCredentials> {
-        let result = self.user.iter()
+        let result = self
+            .user
+            .iter()
             .flat_map(|target_user| &target_user.credentials)
             .find(|credential| credential.username == username)
             .cloned();

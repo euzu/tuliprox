@@ -1,8 +1,8 @@
 use crate::{
     app::{
         components::{
-            config::HasFormData, select::Select, userlist::proxy_type_input::ProxyTypeInput, DropDownOption,
-            DropDownSelection, TextButton, UserStatus,
+            config::HasFormData, select::Select, userlist::proxy_type_input::ProxyTypeInput, ClusterFlagsInput,
+            ClusterFlagsInputMode, DropDownOption, DropDownSelection, TextButton, UserStatus,
         },
         TargetUser,
     },
@@ -15,8 +15,8 @@ use crate::{
 use chrono::{Duration, Utc};
 use shared::{
     model::{
-        permission::Permission, ApiProxyServerInfoDto, ConfigTargetDto, ProxyType, ProxyUserCredentialsDto,
-        ProxyUserStatus,
+        permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, ProxyType,
+        ProxyUserCredentialsDto, ProxyUserStatus,
     },
     utils::generate_random_string,
 };
@@ -36,6 +36,7 @@ generate_form_reducer!(
         Proxy => proxy: ProxyType,
         Server => server: Option<String>,
         Status => status: Option<ProxyUserStatus>,
+        OutputClusters => output_clusters: ClusterFlags,
         MaxConnections => max_connections: u32,
         SoftConnections => soft_connections: u16,
         Priority => priority: i8,
@@ -118,6 +119,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 user.max_connections = DEFAULT_MAX_CONNECTIONS;
                 user.proxy = ProxyType::Reverse(None);
                 user.status = Some(ProxyUserStatus::Active);
+                user.output_clusters = ClusterFlags::all();
                 user.ui_enabled = true;
                 let now = Utc::now();
                 user.created_at = Some(now.timestamp());
@@ -187,23 +189,39 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let instance_status = form_state.clone();
     let instance_proxy = form_state.clone();
     let instance_server = form_state.clone();
+    let instance_output_clusters = form_state.clone();
     html! {
         <div class="tp__proxy-user-credentials-form tp__form-page">
           <div class="tp__proxy-user-credentials-form__body tp__form-page__body">
             { config_field_child!(translate.t("LABEL.PLAYLIST"), "PROXY_USER_CREDENTIALS.PLAYLIST", {
-               html! { <Select name="target"
-                    multi_select={false}
-                    on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
-                      let target = match selections {
-                        DropDownSelection::Empty => None,
-                        DropDownSelection::Single(option) => Some(option),
-                        DropDownSelection::Multi(options) => options.first().cloned(),
-                        };
-                        set_selected_target.set(target);
-                    })}
-                    options={targets.clone()}
-                />
-            }})}
+               html! {
+                    <div class="tp__proxy-user-credentials-form__playlist-row">
+                        <div class="tp__proxy-user-credentials-form__playlist-target">
+                            <Select name="target"
+                                multi_select={false}
+                                on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
+                                  let target = match selections {
+                                    DropDownSelection::Empty => None,
+                                    DropDownSelection::Single(option) => Some(option),
+                                    DropDownSelection::Multi(options) => options.first().cloned(),
+                                    };
+                                    set_selected_target.set(target);
+                                })}
+                                options={targets.clone()}
+                            />
+                        </div>
+                        <ClusterFlagsInput
+                            name="output_clusters"
+                            value={Some(form_state.data().output_clusters)}
+                            mode={ClusterFlagsInputMode::NoneIsAll}
+                            short_labels={true}
+                            on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
+                                instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags.unwrap_or_else(ClusterFlags::all)));
+                            })}
+                        />
+                    </div>
+                }
+            }) }
             { config_field_child!(translate.t("LABEL.STATUS"), "PROXY_USER_CREDENTIALS.STATUS", {
                html! { <Select name="status"
                     multi_select={false}

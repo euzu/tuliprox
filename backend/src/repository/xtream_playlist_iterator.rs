@@ -1,20 +1,20 @@
+use crate::api::model::AppState;
 use crate::model::ConfigTarget;
 use crate::model::{xtream_mapping_option_from_target_options, AppConfig, ProxyUserCredentials};
-use crate::repository::{LockedReceiverStream, open_playlist_reader};
+use crate::repository::get_file_path_for_db_index;
 use crate::repository::user_get_bouquet_filter;
+use crate::repository::{open_playlist_reader, LockedReceiverStream};
 use crate::repository::{xtream_get_file_path, xtream_get_storage_path};
 use futures::Stream;
 use log::error;
 use shared::error::TuliproxError;
 use shared::model::{PlaylistItemType, TargetType, XtreamCluster, XtreamMappingOptions, XtreamPlaylistItem};
 use std::collections::HashSet;
-use crate::repository::get_file_path_for_db_index;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::task;
-use crate::api::model::AppState;
 
 pub struct XtreamPlaylistIterator {
     inner: LockedReceiverStream<(XtreamPlaylistItem, bool)>,
@@ -28,7 +28,6 @@ impl XtreamPlaylistIterator {
         category_id: Option<u32>,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
-
         // TODO use playlist memory cache and keep sorted
 
         debug_assert!(target.get_xtream_output().is_some());
@@ -42,15 +41,21 @@ impl XtreamPlaylistIterator {
             let iter_lock = app_config.file_locks.read_lock(&xtream_path).await;
             let bg_lock = app_config.file_locks.read_lock(&xtream_path).await;
 
-            let filter = user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
+            let filter =
+                user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
+            let output_clusters = user.output_clusters;
             // Parse bouquet filter (strings) once into u32 set to minimize per-item allocations
             let filter_ids: Option<HashSet<u32>> = filter.as_ref().map(|set| {
-                set.iter().filter_map(|s| {
-                    s.parse::<u32>().map_err(|e| {
-                        error!("Failed to parse bouquet filter id '{s}': {e}");
-                        e
-                    }).ok()
-                }).collect()
+                set.iter()
+                    .filter_map(|s| {
+                        s.parse::<u32>()
+                            .map_err(|e| {
+                                error!("Failed to parse bouquet filter id '{s}': {e}");
+                                e
+                            })
+                            .ok()
+                    })
+                    .collect()
             });
 
             let xtream_path = xtream_path.clone();
@@ -85,6 +90,10 @@ impl XtreamPlaylistIterator {
                         }
                     };
 
+                    if !output_clusters.has_cluster(item.item_type) {
+                        continue;
+                    }
+
                     if !Self::matches_filters(cluster, filter_ids.as_ref(), &item) {
                         continue;
                     }
@@ -109,9 +118,7 @@ impl XtreamPlaylistIterator {
                 }
             });
 
-            Ok(Self {
-                inner: LockedReceiverStream::new(rx, iter_lock),
-            })
+            Ok(Self { inner: LockedReceiverStream::new(rx, iter_lock) })
         } else {
             Err(TuliproxError::Config(format!("Failed to find xtream storage for target {}", &target.name)))
         }
@@ -120,7 +127,8 @@ impl XtreamPlaylistIterator {
     fn matches_filters(cluster: XtreamCluster, filter_ids: Option<&HashSet<u32>>, item: &XtreamPlaylistItem) -> bool {
         // We can't serve episodes within series
         if cluster == XtreamCluster::Series
-            && !matches!(item.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo) {
+            && !matches!(item.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
+        {
             return false;
         }
 
@@ -133,7 +141,6 @@ impl XtreamPlaylistIterator {
 
         true
     }
-
 }
 
 impl Stream for XtreamPlaylistIterator {
@@ -142,7 +149,6 @@ impl Stream for XtreamPlaylistIterator {
         Pin::new(&mut self.inner).poll_next(cx)
     }
 }
-
 
 pub struct XtreamPlaylistJsonIterator {
     inner: XtreamPlaylistIterator,
@@ -157,14 +163,16 @@ impl XtreamPlaylistJsonIterator {
         category_id: Option<u32>,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
-        let xtream_output = target.get_xtream_output().ok_or_else(|| TuliproxError::Config(format!("Unexpected: xtream output required for target {}", target.name)))?;
+        let xtream_output = target.get_xtream_output().ok_or_else(|| {
+            TuliproxError::Config(format!("Unexpected: xtream output required for target {}", target.name))
+        })?;
         let encrypt_secret = app_state.get_encrypt_secret();
         let options = xtream_mapping_option_from_target_options(
             target,
             xtream_output,
             &app_state.app_config,
             user,
-            encrypt_secret
+            encrypt_secret,
         );
         Ok(Self {
             inner: XtreamPlaylistIterator::new(cluster, &app_state.app_config, target, category_id, user).await?,
@@ -178,11 +186,10 @@ impl Stream for XtreamPlaylistJsonIterator {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some((pli, has_next))) => {
-                let json = serde_json::to_string(&pli.to_document(&self.options))
-                    .unwrap_or_else(|err| {
-                        error!("Failed to serialize playlist item {}: {err}", pli.virtual_id);
-                        "{}".to_string()
-                    });
+                let json = serde_json::to_string(&pli.to_document(&self.options)).unwrap_or_else(|err| {
+                    error!("Failed to serialize playlist item {}: {err}", pli.virtual_id);
+                    "{}".to_string()
+                });
                 Poll::Ready(Some((json, has_next)))
             }
             Poll::Ready(None) => Poll::Ready(None),
