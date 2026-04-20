@@ -48,7 +48,7 @@ impl ClusterFlags {
 }
 
 impl From<Option<ClusterFlags>> for ClusterFlags {
-    fn from(value: Option<ClusterFlags>) -> Self { value.unwrap_or_else(ClusterFlags::empty) }
+    fn from(value: Option<ClusterFlags>) -> Self { value.unwrap_or_else(ClusterFlags::all) }
 }
 
 impl fmt::Display for ClusterFlags {
