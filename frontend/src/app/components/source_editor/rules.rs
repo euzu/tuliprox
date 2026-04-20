@@ -1,7 +1,7 @@
 use crate::app::components::{Block, BlockType, Connection};
 
 /// Determines whether two blocks can be connected based on explicit editor rules.
-/// Allowed: Input → Target, Target → Output.
+/// Allowed: Input -> Target, Target -> Output.
 /// Target can have multiple Inputs.
 /// Output can only have one Target.
 /// Target can connect to:
@@ -21,7 +21,7 @@ pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connecti
     let to_is_target = to_block.block_type.is_target();
     let to_is_output = to_block.block_type.is_output();
 
-    // Only allow Input → Target OR Target → Output
+    // Only allow Input -> Target OR Target -> Output
     let valid_direction = (is_input && to_is_target) || (is_target && to_is_output);
     if !valid_direction {
         return false;

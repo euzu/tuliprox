@@ -82,7 +82,7 @@ where
     let raw: Value = Value::deserialize(deserializer)?;
 
     match raw {
-        // Null → None
+        // Null -> None
         Value::Null => Ok(None),
 
         // its a number
@@ -95,7 +95,7 @@ where
             }
         }
 
-        // String → extract first number
+        // String -> extract first number
         Value::String(s) => {
             let s = s.trim();
             if s.is_empty() {

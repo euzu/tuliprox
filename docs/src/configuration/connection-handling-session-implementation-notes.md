@@ -5,6 +5,11 @@ This page is for maintainers working on Tuliprox session code.
 If you only want the operator-facing behavior, read:
 
 - [Sessions, HLS, Catchup and Reconnects](./connection-handling-sessions-and-reconnects.md)
+- [Connection Handling Runtime Flow](./connection-handling-runtime-flow.md)
+
+If you want the broader runtime orchestration around admission, placeholders, provider-open, and cleanup, also read:
+
+- [Connection Handling Runtime Internals](./connection-handling-runtime-internals.md)
 
 ## Why this page exists
 
@@ -25,6 +30,11 @@ The most important rule for future changes is:
 - do not derive provider/account affinity from socket-binding rules either
 
 That exact confusion breaks VOD, series, catchup, and local reopen/seek flows.
+
+This page is deliberately narrower than the runtime-internals page:
+
+- this page focuses on session identity, session admission, socket binding, and provider affinity
+- the runtime-internals page focuses on the full admission/playback activity flow
 
 ## Core terms
 
@@ -174,6 +184,12 @@ Reason:
 - a second request for the same logical playback must be admitted as the same playback
 - not as a brand-new connection
 
+Important:
+
+- this is separate from background metadata/probe work
+- probe/resolve tasks do not use normal playback session admission
+- probe-capable background work instead uses provider-side probe handles and provider preemption rules
+
 ### 2. Should this session be bound to exactly one current socket?
 
 This is controlled by `PlaylistItemType::uses_socket_bound_session()`.
@@ -289,6 +305,12 @@ The address move itself is not the provider-affinity rule.
 
 Provider-affinity is the separate invariant that follow-up requests for the same VOD/HLS playback should continue on the same provider account.
 
+This also explains why seek/reopen behavior must not be confused with:
+
+- ordinary new activation
+- socket-bound TS admission
+- background probe/resolve tasks
+
 ### 6. Disconnect handling
 
 Main entry points:
@@ -335,6 +357,7 @@ Read these files together before changing session logic:
 - `backend/src/api/endpoints/hls_api.rs`
 - `backend/src/api/model/active_user_manager.rs`
 - `backend/src/api/model/active_provider_manager.rs`
+- `backend/src/api/model/metadata_update_manager.rs`
 - `shared/src/model/playlist.rs`
 
 ## Tests that should stay green
@@ -348,3 +371,10 @@ These tests cover the most fragile parts of the current logic:
 - `test_adaptive_session_release_connection_preserves_logical_stream_and_start_time`
 
 If you change session code and one of these assumptions no longer holds, update the documentation and the tests in the same change.
+
+## Related pages
+
+- [Connection Handling Runtime Flow](./connection-handling-runtime-flow.md)
+- [Connection Handling Runtime Internals](./connection-handling-runtime-internals.md)
+- [Sessions, HLS, Catchup and Reconnects](./connection-handling-sessions-and-reconnects.md)
+- [Failures and User-Visible Behavior](./connection-handling-failures-and-user-visible-behavior.md)

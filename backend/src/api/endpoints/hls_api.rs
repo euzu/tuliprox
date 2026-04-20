@@ -269,14 +269,32 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 user_token: session_token.as_deref(),
             };
             let hls_content = rewrite_hls(user, &rewrite_hls_props);
+            if let Some(session_token) = session_token.as_deref() {
+                let _transition_guard = app_state
+                    .active_users
+                    .acquire_playback_transition(&user.username, session_token)
+                    .await;
+                app_state
+                    .active_users
+                    .release_unbound_session_reservation(&user.username, session_token, None, false)
+                    .await;
+                app_state
+                    .active_users
+                    .clear_unbound_session_addr(&user.username, session_token, &fingerprint.addr)
+                    .await;
+            }
             hls_response(hls_content).into_response()
         }
         Err(err) => {
             error!("Failed to download m3u8 {}", sanitize_sensitive_info(err.to_string().as_str()));
             if let Some(session_token) = session_token.as_deref() {
+                let _transition_guard = app_state
+                    .active_users
+                    .acquire_playback_transition(&user.username, session_token)
+                    .await;
                 app_state
                     .active_users
-                    .release_unbound_session_reservation(&user.username, session_token, false)
+                    .release_unbound_session_reservation(&user.username, session_token, None, false)
                     .await;
             }
 
@@ -463,31 +481,22 @@ async fn hls_api_stream(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
 
-        let (connection_admission, grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
-            && app_state.app_config.config.load().user_access_control
-        {
-            crate::api::api_utils::resolve_admission_with_strategies(
+        let (connection_admission, grace_mode, request_class) =
+            crate::api::api_utils::resolve_playback_request_admission(
                 &app_state,
-                &user.username,
-                user.max_connections,
-                user.soft_connections,
-                &fingerprint.client_ip,
-                &fingerprint.addr,
-                true,
-                Some(&session.token),
+                &user,
+                &fingerprint,
+                PlaylistItemType::LiveHls,
+                Some(session),
+                &session.token,
                 true,
                 crate::api::api_utils::EvictionReentryGuard::Session(&session.token),
+                // HLS playlist requests (.m3u8) are explicit Prepare: they set up session metadata
+                // but do not consume an admission slot. Segment and other media requests use Activate.
+                is_hls_url(&hls_url),
+                false,
             )
-            .await
-        } else {
-            (
-                crate::api::model::ConnectionAdmission {
-                    permission: UserConnectionPermission::Allowed,
-                    kind: session.connection_kind,
-                },
-                None,
-            )
-        };
+            .await;
         let connection_permission = connection_admission.permission;
         let connection_kind = connection_admission
             .kind
@@ -543,6 +552,7 @@ async fn hls_api_stream(
                 connection_permission,
                 connection_kind,
                 Some(&session.token),
+                Some(request_class),
                 false,
             )
             .await

@@ -73,7 +73,7 @@ impl StreamHistoryConfigDto {
             // Join with storage_dir, then resolve to an absolute path so that a
             // subsequent prepare() call (e.g. after a UI save-round-trip) sees an
             // absolute path and skips the join, preventing double-normalization
-            // (e.g. "history" → "data/history" → "data/data/history").
+            // (e.g. "history" -> "data/history" -> "data/data/history").
             let joined = PathBuf::from(storage_dir).join(directory_path);
             std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().to_string()
         };

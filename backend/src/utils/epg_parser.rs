@@ -57,9 +57,9 @@ pub fn get_epg_processing_options(app_state: &Arc<AppState>, user: &ProxyUserCre
     let rewrite_resources = app_state.app_config.is_reverse_proxy_resource_rewrite_enabled();
     let encrypt_secret = app_state.get_encrypt_secret();
 
-    // If redirect is true → rewrite_urls = false → keep original
-    // If redirect is false and rewrite_resources is true → rewrite_urls = true → rewriting allowed
-    // If redirect is false and rewrite_resources is false → rewrite_urls = false → no rewriting
+    // If redirect is true -> rewrite_urls = false -> keep original
+    // If redirect is false and rewrite_resources is true -> rewrite_urls = true -> rewriting allowed
+    // If redirect is false and rewrite_resources is false -> rewrite_urls = false -> no rewriting
     let redirect = user.proxy.is_redirect(PlaylistItemType::Live) || target.is_force_redirect(PlaylistItemType::Live);
     let rewrite_urls = !redirect && rewrite_resources;
 

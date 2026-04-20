@@ -5,7 +5,8 @@ use crate::{
             connection_manager::{PROVIDER_END_NOT_SET, PROVIDER_END_CLOSED, PROVIDER_END_ERROR},
             create_provider_stream, AppState, BoxedProviderStream, CleanupEvent, ConnectionManager,
             CustomVideoStreamType, EventManager, MeteringStream, ProviderHandle, ProviderStreamFactoryOptions,
-            StreamDetails, StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
+            PendingProviderWakeSource, StreamDetails, StreamError, StreamMeterHandle, TimedClientStream,
+            TransportStreamBuffer,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -120,10 +121,15 @@ struct GracePeriodParams<'a> {
     user: &'a ProxyUserCredentials,
     fingerprint: &'a Fingerprint,
     virtual_id: VirtualId,
+    session_token: Option<&'a str>,
     provisioning_info: Option<GraceProvisioningInfo>,
     waker: Option<Arc<AtomicWaker>>,
     hold_stream: bool,
     capacity_notify: Arc<Notify>,
+    pending_provider_version: Option<u64>,
+    /// The `transition_version` of the session if it is in `GraceActive` lifecycle.
+    /// Used by the grace task to confirm the session is still in `GraceActive` before resolving.
+    grace_active_version: Option<u64>,
 }
 
 enum DeferredProviderOpenOutcome {
@@ -765,6 +771,21 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     let has_provisioning = provisioning_info.is_some();
     let hold_stream = stream_details.grace_period.hold_stream;
     let capacity_notify = app_state.connection_manager.capacity_notified();
+    let pending_provider_version = if hold_stream {
+        if let Some(token) = session_token {
+            app_state.active_users.pending_provider_version(&user.username, token).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    // `GraceActive` version: populated when the session is in `GraceActive` lifecycle (GraceMode::Instant).
+    let grace_active_version = if let Some(token) = session_token {
+        app_state.active_users.grace_active_version(&user.username, token).await
+    } else {
+        None
+    };
 
     let waker = Arc::new(AtomicWaker::new());
     let (grace_stop_flag, grace_task_handle) = if grant_user_grace_period || stream_details.provider_grace_active {
@@ -775,10 +796,13 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             user,
             fingerprint,
             virtual_id,
+            session_token,
             provisioning_info,
             waker: Some(Arc::clone(&waker)),
             hold_stream,
             capacity_notify,
+            pending_provider_version,
+            grace_active_version,
         })
     } else {
         stream_grace_period(GracePeriodParams {
@@ -788,10 +812,13 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             user,
             fingerprint,
             virtual_id,
+            session_token,
             provisioning_info,
             waker: None,
             hold_stream,
             capacity_notify,
+            pending_provider_version,
+            grace_active_version,
         })
     };
 
@@ -908,10 +935,13 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
         user,
         fingerprint,
         virtual_id,
+        session_token,
         provisioning_info,
         waker,
         hold_stream,
         capacity_notify,
+        pending_provider_version,
+        grace_active_version,
     } = request;
     let active_users = Arc::clone(&app_state.active_users);
     let active_provider = Arc::clone(&app_state.active_provider);
@@ -947,6 +977,8 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
         let reconnect_flag = stream_details.reconnect_flag.clone();
         let fingerprint = fingerprint.clone();
         let app_state = Arc::clone(app_state);
+        let session_token = session_token.map(str::to_string);
+        let pending_username = user.username.clone();
         // Safety timeout: if async operations inside the grace task stall, force the flag
         // out of GRACE_PENDING so the client stream is not hung indefinitely.
         // Allow grace_period_millis for the intentional delay plus a 10-second buffer
@@ -960,6 +992,7 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
             let timed_out = tokio::time::timeout(grace_task_timeout, async move {
                 let deadline =
                     tokio::time::Instant::now() + tokio::time::Duration::from_millis(grace_period_millis);
+                let mut pending_wake_source = PendingProviderWakeSource::Activated;
                 loop {
                     let capacity_wait = capacity_notify.notified();
                     tokio::pin!(capacity_wait);
@@ -981,8 +1014,13 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
                     }
 
                     tokio::select! {
-                        () = tokio::time::sleep_until(deadline) => break,
-                        () = &mut capacity_wait => {}
+                        () = tokio::time::sleep_until(deadline) => {
+                            pending_wake_source = PendingProviderWakeSource::Timeout;
+                            break;
+                        }
+                        () = &mut capacity_wait => {
+                            pending_wake_source = PendingProviderWakeSource::CapacityNotify;
+                        }
                     }
                 }
 
@@ -1045,6 +1083,42 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
                     stream_strategy_flag_copy.store(StreamMode::Inner as u8, Ordering::Release);
                 }
 
+                // Resolve session lifecycle transitions.
+                // PendingProvider (Hold): activate on success, expire on failure.
+                if hold_stream {
+                    if let (Some(token), Some(version)) = (session_token.as_deref(), pending_provider_version) {
+                        let _transition_guard = active_users
+                            .acquire_playback_transition(&pending_username, token)
+                            .await;
+                        if updated {
+                            active_users
+                                .expire_pending_provider(&pending_username, token, version, pending_wake_source)
+                                .await;
+                        } else {
+                            active_users
+                                .activate_pending_provider(&pending_username, token, version, pending_wake_source)
+                                .await;
+                        }
+                    }
+                }
+
+                // GraceActive (Instant): activate on success, expire on failure.
+                // grace_active_version is Some when the session is in `GraceActive` lifecycle.
+                if let (Some(token), Some(version)) = (session_token.as_deref(), grace_active_version) {
+                    let _transition_guard = active_users
+                        .acquire_playback_transition(&pending_username, token)
+                        .await;
+                    if updated {
+                        active_users
+                            .expire_grace_active(&pending_username, token, version)
+                            .await;
+                    } else {
+                        active_users
+                            .activate_grace_active(&pending_username, token, version)
+                            .await;
+                    }
+                }
+
                 if updated {
                     if let Some(flag) = reconnect_flag {
                         flag.cancel();
@@ -1088,9 +1162,9 @@ mod tests {
     use crate::api::model::connection_manager::PROVIDER_END_NOT_SET;
     use crate::{
         api::model::{
-            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CustomVideoStreamType,
-            DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager, StreamDetails,
-            StreamError, UpdateGuard,
+            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CreateUserSessionParams,
+            CustomVideoStreamType, DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
+            SharedStreamManager, StreamDetails, StreamError, UpdateGuard,
         },
         auth::Fingerprint,
         model::{AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProcessTargets, ProxyUserCredentials, SourcesConfig},
@@ -1287,6 +1361,7 @@ mod tests {
         app_state: &Arc<AppState>,
         provider_name: &Arc<str>,
         deferred_addr: std::net::SocketAddr,
+        session_token: Option<&str>,
     ) -> (
         Arc<AtomicU8>,
         tokio::task::JoinHandle<()>,
@@ -1306,6 +1381,14 @@ mod tests {
         let stream_details = create_deferred_provider_grace_details(provider_name, deferred_handle);
         let test_user = create_test_user("grace-user");
         let test_fingerprint = create_test_fingerprint(deferred_addr);
+        let pending_provider_version = if let Some(token) = session_token {
+            app_state
+                .active_users
+                .pending_provider_version(&test_user.username, token)
+                .await
+        } else {
+            None
+        };
         let (flag, task) = stream_grace_period(GracePeriodParams {
             app_state,
             stream_details: &stream_details,
@@ -1313,10 +1396,13 @@ mod tests {
             user: &test_user,
             fingerprint: &test_fingerprint,
             virtual_id: 1,
+            session_token,
             provisioning_info: None,
             waker: None,
             hold_stream: true,
             capacity_notify: app_state.connection_manager.capacity_notified(),
+            pending_provider_version,
+            grace_active_version: None,
         });
         (
             flag.expect("provider grace should install a mode flag"),
@@ -1441,7 +1527,7 @@ mod tests {
             .await
             .expect("holder should consume the provider's live capacity");
         let (flag, grace_task, deferred_handle) =
-            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr).await;
+            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, None).await;
 
         assert_eq!(
             StreamMode::from_u8(flag.load(Ordering::Acquire)),
@@ -1461,6 +1547,150 @@ mod tests {
             StreamMode::Inner,
             "capacity-notify should resolve provider grace from GracePending to Inner before the deadline"
         );
+
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_provider_grace_resolution_clears_pending_provider_on_capacity_notify() {
+        let app_state = create_test_app_state();
+        let provider_name = "provider_1".intern();
+        let holder_addr = "127.0.0.1:55024".parse().unwrap_or_else(|_| unreachable!());
+        let deferred_addr = "127.0.0.1:55025".parse().unwrap_or_else(|_| unreachable!());
+        let user = create_test_user("grace-user");
+
+        let _ = app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-grace",
+                virtual_id: 1,
+                provider: provider_name.as_ref(),
+                stream_url: "http://provider-1.example/live/1.ts",
+                addr: &deferred_addr,
+                connection_permission: UserConnectionPermission::GracePeriod,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let _ = app_state
+            .active_users
+            .mark_pending_provider(
+                &user.username,
+                "tok-grace",
+                crate::api::model::PendingProviderReason::GraceHold,
+                9_999,
+            )
+            .await;
+
+        let holder_handle = app_state
+            .active_provider
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &holder_addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
+            .await
+            .expect("holder should consume the provider's live capacity");
+        let (_flag, grace_task, deferred_handle) =
+            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, Some("tok-grace")).await;
+
+        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
+        let join_result = tokio::time::timeout(Duration::from_millis(1), grace_task).await;
+        assert!(join_result.is_ok(), "grace task should finish after capacity notify");
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, "tok-grace")
+            .await
+            .expect("session should still exist");
+        assert!(!matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. }), "capacity notify should clear pending provider state");
+        assert_eq!(session.permission, UserConnectionPermission::Allowed);
+
+        app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_provider_grace_resolution_ignores_stale_pending_version_on_capacity_notify() {
+        let app_state = create_test_app_state();
+        let provider_name = "provider_1".intern();
+        let holder_addr = "127.0.0.1:55026".parse().unwrap_or_else(|_| unreachable!());
+        let deferred_addr = "127.0.0.1:55027".parse().unwrap_or_else(|_| unreachable!());
+        let user = create_test_user("grace-user");
+
+        let _ = app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-grace-stale",
+                virtual_id: 1,
+                provider: provider_name.as_ref(),
+                stream_url: "http://provider-1.example/live/1.ts",
+                addr: &deferred_addr,
+                connection_permission: UserConnectionPermission::GracePeriod,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let _ = app_state
+            .active_users
+            .mark_pending_provider(
+                &user.username,
+                "tok-grace-stale",
+                crate::api::model::PendingProviderReason::GraceHold,
+                9_999,
+            )
+            .await;
+
+        let holder_handle = app_state
+            .active_provider
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &holder_addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
+            .await
+            .expect("holder should consume the provider's live capacity");
+        let (_flag, grace_task, deferred_handle) = start_deferred_provider_grace_resolution(
+            &app_state,
+            &provider_name,
+            deferred_addr,
+            Some("tok-grace-stale"),
+        )
+        .await;
+
+        let replacement_version = app_state
+            .active_users
+            .mark_pending_provider(
+                &user.username,
+                "tok-grace-stale",
+                crate::api::model::PendingProviderReason::GraceHold,
+                10_500,
+            )
+            .await
+            .expect("replacement pending version should be created");
+
+        app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
+        let join_result = tokio::time::timeout(Duration::from_millis(1), grace_task).await;
+        assert!(join_result.is_ok(), "grace task should finish after capacity notify");
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, "tok-grace-stale")
+            .await
+            .expect("session should still exist");
+        let crate::api::model::PlaybackLifecycle::PendingProvider { data: pending } =
+            &session.lifecycle
+            else {
+                panic!("stale grace task must not clear the replacement pending provider state")
+            };
+        assert_eq!(pending.version, replacement_version);
+        assert!(pending.wake_source.is_none());
+        assert_eq!(session.permission, UserConnectionPermission::GracePeriod);
 
         app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
     }
@@ -1690,6 +1920,31 @@ mod tests {
         let provider_name = "provider_1".intern();
         let holder_addr = "127.0.0.1:55015".parse().unwrap_or_else(|_| unreachable!());
         let deferred_addr = "127.0.0.1:55016".parse().unwrap_or_else(|_| unreachable!());
+        let user = create_test_user("grace-user");
+
+        let _ = app_state
+            .active_users
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-grace-timeout",
+                virtual_id: 1,
+                provider: provider_name.as_ref(),
+                stream_url: "http://provider-1.example/live/1.ts",
+                addr: &deferred_addr,
+                connection_permission: UserConnectionPermission::GracePeriod,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let _ = app_state
+            .active_users
+            .mark_pending_provider(
+                &user.username,
+                "tok-grace-timeout",
+                crate::api::model::PendingProviderReason::GraceHold,
+                9_999,
+            )
+            .await;
 
         let holder_handle = app_state
             .active_provider
@@ -1703,7 +1958,7 @@ mod tests {
             .await
             .expect("holder should consume the provider's live capacity");
         let (flag, grace_task, deferred_handle) =
-            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr).await;
+            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, Some("tok-grace-timeout")).await;
 
         assert_eq!(
             StreamMode::from_u8(flag.load(Ordering::Acquire)),
@@ -1723,6 +1978,14 @@ mod tests {
             StreamMode::ProviderExhausted,
             "provider grace resolution should transition from GracePending to ProviderExhausted when the deadline expires"
         );
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, "tok-grace-timeout")
+            .await
+            .expect("session should still exist");
+        assert!(!matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. }), "timeout expiry should clear pending provider state");
+        assert_eq!(session.permission, UserConnectionPermission::Exhausted);
 
         app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
         app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;

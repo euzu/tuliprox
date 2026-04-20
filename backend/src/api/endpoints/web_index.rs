@@ -170,12 +170,12 @@ async fn token_refresh(
 fn inject_nonce_with_parser(html: String, nonce_b64: &str) -> String {
     let settings = RewriteStrSettings {
         element_content_handlers: vec![
-            // 1) All <script> without nonce → add nonce
+            // 1) All <script> without nonce -> add nonce
             element!("script:not([nonce])", move |el| {
                 el.set_attribute("nonce", nonce_b64)?;
                 Ok(())
             }),
-            // 2) All <style> without nonce → add nonce
+            // 2) All <style> without nonce -> add nonce
             element!("style:not([nonce])", move |el| {
                 el.set_attribute("nonce", nonce_b64)?;
                 Ok(())

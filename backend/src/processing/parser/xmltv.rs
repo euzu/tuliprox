@@ -571,7 +571,7 @@ pub fn flatten_tvguide(mut tv_guides: Vec<Epg>) -> Option<Epg> {
                             acc.programmes.insert(ProgrammeKey::from(p));
                         }
                     } else if guide.priority == acc.priority {
-                        // same priority → merge
+                        // same priority -> merge
                         for p in channel.programmes.drain(..) {
                             let key = ProgrammeKey::from(&p);
                             if acc.programmes.insert(key) {

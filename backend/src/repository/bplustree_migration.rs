@@ -622,8 +622,8 @@ pub struct AllStartupMigrationStats {
 }
 
 /// Runs all startup migrations in sequence:
-/// 1. B+Tree storage-format migration (V1 → current binary format)
-/// 2. User DB schema migration (V1/V2/V3 → V4 `MessagePack` layout)
+/// 1. B+Tree storage-format migration (V1 -> current binary format)
+/// 2. User DB schema migration (V1/V2/V3 -> V4 `MessagePack` layout)
 ///
 /// `config_dir` is the directory that contains `api_user.db` and the merge-guard
 /// marker. `storage_dir` is used for the B+Tree migration marker.
