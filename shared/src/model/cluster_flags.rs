@@ -47,6 +47,10 @@ impl ClusterFlags {
     }
 }
 
+impl From<Option<ClusterFlags>> for ClusterFlags {
+    fn from(value: Option<ClusterFlags>) -> Self { value.unwrap_or_else(ClusterFlags::empty) }
+}
+
 impl fmt::Display for ClusterFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut flag_strings = Vec::new();

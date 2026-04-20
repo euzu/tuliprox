@@ -48,7 +48,7 @@ artifacts
 .envrc
 backend/Cargo.lock
 
-#ignore d files
+# Ignore markdown files
 *.md
 !docs/src/**/*.md
 !README.md

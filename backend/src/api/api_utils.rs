@@ -2732,8 +2732,8 @@ mod tests {
     use shared::{
         foundation::Filter,
         model::{
-            ConfigPaths, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder,
-            StreamChannel, XtreamCluster,
+            ClusterFlags, ConfigPaths, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistItemType,
+            ProcessingOrder, StreamChannel, XtreamCluster,
         },
         utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
     };
@@ -3057,6 +3057,13 @@ mod tests {
 
     fn create_test_app_state() -> Arc<AppState> {
         create_test_app_state_for_config(Arc::new(create_test_app_config()))
+    }
+
+    #[tokio::test]
+    async fn create_api_proxy_user_defaults_output_clusters_to_all() {
+        let app_state = create_test_app_state();
+        let user = create_api_proxy_user(&app_state);
+        assert_eq!(user.output_clusters, ClusterFlags::all());
     }
 
     fn create_test_provider_app_state() -> Arc<AppState> {

@@ -36,7 +36,7 @@ generate_form_reducer!(
         Proxy => proxy: ProxyType,
         Server => server: Option<String>,
         Status => status: Option<ProxyUserStatus>,
-        OutputClusters => output_clusters: ClusterFlags,
+        OutputClusters => output_clusters: Option<ClusterFlags>,
         MaxConnections => max_connections: u32,
         SoftConnections => soft_connections: u16,
         Priority => priority: i8,
@@ -213,10 +213,10 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         <ClusterFlagsInput
                             name="output_clusters"
                             value={Some(form_state.data().output_clusters)}
-                            mode={ClusterFlagsInputMode::NoneIsAll}
+                            mode={ClusterFlagsInputMode::NoneIsNone}
                             short_labels={true}
                             on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
-                                instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags.unwrap_or_else(ClusterFlags::all)));
+                                instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags));
                             })}
                         />
                     </div>

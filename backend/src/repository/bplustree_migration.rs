@@ -647,20 +647,14 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         return Ok(false);
     }
 
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV1>::load(db_path) {
-        let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
-        for (key, v1) in &tree {
-            v5_tree.insert(key.clone(), StoredApiUserV5::from_v1(v1));
-        }
-        create_user_db_merge_guard(merge_guard_path)?;
-        v5_tree.store(db_path)?;
-        return Ok(true);
+    if BPlusTree::<String, StoredApiUserV5>::load(db_path).is_ok() {
+        return Ok(false);
     }
 
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV2>::load(db_path) {
+    if let Ok(tree) = BPlusTree::<String, StoredApiUserV4>::load(db_path) {
         let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
-        for (key, v2) in &tree {
-            v5_tree.insert(key.clone(), StoredApiUserV5::from_v2(v2));
+        for (key, v4) in &tree {
+            v5_tree.insert(key.clone(), StoredApiUserV5::from_v4(v4));
         }
         create_user_db_merge_guard(merge_guard_path)?;
         v5_tree.store(db_path)?;
@@ -677,18 +671,24 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         return Ok(true);
     }
 
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV4>::load(db_path) {
+    if let Ok(tree) = BPlusTree::<String, StoredApiUserV2>::load(db_path) {
         let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
-        for (key, v4) in &tree {
-            v5_tree.insert(key.clone(), StoredApiUserV5::from_v4(v4));
+        for (key, v2) in &tree {
+            v5_tree.insert(key.clone(), StoredApiUserV5::from_v2(v2));
         }
         create_user_db_merge_guard(merge_guard_path)?;
         v5_tree.store(db_path)?;
         return Ok(true);
     }
 
-    if BPlusTree::<String, StoredApiUserV5>::load(db_path).is_ok() {
-        return Ok(false);
+    if let Ok(tree) = BPlusTree::<String, StoredApiUserV1>::load(db_path) {
+        let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
+        for (key, v1) in &tree {
+            v5_tree.insert(key.clone(), StoredApiUserV5::from_v1(v1));
+        }
+        create_user_db_merge_guard(merge_guard_path)?;
+        v5_tree.store(db_path)?;
+        return Ok(true);
     }
 
     Err(io::Error::new(
@@ -1123,6 +1123,15 @@ mod tests {
         let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
         assert!(!migrated);
         assert!(!merge_guard_path.exists());
+
+        let v5_tree = BPlusTree::<String, StoredApiUserV5>::load(&db_path)?;
+        let user = v5_tree
+            .query(&"dave".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v5 detection"))?;
+        assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert_eq!(user.priority, Some(5));
+        assert_eq!(user.soft_connections, Some(2));
+        assert_eq!(user.soft_priority, Some(-4));
 
         Ok(())
     }
