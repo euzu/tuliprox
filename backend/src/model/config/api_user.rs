@@ -134,7 +134,7 @@ impl ProxyUserCredentials {
     }
 
     pub fn allows_item_type(&self, item_type: shared::model::PlaylistItemType) -> bool {
-        XtreamCluster::try_from(item_type).map_or(false, |cluster| self.allows_cluster(cluster))
+        XtreamCluster::try_from(item_type).is_ok_and(|cluster| self.allows_cluster(cluster))
     }
 
     pub async fn connection_permission(&self, app_state: &AppState) -> UserConnectionPermission {
