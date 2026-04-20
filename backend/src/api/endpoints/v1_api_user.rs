@@ -217,6 +217,7 @@ async fn terminate_user_session(
     axum::extract::Path((username, session_token)): axum::extract::Path<(String, String)>,
 ) -> impl axum::response::IntoResponse {
     app_state.active_users.terminate_session(&username, &session_token).await;
+    app_state.active_provider.clear_provider_reservation(&session_token).await;
     (axum::http::StatusCode::NO_CONTENT).into_response()
 }
 

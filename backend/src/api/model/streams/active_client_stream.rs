@@ -988,6 +988,9 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
         // Clone handles for use in the timeout fallback, in case the inner async block is cancelled.
         let flag_for_fallback = Arc::clone(&stream_strategy_flag_copy);
         let waker_for_fallback = waker.clone();
+        let session_token_timeout = session_token.clone();
+        let active_users_timeout = Arc::clone(&active_users);
+        let pending_username_timeout = pending_username.clone();
         let grace_task_handle = tokio::spawn(async move {
             let timed_out = tokio::time::timeout(grace_task_timeout, async move {
                 let deadline =
@@ -1134,6 +1137,25 @@ fn stream_grace_period(request: GracePeriodParams<'_>) -> (Option<Arc<AtomicU8>>
             if timed_out.is_err() {
                 // Grace task exceeded its budget without updating the flag — reset GRACE_PENDING
                 // to INNER_STREAM so the client stream is not hung indefinitely.
+                // Also resolve any session lifecycle to prevent inconsistent state:
+                // a PendingProvider / GraceActive session that was never resolved would cause
+                // the next admission attempt to incorrectly skip re-evaluation.
+                if let (Some(token), Some(version)) = (session_token_timeout.as_deref(), pending_provider_version) {
+                    let _transition_guard = active_users_timeout
+                        .acquire_playback_transition(&pending_username_timeout, token)
+                        .await;
+                    active_users_timeout
+                        .expire_pending_provider(&pending_username_timeout, token, version, PendingProviderWakeSource::Timeout)
+                        .await;
+                }
+                if let (Some(token), Some(version)) = (session_token_timeout.as_deref(), grace_active_version) {
+                    let _transition_guard = active_users_timeout
+                        .acquire_playback_transition(&pending_username_timeout, token)
+                        .await;
+                    active_users_timeout
+                        .expire_grace_active(&pending_username_timeout, token, version)
+                        .await;
+                }
                 error!("Grace period task timed out; resetting stream flag to prevent client hang");
                 let _ = flag_for_fallback.compare_exchange(
                     StreamMode::GracePending as u8,

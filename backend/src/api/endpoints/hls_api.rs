@@ -296,6 +296,10 @@ pub(in crate::api) async fn handle_hls_stream_request(
                     .active_users
                     .release_unbound_session_reservation(&user.username, session_token, None, false)
                     .await;
+                app_state
+                    .active_users
+                    .clear_unbound_session_addr(&user.username, session_token, &fingerprint.addr)
+                    .await;
             }
 
             let custom_stream_response = app_state.app_config.custom_stream_response.load();

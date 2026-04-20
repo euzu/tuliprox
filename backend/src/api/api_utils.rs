@@ -796,6 +796,8 @@ struct PlaybackActivationResult {
     placeholder_transition_version: Option<u64>,
 }
 
+/// # Panics
+#[allow(clippy::too_many_lines)]
 async fn activate_session_before_stream_open(
     app_state: &Arc<AppState>,
     request: SessionActivationRequest<'_>,
@@ -813,8 +815,44 @@ async fn activate_session_before_stream_open(
         connection_kind,
         socket_bound,
     } = request;
-    let request_class = if let Some(request_class) = request_class {
-        request_class
+    // Classify based on current session state, not the pre-computed value.
+    // If caller passes FollowUp, verify the session is still counted under the guard.
+    // A stale FollowUp would bypass admission — reclassify to catch this.
+    let effective_request_class = if let Some(request_class) = request_class {
+        if request_class == PlaybackRequestClass::FollowUp {
+            // Re-read session under the guard to ensure the counted lease is still held.
+            // Only reclassify if the session was in a counted state that has since been
+            // released. Pending sessions were never counted (admission pending provider
+            // acquisition) — keep FollowUp so no spurious placeholder is created.
+            let current_session = app_state
+                .active_users
+                .get_and_update_user_session(&user.username, session_token)
+                .await;
+            match current_session.as_ref().map(|s| &s.lifecycle) {
+                // Session is gone (expired/removed) or was never in a counted state — reclassify
+                // so admission runs and creates a fresh placeholder.
+                None => classify_playback_request(PlaybackRequestFacts {
+                    item_type,
+                    existing_session: None,
+                    prepare_only: false,
+                    terminate: false,
+                }),
+                // Had a counted lease but lost it — need to reclassify to Activate.
+                Some(crate::api::model::PlaybackLifecycle::Active | crate::api::model::PlaybackLifecycle::GraceActive) => {
+                    classify_playback_request(PlaybackRequestFacts {
+                        item_type,
+                        existing_session: current_session.as_ref(),
+                        prepare_only: false,
+                        terminate: false,
+                    })
+                }
+                // Pending was never counted (waiting for provider slot); Prepared/Preserved hold
+                // no counted slot — caller-specified FollowUp is still valid, no reclassification.
+                _ => request_class,
+            }
+        } else {
+            request_class
+        }
     } else {
         let existing_session = app_state
             .active_users
@@ -833,10 +871,79 @@ async fn activate_session_before_stream_open(
     // FollowUp: already counted, no re-admission needed.
     // GracePeriod: grace already granted, no re-evaluation needed.
     // No limits: skip admission entirely.
+    // GracePeriod permission is already resolved — skip admission strategies (re-run
+    // would evict the same session again). But we must still materialize the grace
+    // lifecycle (PendingProvider / GraceActive) so the session state is consistent.
+    if connection_permission == UserConnectionPermission::GracePeriod {
+        // Materialize grace lifecycle under the guard so the session state is consistent.
+        // Determine which grace mode applies by checking the current session state.
+        let current_session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, session_token)
+            .await;
+        let (_, resolved_grace) = match current_session.as_ref().map(|s| &s.lifecycle) {
+            Some(crate::api::model::PlaybackLifecycle::PendingProvider { .. }) => {
+                // Session already in PendingProvider — refresh deadline.
+                let deadline = current_time_secs().saturating_add(app_state.get_grace_options().timeout_secs);
+                let _ = app_state
+                    .active_users
+                    .mark_pending_provider(&user.username, session_token, PendingProviderReason::GraceHold, deadline)
+                    .await;
+                (crate::api::model::PlaybackLifecycle::PendingProvider {
+                    data: crate::api::model::PendingProviderState {
+                        reason_code: PendingProviderReason::GraceHold,
+                        created_at: current_time_secs(),
+                        deadline,
+                        version: current_session.as_ref().map_or(0, |s| {
+                            if let crate::api::model::PlaybackLifecycle::PendingProvider { data } = &s.lifecycle {
+                                data.version
+                            } else { 0 }
+                        }),
+                        wake_source: None,
+                    },
+                }, Some(crate::api::model::GraceMode::Hold))
+            }
+            Some(crate::api::model::PlaybackLifecycle::GraceActive) => {
+                // Already in GraceActive — nothing to refresh.
+                (crate::api::model::PlaybackLifecycle::GraceActive, Some(crate::api::model::GraceMode::Instant))
+            }
+            _ => {
+                // Session not yet in grace state — infer from item_type defaults.
+                // Live/LiveHls/LiveDash default to Hold; VOD/Catchup to Instant.
+                if item_type.is_live() || item_type.is_live_adaptive() {
+                    let deadline = current_time_secs().saturating_add(app_state.get_grace_options().timeout_secs);
+                    let _ = app_state
+                        .active_users
+                        .mark_pending_provider(&user.username, session_token, PendingProviderReason::GraceHold, deadline)
+                        .await;
+                    (crate::api::model::PlaybackLifecycle::PendingProvider {
+                        data: crate::api::model::PendingProviderState {
+                            reason_code: PendingProviderReason::GraceHold,
+                            created_at: current_time_secs(),
+                            deadline,
+                            version: 1,
+                            wake_source: None,
+                        },
+                    }, Some(crate::api::model::GraceMode::Hold))
+                } else {
+                    app_state.active_users.mark_grace_active(&user.username, session_token).await;
+                    (crate::api::model::PlaybackLifecycle::GraceActive, Some(crate::api::model::GraceMode::Instant))
+                }
+            }
+        };
+        return PlaybackActivationResult {
+            admission: crate::api::model::ConnectionAdmission {
+                permission: connection_permission,
+                kind: Some(connection_kind),
+            },
+            grace_mode: resolved_grace,
+            placeholder_transition_version: None,
+        };
+    }
+    // No limits: skip admission entirely. FollowUp / Prepare: no re-admission needed.
     if !limits_enabled
-        || connection_permission == UserConnectionPermission::GracePeriod
-        || request_class == PlaybackRequestClass::FollowUp
-        || request_class == PlaybackRequestClass::Prepare
+        || effective_request_class == PlaybackRequestClass::FollowUp
+        || effective_request_class == PlaybackRequestClass::Prepare
     {
         return PlaybackActivationResult {
             admission: crate::api::model::ConnectionAdmission {
@@ -3418,6 +3525,7 @@ mod tests {
                 stream_history: None,
                 qos_aggregation: None,
             }),
+            user_access_control: true,
             ..Config::default()
         };
 
@@ -3799,6 +3907,160 @@ mod tests {
         assert!(
             activation.placeholder_transition_version.is_none(),
             "precomputed follow-up activation must not create a placeholder session"
+        );
+    }
+
+    // stale FollowUp revalidation
+    #[tokio::test]
+    async fn activate_session_before_stream_open_stale_follow_up_reclassified_on_counted_lease_release() {
+        // Scenario: pre-computed FollowUp, but session's counted lease was released before
+        // the guard was acquired. Must reclassify to Activate so admission runs.
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "stale-followup-user".to_string();
+        user.max_connections = 1;
+        let mut channel = create_test_live_channel("http://provider-1.example/live/55230.m3u8");
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.virtual_id = 55230;
+
+        // Session created in Active (counted) state.
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-stale-followup",
+                virtual_id: channel.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: channel.url.as_ref(),
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+
+        // Simulate the counted lease being released before activation:
+        // expire the session so it no longer has a counted lease.
+        app_state
+            .active_users
+            .terminate_session(&user.username, "tok-stale-followup")
+            .await;
+
+        // Call activate with stale FollowUp. Must NOT skip admission — reclassification
+        // to Activate must run so the placeholder is created.
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-stale-followup",
+                request_class: Some(PlaybackRequestClass::FollowUp),
+                virtual_id: channel.virtual_id,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: true,
+            },
+        )
+        .await;
+
+        // Must NOT skip — placeholder must be created since session is expired.
+        assert!(
+            activation.placeholder_transition_version.is_some(),
+            "stale FollowUp with expired session must run admission and create placeholder"
+        );
+    }
+
+    // pre-resolved Grace materialization
+    #[tokio::test]
+    async fn activate_session_before_stream_open_pre_resolved_grace_period_materializes_pending_provider() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "pre-resolved-grace-user".to_string();
+        user.max_connections = 1;
+        let mut channel = create_test_live_channel("http://provider-1.example/live/55231.m3u8");
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.virtual_id = 55231;
+
+        // Session in Prepared state (no grace lifecycle yet).
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-pre-resolved-grace",
+                virtual_id: channel.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: channel.url.as_ref(),
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+
+        // Call activation with pre-resolved GracePeriod permission.
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-pre-resolved-grace",
+                request_class: None,
+                virtual_id: channel.virtual_id,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::GracePeriod,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: true,
+            },
+        )
+        .await;
+
+        assert_eq!(activation.admission.permission, UserConnectionPermission::GracePeriod);
+        assert_eq!(activation.grace_mode, Some(crate::api::model::GraceMode::Hold));
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, "tok-pre-resolved-grace")
+            .await;
+        assert!(
+            session.is_some_and(|s| matches!(s.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. })),
+            "pre-resolved GracePeriod must materialize as PendingProvider lifecycle"
         );
     }
 

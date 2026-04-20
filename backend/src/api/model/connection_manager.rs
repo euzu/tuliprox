@@ -929,6 +929,16 @@ impl ConnectionManager {
     /// Note: `release_connection_as_kicked` (called internally) already handles divergence checking.
     pub async fn release_user_sessions_only(&self, addr: &SocketAddr) {
         let removed = self.user_manager.release_connection_as_kicked(addr).await;
+        // Mirrors the kicked-specific steps from `release_connection_parts`.
+        // Provider release and capacity notification are deferred via `release_provider_deferred`.
+        for stream_info in &removed.removed_streams {
+            if let Some(session_token) = stream_info.session_token.as_deref() {
+                self.provider_manager.clear_provider_reservation(session_token).await;
+            }
+        }
+        if let Some(ref username) = removed.disconnected_user {
+            self.user_manager.terminate_sessions_for_addr(username, addr).await;
+        }
         for stream_info in &removed.removed_streams {
             let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
             self.event_manager.unregister_meter_client(stream_info.uid).await;
@@ -940,6 +950,9 @@ impl ConnectionManager {
                 None,
                 None,
             );
+        }
+        if removed.addr_removed && !removed.removed_streams.is_empty() {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
         }
     }
 
