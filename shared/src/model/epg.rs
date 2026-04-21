@@ -94,3 +94,44 @@ impl EpgProgramme {
         Self { start, stop, channel, title, desc }
     }
 }
+
+/// Request DTO for per-stream EPG lookup.
+/// The Vec allows future batch expansion (multiple epg_channel_ids) without a redesign.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StreamEpgRequest {
+    pub items: Vec<StreamEpgItemRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamEpgItemRequest {
+    pub epg_channel_id: String,
+    #[serde(default)]
+    pub target_id: Option<u16>,
+}
+
+/// Response DTO for per-stream EPG lookup.
+/// Contains entries per unique epg_channel_id, programmes already filtered to 8h window.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StreamEpgResponse {
+    pub entries: Vec<StreamEpgEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamEpgEntry {
+    pub epg_channel_id: String,
+    pub programmes: Vec<EpgProgrammeDto>,
+}
+
+/// Programme DTO with timeshift-adjusted display strings and raw timestamps for local current/next computation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpgProgrammeDto {
+    /// Raw UTC start timestamp — use for local current/next computation.
+    pub start_timestamp: i64,
+    /// Raw UTC stop timestamp.
+    pub stop_timestamp: i64,
+    /// Timeshift-adjusted display string, e.g. "20260421090000 +0200".
+    pub start: String,
+    /// Timeshift-adjusted display string.
+    pub stop: String,
+    pub title: String,
+}

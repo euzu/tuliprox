@@ -80,6 +80,8 @@ impl ConfigService {
     pub fn new(config: &WebConfig, auth: Rc<AuthService>, event_service: Rc<EventService>) -> Self {
         let base_href = get_base_href();
         let config_path = concat_path_leading_slash(&base_href, "api/v1/config");
+        let api = |endpoint: &str| concat_path_leading_slash(&base_href, &format!("api/v1/{endpoint}"));
+        let api_config = |endpoint: &str| concat_path_leading_slash(&config_path, endpoint);
         Self {
             ui_config: Rc::new(config.clone()),
             auth,
@@ -90,14 +92,14 @@ impl ConfigService {
             api_proxy_config_channel: Mutable::new(None),
             is_fetching: AtomicBool::new(false),
             config_path: config_path.clone(),
-            api_proxy_config_path: concat_path(&config_path, "apiproxy"),
-            sources_path: concat_path(&config_path, "sources"),
-            ip_check_path: concat_path_leading_slash(&base_href, "api/v1/ipinfo"),
-            batch_input_content_path: concat_path_leading_slash(&base_href, "api/v1/config/batchContent"),
-            xtream_login_info_path: concat_path_leading_slash(&base_href, "api/v1/config/xtream/login-info"),
-            geoip_path: concat_path_leading_slash(&base_href, "api/v1/geoip/update"),
-            library_path: concat_path_leading_slash(&base_href, "api/v1/library"),
-            setup_complete_path: concat_path_leading_slash(&base_href, "api/v1/setup/complete"),
+            api_proxy_config_path: api_config("apiproxy"),
+            sources_path: api_config("sources"),
+            batch_input_content_path: api_config("batchContent"),
+            xtream_login_info_path: api_config("xtream/login-info"),
+            ip_check_path: api("ipinfo"),
+            geoip_path: api("geoip/update"),
+            library_path: api("library"),
+            setup_complete_path: api("setup/complete"),
             event_service,
         }
     }

@@ -3734,6 +3734,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         }
     }
 
@@ -3752,6 +3753,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         }
     }
 

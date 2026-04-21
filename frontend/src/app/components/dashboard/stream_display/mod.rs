@@ -54,6 +54,17 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let cleanup_now_secs = use_state(shared::utils::current_time_secs);
     let adaptive_session_ttl_secs = get_adaptive_session_ttl_secs(&config_ctx);
     let metrics_enabled = is_stream_metrics_enabled(&config_ctx);
+    let user_comments = use_memo(config_ctx.api_proxy.clone(), |api_proxy| {
+        let mut comments = HashMap::<String, Option<String>>::new();
+        if let Some(api_proxy) = api_proxy.as_ref() {
+            for target_user in &api_proxy.user {
+                for credential in &target_user.credentials {
+                    comments.entry(credential.username.clone()).or_insert_with(|| credential.comment.clone());
+                }
+            }
+        }
+        comments
+    });
 
     use_effect_with((), move |_| {
         let interval = Interval::new(1000, update_timestamps);
@@ -272,10 +283,12 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                                 <div class="tp__stream-display__list">
                                     { for streams.iter().cloned().map(|stream| {
                                         let key = format!("{}-{}", stream.addr, stream.uid);
+                                        let user_comment = user_comments.get(stream.username.as_str()).cloned().flatten();
                                         html! {
                                             <StreamDisplayItem
                                                 key={key}
                                                 stream={stream}
+                                                user_comment={user_comment}
                                                 metrics_enabled={metrics_enabled}
                                                 on_popup_click={handle_popup_onclick.clone()}
                                             />

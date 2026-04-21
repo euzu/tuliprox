@@ -21,7 +21,7 @@ use crate::{
             UserApiRequestQueryOrBody, XtreamAuthorizationResponse,
         },
     },
-    auth::Fingerprint,
+    auth::{verify_access_token, Fingerprint},
     model::{
         xtream_mapping_option_from_target_options, Config, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
         ProxyUserCredentials,
@@ -145,7 +145,7 @@ impl<'a> ApiStreamRequest<'a> {
         stream_id: &'a str,
         action_path: &'a str,
     ) -> Self {
-        Self { context, access_token: false, username: "", password, stream_id, action_path }
+        Self { context, access_token: true, username: "", password, stream_id, action_path }
     }
 }
 
@@ -593,6 +593,12 @@ async fn xtream_player_api_stream_with_token(
     target_id: u16,
     stream_req: ApiStreamRequest<'_>,
 ) -> impl IntoResponse + Send {
+    if stream_req.access_token
+        && !verify_access_token(stream_req.password, &app_state.app_config.access_token_secret)
+    {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
     if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
         let target_name = &target.name;
         if !target.has_output(TargetType::Xtream) {

@@ -54,10 +54,8 @@ impl Default for StreamHistoryService {
 impl StreamHistoryService {
     pub fn new() -> Self {
         let base_href = get_base_href();
-        Self {
-            path: concat_path_leading_slash(&base_href, "api/v1/stream-history"),
-            qos_path: concat_path_leading_slash(&base_href, "api/v1/qos-snapshots"),
-        }
+        let api = |endpoint: &str| concat_path_leading_slash(&base_href, &format!("api/v1/{endpoint}"));
+        Self { path: api("stream-history"), qos_path: api("qos-snapshots") }
     }
 
     pub async fn get_history(

@@ -23,10 +23,11 @@ use log::{debug, error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
-    model::{EpgChannel, EpgProgramme, ShortEpgDto, ShortEpgResultDto},
+    model::{EpgChannel, EpgProgramme, ShortEpgDto, ShortEpgResultDto, StreamEpgRequest, StreamEpgResponse, StreamEpgEntry, EpgProgrammeDto},
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -462,6 +463,100 @@ pub async fn serve_short_epg(
             (axum::http::StatusCode::OK, [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())], json)
                 .into_response()
         }
+        Err(_) => internal_server_error!(),
+    }
+}
+
+/// Serves per-stream EPG data for the UI "now playing" / "up next" display.
+/// Queries epg.db by `epg_channel_id`, filters to 8h window, applies user timeshift.
+/// Returns empty entries for all error/missing cases (no errors surfaced to client).
+async fn serve_stream_epg(
+    app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
+    target: &Arc<ConfigTarget>,
+    epg_path: &Path,
+    items: Vec<String>,
+) -> StreamEpgResponse {
+    let epg_processing_options = get_epg_processing_options(app_state, user, target);
+    let now = chrono::Utc::now().timestamp();
+    let window_end = now + 8 * 3600;
+
+    // Deduplicate by first occurrence, preserving order
+    let unique_ids: Vec<&str> = {
+        let mut seen = HashSet::new();
+        items.iter().filter_map(|id| {
+            if seen.contains(id) {
+                None
+            } else {
+                seen.insert(id.clone());
+                Some(id.as_str())
+            }
+        }).collect()
+    };
+
+    let mut entries = Vec::with_capacity(unique_ids.len());
+
+    for epg_channel_id in unique_ids {
+        let channel = get_epg_channel(app_state, &epg_channel_id.intern(), epg_path).await;
+
+        let programmes = match channel {
+            Some(ch) => ch.programmes.iter()
+                .filter(|p| p.stop > now && p.start <= window_end)
+                .map(|p| {
+                    let (start_str, stop_str, start_ts, stop_ts) = get_applied_epg_timeshift(p, &epg_processing_options);
+                    EpgProgrammeDto {
+                        start_timestamp: start_ts,
+                        stop_timestamp: stop_ts,
+                        start: start_str,
+                        stop: stop_str,
+                        title: p.title.as_ref().map_or_else(String::new, ToString::to_string),
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
+        entries.push(StreamEpgEntry {
+            epg_channel_id: epg_channel_id.to_string(),
+            programmes,
+        });
+    }
+
+    StreamEpgResponse { entries }
+}
+
+/// Handles stream EPG API requests for per-stream programme display.
+pub(crate) async fn stream_epg_api(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(stream_epg_req): axum::extract::Json<StreamEpgRequest>,
+) -> impl IntoResponse + Send {
+    let request_items = stream_epg_req.items;
+    let Some(target_id) = request_items.iter().find_map(|item| item.target_id) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    let user = ProxyUserCredentials::default();
+
+    let config = &app_state.app_config.config.load();
+    let Some(epg_path) = get_epg_path_for_target(config, &target) else {
+        return (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
+            serde_json::to_string(&StreamEpgResponse::default()).unwrap_or_default(),
+        ).into_response();
+    };
+
+    let items = request_items.into_iter().map(|i| i.epg_channel_id).collect();
+    let result = serve_stream_epg(&app_state, &user, &target, &epg_path, items).await;
+
+    match serde_json::to_string(&result) {
+        Ok(json) => (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
+            json,
+        ).into_response(),
         Err(_) => internal_server_error!(),
     }
 }

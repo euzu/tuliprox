@@ -3155,6 +3155,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         }
     }
 
@@ -3173,6 +3174,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         }
     }
 
@@ -6898,6 +6900,7 @@ mod tests {
                     cluster: XtreamCluster::Live, group: "g".intern(), title: "t".intern(),
                     url: "http://localhost/stream.ts".intern(),
                     shared: false, shared_joined_existing: None, shared_stream_id: None, technical: None,
+                    epg_channel_id: None,
                 },
                 "ua".to_string(), None, Some("tok-orphan"),
             );
