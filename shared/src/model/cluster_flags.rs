@@ -16,6 +16,10 @@ bitflags! {
     }
 }
 
+impl Default for ClusterFlags {
+    fn default() -> Self { Self::all() }
+}
+
 impl ClusterFlags {
     pub fn has_cluster(&self, item_type: PlaylistItemType) -> bool {
         XtreamCluster::try_from(item_type).ok().is_some_and(|cluster| match cluster {

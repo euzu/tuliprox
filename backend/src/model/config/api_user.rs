@@ -11,11 +11,7 @@ use shared::model::{
 use std::sync::Arc;
 use zeroize::Zeroize;
 
-fn default_output_clusters() -> ClusterFlags {
-    ClusterFlags::all()
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProxyUserCredentials {
     pub username: String,
     pub password: String,
@@ -149,31 +145,6 @@ impl Drop for ProxyUserCredentials {
         self.password.zeroize();
         if let Some(mut token) = self.token.take() {
             token.zeroize();
-        }
-    }
-}
-
-impl Default for ProxyUserCredentials {
-    fn default() -> Self {
-        Self {
-            username: String::new(),
-            password: String::new(),
-            token: None,
-            proxy: ProxyType::default(),
-            server: None,
-            epg_timeshift: None,
-            epg_request_timeshift: None,
-            created_at: None,
-            exp_date: None,
-            max_connections: 0,
-            status: None,
-            output_clusters: default_output_clusters(),
-            ui_enabled: true,
-            comment: None,
-            priority: 0,
-            soft_connections: 0,
-            soft_priority: 0,
-            t_is_api_user: false,
         }
     }
 }
