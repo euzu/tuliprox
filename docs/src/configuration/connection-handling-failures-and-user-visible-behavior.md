@@ -95,6 +95,13 @@ Then the behavior is:
 - the start was provisionally allowed
 - the later final decision was negative
 
+On current runtime builds, a user-admission grace failure may also trigger one more
+step before the final negative result:
+
+- Tuliprox evaluates only the remaining configured strategies after the already-used grace
+- a later eviction strategy may still rescue the request
+- if that also fails, the result becomes final exhausted
+
 ### 6. A kick feels "harder" than a normal disconnect
 
 This is intentional.
@@ -177,6 +184,11 @@ User side:
 - admission strategies
 - grace
 - sessions
+
+Important:
+
+- user-grace failure may still fall through to later remaining strategies
+- provider-grace failure does not
 
 Provider side:
 

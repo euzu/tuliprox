@@ -158,6 +158,8 @@ jobs:
           else
             VERSION=$(grep -Po '^version\s*=\s*"\K[0-9\.]+' ./Cargo.toml | head -n1)
             git commit -m "ci: bump version v$VERSION"
+            # Delete local tag if it exists (from a previous failed run)
+            git tag -d "v$VERSION" 2>/dev/null || true
             git tag -a "v$VERSION" -m "v$VERSION"
             echo "did_commit=true" >> "$GITHUB_OUTPUT"
           fi

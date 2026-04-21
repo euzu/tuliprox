@@ -6,6 +6,12 @@
 
 ## 🌟 New Features
 
+- **Per-User Output Clusters**: API proxy users can now be restricted to specific clusters on their assigned target via
+  `output_clusters`.
+  - Supported values: `live`, `vod`, `series`.
+  - The filter is evaluated per user and limits which clusters are visible and deliverable for that account.
+  - At least one cluster should be selected if you want an active restriction.
+  - If no cluster is selected, the filter is treated as inactive and Tuliprox serves all clusters for that user.
 - **Input Resolve Filter**: Added `resolve_filter` option to input configuration to selectively resolve only entries matching a filter expression.
 - **Input Probe Filter**: Added `probe_filter` option to input configuration to selectively probe only entries matching a filter expression.
 - **Soft Connections And Soft Priority**: API users can now be configured with `soft_connections` and `soft_priority`.
@@ -106,6 +112,9 @@
   - `grace_instant_stream` and `grace_hold_stream` are mutually exclusive.
   - Grace strategies require `grace_period_millis > 0`.
   - Added comprehensive connection handling documentation covering failures, user-visible behavior, priorities, sessions, and reconnects.
+  - Added two new runtime-flow handbook pages:
+    - operator-facing current runtime flow
+    - developer-facing runtime internals and activity flow
 - **Session Handling Boundary**: HLS and catchup remain session-based for continuity and provider affinity, but regular TS/VOD/local playback is now
   enforced as socket-bound admission.
   - A second non-HLS socket now counts as a second user connection even for the same user, IP, and stream.
@@ -139,6 +148,11 @@
 
 ## 🐛 Fixes
 
+- **Template Expansion Efficiency**: Optimized `template.yml` / `template.d` multi-template expansion so sequence-style templates no longer
+  duplicate unrelated entries during dependency resolution.
+  - Sequence templates still resolve correctly and preserve order.
+  - Missing-template and cyclic-dependency validation remains unchanged.
+  - This reduces config/Web UI load cost for larger nested template collections.
 - **Shutdown Diagnostics**: Stream-history shutdown now reports dead worker situations instead of silently swallowing them.
 - **Release Workflow Safety**:
   - `master` releases now refuse to build non-release versions when the patch component is not `0`.
@@ -155,6 +169,10 @@
   - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
     Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  
     `grace_instant_stream`, `grace_hold_stream`.
+- **api-proxy.yml (`user.credentials[]`)**:
+  - Added `output_clusters` (optional list, default effective behavior `all`): restricts a user to `live`, `vod`,
+    and/or `series` on the assigned target. If no cluster is selected, the filter is inactive and all clusters are
+    served.
 - **config.yml (`web_ui`)**:
   - Added `landing_page` (optional, default `dashboard`): initial view after login.
 - **config.yml (`log`)**:
@@ -198,7 +216,9 @@
       metadata:
         path: /data/library_metadata
         fallback_to_filename: true
+    ```
 
+    ```yaml
     # After
     metadata_update:
       cache_path: /data/library_metadata  # moved here
@@ -216,7 +236,9 @@
     inputs:
       - type: xtream_batch
         url: 'file:///home/tuliprox/config/batch.csv'
+    ```
 
+    ```yaml
     # After
     inputs:
       - type: xtream_batch

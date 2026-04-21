@@ -123,7 +123,7 @@ pub fn archive_pending_file(path: &Path) -> io::Result<PathBuf> {
     fs::remove_file(path)?;
 
     info!(
-        "Archived stream history for {}: {} blocks, {} records → {}",
+        "Archived stream history for {}: {} blocks, {} records -> {}",
         summary.header.partition_day_ts_utc,
         summary.total_blocks,
         summary.total_records,

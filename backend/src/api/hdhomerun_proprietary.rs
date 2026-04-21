@@ -68,10 +68,10 @@ fn write_tlv_str(buf: &mut bytes::BytesMut, tag: u8, value: &str) {
 // helper function for variable-length TLV
 fn write_tlv_length(buf: &mut bytes::BytesMut, len: usize) {
     if len <= 0x7F {
-        // ≤ 127 → 1 Byte length
+        // ≤ 127 -> 1 Byte length
         buf.put_u8(u8::try_from(len).unwrap_or(0xFF));
     } else {
-        // ≥ 128 → 2-byte length with the highest bit set
+        // ≥ 128 -> 2-byte length with the highest bit set
         let len = u16::try_from(len).unwrap_or(0); // safe, we limit it above to 0x7FFF
         let first = 0x80 | ((len & 0x7F) as u8);
         let second = ((len >> 7) & 0xFF) as u8;

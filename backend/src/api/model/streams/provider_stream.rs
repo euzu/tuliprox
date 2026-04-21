@@ -17,7 +17,7 @@ use shared::model::PlaylistItemType;
 use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum CustomVideoStreamType {
     ChannelUnavailable,
     UserConnectionsExhausted,

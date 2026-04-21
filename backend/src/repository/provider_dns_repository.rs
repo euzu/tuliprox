@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::api::model::AppState;
 use crate::model::ConfigProvider;
 
-/// All providers' resolved DNS data, keyed by provider name → hostname → IPs.
+/// All providers' resolved DNS data, keyed by provider name -> hostname -> IPs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DnsResolvedStore {
     #[serde(flatten)]
@@ -90,7 +90,7 @@ pub async fn persist_dns_resolved_store(path: &Path, store: &DnsResolvedStore) -
         }
         let _ = fs::remove_file(&tmp_path).await;
         return Err(format!(
-            "rename temp file '{}' → '{}' failed: {err}",
+            "rename temp file '{}' -> '{}' failed: {err}",
             tmp_path.display(),
             path.display()
         ));

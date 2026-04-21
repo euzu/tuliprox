@@ -49,7 +49,7 @@ pub fn hash_string_as_hex(url: &str) -> String { hex_encode(hash_string(url).as_
 /// Extracts the numeric ID from the last path segment of a URL.
 /// Returns `Some(id)` only when the segment after the last `/` (before any extension)
 /// is composed entirely of ASCII digits.
-/// Example: `"http://srv.com/live/user/pass/950327.ts"` → `Some(950327)`
+/// Example: `"http://srv.com/live/user/pass/950327.ts"` -> `Some(950327)`
 pub fn extract_numeric_id_from_url(url: &str) -> Option<u32> {
     let bytes = url.as_bytes();
 
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn short_hash_length_is_16_hex_chars() {
-        // 8 bytes → 16 hex characters
+        // 8 bytes -> 16 hex characters
         assert_eq!(short_hash("anything").len(), 16);
     }
 
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn hash_string_as_hex_length() {
-        // UUIDType is 32 bytes (blake3) → 64 hex chars
+        // UUIDType is 32 bytes (blake3) -> 64 hex chars
         assert_eq!(hash_string_as_hex("test").len(), 64);
     }
 
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn parse_uuid_hex_no_hyphens_wrong_format() {
-        // 32 hex chars without hyphens → length 32 ≠ 36
+        // 32 hex chars without hyphens -> length 32 ≠ 36
         assert_eq!(parse_uuid_hex("550e8400e29b41d4a716446655440000"), None);
     }
 

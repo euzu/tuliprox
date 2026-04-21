@@ -29,13 +29,20 @@ fn get_categories_from_xtream(categories: Option<Vec<PlaylistXtreamCategory>>) -
     groups
 }
 
-async fn get_categories_from_m3u_playlist(target: &ConfigTarget, config: &AppConfig) -> Vec<Arc<str>> {
+async fn get_categories_from_m3u_playlist(
+    target: &ConfigTarget,
+    config: &AppConfig,
+    user: &crate::model::ProxyUserCredentials,
+) -> Vec<Arc<str>> {
     let mut groups = Vec::new();
     if let Some(mut iter) = iter_raw_m3u_target_playlist(config, target, None).await {
         let mut unique_groups = HashSet::new();
         while let Some(item) = iter.next().await {
             match item {
                 Ok(item) => {
+                    if !user.allows_item_type(item.item_type) {
+                        continue;
+                    }
                     if unique_groups.insert(item.group.clone()) {
                         groups.push(item.group.clone());
                     }
@@ -61,15 +68,27 @@ async fn playlist_categories(
             let target_name = &target.name;
             let xtream_stream = if target.has_output(TargetType::Xtream) {
                 let config = &app_state.app_config.config.load();
-                let live_categories = get_categories_from_xtream(
-                    xtream_get_playlist_categories(config, target_name, XtreamCluster::Live).await,
-                );
-                let vod_categories = get_categories_from_xtream(
-                    xtream_get_playlist_categories(config, target_name, XtreamCluster::Video).await,
-                );
-                let series_categories = get_categories_from_xtream(
-                    xtream_get_playlist_categories(config, target_name, XtreamCluster::Series).await,
-                );
+                let live_categories = if user.allows_cluster(XtreamCluster::Live) {
+                    get_categories_from_xtream(
+                        xtream_get_playlist_categories(config, target_name, XtreamCluster::Live).await,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let vod_categories = if user.allows_cluster(XtreamCluster::Video) {
+                    get_categories_from_xtream(
+                        xtream_get_playlist_categories(config, target_name, XtreamCluster::Video).await,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let series_categories = if user.allows_cluster(XtreamCluster::Series) {
+                    get_categories_from_xtream(
+                        xtream_get_playlist_categories(config, target_name, XtreamCluster::Series).await,
+                    )
+                } else {
+                    Vec::new()
+                };
                 stream::iter(vec![
                     Ok::<Bytes, String>(Bytes::from(r#"{"live": "#)),
                     Ok::<Bytes, String>(Bytes::from(
@@ -90,7 +109,11 @@ async fn playlist_categories(
             };
 
             let m3u_stream = if target.has_output(TargetType::M3u) {
-                let live_categories = get_categories_from_m3u_playlist(&target, &app_state.app_config).await;
+                let live_categories = if user.allows_cluster(XtreamCluster::Live) {
+                    get_categories_from_m3u_playlist(&target, &app_state.app_config, &user).await
+                } else {
+                    Vec::new()
+                };
                 stream::iter(vec![
                     Ok::<Bytes, String>(Bytes::from(r#"{"live": "#)),
                     Ok::<Bytes, String>(Bytes::from(

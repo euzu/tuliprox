@@ -1,29 +1,22 @@
-use shared::error::TuliproxError;
-use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::ConfigTarget;
-use shared::create_bitset;
-use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, TargetType, XtreamCluster};
-use crate::repository::{LockedReceiverStream, open_playlist_reader};
+use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::repository::m3u_get_file_path_for_db;
-use crate::repository::{ensure_target_storage_path, get_file_path_for_db_index};
 use crate::repository::storage_const;
 use crate::repository::user_get_bouquet_filter;
+use crate::repository::{ensure_target_storage_path, get_file_path_for_db_index};
+use crate::repository::{open_playlist_reader, LockedReceiverStream};
 use futures::Stream;
+use log::error;
+use shared::create_bitset;
+use shared::error::TuliproxError;
+use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, TargetType, XtreamCluster};
+use shared::utils::{extract_extension_from_url, Internable};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use log::error;
-use shared::utils::{extract_extension_from_url, Internable};
 use tokio::sync::mpsc;
 use tokio::task;
 
-create_bitset!(
-    u8,
-    M3uPlaylistIteratorFlags,
-    MaskRedirectUrl,
-    IncludeTypeInUrl,
-    RewriteResource
-);
-
+create_bitset!(u8, M3uPlaylistIteratorFlags, MaskRedirectUrl, IncludeTypeInUrl, RewriteResource);
 
 pub struct M3uPlaylistIterator {
     inner: LockedReceiverStream<(M3uPlaylistItem, bool)>,
@@ -49,31 +42,32 @@ fn build_rewritten_url(
             | PlaylistItemType::LiveHls
             | PlaylistItemType::LiveDash => "live",
             PlaylistItemType::Video | PlaylistItemType::LocalVideo => "movie",
-            PlaylistItemType::Series | PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeries | PlaylistItemType::LocalSeriesInfo => "series",
+            PlaylistItemType::Series
+            | PlaylistItemType::SeriesInfo
+            | PlaylistItemType::LocalSeries
+            | PlaylistItemType::LocalSeriesInfo => "series",
         }
     } else {
         ""
     };
 
-    let mut cap = base_url.len()
-        + prefix_path.len()
-        + username.len()
-        + password.len()
-        + 32; // separators and id
-    if typed { cap += stream_type.len() + 1; }
+    let mut cap = base_url.len() + prefix_path.len() + username.len() + password.len() + 32; // separators and id
+    if typed {
+        cap += stream_type.len() + 1;
+    }
 
     let rewritten_url = if typed {
         shared::concat_string!(
-                cap = cap;
-                base_url, "/", prefix_path, "/", stream_type, "/",
-                username, "/", password, "/", &m3u_pli.virtual_id.to_string()
-            )
+            cap = cap;
+            base_url, "/", prefix_path, "/", stream_type, "/",
+            username, "/", password, "/", &m3u_pli.virtual_id.to_string()
+        )
     } else {
         shared::concat_string!(
-                cap = cap;
-                base_url, "/", prefix_path, "/",
-                username, "/", password, "/", &m3u_pli.virtual_id.to_string()
-            )
+            cap = cap;
+            base_url, "/", prefix_path, "/",
+            username, "/", password, "/", &m3u_pli.virtual_id.to_string()
+        )
     };
 
     if append_extension {
@@ -95,14 +89,9 @@ fn apply_rewrite(
     proxy_type: ProxyType,
 ) -> M3uPlaylistItem {
     let is_redirect = proxy_type.is_redirect(m3u_pli.item_type)
-        || target_options
-            .and_then(|o| o.force_redirect.as_ref())
-            .is_some_and(|f| f.has_cluster(m3u_pli.item_type));
-    let should_rewrite_urls = if is_redirect {
-        flags.contains(M3uPlaylistIteratorFlags::MaskRedirectUrl)
-    } else {
-        true
-    };
+        || target_options.and_then(|o| o.force_redirect.as_ref()).is_some_and(|f| f.has_cluster(m3u_pli.item_type));
+    let should_rewrite_urls =
+        if is_redirect { flags.contains(M3uPlaylistIteratorFlags::MaskRedirectUrl) } else { true };
 
     if should_rewrite_urls {
         let stream_url = build_rewritten_url(
@@ -116,11 +105,7 @@ fn apply_rewrite(
             true,
         );
         let resource_url = if flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
-            let source_url = if m3u_pli.logo.is_empty() {
-                m3u_pli.logo_small.as_ref()
-            } else {
-                m3u_pli.logo.as_ref()
-            };
+            let source_url = if m3u_pli.logo.is_empty() { m3u_pli.logo_small.as_ref() } else { m3u_pli.logo.as_ref() };
             Some(build_rewritten_url(
                 base_url,
                 username,
@@ -145,17 +130,17 @@ fn apply_rewrite(
     m3u_pli
 }
 
-
 impl M3uPlaylistIterator {
     pub async fn new(
         cfg: &AppConfig,
         target: &ConfigTarget,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
-
         // TODO use playlist memory cache, but be aware of sorting !
 
-        let m3u_output = target.get_m3u_output().ok_or_else(|| TuliproxError::Config(format!("Unexpected failure, missing m3u target output for target {}",  target.name)))?;
+        let m3u_output = target.get_m3u_output().ok_or_else(|| {
+            TuliproxError::Config(format!("Unexpected failure, missing m3u target output for target {}", target.name))
+        })?;
         let config = cfg.config.load();
         let target_path = ensure_target_storage_path(&config, target.name.as_str()).await?;
         let m3u_path = m3u_get_file_path_for_db(&target_path);
@@ -179,6 +164,7 @@ impl M3uPlaylistIterator {
         let username = user.username.clone();
         let password = user.password.clone();
         let proxy_type = user.proxy;
+        let output_clusters = user.output_clusters;
         let target_options = target.options.clone();
 
         let m3u_path = m3u_path.clone();
@@ -211,21 +197,18 @@ impl M3uPlaylistIterator {
                     }
                 };
 
+                if !output_clusters.has_cluster(item.item_type) {
+                    continue;
+                }
+
                 if let Some(set) = &filter {
                     if !set.contains(item.group.as_ref()) {
                         continue;
                     }
                 }
 
-                let item = apply_rewrite(
-                    item,
-                    &base_url,
-                    &username,
-                    &password,
-                    target_options.as_ref(),
-                    flags,
-                    proxy_type,
-                );
+                let item =
+                    apply_rewrite(item, &base_url, &username, &password, target_options.as_ref(), flags, proxy_type);
 
                 if let Some(prev) = pending.replace(item) {
                     if tx.blocking_send((prev, true)).is_err() {

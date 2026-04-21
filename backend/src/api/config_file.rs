@@ -295,11 +295,11 @@ impl ConfigFile {
         // but without touching any live state. If anything fails, we return an error
         // and the currently-running state remains completely unchanged.
         let follow_up: PreparedFollowUp = if template_changed {
-            // Template path changed → sources depend on new templates, reload everything.
+            // Template path changed -> sources depend on new templates, reload everything.
             let prepared = Self::prepare_sources_reload_with_config(&config, &effective_paths).await?;
             PreparedFollowUp::Sources(prepared)
         } else if mapping_changed {
-            // Only mapping path changed; templates are the same → load templates once.
+            // Only mapping path changed; templates are the same -> load templates once.
             let prepared_templates = Self::load_prepared_global_templates_with_config(&effective_paths, &config).await?;
             let prepared = Self::prepare_mapping_reload(
                 effective_paths.mapping_file_path.as_deref(),

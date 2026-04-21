@@ -541,7 +541,7 @@ impl TransportStreamBuffer {
         pts_dts_maybe: Option<(usize, Option<usize>, u16)>,
         timestamp_offset: u64,
     ) {
-        // No offset → timestamps are already correct, skip all decode/encode work.
+        // No offset -> timestamps are already correct, skip all decode/encode work.
         if timestamp_offset == 0 {
             return;
         }

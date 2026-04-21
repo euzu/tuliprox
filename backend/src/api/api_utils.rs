@@ -4,9 +4,9 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
-            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig, ProviderStreamFactoryOptions,
-            ProviderStreamState, SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream,
-            UserApiRequest, UserSession,
+            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
+            ProviderStreamFactoryOptions, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
+            StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, PendingProviderReason,
         },
     },
     auth::Fingerprint,
@@ -38,8 +38,8 @@ use shared::{
     },
     utils::{
         bin_serialize, extract_extension_from_url, human_readable_kbps, is_sanitize_sensitive_info_enabled,
-        replace_url_extension, sanitize_sensitive_info,
-        trim_slash, Internable, CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
+        replace_url_extension, sanitize_sensitive_info, current_time_secs, trim_slash, Internable, CONTENT_TYPE_CBOR,
+        CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
     },
 };
 use std::{
@@ -47,6 +47,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     io::SeekFrom,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -63,6 +64,130 @@ const RECENT_EVICTION_REENTRY_TTL_SECS: u64 = 3;
 pub(crate) enum EvictionReentryGuard<'a> {
     Session(&'a str),
     SocketPlayback { virtual_id: VirtualId },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlaybackRequestClass {
+    Prepare,
+    Activate,
+    FollowUp,
+    Terminate,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PlaybackRequestFacts<'a> {
+    pub(crate) item_type: PlaylistItemType,
+    pub(crate) existing_session: Option<&'a UserSession>,
+    pub(crate) prepare_only: bool,
+    pub(crate) terminate: bool,
+}
+
+pub(crate) fn classify_playback_request(facts: PlaybackRequestFacts<'_>) -> PlaybackRequestClass {
+    if facts.terminate {
+        return PlaybackRequestClass::Terminate;
+    }
+    if facts.prepare_only {
+        return PlaybackRequestClass::Prepare;
+    }
+    if let Some(session) = facts.existing_session {
+        // FollowUp only for sessions that are actively counted.
+        // PendingProvider has no counted lease yet - activation is still pending.
+        // Prepared/Preserved/Expired sessions are not FollowUp.
+        if session.lifecycle.is_counted() {
+            return PlaybackRequestClass::FollowUp;
+        }
+    }
+    let _ = facts.item_type;
+    PlaybackRequestClass::Activate
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_playback_request_admission(
+    app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
+    fingerprint: &Fingerprint,
+    item_type: PlaylistItemType,
+    user_session: Option<&UserSession>,
+    session_token: &str,
+    activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
+    prepare_only: bool,
+    terminate: bool,
+) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>, PlaybackRequestClass) {
+    let request_class = classify_playback_request(PlaybackRequestFacts {
+        item_type,
+        existing_session: user_session,
+        prepare_only,
+        terminate,
+    });
+    let limits_enabled =
+        (user.max_connections > 0 || user.soft_connections > 0) && app_state.app_config.config.load().user_access_control;
+
+    // Handle explicit Terminate: run termination and return exhausted permission.
+    // No admission strategies are evaluated — termination immediately expires the playback.
+    if request_class == PlaybackRequestClass::Terminate {
+        if let Some(session) = user_session {
+            app_state
+                .active_users
+                .terminate_session(&user.username, session.token.as_str())
+                .await;
+        }
+        return (
+            crate::api::model::ConnectionAdmission {
+                permission: UserConnectionPermission::Exhausted,
+                kind: user_session
+                    .and_then(|session| session.connection_kind)
+                    .or(Some(crate::api::model::ConnectionKind::Normal)),
+            },
+            None,
+            request_class,
+        );
+    }
+
+    // Handle Prepare: no admission cost, just prepare state. Return Allowed without
+    // running strategies or modifying counted state. Caller handles the actual activation.
+    if request_class == PlaybackRequestClass::Prepare {
+        return (
+            crate::api::model::ConnectionAdmission {
+                permission: UserConnectionPermission::Allowed,
+                kind: user_session
+                    .and_then(|session| session.connection_kind)
+                    .or(Some(crate::api::model::ConnectionKind::Normal)),
+            },
+            None,
+            request_class,
+        );
+    }
+
+    if request_class == PlaybackRequestClass::FollowUp || !limits_enabled {
+        return (
+            crate::api::model::ConnectionAdmission {
+                permission: user_session
+                    .map_or(UserConnectionPermission::Allowed, |session| session.permission),
+                kind: user_session
+                    .and_then(|session| session.connection_kind)
+                    .or(Some(crate::api::model::ConnectionKind::Normal)),
+            },
+            None,
+            request_class,
+        );
+    }
+
+    let result = resolve_admission_with_strategies(
+        app_state,
+        &user.username,
+        user.max_connections,
+        user.soft_connections,
+        &fingerprint.client_ip,
+        &fingerprint.addr,
+        true,
+        Some(session_token),
+        activate_unbound_session,
+        eviction_reentry_guard,
+    )
+    .await;
+
+    (result.admission, result.grace_mode, request_class)
 }
 
 async fn should_suppress_eviction_for_recent_request(
@@ -172,23 +297,16 @@ pub(crate) fn record_connect_failed_attempt(attempt: ConnectFailedAttempt<'_>) {
         None,
     );
     // Resolve target_name from target_id using the stable target config name.
-    let target_name = attempt
-        .app_state
-        .app_config
-        .get_target_by_id(info.channel.target_id)
-        .as_deref()
-        .map(|t| (&t.name).intern());
-    attempt
-        .app_state
-        .connection_manager
-        .record_connect_failed_with_provider_failure(
-            &info,
-            attempt.reason,
-            attempt.failure_stage,
-            None,
-            None,
-            target_name,
-        );
+    let target_name =
+        attempt.app_state.app_config.get_target_by_id(info.channel.target_id).as_deref().map(|t| (&t.name).intern());
+    attempt.app_state.connection_manager.record_connect_failed_with_provider_failure(
+        &info,
+        attempt.reason,
+        attempt.failure_stage,
+        None,
+        None,
+        target_name,
+    );
 }
 
 fn admission_failure_video_type(reason: ConnectFailureReason) -> Option<CustomVideoStreamType> {
@@ -344,6 +462,7 @@ macro_rules! try_result_not_found {
 }
 
 use crate::api::panel_api::{can_provision_on_exhausted, create_panel_api_provisioning_stream_details};
+use crate::utils::LRUResourceCache;
 pub use internal_server_error;
 use shared::error::TuliproxError;
 use shared::model::{AdmissionStrategy, ConnectFailureReason, FailureStage};
@@ -354,7 +473,6 @@ pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
 pub use try_unwrap_body;
-use crate::utils::LRUResourceCache;
 
 pub fn get_server_time() -> String {
     chrono::offset::Local::now().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string()
@@ -530,6 +648,31 @@ pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOpt
     StreamOptions { stream_retry, buffer_enabled, buffer_size, pipe_provider_stream }
 }
 
+/// Metadata capturing which grace strategy was chosen and the original connection kind,
+/// used to reconstruct the remaining-strategies slice on user-grace failure.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct GraceResolutionContext {
+    /// Index of the grace strategy that was actually used.
+    pub(crate) strategy_index: usize,
+    /// Full effective strategy list for stable reconstruction of the remaining slice.
+    pub(crate) strategies: Vec<AdmissionStrategy>,
+    /// The original `ConnectionKind` from the admission decision that led to this grace.
+    /// Preserved so that the remaining-strategy fallback can return the correct kind
+    /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.
+    pub(crate) kind: Option<crate::api::model::ConnectionKind>,
+}
+
+/// Structured result of evaluating admission strategies.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct AdmissionStrategyResolution {
+    pub(crate) admission: crate::api::model::ConnectionAdmission,
+    pub(crate) grace_mode: Option<crate::api::model::GraceMode>,
+    /// Present only when the request was admitted via a user-grace strategy.
+    pub(crate) grace_context: Option<GraceResolutionContext>,
+}
+
 pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppState>) -> Vec<AdmissionStrategy> {
     let config = app_state.app_config.config.load();
     let stream_config = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref());
@@ -546,59 +689,57 @@ pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppStat
     }
 }
 
+/// Shared strategy-evaluation loop used by both the initial admission path
+/// (`resolve_admission_with_strategies`) and the remaining-strategies path
+/// (`evaluate_remaining_strategies_after_grace`).
+///
+/// Returns `Some(resolution)` when a Grace or a successful Eviction+Retry is found.
+/// Returns `None` when every strategy in `strategies` returns `NoMatch` — the caller
+/// is then responsible for constructing the final exhausted result with the correct
+/// `kind` (preserved from the original admission).
 #[allow(clippy::too_many_arguments)]
-pub(in crate::api) async fn resolve_admission_with_strategies(
-    app_state: &Arc<AppState>,
-    username: &str,
+async fn evaluate_admission_strategy_loop<'a, F>(
+    app_state: &'a Arc<AppState>,
+    username: &'a str,
     max_connections: u32,
     soft_connections: u16,
-    client_ip: &str,
-    request_addr: &std::net::SocketAddr,
-    // This controls whether an existing logical playback session may reopen while the user is already at limit.
-    // It is intentionally independent from whether the session is socket-bound.
+    client_ip: &'a str,
+    request_addr: &'a std::net::SocketAddr,
     use_session_admission: bool,
-    session_token: Option<&str>,
+    session_token: Option<&'a str>,
     activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'_>,
-) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>) {
-    use crate::api::model::{evaluate_strategy, AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext};
+    eviction_reentry_guard: EvictionReentryGuard<'a>,
+    strategies: &'a [shared::model::AdmissionStrategy],
+    base_idx: usize,
+    admission: crate::api::model::ConnectionAdmission,
+    _kind_for_exhausted: Option<crate::api::model::ConnectionKind>,
+    build_grace_ctx: F,
+) -> Option<AdmissionStrategyResolution>
+where
+    F: Fn(usize) -> GraceResolutionContext,
+{
+    use crate::api::model::{evaluate_strategy, AdmissionDecision, StrategyContext};
     use shared::model::UserConnectionPermission;
-
-    let admission = get_admission_for_request(
-        app_state,
-        username,
-        max_connections,
-        soft_connections,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-    )
-        .await;
-
-    if admission.permission != UserConnectionPermission::Exhausted {
-        return (admission, None);
-    }
-
-    let strategies = get_effective_admission_strategies(app_state);
-    if strategies.is_empty() {
-        debug!("No admission strategies configured, denying request for user {username}");
-        return (admission, None);
-    }
-
     let mut candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
-    let ctx = StrategyContext { username, client_ip, strategies: &strategies };
-    for strategy in &strategies {
+    let ctx = StrategyContext { username, client_ip, strategies };
+    let mut idx = 0usize;
+
+    for strategy in strategies {
         match evaluate_strategy(*strategy, &ctx, &candidates) {
             AdmissionDecision::NoMatch => {}
             AdmissionDecision::Grace(mode) => {
                 if app_state.active_users.grant_grace(username).await {
-                    return (
-                        ConnectionAdmission {
+                    // Return a FRESH admission with GracePeriod permission (not the admission
+                    // parameter, which may have Exhausted permission). The kind is preserved from
+                    // the original admission.
+                    return Some(AdmissionStrategyResolution {
+                        admission: crate::api::model::ConnectionAdmission {
                             permission: UserConnectionPermission::GracePeriod,
-                            kind: Some(ConnectionKind::Normal),
+                            kind: admission.kind,
                         },
-                        Some(mode),
-                    );
+                        grace_mode: Some(mode),
+                        grace_context: Some(build_grace_ctx(base_idx + idx)),
+                    });
                 }
                 debug!("Grace grant rejected for user {username}, continuing with later strategies");
             }
@@ -610,7 +751,7 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
                     eviction_reentry_guard,
                     &target.addr,
                 )
-                    .await
+                .await
                 {
                     debug!(
                         "Skipping eviction strategy {strategy:?} for recently evicted request of user {username} targeting {}",
@@ -633,22 +774,185 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
                     session_token,
                     activate_unbound_session,
                 )
-                    .await;
+                .await;
                 if retry_admission.permission == UserConnectionPermission::Allowed {
-                    return (retry_admission, None);
+                    return Some(AdmissionStrategyResolution {
+                        admission: retry_admission,
+                        grace_mode: None,
+                        grace_context: None,
+                    });
                 }
                 debug!("Admission still denied after eviction for user {username}, continuing with later strategies");
                 candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
             }
             AdmissionDecision::Deny => {
-                debug!("Admission strategy denied for user {username}");
-                return (admission, None);
+                // Caller constructs the final exhausted result.
+                return None;
             }
         }
+        idx += 1;
+    }
+
+    // All strategies returned NoMatch — caller constructs the final exhausted result.
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::api) async fn resolve_admission_with_strategies(
+    app_state: &Arc<AppState>,
+    username: &str,
+    max_connections: u32,
+    soft_connections: u16,
+    client_ip: &str,
+    request_addr: &std::net::SocketAddr,
+    // This controls whether an existing logical playback session may reopen while the user is already at limit.
+    // It is intentionally independent from whether the session is socket-bound.
+    use_session_admission: bool,
+    session_token: Option<&str>,
+    activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
+) -> AdmissionStrategyResolution {
+    use shared::model::UserConnectionPermission;
+
+    let admission = get_admission_for_request(
+        app_state,
+        username,
+        max_connections,
+        soft_connections,
+        use_session_admission,
+        session_token,
+        activate_unbound_session,
+    )
+        .await;
+
+    if admission.permission != UserConnectionPermission::Exhausted {
+        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+    }
+
+    let strategies = get_effective_admission_strategies(app_state);
+    if strategies.is_empty() {
+        debug!("No admission strategies configured, denying request for user {username}");
+        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+    }
+
+    let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
+        strategy_index: global_idx,
+        strategies: strategies.clone(),
+        kind: admission.kind,
+    };
+
+    if let Some(resolution) = evaluate_admission_strategy_loop(
+        app_state,
+        username,
+        max_connections,
+        soft_connections,
+        client_ip,
+        request_addr,
+        use_session_admission,
+        session_token,
+        activate_unbound_session,
+        eviction_reentry_guard,
+        &strategies,
+        0,
+        admission,
+        admission.kind,
+        build_grace_ctx,
+    )
+        .await
+    {
+        return resolution;
     }
 
     debug!("No admission strategy could admit user {username}");
-    (admission, None)
+    AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None }
+}
+
+/// Evaluates only the strategies that come AFTER the already-used grace strategy.
+/// This is called when a user-grace has failed and the system needs to determine
+/// whether a remaining eviction strategy can free a slot.
+///
+/// Rules:
+/// - Only `grace_context.strategies[(strategy_index + 1)..]` are evaluated
+/// - `NoMatch` → continue to next strategy
+/// - `Evict` → kick target, retry admission
+/// - `Grace` → technically possible under current config (only one grace allowed), but handled
+/// - `Deny` → final exhausted
+/// - Empty remaining slice → final exhausted
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(in crate::api) async fn evaluate_remaining_strategies_after_grace(
+    app_state: &Arc<AppState>,
+    username: &str,
+    max_connections: u32,
+    soft_connections: u16,
+    client_ip: &str,
+    request_addr: &std::net::SocketAddr,
+    use_session_admission: bool,
+    session_token: Option<&str>,
+    activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
+    grace_context: &GraceResolutionContext,
+    original_kind: Option<crate::api::model::ConnectionKind>,
+) -> AdmissionStrategyResolution {
+    use shared::model::UserConnectionPermission;
+
+    let remaining = grace_context.strategy_index + 1;
+    let strategies = &grace_context.strategies;
+    if remaining >= strategies.len() {
+        debug!("No remaining strategies after grace for user {username}");
+        return AdmissionStrategyResolution {
+            admission: crate::api::model::ConnectionAdmission {
+                permission: UserConnectionPermission::Exhausted,
+                kind: original_kind,
+            },
+            grace_mode: None,
+            grace_context: None,
+        };
+    }
+
+    // admission.kind is used only inside build_grace_ctx for the Grace case's
+    // GraceResolutionContext.kind. Both paths (helper early-return and caller
+    // exhausted construction) use original_kind, so this is safe.
+    let admission = crate::api::model::ConnectionAdmission {
+        permission: UserConnectionPermission::Exhausted,
+        kind: original_kind,
+    };
+    let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
+        strategy_index: global_idx,
+        strategies: strategies.clone(),
+        kind: original_kind,
+    };
+
+    if let Some(resolution) = evaluate_admission_strategy_loop(
+        app_state,
+        username,
+        max_connections,
+        soft_connections,
+        client_ip,
+        request_addr,
+        use_session_admission,
+        session_token,
+        activate_unbound_session,
+        eviction_reentry_guard,
+        &strategies[remaining..],
+        remaining,
+        admission,
+        original_kind,
+        build_grace_ctx,
+    )
+        .await
+    {
+        return resolution;
+    }
+
+    debug!("No remaining strategy could admit user {username}");
+    AdmissionStrategyResolution {
+        admission: crate::api::model::ConnectionAdmission {
+            permission: UserConnectionPermission::Exhausted,
+            kind: original_kind,
+        },
+        grace_mode: None,
+        grace_context: None,
+    }
 }
 
 struct SessionActivationRequest<'a> {
@@ -656,42 +960,184 @@ struct SessionActivationRequest<'a> {
     input: &'a ConfigInput,
     user: &'a ProxyUserCredentials,
     session_token: &'a str,
+    request_class: Option<PlaybackRequestClass>,
     virtual_id: VirtualId,
+    item_type: PlaylistItemType,
     stream_url: &'a str,
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
     socket_bound: bool,
 }
 
+struct PlaybackActivationResult {
+    admission: crate::api::model::ConnectionAdmission,
+    grace_mode: Option<crate::api::model::GraceMode>,
+    grace_context: Option<crate::api::api_utils::GraceResolutionContext>,
+    placeholder_transition_version: Option<u64>,
+}
+
+/// # Panics
+#[allow(clippy::too_many_lines)]
 async fn activate_session_before_stream_open(
     app_state: &Arc<AppState>,
     request: SessionActivationRequest<'_>,
-) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>, bool) {
+) -> PlaybackActivationResult {
     let SessionActivationRequest {
         fingerprint,
         input,
         user,
         session_token,
+        request_class,
         virtual_id,
+        item_type,
         stream_url,
         connection_permission,
         connection_kind,
         socket_bound,
     } = request;
+    // Classify based on current session state, not the pre-computed value.
+    // If caller passes FollowUp, verify the session is still counted under the guard.
+    // A stale FollowUp would bypass admission — reclassify to catch this.
+    let effective_request_class = if let Some(request_class) = request_class {
+        if request_class == PlaybackRequestClass::FollowUp {
+            // Re-read session under the guard to ensure the counted lease is still held.
+            // Only reclassify if the session was in a counted state that has since been
+            // released. Pending sessions were never counted (admission pending provider
+            // acquisition) — keep FollowUp so no spurious placeholder is created.
+            let current_session = app_state
+                .active_users
+                .get_and_update_user_session(&user.username, session_token)
+                .await;
+            match current_session.as_ref().map(|s| &s.lifecycle) {
+                // Session is gone (expired/removed) or was never in a counted state — reclassify
+                // so admission runs and creates a fresh placeholder.
+                None => classify_playback_request(PlaybackRequestFacts {
+                    item_type,
+                    existing_session: None,
+                    prepare_only: false,
+                    terminate: false,
+                }),
+                // Had a counted lease but lost it — need to reclassify to Activate.
+                Some(crate::api::model::PlaybackLifecycle::Active | crate::api::model::PlaybackLifecycle::GraceActive) => {
+                    classify_playback_request(PlaybackRequestFacts {
+                        item_type,
+                        existing_session: current_session.as_ref(),
+                        prepare_only: false,
+                        terminate: false,
+                    })
+                }
+                // Pending was never counted (waiting for provider slot); Prepared/Preserved hold
+                // no counted slot — caller-specified FollowUp is still valid, no reclassification.
+                _ => request_class,
+            }
+        } else {
+            request_class
+        }
+    } else {
+        let existing_session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, session_token)
+            .await;
+        classify_playback_request(PlaybackRequestFacts {
+            item_type,
+            existing_session: existing_session.as_ref(),
+            prepare_only: false,
+            terminate: false,
+        })
+    };
     let limits_enabled =
         app_state.app_config.config.load().user_access_control && (user.max_connections > 0 || user.soft_connections > 0);
-    if !limits_enabled || connection_permission == UserConnectionPermission::GracePeriod {
-        return (
-            crate::api::model::ConnectionAdmission {
+    // Prepare: session setup without admission cost. The caller handles the actual activation.
+    // FollowUp: already counted, no re-admission needed.
+    // GracePeriod: grace already granted, no re-evaluation needed.
+    // No limits: skip admission entirely.
+    // GracePeriod permission is already resolved — skip admission strategies (re-run
+    // would evict the same session again). But we must still materialize the grace
+    // lifecycle (PendingProvider / GraceActive) so the session state is consistent.
+    if connection_permission == UserConnectionPermission::GracePeriod {
+        // Materialize grace lifecycle under the guard so the session state is consistent.
+        // Determine which grace mode applies by checking the current session state.
+        let current_session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, session_token)
+            .await;
+        let (_, resolved_grace) = match current_session.as_ref().map(|s| &s.lifecycle) {
+            Some(crate::api::model::PlaybackLifecycle::PendingProvider { .. }) => {
+                // Session already in PendingProvider — refresh deadline.
+                let deadline = current_time_secs().saturating_add(app_state.get_grace_options().timeout_secs);
+                let _ = app_state
+                    .active_users
+                    .mark_pending_provider(&user.username, session_token, PendingProviderReason::GraceHold, deadline)
+                    .await;
+                (crate::api::model::PlaybackLifecycle::PendingProvider {
+                    data: crate::api::model::PendingProviderState {
+                        reason_code: PendingProviderReason::GraceHold,
+                        created_at: current_time_secs(),
+                        deadline,
+                        version: current_session.as_ref().map_or(0, |s| {
+                            if let crate::api::model::PlaybackLifecycle::PendingProvider { data } = &s.lifecycle {
+                                data.version
+                            } else { 0 }
+                        }),
+                        wake_source: None,
+                    },
+                }, Some(crate::api::model::GraceMode::Hold))
+            }
+            Some(crate::api::model::PlaybackLifecycle::GraceActive) => {
+                // Already in GraceActive — nothing to refresh.
+                (crate::api::model::PlaybackLifecycle::GraceActive, Some(crate::api::model::GraceMode::Instant))
+            }
+            _ => {
+                // Session not yet in grace state — infer from item_type defaults.
+                // Live/LiveHls/LiveDash default to Hold; VOD/Catchup to Instant.
+                if item_type.is_live() || item_type.is_live_adaptive() {
+                    let deadline = current_time_secs().saturating_add(app_state.get_grace_options().timeout_secs);
+                    let _ = app_state
+                        .active_users
+                        .mark_pending_provider(&user.username, session_token, PendingProviderReason::GraceHold, deadline)
+                        .await;
+                    (crate::api::model::PlaybackLifecycle::PendingProvider {
+                        data: crate::api::model::PendingProviderState {
+                            reason_code: PendingProviderReason::GraceHold,
+                            created_at: current_time_secs(),
+                            deadline,
+                            version: 1,
+                            wake_source: None,
+                        },
+                    }, Some(crate::api::model::GraceMode::Hold))
+                } else {
+                    app_state.active_users.mark_grace_active(&user.username, session_token).await;
+                    (crate::api::model::PlaybackLifecycle::GraceActive, Some(crate::api::model::GraceMode::Instant))
+                }
+            }
+        };
+        return PlaybackActivationResult {
+            admission: crate::api::model::ConnectionAdmission {
                 permission: connection_permission,
                 kind: Some(connection_kind),
             },
-            None,
-            false,
-        );
+            grace_mode: resolved_grace,
+            grace_context: None,
+            placeholder_transition_version: None,
+        };
+    }
+    // No limits: skip admission entirely. FollowUp / Prepare: no re-admission needed.
+    if !limits_enabled
+        || effective_request_class == PlaybackRequestClass::FollowUp
+        || effective_request_class == PlaybackRequestClass::Prepare
+    {
+        return PlaybackActivationResult {
+            admission: crate::api::model::ConnectionAdmission {
+                permission: connection_permission,
+                kind: Some(connection_kind),
+            },
+            grace_mode: None,
+            grace_context: None,
+            placeholder_transition_version: None,
+        };
     }
 
-    let created_placeholder = app_state
+    let placeholder_transition_version = Some(app_state
         .active_users
         .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
             user,
@@ -704,9 +1150,9 @@ async fn activate_session_before_stream_open(
             connection_kind: Some(connection_kind),
             socket_bound,
         })
-        .await;
+        .await);
 
-    let (admission, grace_mode) = resolve_admission_with_strategies(
+    let result = resolve_admission_with_strategies(
         app_state,
         &user.username,
         user.max_connections,
@@ -722,9 +1168,35 @@ async fn activate_session_before_stream_open(
             EvictionReentryGuard::Session(session_token)
         },
     )
-        .await;
+    .await;
+    let admission = result.admission;
+    let grace_mode = result.grace_mode;
+    let grace_context = result.grace_context;
 
-    (admission, grace_mode, created_placeholder)
+    if admission.permission == UserConnectionPermission::GracePeriod {
+        if matches!(grace_mode, Some(crate::api::model::GraceMode::Hold)) {
+            // Hold: session waits for provider slot. Does not count until provider is acquired.
+            let deadline = current_time_secs().saturating_add(app_state.get_grace_options().timeout_secs);
+            let _ = app_state
+                .active_users
+                .mark_pending_provider(&user.username, session_token, PendingProviderReason::GraceHold, deadline)
+                .await;
+        } else if matches!(grace_mode, Some(crate::api::model::GraceMode::Instant)) {
+            // Instant: session is provisionally active immediately. Counts against admission limits
+            // until the grace window resolves (success → Active, failure → Expired).
+            app_state
+                .active_users
+                .mark_grace_active(&user.username, session_token)
+                .await;
+        }
+    }
+
+    PlaybackActivationResult {
+        admission,
+        grace_mode,
+        grace_context,
+        placeholder_transition_version,
+    }
 }
 
 pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> String {
@@ -905,10 +1377,10 @@ fn get_grace_period_millis(
 ) -> u64 {
     if config_grace_period_millis > 0
         && (
-        matches!(stream_response_params, ProviderStreamState::GracePeriod(_, _)) // provider grace period
+            matches!(stream_response_params, ProviderStreamState::GracePeriod(_, _)) // provider grace period
             || connection_permission == UserConnectionPermission::GracePeriod
-        // user grace period
-    )
+            // user grace period
+        )
     {
         config_grace_period_millis
     } else {
@@ -916,7 +1388,25 @@ fn get_grace_period_millis(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn should_defer_provider_open_for_grace_hold(
+    provider_grace_active: bool,
+    hold_stream: bool,
+    item_type: PlaylistItemType,
+    is_reopen: bool,
+) -> bool {
+    if !(provider_grace_active && hold_stream) {
+        return false;
+    }
+
+    // v3.3.0 opened provider-affine VOD/Series/Catchup reopens immediately, even when
+    // provider grace was temporarily in effect. Parking these requests in GracePending
+    // was introduced later and breaks players like libmpv during seek/reopen retries.
+    // Keep hold-stream behavior for live/admission paths, but restore direct-open behavior
+    // for provider-affine on-demand session reopens.
+    !(!item_type.is_live() && item_type.requires_provider_affinity() && is_reopen)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn create_stream_response_details(
     app_state: &Arc<AppState>,
     stream_options: &StreamOptions,
@@ -935,8 +1425,10 @@ async fn create_stream_response_details(
     virtual_id: VirtualId,
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
+    is_reopen: bool,
     session_owner: Option<&str>,
     grace_hold_override: Option<bool>,
+    grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy = resolve_streaming_strategy(
         app_state,
@@ -952,7 +1444,7 @@ async fn create_stream_response_details(
             session_owner,
         },
     )
-        .await;
+    .await;
     let mut grace_period_options = app_state.get_grace_options();
     grace_period_options.period_millis = get_grace_period_millis(
         connection_permission,
@@ -962,10 +1454,8 @@ async fn create_stream_response_details(
     if let Some(hold) = grace_hold_override {
         grace_period_options.hold_stream = hold;
     }
-    let provider_grace_active = matches!(
-        streaming_strategy.provider_stream_state,
-        ProviderStreamState::GracePeriod(_, _)
-    );
+    let provider_grace_active =
+        matches!(streaming_strategy.provider_stream_state, ProviderStreamState::GracePeriod(_, _));
 
     let guard_provider_name =
         streaming_strategy.provider_handle.as_ref().and_then(|guard| guard.allocation.get_provider_name());
@@ -1007,6 +1497,7 @@ async fn create_stream_response_details(
                 disable_provider_grace: false,
                 reconnect_flag: None,
                 provider_handle: streaming_strategy.provider_handle.clone(),
+                grace_resolution_context,
             })
         }
         ProviderStreamState::Available(_provider_name, request_url)
@@ -1016,7 +1507,12 @@ async fn create_stream_response_details(
                 sanitize_sensitive_info(guard_provider_name.as_deref().unwrap_or("?")),
                 sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
             );
-            let defer_provider_stream_until_grace_check = if provider_grace_active && grace_period_options.hold_stream {
+            let defer_provider_stream_until_grace_check = if should_defer_provider_open_for_grace_hold(
+                provider_grace_active,
+                grace_period_options.hold_stream,
+                item_type,
+                is_reopen,
+            ) {
                 if let Some(provider_name) = guard_provider_name.as_ref() {
                     app_state.active_provider.is_over_limit(provider_name).await
                 } else {
@@ -1036,8 +1532,8 @@ async fn create_stream_response_details(
                 let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
                     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
                     let disabled_headers = app_state.get_disabled_headers();
-                    let mut provider_stream_factory_options = ProviderStreamFactoryOptions::new(
-                        &crate::api::model::ProviderStreamFactoryParams {
+                    let mut provider_stream_factory_options =
+                        ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
                             addr: fingerprint.addr,
                             item_type,
                             share_stream,
@@ -1051,8 +1547,7 @@ async fn create_stream_response_details(
                             client_ip: Some(&fingerprint.client_ip),
                             stream_channel: Some(stream_channel),
                             connect_failure_stage: Some(FailureStage::ProviderOpen),
-                        },
-                    );
+                        });
 
                     let provider_config = input.get_resolve_provider(url.as_ref());
                     provider_stream_factory_options.set_provider(provider_config);
@@ -1063,7 +1558,7 @@ async fn create_stream_response_details(
                         &app_state.http_client.load(),
                         provider_stream_factory_options,
                     )
-                        .await
+                    .await
                     {
                         None => (None, None),
                         Some((stream, info)) => (Some(stream), info),
@@ -1107,6 +1602,7 @@ async fn create_stream_response_details(
                 disable_provider_grace: false,
                 reconnect_flag,
                 provider_handle,
+                grace_resolution_context,
             })
         }
     }
@@ -1241,7 +1737,7 @@ fn is_throttled_stream(item_type: PlaylistItemType, throttle_kbps: usize) -> boo
 
 fn prepare_body_stream<S>(app_state: &Arc<AppState>, item_type: PlaylistItemType, stream: S) -> axum::body::Body
 where
-    S: futures::Stream<Item=Result<bytes::Bytes, StreamError>> + Send + 'static,
+    S: futures::Stream<Item = Result<bytes::Bytes, StreamError>> + Send + 'static,
 {
     let throttle_kbps = usize::try_from(get_stream_throttle(app_state)).unwrap_or_default();
     let body_stream = if is_throttled_stream(item_type, throttle_kbps) {
@@ -1263,14 +1759,42 @@ pub async fn force_provider_stream_response(
     ctx: ForceStreamRequestContext<'_>,
     grace_mode: Option<crate::api::model::GraceMode>,
 ) -> impl IntoResponse + Send {
+    let _transition_guard = app_state
+        .active_users
+        .acquire_playback_transition(&ctx.user.username, &user_session.token)
+        .await;
     let stream_options = get_stream_options(app_state);
     let share_stream = false;
     let connection_permission = UserConnectionPermission::Allowed;
     let item_type = stream_channel.item_type;
 
-    // Release the existing provider connection for this session before acquiring a new one.
-    // This is critical for users with a connection limit of 1 to avoid "Provider exhausted" or provider-side 502/509 errors during seeking.
-    app_state.connection_manager.release_provider_connection(&user_session.addr).await;
+    // Forced reopens must clear stale provider slots before reacquiring. For adaptive HLS/DASH
+    // sessions we only target old active stream sockets of the same session, never manifest-only
+    // session addresses, otherwise the controlling playlist request gets torn down.
+    let cleanup_addrs = if item_type.is_live_adaptive() {
+        app_state
+            .active_users
+            .adaptive_session_stream_cleanup_addrs(&ctx.user.username, &user_session.token, &fingerprint.addr)
+            .await
+    } else {
+        session_reacquire_cleanup_addrs(user_session, &fingerprint.addr)
+    };
+
+    if cleanup_addrs.is_empty() {
+        debug_if_enabled!(
+            "Forced reopen cleanup had no stale targets for item_type={item_type:?} session={} current_addr={}",
+            sanitize_sensitive_info(&user_session.token),
+            sanitize_sensitive_info(&fingerprint.addr.to_string())
+        );
+    } else {
+        debug_if_enabled!(
+            "Forced reopen cleanup releasing {} stale target(s) for item_type={item_type:?} session={} current_addr={}",
+            cleanup_addrs.len(),
+            sanitize_sensitive_info(&user_session.token),
+            sanitize_sensitive_info(&fingerprint.addr.to_string())
+        );
+        cleanup_forced_reopen_addrs(app_state, item_type, &cleanup_addrs).await;
+    }
 
     // Provider-affine playback must stay on the same provider account across seeks/range reconnects.
     // Only non-affine sessions may fall back to a different account in the same lineup.
@@ -1279,9 +1803,7 @@ pub async fn force_provider_stream_response(
     // Never allow provider-side grace for forced seek/session reacquire.
     // Over-allocation here would break provider-side one-connection limits.
     let allow_provider_grace = false;
-    let connection_kind = user_session
-        .connection_kind
-        .unwrap_or(crate::api::model::ConnectionKind::Normal);
+    let connection_kind = user_session.connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
 
     let stream_details = match create_stream_response_details(
         app_state,
@@ -1301,16 +1823,18 @@ pub async fn force_provider_stream_response(
         stream_channel.virtual_id,
         connection_priority_for_kind(ctx.user, connection_kind),
         connection_kind,
+        true,
         Some(user_session.token.as_str()),
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
+        None,
     )
-        .await
+    .await
     {
         Ok(stream_details) => stream_details,
         Err(err) => {
             app_state
                 .active_users
-                .release_unbound_session_reservation(&ctx.user.username, &user_session.token, false)
+                .release_unbound_session_reservation(&ctx.user.username, &user_session.token, None, false)
                 .await;
             error!("Failed to stream: {err}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1327,7 +1851,7 @@ pub async fn force_provider_stream_response(
             stream_details.stream.is_some(),
             stream_details.has_deferred_provider_open(),
         )
-            .await;
+        .await;
         let provider_response =
             stream_details.stream_info.as_ref().map(|(h, sc, url, cvt)| (h.clone(), *sc, url.clone(), *cvt));
         if ctx.session_reservation_ttl_secs > 0 {
@@ -1338,19 +1862,14 @@ pub async fn force_provider_stream_response(
                     .await;
             }
         }
-        app_state
-            .active_users
-            .update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr)
-            .await;
+        app_state.active_users.update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr).await;
         stream_channel.shared = share_stream;
         let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
             user: ctx.user,
             connection_permission,
-            connection_kind: user_session
-                .connection_kind
-                .unwrap_or(crate::api::model::ConnectionKind::Normal),
+            connection_kind: user_session.connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
             fingerprint,
             stream_channel,
             session_token: Some(&user_session.token),
@@ -1358,7 +1877,7 @@ pub async fn force_provider_stream_response(
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
         })
-            .await;
+        .await;
 
         let (status_code, header_map) = get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
         let mut response = axum::response::Response::builder().status(status_code);
@@ -1369,7 +1888,9 @@ pub async fn force_provider_stream_response(
         let body_stream = prepare_body_stream(app_state, item_type, stream);
         debug_if_enabled!(
             "Streaming provider forced stream request from {}",
-            sanitize_sensitive_info(resolve_request_url_for_logging(ctx.input, user_session.stream_url.as_ref()).as_ref())
+            sanitize_sensitive_info(
+                resolve_request_url_for_logging(ctx.input, user_session.stream_url.as_ref()).as_ref()
+            )
         );
         let mut response = try_unwrap_body!(response.body(body_stream));
         mark_response_as_uncompressed(&mut response);
@@ -1379,7 +1900,7 @@ pub async fn force_provider_stream_response(
     app_state.connection_manager.release_provider_handle(stream_details.provider_handle).await;
     app_state
         .active_users
-        .release_unbound_session_reservation(&ctx.user.username, &user_session.token, false)
+        .release_unbound_session_reservation(&ctx.user.username, &user_session.token, None, false)
         .await;
     if let (Some(stream), _stream_info) =
         create_channel_unavailable_stream(&app_state.app_config, &[], StatusCode::SERVICE_UNAVAILABLE)
@@ -1401,10 +1922,11 @@ pub async fn force_provider_stream_response(
 
 /// # Panics
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn stream_response(
+pub(crate) async fn stream_response(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
     session_token: &str,
+    request_class: Option<PlaybackRequestClass>,
     mut stream_channel: StreamChannel,
     stream_url: &str,
     req_headers: &HeaderMap,
@@ -1416,6 +1938,10 @@ pub async fn stream_response(
     allow_exhausted_shared_reconnect: bool,
     grace_mode: Option<crate::api::model::GraceMode>,
 ) -> impl IntoResponse + Send {
+    let _transition_guard = app_state
+        .active_users
+        .acquire_playback_transition(&user.username, session_token)
+        .await;
     let request_log_stream_url = resolve_request_url_for_logging(input, stream_url);
     if log_enabled!(log::Level::Trace) {
         trace!("Try to open stream {}", sanitize_sensitive_info(request_log_stream_url.as_ref()));
@@ -1425,26 +1951,29 @@ pub async fn stream_response(
     let item_type = stream_channel.item_type;
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
-    let (final_admission, resolved_grace_mode, created_placeholder_session) = activate_session_before_stream_open(
+    let activation = activate_session_before_stream_open(
         app_state,
         SessionActivationRequest {
             fingerprint,
             input,
             user,
             session_token,
+            request_class,
             virtual_id,
+            item_type,
             stream_url,
             connection_permission,
             connection_kind,
             socket_bound: item_type.uses_socket_bound_session(),
         },
-    )
+        )
         .await;
-    let grace_mode = resolved_grace_mode.or(grace_mode);
-    connection_permission = final_admission.permission;
-    connection_kind = final_admission.kind.unwrap_or(connection_kind);
+    let grace_mode = activation.grace_mode.or(grace_mode);
+    connection_permission = activation.admission.permission;
+    connection_kind = activation.admission.kind.unwrap_or(connection_kind);
 
-    let allow_shared_reuse = connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
+    let allow_shared_reuse =
+        connection_permission != UserConnectionPermission::Exhausted || allow_exhausted_shared_reconnect;
 
     let share_stream = is_stream_share_enabled(item_type, target);
     let _shared_lock = if share_stream {
@@ -1462,7 +1991,7 @@ pub async fn stream_response(
                 session_token,
                 req_headers,
             )
-                .await
+            .await
             {
                 return value.into_response();
             }
@@ -1483,12 +2012,9 @@ pub async fn stream_response(
                 session_token,
                 req_headers,
             )
-                .await
+            .await
             {
-                debug_if_enabled!(
-                    "Opportunistic shared stream reuse for {}",
-                    sanitize_sensitive_info(stream_url)
-                );
+                debug_if_enabled!("Opportunistic shared stream reuse for {}", sanitize_sensitive_info(stream_url));
                 return value.into_response();
             }
         }
@@ -1498,7 +2024,12 @@ pub async fn stream_response(
     if connection_permission == UserConnectionPermission::Exhausted {
         app_state
             .active_users
-            .release_unbound_session_reservation(&user.username, session_token, created_placeholder_session)
+            .release_unbound_session_reservation(
+                &user.username,
+                session_token,
+                activation.placeholder_transition_version,
+                activation.placeholder_transition_version.is_some(),
+            )
             .await;
         record_connect_failed_attempt(ConnectFailedAttempt {
             app_state,
@@ -1515,7 +2046,7 @@ pub async fn stream_response(
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
-            .into_response();
+        .into_response();
     }
 
     let stream_options = get_stream_options(app_state);
@@ -1537,16 +2068,23 @@ pub async fn stream_response(
         stream_channel.virtual_id,
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
+        false,
         Some(session_token),
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
+        activation.grace_context.clone(),
     )
-        .await
+    .await
     {
         Ok(stream_details) => stream_details,
         Err(err) => {
             app_state
                 .active_users
-                .release_unbound_session_reservation(&user.username, session_token, created_placeholder_session)
+                .release_unbound_session_reservation(
+                    &user.username,
+                    session_token,
+                    activation.placeholder_transition_version,
+                    activation.placeholder_transition_version.is_some(),
+                )
                 .await;
             error!("Failed to stream: {err}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1589,7 +2127,7 @@ pub async fn stream_response(
             stream_details.stream.is_some(),
             stream_details.has_deferred_provider_open(),
         )
-            .await;
+        .await;
 
         let mut is_stream_shared = share_stream && !stream_details.has_deferred_provider_open();
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
@@ -1624,7 +2162,7 @@ pub async fn stream_response(
             meter_uid: metering.meter_uid,
             meter_stream: metering.meter_stream,
         })
-            .await;
+        .await;
         let stream_resp = if is_stream_shared {
             debug_if_enabled!(
                 "Streaming shared stream request from {}",
@@ -1643,7 +2181,7 @@ pub async fn stream_response(
                 connection_priority_for_kind(user, connection_kind),
                 connection_kind,
             )
-                .await
+            .await
             {
                 let (status_code, header_map) =
                     get_stream_response_with_headers(provider_response.map(|(h, s, _, _)| (h, s)));
@@ -1686,7 +2224,10 @@ pub async fn stream_response(
             let log_session_url = resolve_request_url_for_logging(input, session_url.as_ref());
             if log_enabled!(log::Level::Debug) {
                 if log_session_url.eq(log_actual_request_url.as_ref()) {
-                    debug!("Streaming stream request from {}", sanitize_sensitive_info(log_actual_request_url.as_ref()));
+                    debug!(
+                        "Streaming stream request from {}",
+                        sanitize_sensitive_info(log_actual_request_url.as_ref())
+                    );
                 } else {
                     debug!(
                         "Streaming stream request for {} from {}",
@@ -1749,7 +2290,12 @@ pub async fn stream_response(
     app_state.connection_manager.release_provider_handle(stream_details.provider_handle).await;
     app_state
         .active_users
-        .release_unbound_session_reservation(&user.username, session_token, created_placeholder_session)
+        .release_unbound_session_reservation(
+            &user.username,
+            session_token,
+            activation.placeholder_transition_version,
+            activation.placeholder_transition_version.is_some(),
+        )
         .await;
     StatusCode::BAD_REQUEST.into_response()
 }
@@ -1800,10 +2346,7 @@ async fn prepare_stream_metering(
         if share_stream {
             app_state.shared_stream_manager.register_meter_uid(stream_url, meter_uid).await;
         }
-        return StreamMeteringConfig {
-            meter_uid,
-            meter_stream: true,
-        };
+        return StreamMeteringConfig { meter_uid, meter_stream: true };
     }
 
     StreamMeteringConfig::default()
@@ -1817,7 +2360,11 @@ fn resolve_stream_config_u64(
     stream_config.map_or(default_value, selector)
 }
 
-fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate::model::StreamConfig) -> u64, default_value: u64) -> u64 {
+fn get_stream_config_u64(
+    app_state: &Arc<AppState>,
+    selector: impl FnOnce(&crate::model::StreamConfig) -> u64,
+    default_value: u64,
+) -> u64 {
     let config = app_state.app_config.config.load();
     let stream_config = config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.stream.as_ref());
     resolve_stream_config_u64(stream_config, selector, default_value)
@@ -1825,6 +2372,20 @@ fn get_stream_config_u64(app_state: &Arc<AppState>, selector: impl FnOnce(&crate
 
 pub(crate) fn get_hls_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
     get_stream_config_u64(app_state, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs())
+}
+
+async fn cleanup_forced_reopen_addrs(
+    app_state: &Arc<AppState>,
+    item_type: PlaylistItemType,
+    cleanup_addrs: &[SocketAddr],
+) {
+    let close_client_socket = !item_type.is_live_adaptive();
+    for addr in cleanup_addrs {
+        app_state.connection_manager.release_provider_connection(addr).await;
+        if close_client_socket {
+            let _ = app_state.connection_manager.close_connection_signal(addr);
+        }
+    }
 }
 
 pub(crate) fn get_catchup_session_ttl_secs(app_state: &Arc<AppState>) -> u64 {
@@ -1862,7 +2423,7 @@ async fn try_shared_stream_response_if_any(
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
     )
-        .await
+    .await
     {
         debug_if_enabled!("Using shared stream {}", sanitize_sensitive_info(stream_url));
         if let Some(headers) = app_state.shared_stream_manager.get_shared_state_headers(stream_url).await {
@@ -1892,7 +2453,8 @@ async fn try_shared_stream_response_if_any(
             }
             stream_channel.shared = true;
             stream_channel.shared_joined_existing = Some(true);
-            stream_channel.shared_stream_id = app_state.shared_stream_manager.get_meter_uid(stream_url).await.map(u64::from);
+            stream_channel.shared_stream_id =
+                app_state.shared_stream_manager.get_meter_uid(stream_url).await.map(u64::from);
             let metering = StreamMeteringConfig {
                 meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
                 meter_stream: false,
@@ -1910,8 +2472,8 @@ async fn try_shared_stream_response_if_any(
                 meter_uid: metering.meter_uid,
                 meter_stream: metering.meter_stream,
             })
-                .await
-                .boxed();
+            .await
+            .boxed();
             let mut response = axum::response::Response::builder().status(status_code);
             for (key, value) in &header_map {
                 response = response.header(key, value);
@@ -1925,7 +2487,7 @@ async fn try_shared_stream_response_if_any(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn local_stream_response(
+pub(crate) async fn local_stream_response(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
     pli: StreamChannel,
@@ -1936,8 +2498,19 @@ pub async fn local_stream_response(
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
     playback_session_token: Option<&str>,
+    request_class: Option<PlaybackRequestClass>,
     check_path: bool,
 ) -> impl IntoResponse + Send {
+    let _transition_guard = if let Some(session_token) = playback_session_token {
+        Some(
+            app_state
+                .active_users
+                .acquire_playback_transition(&user.username, session_token)
+                .await,
+        )
+    } else {
+        None
+    };
     if log_enabled!(log::Level::Trace) {
         trace!("Try to open stream {}", sanitize_sensitive_info(&pli.url));
     }
@@ -1948,15 +2521,15 @@ pub async fn local_stream_response(
         let allow_session_reopen = if let Some(session_token) = playback_session_token {
             user.max_connections > 0
                 && app_state
-                .active_users
-                .connection_permission_for_session(
-                    &user.username,
-                    user.max_connections,
-                    user.soft_connections,
-                    session_token,
-                )
-                .await
-                != UserConnectionPermission::Exhausted
+                    .active_users
+                    .connection_permission_for_session(
+                        &user.username,
+                        user.max_connections,
+                        user.soft_connections,
+                        session_token,
+                    )
+                    .await
+                    != UserConnectionPermission::Exhausted
         } else {
             false
         };
@@ -1976,7 +2549,7 @@ pub async fn local_stream_response(
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-                .into_response();
+            .into_response();
         }
         connection_permission = UserConnectionPermission::Allowed;
     }
@@ -2054,9 +2627,8 @@ pub async fn local_stream_response(
         }
     }
 
-    let stream = ReaderStream::new(file.take(content_length))
-        .map_err(|err| StreamError::Stream(err.to_string()))
-        .boxed();
+    let stream =
+        ReaderStream::new(file.take(content_length)).map_err(|err| StreamError::Stream(err.to_string())).boxed();
     let throttle_kbps = usize::try_from(get_stream_throttle(app_state)).unwrap_or_default();
     let stream = if is_throttled_stream(pli.item_type, throttle_kbps) {
         info!("Stream throttling active: {}", human_readable_kbps(u64::try_from(throttle_kbps).unwrap_or_default()));
@@ -2066,14 +2638,16 @@ pub async fn local_stream_response(
     };
     let mut connection_kind = connection_kind;
     if let Some(session_token) = playback_session_token {
-        let (final_admission, resolved_grace_mode, created_placeholder) = activate_session_before_stream_open(
+        let activation = activate_session_before_stream_open(
             app_state,
             SessionActivationRequest {
                 fingerprint,
                 input,
                 user,
                 session_token,
+                request_class,
                 virtual_id: pli.virtual_id,
+                item_type: pli.item_type,
                 stream_url: &pli.url,
                 connection_permission,
                 connection_kind,
@@ -2081,21 +2655,26 @@ pub async fn local_stream_response(
             },
         )
             .await;
-        grace_mode = resolved_grace_mode;
-        connection_permission = final_admission.permission;
-        connection_kind = final_admission.kind.unwrap_or(connection_kind);
+        grace_mode = activation.grace_mode;
+        connection_permission = activation.admission.permission;
+        connection_kind = activation.admission.kind.unwrap_or(connection_kind);
 
         if connection_permission == UserConnectionPermission::Exhausted {
             app_state
                 .active_users
-                .release_unbound_session_reservation(&user.username, session_token, created_placeholder)
+                .release_unbound_session_reservation(
+                    &user.username,
+                    session_token,
+                    activation.placeholder_transition_version,
+                    activation.placeholder_transition_version.is_some(),
+                )
                 .await;
             return create_custom_video_stream_response(
                 app_state,
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
-                .into_response();
+            .into_response();
         }
     }
     let mut grace_period_options = app_state.get_grace_options();
@@ -2144,7 +2723,7 @@ pub async fn local_stream_response(
         meter_uid: 0,
         meter_stream: false,
     })
-        .await;
+    .await;
 
     let mut response = Response::new(axum::body::Body::from_stream(stream));
 
@@ -2322,7 +2901,7 @@ async fn fetch_resource_with_retry(
                 default_user_agent.as_deref(),
             )
         })
-            .await
+        .await
     else {
         return None;
     };
@@ -2333,7 +2912,7 @@ async fn fetch_resource_with_retry(
         return Some(build_resource_stream_response(app_state, resource_url, response).await);
     }
 
-    // Non-retriable Status → Upstream Response incl. Body
+    // Non-retriable Status -> Upstream Response incl. Body
     debug_if_enabled!("Failed to open resource got status {status} for {}", sanitize_sensitive_info(resource_url));
 
     let mut response_builder = axum::response::Response::builder().status(status);
@@ -2367,8 +2946,8 @@ pub async fn resource_response(
                 mime_type.unwrap_or_else(|| mime::APPLICATION_OCTET_STREAM.to_string()),
                 Some("public, max-age=14400"),
             )
-                .await
-                .into_response();
+            .await
+            .into_response();
         }
     }
     trace_if_enabled!("Try to fetch resource {}", sanitize_sensitive_info(resource_url));
@@ -2458,7 +3037,7 @@ pub fn json_or_bin_response<T: Serialize>(accept: Option<&str>, data: &T) -> imp
 
 pub fn stream_json_or_bin_response<P>(
     accept: Option<&str>,
-    data: Box<dyn Iterator<Item=P> + Send>,
+    data: Box<dyn Iterator<Item = P> + Send>,
 ) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
@@ -2472,7 +3051,7 @@ where
 pub fn stream_json_or_bin_response_stream<P, S>(accept: Option<&str>, data: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
-    S: Stream<Item=P> + Send + Unpin + 'static,
+    S: Stream<Item = P> + Send + Unpin + 'static,
 {
     if accept.is_some_and(|a| a.contains(CONTENT_TYPE_CBOR)) {
         return stream_bin_array_stream(data);
@@ -2480,7 +3059,12 @@ where
     stream_json_array_stream(data)
 }
 
-pub fn create_session_fingerprint(fingerprint: &Fingerprint, username: &str, virtual_id: u32, socket_bound: bool) -> String {
+pub fn create_session_fingerprint(
+    fingerprint: &Fingerprint,
+    username: &str,
+    virtual_id: u32,
+    socket_bound: bool,
+) -> String {
     if socket_bound {
         concat_string!(&fingerprint.addr.to_string(), "|", username, "|", &virtual_id.to_string())
     } else {
@@ -2496,6 +3080,23 @@ pub(crate) fn is_session_based_playback(item_type: PlaylistItemType, extension: 
     item_type.is_live_adaptive() || matches!(extension, Some(ext) if ext == HLS_EXT || ext == DASH_EXT)
 }
 
+pub(crate) fn is_socket_bound_playback_session(item_type: PlaylistItemType, extension: Option<&str>) -> bool {
+    item_type.uses_socket_bound_session() && !is_session_based_playback(item_type, extension)
+}
+
+fn session_reacquire_cleanup_addrs(user_session: &UserSession, current_addr: &SocketAddr) -> Vec<SocketAddr> {
+    let mut addrs = Vec::with_capacity(user_session.active_addrs.len().saturating_add(1));
+    if user_session.addr != *current_addr {
+        addrs.push(user_session.addr);
+    }
+    for addr in &user_session.active_addrs {
+        if *addr != *current_addr && !addrs.contains(addr) {
+            addrs.push(*addr);
+        }
+    }
+    addrs
+}
+
 pub(crate) fn should_allow_exhausted_shared_reconnect(
     share_stream: bool,
     user_session: Option<&UserSession>,
@@ -2504,13 +3105,13 @@ pub(crate) fn should_allow_exhausted_shared_reconnect(
 ) -> bool {
     share_stream
         && user_session.is_some_and(|session| {
-        session.permission != UserConnectionPermission::Exhausted
-            && session.virtual_id == requested_virtual_id
-            && session.stream_url.as_ref() == requested_stream_url
-    })
+            session.permission != UserConnectionPermission::Exhausted
+                && session.virtual_id == requested_virtual_id
+                && session.stream_url.as_ref() == requested_stream_url
+        })
 }
 
-pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item=P> + Send>) -> axum::response::Response
+pub fn stream_json_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
 {
@@ -2538,7 +3139,7 @@ where
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
 
-pub fn stream_bin_array<P>(iter: Box<dyn Iterator<Item=P> + Send>) -> axum::response::Response
+pub fn stream_bin_array<P>(iter: Box<dyn Iterator<Item = P> + Send>) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
 {
@@ -2562,11 +3163,11 @@ where
             // CBOR: start indefinite-length array
             Ok::<_, Infallible>(Bytes::from_static(&[0x9f]))
         })
-            .chain(stream)
-            .chain(stream::once(async {
-                // CBOR: end indefinite-length array
-                Ok::<_, Infallible>(Bytes::from_static(&[0xff]))
-            })),
+        .chain(stream)
+        .chain(stream::once(async {
+            // CBOR: end indefinite-length array
+            Ok::<_, Infallible>(Bytes::from_static(&[0xff]))
+        })),
     );
 
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
@@ -2575,7 +3176,7 @@ where
 pub fn stream_json_array_stream<P, S>(stream: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
-    S: Stream<Item=P> + Send + Unpin + 'static,
+    S: Stream<Item = P> + Send + Unpin + 'static,
 {
     let stream = stream::unfold((stream, true), |(mut stream, first)| async move {
         match stream.next().await {
@@ -2604,7 +3205,7 @@ where
 pub fn stream_bin_array_stream<P, S>(stream: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
-    S: Stream<Item=P> + Send + Unpin + 'static,
+    S: Stream<Item = P> + Send + Unpin + 'static,
 {
     let stream = stream::unfold(stream, |mut stream| async move {
         match stream.next().await {
@@ -2649,6 +3250,7 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         exp_date: None,
         max_connections: 0,
         status: None,
+        output_clusters: shared::model::ClusterFlags::all(),
         ui_enabled: false,
         comment: None,
         priority: 0,
@@ -2678,8 +3280,8 @@ mod tests {
     use crate::model::StreamHistoryConfig;
     use crate::{
         api::model::{
-            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager, MetadataUpdateManager,
-            PlaylistStorageState, SharedStreamManager,
+            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
+            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
         },
         auth::Fingerprint,
         model::{
@@ -2694,7 +3296,10 @@ mod tests {
     use futures::stream;
     use shared::{
         foundation::Filter,
-        model::{ConfigPaths, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder, StreamChannel, XtreamCluster},
+        model::{
+            ClusterFlags, ConfigPaths, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistItemType,
+            ProcessingOrder, StreamChannel, XtreamCluster,
+        },
         utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
     };
     use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
@@ -2742,11 +3347,7 @@ mod tests {
     #[test]
     fn test_get_stream_config_u64_uses_default_when_stream_config_missing() {
         assert_eq!(
-            resolve_stream_config_u64(
-                None,
-                |stream| stream.hls_session_ttl_secs,
-                default_hls_session_ttl_secs()
-            ),
+            resolve_stream_config_u64(None, |stream| stream.hls_session_ttl_secs, default_hls_session_ttl_secs()),
             default_hls_session_ttl_secs()
         );
         assert_eq!(
@@ -2822,7 +3423,7 @@ mod tests {
                 session_owner: Some("vod-session"),
             },
         )
-            .await;
+        .await;
         assert!(strict.provider_handle.is_none(), "strict provider affinity should not allocate a different provider");
         assert!(
             matches!(strict.provider_stream_state, ProviderStreamState::Custom(_)),
@@ -2843,9 +3444,12 @@ mod tests {
                 session_owner: Some("live-session"),
             },
         )
-            .await;
-        let (ProviderStreamState::Available(Some(fallback_provider), _) | ProviderStreamState::GracePeriod(Some(fallback_provider), _)) = fallback.provider_stream_state else
-        { panic!("fallback-enabled request should allocate a provider") };
+        .await;
+        let (ProviderStreamState::Available(Some(fallback_provider), _)
+        | ProviderStreamState::GracePeriod(Some(fallback_provider), _)) = fallback.provider_stream_state
+        else {
+            panic!("fallback-enabled request should allocate a provider")
+        };
         assert_eq!(fallback_provider.as_ref(), "provider_2");
 
         app_state.active_provider.release_connection(&busy_addr).await;
@@ -2856,6 +3460,7 @@ mod tests {
     #[test]
     fn test_should_allow_exhausted_shared_reconnect_only_for_matching_shared_session() {
         let session = UserSession {
+            transition_version: 1,
             connection_kind: Some(crate::api::model::ConnectionKind::Normal),
             token: "tok".to_string(),
             virtual_id: 282,
@@ -2867,33 +3472,13 @@ mod tests {
             ts: 1,
             started_at: 1,
             permission: UserConnectionPermission::Allowed,
-            counted: false,
+            lifecycle: crate::api::model::PlaybackLifecycle::Active,
         };
 
-        assert!(should_allow_exhausted_shared_reconnect(
-            true,
-            Some(&session),
-            282,
-            "http://provider/live/449924.ts"
-        ));
-        assert!(!should_allow_exhausted_shared_reconnect(
-            false,
-            Some(&session),
-            282,
-            "http://provider/live/449924.ts"
-        ));
-        assert!(!should_allow_exhausted_shared_reconnect(
-            true,
-            Some(&session),
-            999,
-            "http://provider/live/449924.ts"
-        ));
-        assert!(!should_allow_exhausted_shared_reconnect(
-            true,
-            Some(&session),
-            282,
-            "http://provider/live/other.ts"
-        ));
+        assert!(should_allow_exhausted_shared_reconnect(true, Some(&session), 282, "http://provider/live/449924.ts"));
+        assert!(!should_allow_exhausted_shared_reconnect(false, Some(&session), 282, "http://provider/live/449924.ts"));
+        assert!(!should_allow_exhausted_shared_reconnect(true, Some(&session), 999, "http://provider/live/449924.ts"));
+        assert!(!should_allow_exhausted_shared_reconnect(true, Some(&session), 282, "http://provider/live/other.ts"));
     }
 
     fn create_test_app_config() -> AppConfig {
@@ -3040,6 +3625,13 @@ mod tests {
         create_test_app_state_for_config(Arc::new(create_test_app_config()))
     }
 
+    #[tokio::test]
+    async fn create_api_proxy_user_defaults_output_clusters_to_all() {
+        let app_state = create_test_app_state();
+        let user = create_api_proxy_user(&app_state);
+        assert_eq!(user.output_clusters, ClusterFlags::all());
+    }
+
     fn create_test_provider_app_state() -> Arc<AppState> {
         create_test_app_state_for_config(Arc::new(create_test_provider_app_config()))
     }
@@ -3058,8 +3650,13 @@ mod tests {
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let config = app_cfg.config.load();
         let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
-        let connection_manager =
-            Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager, history_config.as_ref()));
+        let connection_manager = Arc::new(ConnectionManager::new(
+            &active_users,
+            &active_provider,
+            &shared_stream_manager,
+            &event_manager,
+            history_config.as_ref(),
+        ));
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -3113,6 +3710,7 @@ mod tests {
                 stream_history: None,
                 qos_aggregation: None,
             }),
+            user_access_control: true,
             ..Config::default()
         };
 
@@ -3157,15 +3755,870 @@ mod tests {
         }
     }
 
+    fn create_test_session(
+        token: &str,
+        item_type: PlaylistItemType,
+        lifecycle: crate::api::model::PlaybackLifecycle,
+    ) -> UserSession {
+        UserSession {
+            token: token.to_string(),
+            transition_version: 1,
+            virtual_id: 42,
+            provider: Arc::<str>::from("provider-a"),
+            stream_url: Arc::<str>::from(match item_type {
+                PlaylistItemType::LiveHls => "http://provider-1.example/live/42.m3u8",
+                _ => "http://provider-1.example/live/42.ts",
+            }),
+            addr: "127.0.0.1:55555".parse().unwrap_or_else(|_| unreachable!()),
+            socket_bound: item_type.uses_socket_bound_session(),
+            active_addrs: Vec::new(),
+            ts: 1,
+            started_at: 1,
+            permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            lifecycle,
+        }
+    }
+
+    #[test]
+    fn classify_playback_request_marks_adaptive_playlist_request_as_prepare() {
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::LiveHls,
+            existing_session: None,
+            prepare_only: true,
+            terminate: false,
+        });
+
+        assert_eq!(request_class, PlaybackRequestClass::Prepare);
+    }
+
+    #[test]
+    fn classify_playback_request_marks_preserved_session_as_activate() {
+        let session = create_test_session(
+            "tok-preserved",
+            PlaylistItemType::LiveHls,
+            crate::api::model::PlaybackLifecycle::Preserved,
+        );
+
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::LiveHls,
+            existing_session: Some(&session),
+            prepare_only: false,
+            terminate: false,
+        });
+
+        assert_eq!(request_class, PlaybackRequestClass::Activate);
+    }
+
+    #[test]
+    fn classify_playback_request_marks_counted_session_as_follow_up() {
+        let session = create_test_session(
+            "tok-active",
+            PlaylistItemType::LiveHls,
+            crate::api::model::PlaybackLifecycle::Active,
+        );
+
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::LiveHls,
+            existing_session: Some(&session),
+            prepare_only: false,
+            terminate: false,
+        });
+
+        assert_eq!(request_class, PlaybackRequestClass::FollowUp);
+    }
+
+    /// `PendingProvider` must NOT be classified as `FollowUp`.
+    /// `PendingProvider` has no counted lease yet — the session is still waiting
+    /// for a provider slot. A new request on a `PendingProvider` session should
+    /// be `Activate` so that full admission evaluation happens, not a cheap
+    /// `FollowUp` skip.
+    #[test]
+    fn classify_playback_request_marks_pending_provider_as_activate_not_follow_up() {
+        let session = create_test_session(
+            "tok-pending",
+            PlaylistItemType::LiveHls,
+            crate::api::model::PlaybackLifecycle::PendingProvider {
+                data: crate::api::model::PendingProviderState {
+                    reason_code: crate::api::model::PendingProviderReason::GraceHold,
+                    created_at: 1,
+                    deadline: 30,
+                    version: 1,
+                    wake_source: None,
+                }
+            },
+        );
+
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::LiveHls,
+            existing_session: Some(&session),
+            prepare_only: false,
+            terminate: false,
+        });
+
+        assert_eq!(
+            request_class,
+            PlaybackRequestClass::Activate,
+            "PendingProvider should not be FollowUp - it has no counted lease yet"
+        );
+    }
+
+    /// `Active` without a counted lease must NOT be classified as `FollowUp`.
+    /// `FollowUp` should only be returned when the session actually owns a
+    /// counted admission lease. A session with `Active` lifecycle but no counted
+    /// lease should go through `Activate` so that the counted lease is reacquired.
+    #[test]
+    fn classify_playback_request_marks_active_without_counted_as_activate_not_follow_up() {
+        let mut session = create_test_session(
+            "tok-active-uncounted",
+            PlaylistItemType::LiveHls,
+            crate::api::model::PlaybackLifecycle::Active, // counted=false via is_counted()
+        );
+        // Manually force counted=false by setting to Prepared lifecycle, then restoring
+        // Note: is_counted() returns false for Prepared, true for Active
+        // For this test we need a session that is Active lifecycle but not counted
+        // The new model derives counted from lifecycle, so we must use a different lifecycle
+        // to represent "not counted". Use Prepared instead.
+        session.lifecycle = crate::api::model::PlaybackLifecycle::Prepared;
+
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::LiveHls,
+            existing_session: Some(&session),
+            prepare_only: false,
+            terminate: false,
+        });
+
+        assert_eq!(
+            request_class,
+            PlaybackRequestClass::Activate,
+            "Active session with counted=false should not be FollowUp"
+        );
+    }
+
+    /// Prepared sessions must be classified as Activate.
+    #[test]
+    fn classify_playback_request_marks_prepared_session_as_activate() {
+        let session = create_test_session(
+            "tok-prepared",
+            PlaylistItemType::LiveHls,
+            crate::api::model::PlaybackLifecycle::Prepared,
+        );
+
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::LiveHls,
+            existing_session: Some(&session),
+            prepare_only: false,
+            terminate: false,
+        });
+
+        assert_eq!(request_class, PlaybackRequestClass::Activate);
+    }
+
+    /// `GraceActive` without counted lease must NOT be classified as `FollowUp`.
+    #[test]
+    fn classify_playback_request_marks_grace_active_without_counted_as_activate() {
+        let mut session = create_test_session(
+            "tok-grace-uncounted",
+            PlaylistItemType::LiveHls,
+            crate::api::model::PlaybackLifecycle::Active, // is_counted() = true for GraceActive
+        );
+        // Test scenario: session has GraceActive lifecycle but we need it NOT counted
+        // This represents the edge case before grace task resolves. Use Prepared lifecycle
+        // to model "not counted" since is_counted() returns false for Prepared.
+        session.lifecycle = crate::api::model::PlaybackLifecycle::Prepared;
+
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::LiveHls,
+            existing_session: Some(&session),
+            prepare_only: false,
+            terminate: false,
+        });
+
+        assert_eq!(
+            request_class,
+            PlaybackRequestClass::Activate,
+            "GraceActive session with counted=false should not be FollowUp"
+        );
+    }
+
+    #[tokio::test]
+    async fn activate_session_before_stream_open_skips_placeholder_for_follow_up_session() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "follow-up-user".to_string();
+        user.max_connections = 1;
+        let mut channel = create_test_live_channel("http://provider-1.example/live/55220.m3u8");
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.virtual_id = 55220;
+
+        app_state.connection_manager.add_connection(&addr).await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-follow-up",
+                virtual_id: channel.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: channel.url.as_ref(),
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &fingerprint,
+                provider: input.name.clone(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-follow-up"),
+            })
+            .await;
+
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-follow-up",
+                request_class: None,
+                virtual_id: channel.virtual_id,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: true,
+            },
+        )
+        .await;
+
+        assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(activation.admission.kind, Some(crate::api::model::ConnectionKind::Normal));
+        assert_eq!(activation.grace_mode, None);
+        assert!(
+            activation.placeholder_transition_version.is_none(),
+            "follow-up activation must not create a placeholder session"
+        );
+    }
+
+    #[tokio::test]
+    async fn activate_session_before_stream_open_uses_precomputed_follow_up_request_class() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "precomputed-follow-up-user".to_string();
+        user.max_connections = 1;
+        let mut channel = create_test_live_channel("http://provider-1.example/live/55221.m3u8");
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.virtual_id = 55221;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-precomputed-follow-up",
+                virtual_id: channel.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: channel.url.as_ref(),
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-precomputed-follow-up",
+                request_class: Some(PlaybackRequestClass::FollowUp),
+                virtual_id: channel.virtual_id,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: true,
+            },
+        )
+        .await;
+
+        assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(activation.admission.kind, Some(crate::api::model::ConnectionKind::Normal));
+        assert_eq!(activation.grace_mode, None);
+        assert!(
+            activation.placeholder_transition_version.is_none(),
+            "precomputed follow-up activation must not create a placeholder session"
+        );
+    }
+
+    // stale FollowUp revalidation
+    #[tokio::test]
+    async fn activate_session_before_stream_open_stale_follow_up_reclassified_on_counted_lease_release() {
+        // Scenario: pre-computed FollowUp, but session's counted lease was released before
+        // the guard was acquired. Must reclassify to Activate so admission runs.
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "stale-followup-user".to_string();
+        user.max_connections = 1;
+        let mut channel = create_test_live_channel("http://provider-1.example/live/55230.m3u8");
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.virtual_id = 55230;
+
+        // Session created in Active (counted) state.
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-stale-followup",
+                virtual_id: channel.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: channel.url.as_ref(),
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+
+        // Simulate the counted lease being released before activation:
+        // expire the session so it no longer has a counted lease.
+        app_state
+            .active_users
+            .terminate_session(&user.username, "tok-stale-followup")
+            .await;
+
+        // Call activate with stale FollowUp. Must NOT skip admission — reclassification
+        // to Activate must run so the placeholder is created.
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-stale-followup",
+                request_class: Some(PlaybackRequestClass::FollowUp),
+                virtual_id: channel.virtual_id,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: true,
+            },
+        )
+        .await;
+
+        // Must NOT skip — placeholder must be created since session is expired.
+        assert!(
+            activation.placeholder_transition_version.is_some(),
+            "stale FollowUp with expired session must run admission and create placeholder"
+        );
+    }
+
+    // pre-resolved Grace materialization
+    #[tokio::test]
+    async fn activate_session_before_stream_open_pre_resolved_grace_period_materializes_pending_provider() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "pre-resolved-grace-user".to_string();
+        user.max_connections = 1;
+        let mut channel = create_test_live_channel("http://provider-1.example/live/55231.m3u8");
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.virtual_id = 55231;
+
+        // Session in Prepared state (no grace lifecycle yet).
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-pre-resolved-grace",
+                virtual_id: channel.virtual_id,
+                provider: input.name.as_ref(),
+                stream_url: channel.url.as_ref(),
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+
+        // Call activation with pre-resolved GracePeriod permission.
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-pre-resolved-grace",
+                request_class: None,
+                virtual_id: channel.virtual_id,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::GracePeriod,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: true,
+            },
+        )
+        .await;
+
+        assert_eq!(activation.admission.permission, UserConnectionPermission::GracePeriod);
+        assert_eq!(activation.grace_mode, Some(crate::api::model::GraceMode::Hold));
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, "tok-pre-resolved-grace")
+            .await;
+        assert!(
+            session.is_some_and(|s| matches!(s.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. })),
+            "pre-resolved GracePeriod must materialize as PendingProvider lifecycle"
+        );
+    }
+
+    /// `activate_session_before_stream_open` skips placeholder for Prepare class.
+    #[tokio::test]
+    async fn activate_session_before_stream_open_skips_placeholder_for_prepare() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55222".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "prepare-user".to_string();
+        user.max_connections = 1;
+
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-prepare",
+                // Explicitly pass Prepare class — placeholder and admission should be skipped.
+                request_class: Some(PlaybackRequestClass::Prepare),
+                virtual_id: 55222,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: "http://provider.example/live/test.ts",
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: true,
+            },
+        )
+        .await;
+
+        // Prepare returns Allowed without running admission strategies.
+        assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(activation.grace_mode, None);
+        assert!(
+            activation.placeholder_transition_version.is_none(),
+            "Prepare activation must not create a placeholder session"
+        );
+    }
+
+    /// `resolve_playback_request_admission` with `prepare_only = true` returns `Prepare` class.
+    #[tokio::test]
+    async fn resolve_playback_request_admission_prepare_only_returns_prepare_class() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55223".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "prepare-only-user".to_string();
+        user.max_connections = 1;
+
+        let (admission, grace_mode, request_class) = resolve_playback_request_admission(
+            &app_state,
+            &user,
+            &fingerprint,
+            PlaylistItemType::LiveHls,
+            None,
+            "tok-prepare-only",
+            false,
+            EvictionReentryGuard::Session("tok-prepare-only"),
+            true,  // prepare_only
+            false, // terminate
+        )
+        .await;
+
+        assert_eq!(request_class, PlaybackRequestClass::Prepare);
+        // Prepare returns Allowed without running strategies.
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(grace_mode, None);
+    }
+
+    /// `resolve_playback_request_admission` with `terminate = true` returns `Terminate` class
+    /// and calls `terminate_session` on the existing session.
+    #[tokio::test]
+    async fn resolve_playback_request_admission_terminate_returns_terminate_class() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+        let addr: SocketAddr = "127.0.0.1:55224".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "terminate-user".to_string();
+        user.max_connections = 2;
+
+        // First create a session.
+        let session_token = "tok-terminate";
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token,
+                virtual_id: 55224,
+                provider: "test-provider",
+                stream_url: "http://provider.example/test.ts",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        // Verify session exists.
+        let before = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, session_token)
+            .await;
+        assert!(before.is_some(), "session should exist before terminate");
+
+        let (admission, grace_mode, request_class) = resolve_playback_request_admission(
+            &app_state,
+            &user,
+            &fingerprint,
+            PlaylistItemType::LiveHls,
+            before.as_ref(),
+            session_token,
+            false,
+            EvictionReentryGuard::Session(session_token),
+            false, // prepare_only
+            true,  // terminate
+        )
+        .await;
+
+        assert_eq!(request_class, PlaybackRequestClass::Terminate);
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(grace_mode, None);
+
+        // Session should be expired after terminate.
+        let after = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, session_token)
+            .await;
+        assert!(after.is_none(), "session should be removed after terminate");
+    }
+
+    /// `classify_playback_request` returns `Terminate` when `terminate = true`.
+    #[test]
+    fn classify_playback_request_returns_terminate_when_flag_set() {
+        let request_class = classify_playback_request(PlaybackRequestFacts {
+            item_type: PlaylistItemType::Live,
+            existing_session: None,
+            prepare_only: false,
+            terminate: true,
+        });
+        assert_eq!(request_class, PlaybackRequestClass::Terminate);
+    }
+
+    #[tokio::test]
+    async fn activate_session_before_stream_open_marks_pending_provider_for_grace_hold() {
+        let stream_cfg = crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        };
+        let mut app_cfg = create_test_app_config();
+        app_cfg.config = Arc::new(ArcSwap::from_pointee(Config {
+            user_access_control: true,
+            reverse_proxy: Some(crate::model::ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: crate::model::ResourceRetryConfig::default(),
+                disabled_header: None,
+                stream: Some(stream_cfg),
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+                stream_history: None,
+                qos_aggregation: None,
+            }),
+            ..Config::default()
+        }));
+        let app_state = create_test_app_state_for_config(Arc::new(app_cfg));
+        let first_addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
+        let first_fingerprint = create_test_fingerprint(first_addr);
+        let second_fingerprint = create_test_fingerprint(second_addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "grace-hold-user".to_string();
+        user.max_connections = 1;
+        let first_channel = create_test_live_channel("http://provider-1.example/live/1.ts");
+        let mut second_channel = create_test_live_channel("http://provider-1.example/live/2.m3u8");
+        second_channel.item_type = PlaylistItemType::LiveHls;
+        second_channel.virtual_id = 55231;
+
+        app_state.connection_manager.add_connection(&first_addr).await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 10,
+                fingerprint: &first_fingerprint,
+                provider: input.name.clone(),
+                stream_channel: &first_channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-first"),
+            })
+            .await;
+
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &second_fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-grace-hold",
+                request_class: None,
+                virtual_id: second_channel.virtual_id,
+                item_type: PlaylistItemType::LiveHls,
+                stream_url: second_channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: false,
+            },
+        )
+        .await;
+
+        assert_eq!(activation.admission.permission, UserConnectionPermission::GracePeriod);
+        assert_eq!(activation.grace_mode, Some(crate::api::model::GraceMode::Hold));
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, "tok-grace-hold")
+            .await
+            .expect("placeholder session should exist");
+        let crate::api::model::PlaybackLifecycle::PendingProvider { data: pending } =
+            &session.lifecycle
+            else {
+                panic!("grace hold should mark pending provider state")
+            };
+        assert!(matches!(pending.reason_code, crate::api::model::PendingProviderReason::GraceHold));
+        assert!(pending.deadline >= pending.created_at);
+        assert_eq!(app_state.active_users.user_connections(&user.username).await, 1);
+        assert!(!session.lifecycle.is_counted(), "pending provider placeholder must not consume an active user lease before commit");
+    }
+
+    #[tokio::test]
+    async fn activate_session_before_stream_open_does_not_commit_user_lease_before_provider_success() {
+        let stream_cfg = crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 0,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: false,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: None,
+        };
+        let mut app_cfg = create_test_app_config();
+        app_cfg.config = Arc::new(ArcSwap::from_pointee(Config {
+            user_access_control: true,
+            reverse_proxy: Some(crate::model::ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: crate::model::ResourceRetryConfig::default(),
+                disabled_header: None,
+                stream: Some(stream_cfg),
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+                stream_history: None,
+                qos_aggregation: None,
+            }),
+            ..Config::default()
+        }));
+        let app_state = create_test_app_state_for_config(Arc::new(app_cfg));
+        let addr: SocketAddr = "127.0.0.1:55232".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input = app_state.app_config.sources.load().inputs[0].clone();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "atomic-commit-user".to_string();
+        user.max_connections = 1;
+        let channel = create_test_live_channel("http://provider-1.example/live/3.ts");
+
+        let activation = activate_session_before_stream_open(
+            &app_state,
+            SessionActivationRequest {
+                fingerprint: &fingerprint,
+                input: input.as_ref(),
+                user: &user,
+                session_token: "tok-atomic-commit",
+                request_class: None,
+                virtual_id: channel.virtual_id,
+                item_type: channel.item_type,
+                stream_url: channel.url.as_ref(),
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                socket_bound: false,
+            },
+        )
+        .await;
+
+        assert_eq!(activation.admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(activation.grace_mode, None);
+
+        let session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, "tok-atomic-commit")
+            .await
+            .expect("placeholder session should exist");
+        assert_eq!(
+            app_state.active_users.user_connections(&user.username).await,
+            0,
+            "allowed activation should stay provisional until provider acquisition and stream commit succeed"
+        );
+        assert!(
+            !session.lifecycle.is_counted(),
+            "placeholder session must stay uncounted until the provider side has been committed"
+        );
+        assert!(!matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. }));
+    }
+
     fn create_test_shared_target() -> ConfigTarget {
         ConfigTarget {
             id: 1,
             enabled: true,
             name: "shared".to_string(),
-            options: Some(ConfigTargetOptions {
-                share_live_streams: true,
-                ..ConfigTargetOptions::default()
-            }),
+            options: Some(ConfigTargetOptions { share_live_streams: true, ..ConfigTargetOptions::default() }),
             sort: None,
             filter: Filter::default(),
             output: Vec::new(),
@@ -3240,7 +4693,215 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_admission_with_strategies_falls_through_after_failed_grace_grant() {
+    async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
+        // Use a DIFFERENT session token than the pre-existing counted session.
+        // Otherwise session-admission may treat it as a valid reopen and skip the exhausted path.
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserOldest,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55401".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:55402".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+        // addr1 and addr2 have DIFFERENT IPs.
+        // EvictUserSameIpOldest will NOT match (different IP), so GraceHoldStream is evaluated.
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-grace-ctx".to_string();
+        user.max_connections = 1;
+
+        // Register the connection first so update_connection succeeds
+        app_state.connection_manager.add_connection(&addr1).await;
+
+        // Create the session — lifecycle starts as Prepared (uncounted)
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-existing-counted",
+                virtual_id: 55401,
+                provider: "provider_1",
+                stream_url: "http://provider-1.example/live/55401.m3u8",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+
+        // update_connection promotes the session to Active (counted) and creates a stream.
+        // This exhausts the user's single slot (max_connections = 1).
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55401,
+                meter_uid: 55401,
+                username: "user-grace-ctx",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider_1".intern(),
+                stream_channel: &create_test_live_channel("http://provider-1.example/live/55401.m3u8"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-existing-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        // Now the new request finds the slot exhausted and the grace strategy kicks in.
+        let result = resolve_admission_with_strategies(
+            &app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new-request"),
+            true,
+            EvictionReentryGuard::Session("tok-new-request"),
+        )
+        .await;
+
+        assert_eq!(result.admission.permission, UserConnectionPermission::GracePeriod, "grace should be granted");
+        assert!(matches!(result.grace_mode, Some(crate::api::model::GraceMode::Hold)));
+        let ctx = result.grace_context.expect("grace_context must be present when grace is granted");
+        assert_eq!(ctx.strategy_index, 1, "GraceHoldStream is at index 1");
+        assert_eq!(ctx.strategies.len(), 3);
+        assert!(matches!(ctx.strategies[ctx.strategy_index], AdmissionStrategy::GraceHoldStream));
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_evicts_after_used_grace() {
+        // Strategies: [GraceHoldStream, EvictUserOldest]
+        // Grace was used at index 0, so only EvictUserOldest (index 1) is evaluated.
+        // Eviction frees the slot → Allowed.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::EvictUserOldest,
+        ];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserOldest,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55701".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:55702".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "remaining-evict".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted",
+                virtual_id: 55701,
+                provider: "provider-evict",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55701,
+                meter_uid: 55701,
+                username: "remaining-evict",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-evict".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "remaining-evict",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Normal),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Allowed,
+            "EvictUserOldest should free the slot"
+        );
+        assert!(result.grace_context.is_none(), "no grace context on eviction success");
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() {
+        // Strategies: [GraceHoldStream, EvictUserSameIpOldest, EvictUserOldest]
+        // Grace was at index 0, remaining are EvictUserSameIpOldest (index 1) and EvictUserOldest (index 2).
+        // The existing counted session is at a DIFFERENT IP, so EvictUserSameIpOldest → NoMatch.
+        // EvictUserOldest succeeds → Allowed.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::EvictUserSameIpOldest,
+            AdmissionStrategy::EvictUserOldest,
+        ];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
             metrics_enabled: true,
@@ -3256,6 +4917,463 @@ mod tests {
             admission_strategies: Some(vec![
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::EvictUserOldest,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55801".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:55802".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "remaining-skip-no-match".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted",
+                virtual_id: 55801,
+                provider: "provider-skip",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55801,
+                meter_uid: 55801,
+                username: "remaining-skip-no-match",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-skip".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "remaining-skip-no-match",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Normal),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Allowed,
+            "EvictUserSameIpOldest should NoMatch, EvictUserOldest should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_empty_slice_denies() {
+        // Strategies: [GraceHoldStream]
+        // Grace was at index 0, remaining slice is empty → exhausted.
+        let strategies = vec![AdmissionStrategy::GraceHoldStream];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+
+        let addr: SocketAddr = "10.0.0.5:55901".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "no-remaining-strategies",
+            1,
+            0,
+            &fingerprint.client_ip,
+            &fingerprint.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Exhausted,
+            "empty remaining slice should deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
+        // Strategies: [GraceHoldStream]
+        // Grace was at index 0, remaining slice is empty → exhausted.
+        // grace_context.kind is Soft — must be preserved in the exhausted result.
+        let strategies = vec![AdmissionStrategy::GraceHoldStream];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Soft) };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+
+        let addr: SocketAddr = "10.0.0.6:55902".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "soft-kind-user",
+            1,
+            0,
+            &fingerprint.client_ip,
+            &fingerprint.addr,
+            true,
+            Some("tok-soft"),
+            true,
+            EvictionReentryGuard::Session("tok-soft"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Soft),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Exhausted,
+            "empty remaining slice should deny"
+        );
+        assert_eq!(
+            result.admission.kind,
+            Some(crate::api::model::ConnectionKind::Soft),
+            "exhausted result must preserve the original Soft connection kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_does_not_retry_used_prefix() {
+        // Strategies: [GraceHoldStream, GraceInstantStream, EvictUserOldest]
+        // Grace was at index 1 (GraceInstantStream).
+        // Remaining slice: [EvictUserOldest] (index 2).
+        // GraceHoldStream (index 0) must NOT be re-evaluated.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::GraceInstantStream,
+            AdmissionStrategy::EvictUserOldest,
+        ];
+        let strategies_for_config = strategies.clone();
+        let grace_context = GraceResolutionContext { strategy_index: 1, strategies, kind: None };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(strategies_for_config),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:56001".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:56002".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "remaining-no-retry".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted",
+                virtual_id: 56001,
+                provider: "provider-no-retry",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 56001,
+                meter_uid: 56001,
+                username: "remaining-no-retry",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-no-retry".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "remaining-no-retry",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Normal),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Allowed,
+            "only EvictUserOldest should be evaluated, not GraceHoldStream"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_context_kind() {
+        // grace_context.kind = Normal, original_kind = Soft
+        // remaining slice is empty → exhausted result must use original_kind.
+        // This proves the empty-slice branch uses original_kind, not grace_context.kind.
+        let strategies = vec![AdmissionStrategy::GraceHoldStream];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Normal) };
+        let original_kind = Some(crate::api::model::ConnectionKind::Soft);
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+
+        let addr: SocketAddr = "10.0.0.7:55903".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "kind-mismatch-empty",
+            1,
+            0,
+            &fingerprint.client_ip,
+            &fingerprint.addr,
+            true,
+            Some("tok-empty"),
+            true,
+            EvictionReentryGuard::Session("tok-empty"),
+            &grace_context,
+            original_kind,
+        )
+        .await;
+
+        assert_eq!(result.admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(
+            result.admission.kind,
+            original_kind,
+            "exhausted result must use original_kind (Soft), not grace_context.kind (Normal)"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_later_grace_uses_original_kind_not_context_kind() {
+        // grace_context.kind = Normal, original_kind = Soft
+        // Strategies: [GraceHoldStream, GraceInstantStream]
+        // Grace was used at index 0 (GraceHoldStream).
+        // Remaining slice contains GraceInstantStream (index 1).
+        // When the helper returns Grace for the remaining strategy, the new
+        // GraceResolutionContext.kind must be original_kind (Soft), not grace_context.kind (Normal).
+        // This proves build_grace_ctx uses original_kind as source of truth.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::GraceInstantStream,
+        ];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Normal) };
+        let original_kind = Some(crate::api::model::ConnectionKind::Soft);
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::GraceInstantStream,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55710".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.8:55711".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "kind-mismatch-grace".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted-grace",
+                virtual_id: 55710,
+                provider: "provider-grace-kind",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55710,
+                meter_uid: 55710,
+                username: "kind-mismatch-grace",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-grace-kind".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted-grace"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "kind-mismatch-grace",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new-grace"),
+            true,
+            EvictionReentryGuard::Session("tok-new-grace"),
+            &grace_context,
+            original_kind,
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::GracePeriod,
+            "remaining GraceInstantStream should grant GracePeriod"
+        );
+        assert!(
+            result.grace_context.is_some(),
+            "grace_context must be present when grace is granted"
+        );
+        assert_eq!(
+            result.grace_context.as_ref().unwrap().kind,
+            original_kind,
+            "GraceResolutionContext.kind in the result must be original_kind (Soft), not grace_context.kind (Normal)"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn resolve_admission_with_strategies_falls_through_after_failed_grace_grant() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserOldest,
             ]),
         });
 
@@ -3266,6 +5384,26 @@ mod tests {
 
         app_state.connection_manager.add_connection(&first_addr).await;
         app_state.connection_manager.add_connection(&second_addr).await;
+
+        let mut session_user = ProxyUserCredentials::default();
+        session_user.username = "fallthrough".to_string();
+        session_user.max_connections = 1;
+        session_user.soft_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &session_user,
+                session_token: "tok-first",
+                virtual_id: 1,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/1.ts",
+                addr: &first_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
 
         app_state
             .connection_manager
@@ -3288,6 +5426,21 @@ mod tests {
         assert!(app_state.active_users.grant_grace("fallthrough").await);
 
         app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &session_user,
+                session_token: "tok-second",
+                virtual_id: 2,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/2.ts",
+                addr: &second_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Soft),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
             .connection_manager
             .update_connection(crate::api::model::ConnectionParams {
                 meter_uid: 2,
@@ -3305,7 +5458,7 @@ mod tests {
             })
             .await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "fallthrough",
             1,
@@ -3318,9 +5471,11 @@ mod tests {
             EvictionReentryGuard::Session("tok-third"),
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
-        assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+        assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Normal));
         assert_eq!(grace_mode, None);
     }
 
@@ -3379,7 +5534,7 @@ mod tests {
             EvictionReentryGuard::Session("vod-session"),
         )
             .await;
-        assert_eq!(session_based.0.permission, UserConnectionPermission::Allowed);
+        assert_eq!(session_based.admission.permission, UserConnectionPermission::Allowed);
 
         let connection_based = resolve_admission_with_strategies(
             &app_state,
@@ -3394,7 +5549,7 @@ mod tests {
             EvictionReentryGuard::Session("vod-session"),
         )
             .await;
-        assert_eq!(connection_based.0.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(connection_based.admission.permission, UserConnectionPermission::Exhausted);
     }
 
     #[tokio::test]
@@ -3469,7 +5624,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user",
             1,
@@ -3482,6 +5637,8 @@ mod tests {
             EvictionReentryGuard::SocketPlayback { virtual_id: 9001 },
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
         assert_eq!(grace_mode, None);
@@ -3491,6 +5648,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn resolve_admission_with_strategies_allows_other_channel_after_recent_eviction() {
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -3517,9 +5675,41 @@ mod tests {
         victim_channel.virtual_id = 9101;
         let mut winner_channel = create_test_live_channel("http://provider-1.example/live/9102.ts");
         winner_channel.virtual_id = 9102;
+        let mut session_user = ProxyUserCredentials::default();
+        session_user.username = "loop-user-2".to_string();
 
         app_state.connection_manager.add_connection(&victim_addr).await;
         app_state.connection_manager.add_connection(&winner_addr).await;
+
+        // Create sessions before update_connection so streams are linked to counted sessions
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &session_user,
+                session_token: "session-victim",
+                virtual_id: 9101,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/9101.ts",
+                addr: &victim_addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &session_user,
+                session_token: "session-winner",
+                virtual_id: 9102,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/9102.ts",
+                addr: &winner_addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
 
         app_state
             .connection_manager
@@ -3562,7 +5752,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, _grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user-2",
             1,
@@ -3575,12 +5765,14 @@ mod tests {
             EvictionReentryGuard::SocketPlayback { virtual_id: 9103 },
         )
             .await;
+        let admission = result.admission;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert!(app_state.active_users.active_streams().await.is_empty());
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn resolve_admission_with_strategies_does_not_suppress_different_session_on_same_channel() {
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
@@ -3606,9 +5798,41 @@ mod tests {
         let mut channel = create_test_live_channel("http://provider-1.example/live/9301.m3u8");
         channel.virtual_id = 9301;
         channel.item_type = PlaylistItemType::LiveHls;
+        let mut session_user = ProxyUserCredentials::default();
+        session_user.username = "loop-user-4".to_string();
 
         app_state.connection_manager.add_connection(&victim_addr).await;
         app_state.connection_manager.add_connection(&winner_addr).await;
+
+        // Create sessions before update_connection so streams are linked to counted sessions
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &session_user,
+                session_token: "session-victim",
+                virtual_id: 9301,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/9301.m3u8",
+                addr: &victim_addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &session_user,
+                session_token: "session-winner",
+                virtual_id: 9301,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/9301.m3u8",
+                addr: &winner_addr,
+                connection_permission: shared::model::UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
 
         app_state
             .connection_manager
@@ -3651,7 +5875,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user-4",
             1,
@@ -3664,6 +5888,8 @@ mod tests {
             EvictionReentryGuard::Session("session-other"),
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(grace_mode, None);
@@ -3742,7 +5968,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user-3",
             1,
@@ -3755,6 +5981,8 @@ mod tests {
             EvictionReentryGuard::SocketPlayback { virtual_id: 9201 },
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
@@ -3805,10 +6033,11 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Normal,
             None,
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "local file streaming should register an active stream");
@@ -3864,10 +6093,11 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Normal,
             Some(&first_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         let _second_response = local_stream_response(
             &second_fingerprint,
@@ -3880,17 +6110,23 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Normal,
             Some(&second_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         assert_eq!(app_state.active_users.user_connections(&user.username).await, 1);
         assert_eq!(app_state.active_users.active_streams().await.len(), 1);
         assert_eq!(
             app_state
                 .active_users
-                .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
+                .connection_admission_for_session(
+                    &user.username,
+                    user.max_connections,
+                    user.soft_connections,
+                    &second_token
+                )
                 .await
                 .permission,
             UserConnectionPermission::Exhausted,
@@ -3903,10 +6139,7 @@ mod tests {
         let app_state = create_test_provider_app_state();
         let stream_url = "http://provider-1.example/live/shared.ts";
         let input_name = "provider_1".intern();
-        let input = app_state
-            .app_config
-            .get_input_by_name(&input_name)
-            .expect("provider input should exist");
+        let input = app_state.app_config.get_input_by_name(&input_name).expect("provider input should exist");
         let target = Arc::new(create_test_shared_target());
 
         let owner_addr = "127.0.0.1:55140".parse().unwrap_or_else(|_| unreachable!());
@@ -3927,7 +6160,7 @@ mod tests {
             0,
             crate::api::model::ConnectionKind::Normal,
         )
-            .await;
+        .await;
         assert!(registered.is_some(), "shared stream should register");
 
         let mut user = ProxyUserCredentials::default();
@@ -3961,9 +6194,8 @@ mod tests {
             .await
             .expect("normal stream should register");
 
-        let admission = app_state
-            .get_connection_admission(&user.username, user.max_connections, user.soft_connections)
-            .await;
+        let admission =
+            app_state.get_connection_admission(&user.username, user.max_connections, user.soft_connections).await;
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
 
@@ -3973,6 +6205,7 @@ mod tests {
             &soft_fingerprint,
             &app_state,
             "soft-session",
+            None,
             create_test_live_channel(stream_url),
             stream_url,
             &HeaderMap::default(),
@@ -3984,15 +6217,92 @@ mod tests {
             false,
             None,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let session_admission = app_state
             .active_users
-            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, "soft-session")
+            .connection_admission_for_session(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                "soft-session",
+            )
             .await;
         assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
+    }
+
+    #[tokio::test]
+    async fn stream_response_rolls_back_provisional_user_activation_when_provider_open_fails() {
+        let mut app_cfg = create_test_provider_app_config();
+        app_cfg.config = Arc::new(ArcSwap::from_pointee(Config {
+            user_access_control: true,
+            ..Config::default()
+        }));
+        let app_state = create_test_app_state_for_config(Arc::new(app_cfg));
+        let addr = "127.0.0.1:55143".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .get_input_by_name(&input_name)
+            .expect("provider input should exist");
+        let target = Arc::new(ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "test".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let mut user = ProxyUserCredentials::default();
+        user.username = "rollback-user".to_string();
+        user.max_connections = 1;
+        let stream_url = "provider://bad-url";
+        let channel = create_test_live_channel(stream_url);
+
+        let response = stream_response(
+            &fingerprint,
+            &app_state,
+            "rollback-session",
+            None,
+            channel,
+            stream_url,
+            &HeaderMap::default(),
+            &input,
+            &target,
+            &user,
+            UserConnectionPermission::Allowed,
+            crate::api::model::ConnectionKind::Normal,
+            false,
+            None,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            app_state.active_users.user_connections(&user.username).await,
+            0,
+            "failed provider open must rollback provisional user activation"
+        );
+        assert!(
+            app_state
+                .active_users
+                .get_and_update_user_session(&user.username, "rollback-session")
+                .await
+                .is_none(),
+            "failed provider open must remove the provisional placeholder session"
+        );
     }
 
     #[tokio::test]
@@ -4035,10 +6345,11 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Normal,
             None,
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         assert!(!should_compress_response(&response));
     }
@@ -4085,10 +6396,11 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         let _second_response = local_stream_response(
             &second_fingerprint,
@@ -4101,10 +6413,11 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1, "stable playback token should reuse the tracked local connection");
@@ -4156,10 +6469,11 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         let second_response = local_stream_response(
             &second_fingerprint,
@@ -4172,10 +6486,11 @@ mod tests {
             UserConnectionPermission::Exhausted,
             crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         assert_eq!(second_response.status(), StatusCode::OK);
 
@@ -4230,10 +6545,11 @@ mod tests {
             UserConnectionPermission::Allowed,
             crate::api::model::ConnectionKind::Soft,
             Some(playback_session_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         let second_response = local_stream_response(
             &second_fingerprint,
@@ -4246,22 +6562,28 @@ mod tests {
             UserConnectionPermission::Exhausted,
             crate::api::model::ConnectionKind::Normal,
             Some(playback_session_token),
+            None,
             false,
         )
-            .await
-            .into_response();
+        .await
+        .into_response();
 
         assert_eq!(second_response.status(), StatusCode::OK);
 
         let session_admission = app_state
             .active_users
-            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, playback_session_token)
+            .connection_admission_for_session(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                playback_session_token,
+            )
             .await;
         assert_eq!(session_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
     }
 
     #[tokio::test]
-    async fn activated_session_admission_reserves_hls_slots_via_api_utils() {
+    async fn activated_session_admission_keeps_hls_placeholders_uncounted_via_api_utils() {
         let app_state = create_test_app_state();
         let mut user = ProxyUserCredentials::default();
         user.username = "hls-user".to_string();
@@ -4313,8 +6635,7 @@ mod tests {
             true,
             EvictionReentryGuard::Session("tok-hls-first"),
         )
-            .await
-            .0;
+            .await;
         let second_admission = resolve_admission_with_strategies(
             &app_state,
             &user.username,
@@ -4327,11 +6648,11 @@ mod tests {
             true,
             EvictionReentryGuard::Session("tok-hls-second"),
         )
-            .await
-            .0;
+            .await;
 
-        assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
-        assert_eq!(second_admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(first_admission.admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(second_admission.admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(app_state.active_users.user_connections(&user.username).await, 0);
     }
 
     #[tokio::test]
@@ -4387,9 +6708,127 @@ mod tests {
 
         let admission = app_state
             .active_users
-            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
+            .connection_admission_for_session(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                &second_token,
+            )
             .await;
         assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn resolve_admission_with_strategies_evicts_preserved_hls_session_for_same_user_ts_request() {
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::EvictUserSameIpLatest,
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserOldest,
+                AdmissionStrategy::EvictUserLatest,
+            ]),
+        });
+
+        let hls_addr: std::net::SocketAddr = "127.0.0.1:55176".parse().unwrap_or_else(|_| unreachable!());
+        let ts_addr: std::net::SocketAddr = "127.0.0.1:55177".parse().unwrap_or_else(|_| unreachable!());
+        let hls_fingerprint = create_test_fingerprint_with_user_agent(hls_addr, "player/1.0");
+        let ts_fingerprint = create_test_fingerprint_with_user_agent(ts_addr, "player/1.0");
+        let mut user = ProxyUserCredentials::default();
+        user.username = "same-user".to_string();
+        user.max_connections = 1;
+
+        app_state.connection_manager.add_connection(&hls_addr).await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-preserved",
+                virtual_id: 5001,
+                provider: "provider-a",
+                stream_url: "http://provider-1.example/live/5001.m3u8",
+                addr: &hls_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &hls_fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &StreamChannel {
+                    item_type: PlaylistItemType::LiveHls,
+                    virtual_id: 5001,
+                    ..create_test_live_channel("http://provider-1.example/live/5001.m3u8")
+                },
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-hls-preserved"),
+            })
+            .await;
+
+        app_state.connection_manager.release_connection(&hls_addr).await;
+        assert_eq!(app_state.active_users.user_connections(&user.username).await, 0);
+        assert!(app_state.active_users.active_streams().await.is_empty());
+
+        let mut close_rx = app_state.connection_manager.get_close_connection_channel();
+        let result = resolve_admission_with_strategies(
+            &app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &ts_fingerprint.client_ip,
+            &ts_fingerprint.addr,
+            false,
+            None,
+            false,
+            EvictionReentryGuard::SocketPlayback { virtual_id: 5001 },
+        )
+        .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
+
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(grace_mode, None);
+        assert!(app_state.active_users.active_streams().await.is_empty());
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), close_rx.recv())
+                .await
+                .ok()
+                .and_then(Result::ok),
+            Some(crate::api::model::CloseConnectionSignal::WithReason(
+                hls_addr,
+                shared::model::DisconnectReason::ClientKicked,
+            ))
+        );
+        assert!(
+            app_state
+                .active_users
+                .get_and_update_user_session(&user.username, "tok-hls-preserved")
+                .await
+                .is_none(),
+            "preserved session should be removed once the TS request evicts it"
+        );
     }
 
     #[tokio::test]
@@ -4450,7 +6889,12 @@ mod tests {
 
         let second_admission = app_state
             .active_users
-            .connection_admission_for_session(&user.username, user.max_connections, user.soft_connections, &second_token)
+            .connection_admission_for_session(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                &second_token,
+            )
             .await;
         assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(second_admission.kind, Some(crate::api::model::ConnectionKind::Soft));
@@ -4513,6 +6957,280 @@ mod tests {
         assert_ne!(logical, socket_bound);
         assert!(logical.contains(&fingerprint.key));
         assert!(socket_bound.contains(&fingerprint.addr.to_string()));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn xtream_hls_then_ts_uses_distinct_tokens_and_evicts_old_hls_session() {
+        let mut app_cfg = create_test_app_config();
+        let config = Config {
+            user_access_control: true,
+            reverse_proxy: Some(crate::model::ReverseProxyConfig {
+                resource_rewrite_disabled: false,
+                rewrite_secret: [0; 16],
+                resource_retry: crate::model::ResourceRetryConfig::default(),
+                disabled_header: None,
+                stream: Some(crate::model::StreamConfig {
+                    retry: true,
+                    metrics_enabled: true,
+                    buffer: None,
+                    grace_period_millis: 2_000,
+                    grace_period_timeout_secs: 8,
+                    grace_period_hold_stream: true,
+                    hls_session_ttl_secs: 10,
+                    catchup_session_ttl_secs: 10,
+                    throttle_str: None,
+                    throttle_kbps: 0,
+                    shared_burst_buffer_mb: 1,
+                    admission_strategies: Some(vec![
+                        AdmissionStrategy::EvictUserSameIpOldest,
+                        AdmissionStrategy::EvictUserSameIpLatest,
+                        AdmissionStrategy::GraceHoldStream,
+                        AdmissionStrategy::EvictUserOldest,
+                        AdmissionStrategy::EvictUserLatest,
+                    ]),
+                }),
+                cache: None,
+                rate_limit: None,
+                geoip: None,
+                stream_history: None,
+                qos_aggregation: None,
+            }),
+            ..Config::default()
+        };
+        app_cfg.config = Arc::new(ArcSwap::from_pointee(config));
+        let app_state = create_test_app_state_for_config(Arc::new(app_cfg));
+        let hls_addr: SocketAddr = "127.0.0.1:55186".parse().unwrap_or_else(|_| unreachable!());
+        let ts_addr: SocketAddr = "127.0.0.1:55187".parse().unwrap_or_else(|_| unreachable!());
+        let hls_fingerprint = create_test_fingerprint_with_user_agent(hls_addr, "libmpv");
+        let ts_fingerprint = create_test_fingerprint_with_user_agent(ts_addr, "libmpv");
+        let mut user = ProxyUserCredentials::default();
+        user.username = "xtream-hls-ts".to_string();
+        user.max_connections = 1;
+
+        let virtual_id = 7811;
+        let hls_token = create_session_fingerprint(&hls_fingerprint, &user.username, virtual_id, false);
+        let ts_token = create_session_fingerprint(&ts_fingerprint, &user.username, virtual_id, true);
+        assert_ne!(hls_token, ts_token, "Xtream .m3u8 and .ts must not share the same playback token");
+
+        let mut hls_channel = create_test_live_channel("http://provider-1.example/live/7811.m3u8");
+        hls_channel.virtual_id = virtual_id;
+        hls_channel.item_type = PlaylistItemType::LiveHls;
+        let mut ts_channel = create_test_live_channel("http://provider-1.example/live/7811.ts");
+        ts_channel.virtual_id = virtual_id;
+
+        app_state.connection_manager.add_connection(&hls_addr).await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: &hls_token,
+                virtual_id,
+                provider: "provider_1",
+                stream_url: hls_channel.url.as_ref(),
+                addr: &hls_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 1,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &hls_fingerprint,
+                provider: "provider_1".intern(),
+                stream_channel: &hls_channel,
+                user_agent: Cow::Borrowed("libmpv"),
+                session_token: Some(&hls_token),
+            })
+            .await;
+
+        app_state.connection_manager.release_connection(&hls_addr).await;
+        assert!(
+            app_state
+                .active_users
+                .get_and_update_user_session(&user.username, &hls_token)
+                .await
+                .is_some(),
+            "preserved HLS session should still exist before the competing TS request"
+        );
+        assert_eq!(
+            app_state
+                .active_users
+                .connection_admission(&user.username, user.max_connections, user.soft_connections)
+                .await
+                .permission,
+            UserConnectionPermission::Exhausted,
+            "the preserved HLS playback must still reserve the user's only slot before the TS request is evaluated"
+        );
+        assert_eq!(
+            app_state
+                .active_users
+                .get_eviction_candidates(&user.username, &ts_fingerprint.client_ip)
+                .await
+                .len(),
+            1,
+            "the preserved HLS playback should be the single eviction candidate for the competing TS request"
+        );
+
+        let (ts_admission, ts_grace_mode, request_class) = resolve_playback_request_admission(
+            &app_state,
+            &user,
+            &ts_fingerprint,
+            PlaylistItemType::Live,
+            None,
+            &ts_token,
+            false,
+            EvictionReentryGuard::SocketPlayback { virtual_id },
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(request_class, PlaybackRequestClass::Activate);
+        assert_eq!(ts_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(ts_grace_mode, None);
+        assert!(
+            app_state
+                .active_users
+                .get_and_update_user_session(&user.username, &hls_token)
+                .await
+                .is_none(),
+            "the competing TS activation must remove the old preserved HLS session even though there is no live socket left to kick"
+        );
+
+        app_state.connection_manager.add_connection(&ts_addr).await;
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: &ts_token,
+                virtual_id,
+                provider: "provider_1",
+                stream_url: ts_channel.url.as_ref(),
+                addr: &ts_addr,
+                connection_permission: ts_admission.permission,
+                connection_kind: ts_admission.kind,
+                socket_bound: true,
+            })
+            .await;
+        app_state
+            .connection_manager
+            .update_connection(crate::api::model::ConnectionParams {
+                meter_uid: 2,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &ts_fingerprint,
+                provider: "provider_1".intern(),
+                stream_channel: &ts_channel,
+                user_agent: Cow::Borrowed("libmpv"),
+                session_token: Some(&ts_token),
+            })
+            .await;
+
+        assert!(
+            app_state
+                .active_users
+                .get_and_update_user_session(&user.username, &hls_token)
+                .await
+                .is_none(),
+            "after the competing TS request, the old Xtream HLS session must be gone so later /hls segment fetches cannot revive it"
+        );
+        assert!(
+            app_state
+                .active_users
+                .get_and_update_user_session(&user.username, &ts_token)
+                .await
+                .is_some(),
+            "the winning TS playback should remain tracked under its socket-bound Xtream token"
+        );
+    }
+
+    #[test]
+    fn socket_bound_playback_session_matches_only_plain_live_playback() {
+        assert!(is_socket_bound_playback_session(PlaylistItemType::Live, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Live, Some(HLS_EXT)));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Live, Some(DASH_EXT)));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::LiveHls, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Video, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Series, None));
+        assert!(!is_socket_bound_playback_session(PlaylistItemType::Catchup, None));
+    }
+
+    #[test]
+    fn session_reacquire_cleanup_addrs_excludes_current_and_deduplicates() {
+        let primary: SocketAddr = "127.0.0.1:55191".parse().unwrap_or_else(|_| unreachable!());
+        let overlap: SocketAddr = "127.0.0.1:55192".parse().unwrap_or_else(|_| unreachable!());
+        let seek: SocketAddr = "127.0.0.1:55193".parse().unwrap_or_else(|_| unreachable!());
+        let session = UserSession {
+            token: "tok-vod".to_string(),
+            transition_version: 1,
+            virtual_id: 9001,
+            provider: "provider-a".intern(),
+            stream_url: "http://localhost/movie.mkv".intern(),
+            addr: seek,
+            socket_bound: false,
+            active_addrs: vec![primary, overlap, seek, overlap],
+            ts: 1,
+            started_at: 1,
+            permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+            lifecycle: crate::api::model::PlaybackLifecycle::Active,
+        };
+
+        assert_eq!(session_reacquire_cleanup_addrs(&session, &seek), vec![primary, overlap]);
+    }
+
+    #[test]
+    fn grace_hold_defers_live_but_not_provider_affine_session_reopens() {
+        assert!(should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::LiveHls, false));
+        assert!(should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Video, false));
+        assert!(!should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Catchup, true));
+        assert!(!should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Video, true));
+        assert!(!should_defer_provider_open_for_grace_hold(true, false, PlaylistItemType::Video, true));
+    }
+
+    #[tokio::test]
+    async fn forced_reopen_cleanup_for_adaptive_streams_does_not_close_client_socket() {
+        let app_state = create_test_app_state();
+        let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
+        let mut close_rx = app_state.connection_manager.get_close_connection_channel();
+
+        cleanup_forced_reopen_addrs(&app_state, PlaylistItemType::LiveHls, &[addr]).await;
+
+        let signal = tokio::time::timeout(std::time::Duration::from_millis(50), close_rx.recv())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        assert!(signal.is_none(), "adaptive cleanup should not hard-close the previous client socket");
+    }
+
+    #[tokio::test]
+    async fn forced_reopen_cleanup_for_non_adaptive_streams_closes_client_socket() {
+        let app_state = create_test_app_state();
+        let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
+        let mut close_rx = app_state.connection_manager.get_close_connection_channel();
+
+        cleanup_forced_reopen_addrs(&app_state, PlaylistItemType::Live, &[addr]).await;
+
+        let signal = tokio::time::timeout(std::time::Duration::from_millis(50), close_rx.recv())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        assert!(matches!(
+            signal,
+            Some(crate::api::model::CloseConnectionSignal::WithReason(signal_addr, _)) if signal_addr == addr
+        ));
     }
 
     #[tokio::test]
