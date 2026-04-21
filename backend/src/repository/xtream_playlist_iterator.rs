@@ -20,7 +20,18 @@ pub struct XtreamPlaylistIterator {
     inner: LockedReceiverStream<(XtreamPlaylistItem, bool)>,
 }
 
+fn is_cluster_allowed_for_user(user: &ProxyUserCredentials, cluster: XtreamCluster) -> bool {
+    user.allows_cluster(cluster)
+}
+
 impl XtreamPlaylistIterator {
+    fn empty() -> Self {
+        // Ghost Channel pattern
+        // When you immediately drop the sender with `_`, the channel is closed and receiver gets None.
+        let (_tx, rx) = mpsc::channel::<(XtreamPlaylistItem, bool)>(1);
+        Self { inner: LockedReceiverStream::new_empty(rx) }
+    }
+
     pub async fn new(
         cluster: XtreamCluster,
         app_config: &AppConfig,
@@ -29,6 +40,9 @@ impl XtreamPlaylistIterator {
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
         // TODO use playlist memory cache and keep sorted
+        if !is_cluster_allowed_for_user(user, cluster) {
+            return Ok(Self::empty());
+        }
 
         debug_assert!(target.get_xtream_output().is_some());
         let config = app_config.config.load();
@@ -43,7 +57,6 @@ impl XtreamPlaylistIterator {
 
             let filter =
                 user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
-            let output_clusters = user.output_clusters;
             // Parse bouquet filter (strings) once into u32 set to minimize per-item allocations
             let filter_ids: Option<HashSet<u32>> = filter.as_ref().map(|set| {
                 set.iter()
@@ -89,10 +102,6 @@ impl XtreamPlaylistIterator {
                             continue;
                         }
                     };
-
-                    if !output_clusters.has_cluster(item.item_type) {
-                        continue;
-                    }
 
                     if !Self::matches_filters(cluster, filter_ids.as_ref(), &item) {
                         continue;
@@ -174,12 +183,19 @@ impl XtreamPlaylistJsonIterator {
             user,
             encrypt_secret,
         )?;
+        if !is_cluster_allowed_for_user(user, cluster) {
+            return Ok(Self {
+                inner: XtreamPlaylistIterator::empty(),
+                options,
+            });
+        }
         Ok(Self {
             inner: XtreamPlaylistIterator::new(cluster, &app_state.app_config, target, category_id, user).await?,
             options,
         })
     }
 }
+
 
 impl Stream for XtreamPlaylistJsonIterator {
     type Item = (String, bool);
@@ -195,5 +211,30 @@ impl Stream for XtreamPlaylistJsonIterator {
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{is_cluster_allowed_for_user, XtreamPlaylistIterator};
+    use crate::model::ProxyUserCredentials;
+    use shared::model::{ClusterFlags, XtreamCluster};
+    use futures::StreamExt;
+
+    #[test]
+    fn cluster_guard_respects_user_cluster_flags() {
+        let mut user = ProxyUserCredentials::default();
+        user.output_clusters = ClusterFlags::Live | ClusterFlags::Series;
+
+        assert!(is_cluster_allowed_for_user(&user, XtreamCluster::Live));
+        assert!(!is_cluster_allowed_for_user(&user, XtreamCluster::Video));
+        assert!(is_cluster_allowed_for_user(&user, XtreamCluster::Series));
+    }
+
+    #[tokio::test]
+    async fn empty_iterator_yields_no_items() {
+        let mut iter = XtreamPlaylistIterator::empty();
+        assert!(iter.next().await.is_none());
     }
 }

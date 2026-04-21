@@ -14,14 +14,21 @@ use super::{BPlusTreeQuery, BPlusTreeSortedIteratorOwned, PlaylistIteratorReader
 /// Stream wrapper that holds a file read lock for the lifetime of the stream.
 pub struct LockedReceiverStream<T> {
     rx: ReceiverStream<T>,
-    _guard: FileReadGuard,
+    _guard: Option<FileReadGuard>,
 }
 
 impl<T> LockedReceiverStream<T> {
     pub fn new(rx: mpsc::Receiver<T>, guard: FileReadGuard) -> Self {
         Self {
             rx: ReceiverStream::new(rx),
-            _guard: guard,
+            _guard: Some(guard),
+        }
+    }
+
+    pub fn new_empty(rx: mpsc::Receiver<T>) -> Self {
+        Self {
+            rx: ReceiverStream::new(rx),
+            _guard: None,
         }
     }
 }

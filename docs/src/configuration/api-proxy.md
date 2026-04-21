@@ -93,6 +93,7 @@ user:
         password: mysecurepassword
         token: auth_token_abc
         proxy: reverse
+        output_clusters: [live, vod]
         server: default
         max_connections: 1
         epg_timeshift: Europe/Paris
@@ -101,7 +102,7 @@ user:
         priority: -10
 
       # Compact inline syntax is also supported:
-      - { username: x3452, password: p, token: 4342sd, proxy: redirect, server: external, epg_timeshift: -2:30 }
+      - { username: x3452, password: p, token: 4342sd, proxy: redirect, output_clusters: [live, vod, series], server: external, epg_timeshift: -2:30 }
 ```
 
 **Crucial Concept:** By default, Tuliprox acts purely as a stream mapper. If you want Tuliprox to actively evaluate the
@@ -112,19 +113,59 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 
 ### Credential Parameters (Deep-Dive)
 
-| Parameter               | Type     | Required | Default    | Technical Impact & Background                                                                                                                                                                                                                                                      |
-|:------------------------|:---------|:--------:|:-----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `username` / `password` | String   |   Yes    |            | The standard Xtream-Codes / M3U credentials used for authentication. Must be unique.                                                                                                                                                                                               |
-| `token`                 | String   |    No    | `None`     | Allows login via a URL parameter (`?token=XYZ`) instead of user/pass. Must be globally unique if set.                                                                                                                                                                              |
-| `proxy`                 | Enum     |    No    | `redirect` | Defines the proxy mode for this user (see [proxy modes](#proxy-modes-proxy) below).                                                                                                                                                                                                |
-| `server`                | String   |    No    | `default`  | Which server block (host/port) is rendered into the playlist for this user.                                                                                                                                                                                                        |
-| `epg_timeshift`         | String   |    No    | `None`     | Shifts EPG times for users in different time zones. Formats supported: `[-+]hh:mm` or `TimeZone`. Examples: `-2:30` (minus 2h30m), `1:45` (1h45m), `+0:15` (15m), `2` (2h), `:30` (30m), `:3` (3m), `Europe/Paris`, `America/New_York`. Only applies when `epg_url` is configured. |
-| `epg_request_timeshift` | String   |    No    | `None`     | Shifts EPG times for users in different time zones specifically to adjust catchup requests                                                                                                                                                                                         |
-| `max_connections`       | Int      |    No    | `0`        | Hard limit of concurrent streams for *this* user. `0` = Unlimited. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                        |
-| `status`                | Enum     |    No    | `Active`   | Possible values: `Active`, `Trial`, `Expired`, `Banned`, `Disabled`, `Pending`. **Requires** `user_access_control: true` in `config.yml` to block non-active streaming.                                                                                                            |
-| `exp_date`              | UnixTs   |    No    | `None`     | Locks the user out after this Unix timestamp. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                                             |
-| `ui_enabled`            | Bool     |    No    | `true`     | Allows this specific user to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                                                                           |
-| `priority`              | Int (i8) |    No    | `0`        | Stream preemption priority. Priority range: `-128` to `127`, where `-128` has the highest priority. Negative numbers are explicitly allowed for top-tier access. (see [user priority](#user-priorities-priority) below)                                                            |
+| Parameter               | Type     | Required | Default    | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                         |
+|:------------------------|:---------|:--------:|:-----------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `username` / `password` | String   |   Yes    |            | The standard Xtream-Codes / M3U credentials used for authentication. Must be unique.                                                                                                                                                                                                                                                                                                                                                  |
+| `token`                 | String   |    No    | `None`     | Allows login via a URL parameter (`?token=XYZ`) instead of user/pass. Must be globally unique if set.                                                                                                                                                                                                                                                                                                                                 |
+| `proxy`                 | Enum     |    No    | `redirect` | Defines the proxy mode for this user (see [proxy modes](#proxy-modes-proxy) below).                                                                                                                                                                                                                                                                                                                                                   |
+| `output_clusters`       | List     |    No    | `all`      | Optional per-user cluster filter for the assigned target. Supported values are `live`, `vod`, and `series`. This controls which clusters are exposed to the user in generated playlists and stream/API responses. At least one cluster should be selected for the filter to be meaningful. If the field is omitted, or resolves to no active cluster selection, the filter is treated as inactive and **all clusters are delivered**. |
+| `server`                | String   |    No    | `default`  | Which server block (host/port) is rendered into the playlist for this user.                                                                                                                                                                                                                                                                                                                                                           |
+| `epg_timeshift`         | String   |    No    | `None`     | Shifts EPG times for users in different time zones. Formats supported: `[-+]hh:mm` or `TimeZone`. Examples: `-2:30` (minus 2h30m), `1:45` (1h45m), `+0:15` (15m), `2` (2h), `:30` (30m), `:3` (3m), `Europe/Paris`, `America/New_York`. Only applies when `epg_url` is configured.                                                                                                                                                    |
+| `epg_request_timeshift` | String   |    No    | `None`     | Shifts EPG times for users in different time zones specifically to adjust catchup requests                                                                                                                                                                                                                                                                                                                                            |
+| `max_connections`       | Int      |    No    | `0`        | Hard limit of concurrent streams for *this* user. `0` = Unlimited. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                                                                                                                                                                           |
+| `status`                | Enum     |    No    | `Active`   | Possible values: `Active`, `Trial`, `Expired`, `Banned`, `Disabled`, `Pending`. **Requires** `user_access_control: true` in `config.yml` to block non-active streaming.                                                                                                                                                                                                                                                               |
+| `exp_date`              | UnixTs   |    No    | `None`     | Locks the user out after this Unix timestamp. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                                                                                                                                                                                                |
+| `ui_enabled`            | Bool     |    No    | `true`     | Allows this specific user to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                                                                                                                                                                                                                              |
+| `priority`              | Int (i8) |    No    | `0`        | Stream preemption priority. Priority range: `-128` to `127`, where `-128` has the highest priority. Negative numbers are explicitly allowed for top-tier access. (see [user priority](#user-priorities-priority) below)                                                                                                                                                                                                               |
+
+---
+
+### Per-User Cluster Selection (`output_clusters`)
+
+`output_clusters` lets you restrict a specific user to only the clusters intended for that account on the assigned
+`target`.
+
+Supported values:
+
+- `live`
+- `vod`
+- `series`
+
+Example:
+
+```yaml
+user:
+  - target: family_target
+    credentials:
+      - username: live_only
+        password: secret
+        output_clusters: [live]
+
+      - username: vod_series_only
+        password: secret
+        output_clusters: [vod, series]
+```
+
+Behavior:
+
+- The filter applies per user, not per target globally.
+- It affects playlist/API visibility and stream delivery for that user.
+- At least one cluster should be selected if you want an active filter.
+- If no cluster is selected, the filter is considered inactive and Tuliprox falls back to delivering **all**
+  clusters.
+
+This means an empty or missing `output_clusters` value does **not** block all content. It means "use the full target
+without cluster restriction".
 
 ---
 
@@ -132,14 +173,14 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 
 This is the most crucial field governing traffic flow for the user. When to use which?
 
-* **`redirect`** *(Default)*: Tuliprox responds to the client with an HTTP 302 Redirect,
+- **`redirect`** *(Default)*: Tuliprox responds to the client with an HTTP 302 Redirect,
   pointing directly to the upstream provider's URL (or rotating through DNS failover IPs).
-  * *When to use:* To save massive bandwidth on your server (Tuliprox only acts as a matchmaker).
-  * *Tradeoff:* **No** connection limits, buffering, bandwidth throttling, or custom fallback videos are applied!
-* **`reverse`**: Tuliprox downloads the video stream from the provider onto your server and pipes it to the client.
-  * *When to use:* This is required for connection limits, fallback videos, caching, bandwidth throttling, and shared
+  - *When to use:* To save massive bandwidth on your server (Tuliprox only acts as a matchmaker).
+  - *Tradeoff:* **No** connection limits, buffering, bandwidth throttling, or custom fallback videos are applied!
+- **`reverse`**: Tuliprox downloads the video stream from the provider onto your server and pipes it to the client.
+  - *When to use:* This is required for connection limits, fallback videos, caching, bandwidth throttling, and shared
       streams to function.
-* **Partial Syntax**: You can mix and match! `reverse[live]` forces Live-TV through Tuliprox
+- **Partial Syntax**: You can mix and match! `reverse[live]` forces Live-TV through Tuliprox
   (allowing shared streams) but redirects VODs (saving bandwidth).
   `reverse[live,vod]` routes everything except Series episodes through Tuliprox.
 
@@ -181,9 +222,9 @@ preempted/killed if any real user needs the slot.)*
 **EPG (Electronic Program Guide)** timeshift allows you to adjust TV program times to match your local time zone. This
 is especially useful when:
 
-* You live in a different time zone than your IPTV provider
-* You want to view programs as if they were aired at a different time
-* Your EPG data is in one time zone, but you need it displayed in another
+- You live in a different time zone than your IPTV provider
+- You want to view programs as if they were aired at a different time
+- Your EPG data is in one time zone, but you need it displayed in another
 
 ---
 
@@ -204,9 +245,9 @@ When configuring users in Tuliprox, you'll find two separate fields for EPG time
 
 ✅ **XMLTV EPG Requests**
 
-* When clients request EPG via `/xmltv.php` or `/epg` endpoints
-* When serving EPG files to applications
-* When you want ALL program times adjusted to your time zone
+- When clients request EPG via `/xmltv.php` or `/epg` endpoints
+- When serving EPG files to applications
+- When you want ALL program times adjusted to your time zone
 
 **Example:** You're in Paris (UTC+2) and your provider is in UTC. All EPG times should be 2 hours earlier.
 
@@ -216,9 +257,9 @@ When configuring users in Tuliprox, you'll find two separate fields for EPG time
 
 ✅ **XTream Catchup API**
 
-* When clients request catchup via `/timeshift` or `/streaming/timeshift.php`
-* When clients provide their own time ranges (`start`, `end`, `duration`)
-* When you need to shift those client-provided times to match your needs
+- When clients request catchup via `/timeshift` or `/streaming/timeshift.php`
+- When clients provide their own time ranges (`start`, `end`, `duration`)
+- When you need to shift those client-provided times to match your needs
 
 **Example:** A client requests catchup from 14:00-16:00. You want these times shifted to match your local time zone.
 
@@ -389,9 +430,9 @@ all).
 
 **A:** Yes! Both `epg_timeshift` and `epg_request_timeshift` are optional (`None`). When empty:
 
-* EPG/EPG times remain unchanged
-* Catchup times are exactly as requested by client
-* No time shifting is applied
+- EPG/EPG times remain unchanged
+- Catchup times are exactly as requested by client
+- No time shifting is applied
 
 ---
 
@@ -399,8 +440,8 @@ all).
 
 **A:** Both are valid formats, but they work differently:
 
-* `+2:00`: A fixed +2 hour offset. This is always +2 hours, regardless of Daylight Saving Time (DST).
-* `Europe/Paris`: Uses the actual Paris time zone, which automatically handles DST (UTC+1 in winter, UTC+2 in summer).
+- `+2:00`: A fixed +2 hour offset. This is always +2 hours, regardless of Daylight Saving Time (DST).
+- `Europe/Paris`: Uses the actual Paris time zone, which automatically handles DST (UTC+1 in winter, UTC+2 in summer).
 
 **Recommendation:** Use timezone names (`Europe/Paris`) for locations with DST. Use fixed offsets (`+2:00`) when you
 want a constant shift.
@@ -418,8 +459,8 @@ IPTV applications. Only configure `epg_request_timeshift` if you specifically ne
 
 **A:** Absolutely! This is the intended design. For example:
 
-* `epg_timeshift: Europe/Berlin` (EPG in Berlin time)
-* `epg_request_timeshift: -2:00` (Catchup shifted by -2 hours)
+- `epg_timeshift: Europe/Berlin` (EPG in Berlin time)
+- `epg_request_timeshift: -2:00` (Catchup shifted by -2 hours)
 
 Each field affects only its specific use case, giving you complete control.
 
@@ -441,8 +482,8 @@ If EPG shows a program at 20:00, it will appear at 17:30 to your client.
 
 **A:** There is no hard limit in Tuliprox, but practical limits apply:
 
-* **For fixed offsets:** Typically -12 to +14 hours (covering most global time differences)
-* **For timezone names:** Any IANA timezone name (e.g., `Pacific/Honolulu` to `Etc/GMT+14`)
+- **For fixed offsets:** Typically -12 to +14 hours (covering most global time differences)
+- **For timezone names:** Any IANA timezone name (e.g., `Pacific/Honolulu` to `Etc/GMT+14`)
 
 ---
 
@@ -526,9 +567,9 @@ Tuliprox also offers **REST-friendly aliases** in case restrictive firewalls or 
 target `.php` extensions. For the sake of simplicity, you can also use `token` in place of
 the `username` and `password` combination on these endpoints:
 
-* `/xtream` instead of `player_api.php`
-* `/m3u` instead of `get.php`
-* `/epg` instead of `xmltv.php`
+- `/xtream` instead of `player_api.php`
+- `/m3u` instead of `get.php`
+- `/epg` instead of `xmltv.php`
 
 ---
 
@@ -542,8 +583,8 @@ and connection kicking will see the proxy's internal IP instead of the actual cl
 
 Ensure your proxy forwards the following:
 
-* `X-Real-IP`
-* `X-Forwarded-For`
+- `X-Real-IP`
+- `X-Forwarded-For`
 
 #### Example: Nginx
 
@@ -584,8 +625,8 @@ your clients must connect via `my-external-domain.com/tuliprox/...`.
 **Configuration Strategy:**
 In this example, we use two paths:
 
-* `/tuliprox`: Used for the **Web-UI** and as the base for the `external` server definition.
-* `/tv`: An optional **shorter alias** for API/Playlist access to keep M3U URLs compact.
+- `/tuliprox`: Used for the **Web-UI** and as the base for the `external` server definition.
+- `/tv`: An optional **shorter alias** for API/Playlist access to keep M3U URLs compact.
 
 ```yaml
 labels:

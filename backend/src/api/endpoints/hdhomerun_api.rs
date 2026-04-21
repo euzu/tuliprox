@@ -268,16 +268,22 @@ async fn lineup_status(
                 }
             } else if target.has_output(TargetType::Xtream) {
                 let credentials = Arc::new(user);
-                let live =
+                let live = if credentials.allows_cluster(XtreamCluster::Live) {
                     match XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &credentials).await {
                         Ok(stream) => stream.count().await,
                         Err(_) => 0,
-                    };
-                let vod =
+                    }
+                } else {
+                    0
+                };
+                let vod = if credentials.allows_cluster(XtreamCluster::Video) {
                     match XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &credentials).await {
                         Ok(stream) => stream.count().await,
                         Err(_) => 0,
-                    };
+                    }
+                } else {
+                    0
+                };
                 live + vod
             } else {
                 0
@@ -364,8 +370,16 @@ async fn lineup(
             Some(base_url)
         };
 
-        let live_channels = XtreamPlaylistIterator::new(XtreamCluster::Live, cfg, target, None, credentials).await.ok();
-        let vod_channels = XtreamPlaylistIterator::new(XtreamCluster::Video, cfg, target, None, credentials).await.ok();
+        let live_channels = if credentials.allows_cluster(XtreamCluster::Live) {
+            XtreamPlaylistIterator::new(XtreamCluster::Live, cfg, target, None, credentials).await.ok()
+        } else {
+            None
+        };
+        let vod_channels = if credentials.allows_cluster(XtreamCluster::Video) {
+            XtreamPlaylistIterator::new(XtreamCluster::Video, cfg, target, None, credentials).await.ok()
+        } else {
+            None
+        };
         let live_stream = xtream_item_to_lineup_stream(
             Arc::clone(cfg),
             XtreamCluster::Live,

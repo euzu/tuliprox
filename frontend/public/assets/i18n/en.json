@@ -582,7 +582,7 @@
       "SOFT_CONNECTIONS": "Additional provider slots above max_connections. Soft connections can be preempted by any normal connection or by a higher-priority soft connection.",
       "SOFT_PRIORITY": "Priority used while this user's connection is consuming a soft slot. Once promoted back to a normal slot, the regular priority applies again.",
       "PASSWORD": "Access password for this user's playlist and streams.",
-      "PLAYLIST": "Playlist specifically assigned to the user proxy context.\n\nThe `L`, `V`, and `S` toggles control which output clusters this user is allowed to receive from that target:\n`L` = Live, `V` = VOD, `S` = Series.\n\nDisabled clusters are hidden from delivery, while the playlist assignment itself stays unchanged.",
+      "PLAYLIST": "Playlist specifically assigned to the user proxy context.\n\nThe `L`, `V`, and `S` toggles control which output clusters this user should receive from that target:\n`L` = Live, `V` = VOD, `S` = Series.\n\nSelect at least one cluster to activate the filter. If no cluster is selected, the cluster filter is inactive and all clusters are delivered for the assigned target.",
       "PROXY": "Proxy access definitions or roles for the designated user.",
       "SERVER": "Target proxy server address or definition.",
       "STATUS": "The active or disabled state of the user proxy credential.",
