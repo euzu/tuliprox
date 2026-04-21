@@ -81,7 +81,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
 
     let app_config = &app_state.app_config;
     let encrypt_secret = app_state.get_encrypt_secret();
-    let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret);
+    let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret)?;
 
     if let Some(content) = pli.get_resolved_info_document(&options) {
         return serde_json::to_string(&content).map_err(|err| TuliproxError::ApiXtream(format!("{err}")));
@@ -251,7 +251,10 @@ fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredent
                               pli: &XtreamPlaylistItem) -> Option<Result<String, TuliproxError>> {
     let app_config = &app_state.app_config;
     let encrypt_secret = app_state.get_encrypt_secret();
-    let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret);
+    let options = match xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret) {
+        Ok(options) => options,
+        Err(err) => return Some(Err(err)),
+    };
     if let Some(content) = pli.get_resolved_info_document(&options) {
         return Some(serde_json::to_string(&content).map_err(|err| TuliproxError::ApiXtream(format!("Failed to serialize stream info: {err}"))));
     }

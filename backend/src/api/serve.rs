@@ -1,4 +1,5 @@
 use crate::api::model::{CloseConnectionSignal, ConnectionManager};
+use shared::model::DisconnectReason;
 use axum::{body::Body, extract::Request, response::Response};
 use futures::FutureExt;
 use hyper::body::Incoming;
@@ -98,7 +99,7 @@ async fn handle_connection<M, S>(
     //
     // TCP keepalive only fires on *idle* connections and therefore does NOT
     // help for active live-streams where the server sends data continuously.
-    // When a client changes IP (e.g. WiFi → 4G) the old TCP connection dies
+    // When a client changes IP (e.g. WiFi -> 4G) the old TCP connection dies
     // without a FIN; without this option the kernel retransmits with
     // exponential back-off for 2–15 minutes before giving up, holding the
     // user connection slot occupied the entire time.
@@ -135,7 +136,8 @@ async fn handle_connection<M, S>(
     tokio::spawn(async move {
         #[allow(unused_mut)]
         let mut builder = Builder::new(TokioExecutor::new());
-        let mut conn = pin!(builder.serve_connection_with_upgrades(io, hyper_service));
+        // Pin<Box<T>> is Unpin, so conn is moveable and can be awaited without extra Pin<> wrappers.
+        let mut conn = Box::pin(builder.serve_connection_with_upgrades(io, hyper_service));
         let mut signal_closed = pin!(signal_tx.closed().fuse());
 
         let connection_manager_clone = Arc::clone(&connection_manager);
@@ -161,8 +163,13 @@ async fn handle_connection<M, S>(
                 Ok(signal) = addr_close_rx.recv() => {
                     match signal {
                         CloseConnectionSignal::WithReason(msg, reason) if msg == addr => {
-                            connection_manager_clone.release_connection_with_reason(&addr, reason).await;
                             debug!("Forced client close {msg} reason={reason:?}");
+                            if matches!(reason, DisconnectReason::ClientKicked) {
+                                connection_manager_clone.release_user_sessions_only(&addr).await;
+                                connection_manager_clone.release_provider_deferred(&addr).await;
+                            } else {
+                                connection_manager_clone.release_connection_with_reason(&addr, reason).await;
+                            }
                             conn.as_mut().graceful_shutdown();
                             break;
                         }

@@ -57,4 +57,5 @@ backend/Cargo.lock
 
 # Ignore ai documentation files
 .c[lor][adu]*
-.dual*
+.dual-graph/
+.dual-graph-context/

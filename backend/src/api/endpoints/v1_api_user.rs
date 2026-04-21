@@ -37,7 +37,7 @@ async fn save_config_api_proxy_user(
     };
 
     // ---------- Search for existing Target and existing User ----------
-    let mut existing_target_index: Option<usize> = None; // index of target (target_name), falls vorhanden
+    let mut existing_target_index: Option<usize> = None; // index of target (target_name), if present
     let mut existing_user_target_index: Option<usize> = None; // index of existing users target
     let mut existing_user_index: Option<usize> = None; // index of the user in the targets credentials list
 
@@ -206,11 +206,27 @@ async fn delete_config_api_proxy_user(
     axum::http::StatusCode::OK.into_response()
 }
 
+/// Terminates a specific playback session for a user.
+///
+/// This is the explicit `Terminate` path from the playback state machine:
+/// - Removes the session and all associated streams
+/// - Releases the counted lease if held
+/// - Sets lifecycle to `Expired`
+async fn terminate_user_session(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path((username, session_token)): axum::extract::Path<(String, String)>,
+) -> impl axum::response::IntoResponse {
+    app_state.active_users.terminate_session(&username, &session_token).await;
+    app_state.active_provider.clear_provider_reservation(&session_token).await;
+    (axum::http::StatusCode::NO_CONTENT).into_response()
+}
+
 pub fn v1_api_user_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
         .route("/user/{target}", axum::routing::post(save_config_api_proxy_user))
         .route("/user/{target}", axum::routing::put(save_config_api_proxy_user))
         .route("/user/{target}/{username}", axum::routing::delete(delete_config_api_proxy_user))
+        .route("/user/{username}/session/{session_token}", axum::routing::delete(terminate_user_session))
 }
 
 pub fn v1_api_user_register_with_permissions(
@@ -226,6 +242,10 @@ pub fn v1_api_user_register_with_permissions(
         .route(
             "/{target}/{username}",
             axum::routing::delete(delete_config_api_proxy_user)
+        )
+        .route(
+            "/{username}/session/{session_token}",
+            axum::routing::delete(terminate_user_session)
         )
         .layer(permission_layer!(app_state, Permission::UserWrite));
 

@@ -670,7 +670,7 @@ impl fmt::Display for ConfigInput {
         write!(f, ", max_connections: {}", self.max_connections)?;
         write!(f, ", method: {:?}", self.method)?;
 
-        // headers, epg etc. wie gehabt…
+        // headers, epg etc. unchanged
 
         write_if_some!(f, self,
             ", username: " => username,

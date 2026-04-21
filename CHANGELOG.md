@@ -106,6 +106,9 @@
   - `grace_instant_stream` and `grace_hold_stream` are mutually exclusive.
   - Grace strategies require `grace_period_millis > 0`.
   - Added comprehensive connection handling documentation covering failures, user-visible behavior, priorities, sessions, and reconnects.
+  - Added two new runtime-flow handbook pages:
+    - operator-facing current runtime flow
+    - developer-facing runtime internals and activity flow
 - **Session Handling Boundary**: HLS and catchup remain session-based for continuity and provider affinity, but regular TS/VOD/local playback is now
   enforced as socket-bound admission.
   - A second non-HLS socket now counts as a second user connection even for the same user, IP, and stream.
@@ -202,7 +205,9 @@
       metadata:
         path: /data/library_metadata
         fallback_to_filename: true
+    ```
 
+    ```yaml
     # After
     metadata_update:
       cache_path: /data/library_metadata  # moved here
@@ -220,7 +225,9 @@
     inputs:
       - type: xtream_batch
         url: 'file:///home/tuliprox/config/batch.csv'
+    ```
 
+    ```yaml
     # After
     inputs:
       - type: xtream_batch

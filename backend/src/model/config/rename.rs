@@ -24,7 +24,9 @@ impl From<&ConfigRenameDto> for ConfigRename {
             })
             .unwrap_or_else(|_| {
                 // Final fallback that avoids panicking on malformed user input.
-                shared::model::REGEX_CACHE.get_or_compile("$^").expect("hardcoded fallback regex '$^' must compile")
+                shared::model::REGEX_CACHE.get_or_compile("$^").unwrap_or_else(|err| {
+                    unreachable!("hardcoded fallback regex '$^' must compile: {err}")
+                })
             });
         Self { field: dto.field, new_name: dto.new_name.clone(), raw_pattern: dto.pattern.clone(), pattern }
     }
