@@ -935,13 +935,19 @@ pub async fn xtream_get_stream_info_response(
 
             let encrypt_secret = app_state.get_encrypt_secret();
 
-            let options = xtream_mapping_option_from_target_options(
+            let options = match xtream_mapping_option_from_target_options(
                 target,
                 xtream_output,
                 &app_state.app_config,
                 user,
                 encrypt_secret,
-            );
+            ) {
+                Ok(options) => options,
+                Err(err) => {
+                    error!("{err}");
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            };
             return axum::Json(pli.to_info_document(&options)).into_response();
         }
 

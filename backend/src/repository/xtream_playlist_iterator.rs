@@ -165,7 +165,7 @@ impl XtreamPlaylistJsonIterator {
             &app_state.app_config,
             user,
             encrypt_secret
-        );
+        )?;
         Ok(Self {
             inner: XtreamPlaylistIterator::new(cluster, &app_state.app_config, target, category_id, user).await?,
             options,
