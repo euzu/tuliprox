@@ -25,6 +25,13 @@ impl<T> LockedReceiverStream<T> {
         }
     }
 
+    /// Creates an intentionally empty stream without a `FileReadGuard`.
+    ///
+    /// Safety invariant:
+    /// This must only be used for receivers whose producer never touches an
+    /// on-disk playlist. It is safe for ghost/closed channels where the stream
+    /// is semantically empty from the start, for example
+    /// `XtreamPlaylistIterator::empty()`.
     pub fn new_empty(rx: mpsc::Receiver<T>) -> Self {
         Self {
             rx: ReceiverStream::new(rx),

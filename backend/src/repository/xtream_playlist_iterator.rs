@@ -161,7 +161,7 @@ impl Stream for XtreamPlaylistIterator {
 
 pub struct XtreamPlaylistJsonIterator {
     inner: XtreamPlaylistIterator,
-    options: XtreamMappingOptions,
+    options: Option<XtreamMappingOptions>,
 }
 
 impl XtreamPlaylistJsonIterator {
@@ -175,6 +175,12 @@ impl XtreamPlaylistJsonIterator {
         let xtream_output = target.get_xtream_output().ok_or_else(|| {
             TuliproxError::Config(format!("Unexpected: xtream output required for target {}", target.name))
         })?;
+        if !is_cluster_allowed_for_user(user, cluster) {
+            return Ok(Self {
+                inner: XtreamPlaylistIterator::empty(),
+                options: None,
+            });
+        }
         let encrypt_secret = app_state.get_encrypt_secret();
         let options = xtream_mapping_option_from_target_options(
             target,
@@ -183,15 +189,9 @@ impl XtreamPlaylistJsonIterator {
             user,
             encrypt_secret,
         )?;
-        if !is_cluster_allowed_for_user(user, cluster) {
-            return Ok(Self {
-                inner: XtreamPlaylistIterator::empty(),
-                options,
-            });
-        }
         Ok(Self {
             inner: XtreamPlaylistIterator::new(cluster, &app_state.app_config, target, category_id, user).await?,
-            options,
+            options: Some(options),
         })
     }
 }
@@ -202,7 +202,10 @@ impl Stream for XtreamPlaylistJsonIterator {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some((pli, has_next))) => {
-                let json = serde_json::to_string(&pli.to_document(&self.options)).unwrap_or_else(|err| {
+                let Some(options) = self.options.as_ref() else {
+                    return Poll::Ready(None);
+                };
+                let json = serde_json::to_string(&pli.to_document(options)).unwrap_or_else(|err| {
                     error!("Failed to serialize playlist item {}: {err}", pli.virtual_id);
                     "{}".to_string()
                 });

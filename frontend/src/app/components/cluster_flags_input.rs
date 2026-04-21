@@ -20,6 +20,8 @@ pub struct ClusterFlagsInputProps {
     pub mode: ClusterFlagsInputMode,
     #[prop_or_default]
     pub short_labels: bool,
+    #[prop_or_default]
+    pub class: String,
 }
 
 #[component]
@@ -78,24 +80,26 @@ pub fn ClusterFlagsInput(props: &ClusterFlagsInputProps) -> Html {
     let vod_label = if props.short_labels { "LABEL.VOD_SHORT" } else { "LABEL.VOD" };
     let series_label = if props.short_labels { "LABEL.SERIES_SHORT" } else { "LABEL.SERIES" };
 
+    let render_cluster = || {
+        html! {<>
+        <span onclick={handle_live_click} class={classes!("noselect", "tp__chip", "tp__cluster-flags-input-live", if flags.intersects(ClusterFlags::Live) {"active"} else {""})}>{ translate.t(live_label) }</span>
+        <span onclick={handle_vod_click} class={classes!("noselect", "tp__chip",  "tp__cluster-flags-input-vod", if flags.intersects(ClusterFlags::Vod)  {"active"} else {""})}>{ translate.t(vod_label) }</span>
+        <span onclick={handle_series_click} class={classes!("noselect", "tp__chip", "tp__cluster-flags-input-series", if flags.intersects(ClusterFlags::Series)  {"active"} else {""})}>{ translate.t(series_label) }</span>
+        </>}
+    };
+
     if props.short_labels {
         html! {
-            <div class={classes!("tp__cluster-flags-input", "tp__cluster-flags-input--short", "tp__proxy-type-input")}>
-               <span class={classes!("tp__chip", "tp__chip__group", "tp__cluster-flags-input__outer", "active", "tp__proxy-type-input__reverse")}>
-                    <span class={"tp__chip__group__sub tp__cluster-flags-input__mixed tp__proxy-type-input__mixed"}>
-                       <span onclick={handle_live_click} class={classes!("noselect", "tp__chip", "tp__cluster-flags-input-live", "tp__proxy-type-input__reverse-live", if flags.intersects(ClusterFlags::Live) {"active"} else {"redirect-active"})}>{ translate.t(live_label) }</span>
-                       <span onclick={handle_vod_click} class={classes!("noselect", "tp__chip",  "tp__cluster-flags-input-vod", "tp__proxy-type-input__reverse-vod", if flags.intersects(ClusterFlags::Vod)  {"active"} else {"redirect-active"})}>{ translate.t(vod_label) }</span>
-                       <span onclick={handle_series_click} class={classes!("noselect", "tp__chip", "tp__cluster-flags-input-series", "tp__proxy-type-input__reverse-series", if flags.intersects(ClusterFlags::Series)  {"active"} else {"redirect-active"})}>{ translate.t(series_label) }</span>
-                    </span>
+            <div class={classes!("tp__cluster-flags-input", "tp__cluster-flags-input--short", "tp__proxy-type-input", &props.class)}>
+                <span class={"tp__chip__group__sub tp__cluster-flags-input__mixed tp__proxy-type-input__mixed"}>
+                    { render_cluster() }
                 </span>
             </div>
         }
     } else {
         html! {
             <div class="tp__cluster-flags-input">
-               <span onclick={handle_live_click} class={classes!("noselect", "tp__chip", "tp__cluster-flags-input-live", if flags.intersects(ClusterFlags::Live) {"active"} else {""})}>{ translate.t(live_label) }</span>
-               <span onclick={handle_vod_click} class={classes!("noselect", "tp__chip",  "tp__cluster-flags-input-vod", if flags.intersects(ClusterFlags::Vod)  {"active"} else {""})}>{ translate.t(vod_label) }</span>
-               <span onclick={handle_series_click} class={classes!("noselect", "tp__chip", "tp__cluster-flags-input-series", if flags.intersects(ClusterFlags::Series)  {"active"} else {""})}>{ translate.t(series_label) }</span>
+              { render_cluster() }
             </div>
         }
     }

@@ -126,15 +126,11 @@ impl ProxyUserCredentials {
     }
 
     pub fn allows_cluster(&self, cluster: XtreamCluster) -> bool {
-        match cluster {
-            XtreamCluster::Live => self.output_clusters.contains(ClusterFlags::Live),
-            XtreamCluster::Video => self.output_clusters.contains(ClusterFlags::Vod),
-            XtreamCluster::Series => self.output_clusters.contains(ClusterFlags::Series),
-        }
+        self.output_clusters.has_cluster(cluster.into())
     }
 
     pub fn allows_item_type(&self, item_type: shared::model::PlaylistItemType) -> bool {
-        XtreamCluster::try_from(item_type).is_ok_and(|cluster| self.allows_cluster(cluster))
+        self.output_clusters.has_cluster(item_type)
     }
 
     pub async fn connection_permission(&self, app_state: &AppState) -> UserConnectionPermission {

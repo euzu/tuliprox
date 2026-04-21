@@ -110,7 +110,12 @@ async fn m3u_api_stream(
     );
 
     if !user.allows_item_type(pli.item_type) {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+        return crate::api::model::create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
     }
     let virtual_id = pli.virtual_id;
 
