@@ -132,7 +132,7 @@ macro_rules! create_bitset {
             }
         }
 
-        // Permission::A | Permission::B → PermissionSet
+        // Permission::A | Permission::B -> PermissionSet
         impl std::ops::BitOr for $enum_name {
             type Output = [<$enum_name Set>];
             #[inline(always)]
@@ -141,7 +141,7 @@ macro_rules! create_bitset {
             }
         }
 
-        // PermissionSet | Permission → PermissionSet
+        // PermissionSet | Permission -> PermissionSet
         impl std::ops::BitOr<$enum_name> for [<$enum_name Set>] {
             type Output = Self;
             #[inline(always)]
@@ -150,7 +150,7 @@ macro_rules! create_bitset {
             }
         }
 
-        // Permission → PermissionSet (single variant)
+        // Permission -> PermissionSet (single variant)
         impl From<$enum_name> for [<$enum_name Set>] {
             #[inline(always)]
             fn from(variant: $enum_name) -> Self {

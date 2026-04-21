@@ -36,6 +36,29 @@ pub struct StreamDetails {
     pub disable_provider_grace: bool,
     pub reconnect_flag: Option<CancellationToken>,
     pub provider_handle: Option<ProviderHandle>,
+    /// Set when the stream was admitted via a user-grace strategy. Carried through to
+    /// `stream_grace_period` so remaining strategies can be evaluated if the grace fails.
+    pub(crate) grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
+}
+
+/// Manual Clone: stream cannot be cloned so we set it to None on the clone.
+/// This is safe because `StreamDetails` is only cloned in contexts where the
+/// stream has already been moved out (e.g., constructing grace params).
+impl Clone for StreamDetails {
+    fn clone(&self) -> Self {
+        Self {
+            stream: None,
+            stream_info: self.stream_info.clone(),
+            provider_name: self.provider_name.clone(),
+            request_url: self.request_url.clone(),
+            grace_period: self.grace_period,
+            provider_grace_active: self.provider_grace_active,
+            disable_provider_grace: self.disable_provider_grace,
+            reconnect_flag: self.reconnect_flag.clone(),
+            provider_handle: self.provider_handle.clone(),
+            grace_resolution_context: self.grace_resolution_context.clone(),
+        }
+    }
 }
 
 impl StreamDetails {
@@ -50,6 +73,7 @@ impl StreamDetails {
             disable_provider_grace: false,
             reconnect_flag: None,
             provider_handle: None,
+            grace_resolution_context: None,
         }
     }
     #[inline]

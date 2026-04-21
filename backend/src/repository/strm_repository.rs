@@ -871,7 +871,7 @@ pub async fn write_strm_playlist(
     };
     let mut processed_strm: HashSet<String> = HashSet::with_capacity(existing_strm.len());
 
-    // Build a lookup map: stripped_path → enriched_path for all existing STRM paths
+    // Build a lookup map: stripped_path -> enriched_path for all existing STRM paths
     // that already contain a TMDB marker. Used to preserve enriched filenames when the
     // current playlist item has no tmdb_id yet (avoids rename back to plain name).
     let enriched_strm: std::collections::HashMap<String, String> = existing_strm

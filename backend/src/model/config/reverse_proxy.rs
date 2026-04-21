@@ -53,7 +53,9 @@ impl Default for ResourceRetryConfig {
 
 /// Default failover redirect pattern when none is configured
 fn default_failover_redirect_patterns() -> Vec<Arc<Regex>> {
-    vec![REGEX_CACHE.get_or_compile("service-abuse").expect("default redirect  failover regex must compile")]
+    vec![REGEX_CACHE
+        .get_or_compile("service-abuse")
+        .unwrap_or_else(|err| unreachable!("hardcoded failover regex 'service-abuse' must compile: {err}"))]
 }
 
 impl ResourceRetryConfig {

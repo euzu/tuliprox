@@ -7,6 +7,14 @@ Jellyfin, Emby, Kodi and similar clients.
 
 ![tuliprox logo](https://github.com/user-attachments/assets/8ef9ea79-62ff-4298-978f-22326c5c3d02)
 
+## Want to join the community
+
+[Join us on Discord](https://discord.gg/gkzCmWw9Tf)
+
+## License
+
+See [`LICENSE`](https://github.com/euzu/tuliprox/blob/develop/LICENSE).
+
 ## 🏆 Key Features
 
 ### 1. Written in Rust — Maximum Performance, Minimal Footprint
@@ -283,14 +291,6 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - tuliprox (incl. traefik) template
 
 `> ./docker/container-templates`
-
-## Want to join the community
-
-[Join us on Discord](https://discord.gg/gkzCmWw9Tf)
-
-## License
-
-See [`LICENSE`](https://github.com/euzu/tuliprox/blob/develop/LICENSE).
 
 ## Quick start
 

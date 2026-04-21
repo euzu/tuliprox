@@ -67,9 +67,9 @@ pub fn is_blank_optional_str(s: Option<&str>) -> bool {
 pub fn trim_slash(s: &str) -> Cow<'_, str> {
     let trimmed = s.trim_matches('/');
     if trimmed.len() == s.len() {
-        Cow::Borrowed(s) // Keine Änderung → kein Clone
+        Cow::Borrowed(s)
     } else {
-        Cow::Owned(trimmed.to_string()) // Änderung → neue String
+        Cow::Owned(trimmed.to_string())
     }
 }
 

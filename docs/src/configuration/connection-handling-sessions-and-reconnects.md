@@ -7,6 +7,7 @@ This matters for operators because many seemingly strange connection patterns ar
 If you are changing the code rather than the configuration, also read:
 
 - [Session Handling Internals](./connection-handling-session-implementation-notes.md)
+- [Connection Handling Runtime Internals](./connection-handling-runtime-internals.md)
 
 ## Why sessions are needed at all
 

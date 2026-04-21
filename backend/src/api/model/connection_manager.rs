@@ -36,6 +36,7 @@ const CLEANUP_QUEUE_CAPACITY: usize = 4096;
 pub(crate) const PROVIDER_END_NOT_SET: u8 = 0;
 pub(crate) const PROVIDER_END_CLOSED: u8 = 1; // Provider EOF
 pub(crate) const PROVIDER_END_ERROR: u8 = 2; // Provider Err
+const PREEMPT_REENTRY_BLOCK_SECS: u64 = 3;
 // Rebuild the expiry heap when it grows beyond this multiple of the live index size.
 const SOCKET_EXPIRY_QUEUE_REBUILD_FACTOR: usize = 2;
 // Avoid rebuilding the expiry heap unless it contains at least this many stale entries.
@@ -333,6 +334,18 @@ async fn release_connection_parts(
     } else {
         user_manager.release_connection(addr).await
     };
+    if matches!(reason, DisconnectReason::ClientKicked) {
+        for stream_info in &removed.removed_streams {
+            if let Some(session_token) = stream_info.session_token.as_deref() {
+                provider_manager.clear_provider_reservation(session_token).await;
+            }
+        }
+        // Explicitly terminate all sessions for the kicked addr. This expires them
+        // immediately rather than leaving them for TTL-based GC cleanup.
+        if let Some(ref username) = removed.disconnected_user {
+            user_manager.terminate_sessions_for_addr(username, addr).await;
+        }
+    }
     for stream_info in &removed.removed_streams {
         let (bytes_sent, first_byte_latency_ms) = event_manager.read_meter_qos(stream_info.meter_uid).await;
         event_manager.unregister_meter_client(stream_info.uid).await;
@@ -424,6 +437,11 @@ async fn handle_update_detail_and_release_provider(
     handle: Option<ProviderHandle>,
 ) {
     if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
+        if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
+            deps.user_manager
+                .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
+                .await;
+        }
         deps.event_manager
             .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
     }
@@ -439,6 +457,11 @@ async fn handle_update_detail_and_release_provider_connection(
     video_type: CustomVideoStreamType,
 ) {
     if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
+        if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
+            deps.user_manager
+                .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
+                .await;
+        }
         deps.event_manager
             .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
     }
@@ -884,6 +907,53 @@ impl ConnectionManager {
     pub async fn release_connection_as_kicked(&self, addr: &SocketAddr) {
         let _ = self.close_connection_with_reason(addr, DisconnectReason::ClientKicked);
         release_connection_with_reason(self, addr, DisconnectReason::ClientKicked, true).await;
+    }
+
+    /// Releases the provider connection for `addr` after `tcp_close_notify` is notified.
+    /// This defers the provider-slot release until after the TCP connection is fully closed,
+    /// preventing a race where a new request acquires the same provider slot while the old
+    /// connection is still draining buffered data (which can take 10+ seconds on a live stream).
+    /// The `close_connection_with_reason` call on the `ConnectionManager` must have already been
+    /// called before invoking this method.
+    pub async fn release_provider_deferred(&self, addr: &SocketAddr) {
+        let addr_owned = *addr;
+        self.provider_manager.release_connection(&addr_owned).await;
+        self.shared_stream_manager.release_connection(&addr_owned, true).await;
+        notify_capacity(self.capacity_notify.as_ref());
+    }
+
+    /// Cleans up user/session/stream state for a forced close without releasing the provider slot.
+    /// The provider release is deferred to `release_provider_deferred` which waits for the TCP
+    /// connection to close, preventing a race where a new request acquires the same provider
+    /// slot while the old connection is still draining buffered data.
+    /// Note: `release_connection_as_kicked` (called internally) already handles divergence checking.
+    pub async fn release_user_sessions_only(&self, addr: &SocketAddr) {
+        let removed = self.user_manager.release_connection_as_kicked(addr).await;
+        // Mirrors the kicked-specific steps from `release_connection_parts`.
+        // Provider release and capacity notification are deferred via `release_provider_deferred`.
+        for stream_info in &removed.removed_streams {
+            if let Some(session_token) = stream_info.session_token.as_deref() {
+                self.provider_manager.clear_provider_reservation(session_token).await;
+            }
+        }
+        if let Some(ref username) = removed.disconnected_user {
+            self.user_manager.terminate_sessions_for_addr(username, addr).await;
+        }
+        for stream_info in &removed.removed_streams {
+            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            self.event_manager.unregister_meter_client(stream_info.uid).await;
+            emit_disconnect_record(
+                &self.history_writer,
+                stream_info,
+                DisconnectReason::ClientKicked,
+                &DisconnectQos { bytes_sent, first_byte_latency_ms, ..Default::default() },
+                None,
+                None,
+            );
+        }
+        if removed.addr_removed && !removed.removed_streams.is_empty() {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(*addr)));
+        }
     }
 
     pub async fn release_provider_connection(&self, addr: &SocketAddr) {
@@ -1391,6 +1461,138 @@ mod tests {
         assert_eq!(
             rx.recv().await.ok(),
             Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::Provisioning))
+        );
+    }
+
+    #[tokio::test]
+    async fn low_priority_preempted_cleanup_blocks_same_user_stream_reentry() {
+        let manager = create_test_connection_manager();
+        let user = create_test_proxy_user("preempted-user");
+        let addr: SocketAddr = "127.0.0.1:6234".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = crate::auth::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let channel = StreamChannel {
+            virtual_id: 409,
+            title: "channel-409".intern(),
+            ..make_stream_info("provider_1", "channel-409").channel
+        };
+
+        manager.add_connection(&addr).await;
+        manager
+            .user_manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-preempted",
+                virtual_id: channel.virtual_id,
+                provider: "provider_1",
+                stream_url: "http://provider-1.example/live/409.ts",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+        manager
+            .user_manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 9001,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 9,
+                soft_priority: 9,
+                fingerprint: &fingerprint,
+                provider: "provider_1".intern(),
+                stream_channel: &channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-preempted"),
+            })
+            .await;
+
+        let deps = CleanupWorkerDeps {
+            user_manager: Arc::clone(&manager.user_manager),
+            provider_manager: Arc::clone(&manager.provider_manager),
+            shared_stream_manager: Arc::clone(&manager.shared_stream_manager),
+            event_manager: Arc::clone(&manager.event_manager),
+            capacity_notify: Arc::clone(&manager.capacity_notify),
+            history_writer: Arc::clone(&manager.history_writer),
+        };
+
+        handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
+
+        assert!(
+            manager
+                .user_manager
+                .is_user_blocked_for_stream(&user.username, channel.virtual_id)
+                .await,
+            "preempted playback should be blocked briefly to prevent immediate reconnect ping-pong"
+        );
+    }
+
+    #[tokio::test]
+    async fn low_priority_preempted_cleanup_blocks_same_user_hls_reentry() {
+        let manager = create_test_connection_manager();
+        let user = create_test_proxy_user("preempted-hls-user");
+        let addr: SocketAddr = "127.0.0.1:6235".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = crate::auth::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let mut channel = make_stream_info("provider_1", "channel-410").channel;
+        channel.virtual_id = 410;
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.title = "channel-410.m3u8".intern();
+        channel.url = "http://provider-1.example/live/410.m3u8".intern();
+
+        manager.add_connection(&addr).await;
+        manager
+            .user_manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-preempted-hls",
+                virtual_id: channel.virtual_id,
+                provider: "provider_1",
+                stream_url: "http://provider-1.example/live/410.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .user_manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 9002,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 9,
+                soft_priority: 9,
+                fingerprint: &fingerprint,
+                provider: "provider_1".intern(),
+                stream_channel: &channel,
+                user_agent: std::borrow::Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-preempted-hls"),
+            })
+            .await;
+
+        let deps = CleanupWorkerDeps {
+            user_manager: Arc::clone(&manager.user_manager),
+            provider_manager: Arc::clone(&manager.provider_manager),
+            shared_stream_manager: Arc::clone(&manager.shared_stream_manager),
+            event_manager: Arc::clone(&manager.event_manager),
+            capacity_notify: Arc::clone(&manager.capacity_notify),
+            history_writer: Arc::clone(&manager.history_writer),
+        };
+
+        handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
+
+        assert!(
+            manager
+                .user_manager
+                .is_user_blocked_for_stream(&user.username, channel.virtual_id)
+                .await,
+            "preempted HLS playback should be blocked briefly to prevent immediate reconnect ping-pong"
         );
     }
 

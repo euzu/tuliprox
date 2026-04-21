@@ -38,7 +38,7 @@ pub fn parse_localized_float(s: &str) -> Option<f64> {
 
         combined.parse::<f64>().ok()
     } else {
-        // No decimal separator → clean out all grouping chars and parse as integer
+        // No decimal separator -> clean out all grouping chars and parse as integer
         let cleaned = s.chars().filter(|c| c.is_ascii_digit() || *c == '-').collect::<String>();
         cleaned.parse::<f64>().ok()
     }

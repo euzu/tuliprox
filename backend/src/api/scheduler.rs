@@ -366,10 +366,10 @@ mod tests {
         // Documents the expected behavior for the hot-reload silent failure scenario:
         //
         // 1. Server starts without `-t` CLI flag
-        //    → forced_targets = ProcessTargets { enabled: false, inputs: [], targets: [] }
+        //    -> forced_targets = ProcessTargets { enabled: false, inputs: [], targets: [] }
         //
         // 2. Schedule has targets: ["my-target"]
-        //    → validate_targets returns: ProcessTargets { enabled: true, inputs: [1,2,3], targets: [100] }
+        //    -> validate_targets returns: ProcessTargets { enabled: true, inputs: [1,2,3], targets: [100] }
         //
         // 3. get_process_targets(cfg, &forced_targets, Some(&["my-target"]))
         //    should return: ProcessTargets { enabled: true, inputs: [1,2,3], targets: [100] }

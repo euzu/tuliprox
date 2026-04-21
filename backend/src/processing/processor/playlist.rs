@@ -446,7 +446,7 @@ async fn playlist_download_from_input(
         let mut m3u_added_groups = false;
 
         if needs_m3u_download {
-            let staged = input.staged.as_ref().expect("hybrid requires staged input");
+            if let Some(staged) = input.staged.as_ref() {
             let staged_source: crate::model::InputSource = staged.into();
             let (m3u_playlist, m3u_errors) =
                 m3u::download_m3u_playlist_from_source(app_config, client, config, input, Some(staged_source)).await;
@@ -454,6 +454,13 @@ async fn playlist_download_from_input(
             m3u_added_groups = !m3u_playlist.is_empty();
             playlist.extend(m3u_playlist);
             all_errors.extend(m3u_errors);
+            } else {
+                warn!(
+                    "hybrid input '{}' requires a staged M3U cluster but none is present; skipping M3U download",
+                    input.name
+                );
+                m3u_error_count = 1;
+            }
         }
 
         let mut xtream_persisted = false;

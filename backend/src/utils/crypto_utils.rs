@@ -23,7 +23,7 @@ pub fn obscure_text(secret: &[u8;16], url: &str) -> Result<String, TuliproxError
     count += crypter.finalize(&mut buf[count..]).map_err(|_| TuliproxError::Crypto("Can't finalize encryption".to_string()))?;
     buf.truncate(count);
 
-    // IV + Ciphertext → URL-safe Base64
+    // IV + Ciphertext -> URL-safe Base64
     let mut out = Vec::with_capacity(iv.len() + buf.len());
     out.extend_from_slice(&iv);
     out.extend_from_slice(&buf);

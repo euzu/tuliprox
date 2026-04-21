@@ -324,6 +324,12 @@ impl ActiveProviderManager {
         );
     }
 
+    pub async fn clear_provider_reservation(&self, session_owner: &str) {
+        let mut reservations = self.reservations.write().await;
+        Self::prune_expired_reservations(&mut reservations);
+        reservations.retain(|_, reservation| !Self::is_same_reservation_family(reservation.owner.as_ref(), session_owner));
+    }
+
     async fn acquire_exact_connection_inner(
         &self,
         provider_name: &Arc<str>,
@@ -1768,6 +1774,46 @@ mod tests {
 
         manager.release_connection(&first_addr).await;
         manager.release_connection(&second_addr).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_clear_provider_reservation_releases_family_block() {
+        let app_cfg = create_test_app_config_single_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let owner_1 = "session-owner-1";
+        let owner_2 = "session-owner-2";
+        let addr_2: SocketAddr = "127.0.0.1:43132".parse().unwrap();
+
+        manager.refresh_provider_reservation(&input_name, owner_1, 15).await;
+
+        let blocked = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr_2,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner_2),
+            )
+            .await;
+        assert!(blocked.is_none(), "reservation should initially block another session");
+
+        manager.clear_provider_reservation(owner_1).await;
+
+        let acquired = manager
+            .acquire_connection_with_grace_for_session(
+                &input_name,
+                &addr_2,
+                false,
+                default_user_priority(),
+                ConnectionKind::Normal,
+                Some(owner_2),
+            )
+            .await;
+        assert!(acquired.is_some(), "clearing reservation should unblock the provider");
     }
 
     #[tokio::test]

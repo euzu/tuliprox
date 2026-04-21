@@ -58,7 +58,7 @@ pub struct RewriteHlsProps<'a> {
 /// Rewrites an HLS URI relative to a base playlist URL.
 /// Absolute URIs are returned unchanged.
 pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
-    // absolute URI → passthrough
+    // absolute URI -> passthrough
     if Url::parse(reference).is_ok() {
         return Cow::Borrowed(reference);
     }

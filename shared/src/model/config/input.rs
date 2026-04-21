@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn test_epg_url_from_enabled_alias_explicit_credentials() {
         let mut dto = create_test_dto();
-        dto.url = "http://main.com".to_string(); // Haupt-URL hat keine Credentials
+        dto.url = "http://main.com".to_string();
 
         let alias = ConfigInputAliasDto {
             enabled: true,
@@ -1064,7 +1064,7 @@ mod tests {
         dto.aliases = Some(vec![alias]);
 
         let result = dto.generate_auto_epg_url();
-        // Da Haupt-DTO leer ist und Alias deaktiviert, muss ein Fehler kommen
+        // Since the main DTO is empty and alias is disabled, an error must occur
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no credentials could be extracted"));
     }

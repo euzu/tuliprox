@@ -11,8 +11,10 @@ It is written for operators rather than developers. The goal is to explain:
 
 If you want to go deeper into individual topics, continue with:
 
+- [Connection Handling Runtime Flow](./connection-handling-runtime-flow.md)
 - [Priorities, Soft Connections and Preemption](./connection-handling-priorities-and-preemption.md)
 - [Sessions, HLS, Catchup and Reconnects](./connection-handling-sessions-and-reconnects.md)
+- [Connection Handling Runtime Internals](./connection-handling-runtime-internals.md)
 - [Failures and User-Visible Behavior](./connection-handling-failures-and-user-visible-behavior.md)
 
 ## Why this matters

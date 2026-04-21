@@ -283,33 +283,25 @@ async fn xtream_player_api_stream(
 
     if pli.item_type.is_local() {
         let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, true);
-        let (admission, _grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
-            && app_state.app_config.config.load().user_access_control
-        {
-            crate::api::api_utils::resolve_admission_with_strategies(
-                app_state,
-                &user.username,
-                user.max_connections,
-                user.soft_connections,
-                &fingerprint.client_ip,
-                &fingerprint.addr,
-                true,
-                Some(playback_session_token.as_str()),
-                false,
-                crate::api::api_utils::EvictionReentryGuard::SocketPlayback {
-                    virtual_id: pli.virtual_id,
-                },
-            )
-            .await
-        } else {
-            (
-                crate::api::model::ConnectionAdmission {
-                    permission: UserConnectionPermission::Allowed,
-                    kind: Some(crate::api::model::ConnectionKind::Normal),
-                },
-                None,
-            )
-        };
+        let user_session = app_state
+            .active_users
+            .get_and_update_user_session(&user.username, &playback_session_token)
+            .await;
+        let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
+            app_state,
+            &user,
+            fingerprint,
+            pli.item_type,
+            user_session.as_ref(),
+            playback_session_token.as_str(),
+            false,
+            crate::api::api_utils::EvictionReentryGuard::SocketPlayback {
+                virtual_id: pli.virtual_id,
+            },
+            false,
+            false,
+        )
+        .await;
         return local_stream_response(
             fingerprint,
             app_state,
@@ -321,6 +313,7 @@ async fn xtream_player_api_stream(
             admission.permission,
             admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
             Some(playback_session_token.as_str()),
+            Some(request_class),
             true,
         )
         .await
@@ -423,31 +416,19 @@ async fn xtream_player_api_stream(
         pli.url.clone()
     };
 
-    let (connection_admission, grace_mode) = if (user.max_connections > 0 || user.soft_connections > 0)
-        && app_state.app_config.config.load().user_access_control
-    {
-        crate::api::api_utils::resolve_admission_with_strategies(
-            app_state,
-            &user.username,
-            user.max_connections,
-            user.soft_connections,
-            &fingerprint.client_ip,
-            &fingerprint.addr,
-            true,
-            Some(&session_key),
-            false,
-            eviction_reentry_guard,
-        )
-        .await
-    } else {
-        (
-            crate::api::model::ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: user_session.as_ref().and_then(|session| session.connection_kind),
-            },
-            None,
-        )
-    };
+    let (connection_admission, grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
+        app_state,
+        &user,
+        fingerprint,
+        item_type,
+        user_session.as_ref(),
+        &session_key,
+        false,
+        eviction_reentry_guard,
+        false,
+        false,
+    )
+    .await;
     let connection_permission = connection_admission.permission;
     let connection_kind = connection_admission
         .kind
@@ -526,6 +507,7 @@ async fn xtream_player_api_stream(
         fingerprint,
         app_state,
         session_key.as_str(),
+        Some(request_class),
         stream_channel,
         &stream_url,
         req_headers,
@@ -640,6 +622,7 @@ async fn xtream_player_api_stream_with_token(
                 UserConnectionPermission::Allowed,
                 crate::api::model::ConnectionKind::Normal,
                 Some(playback_session_token.as_str()),
+                None,
                 true,
             )
             .await
@@ -698,6 +681,7 @@ async fn xtream_player_api_stream_with_token(
             fingerprint,
             app_state,
             session_key.as_str(),
+            None,
             pli.to_stream_channel(target.id),
             &stream_url,
             req_headers,
@@ -951,13 +935,19 @@ pub async fn xtream_get_stream_info_response(
 
             let encrypt_secret = app_state.get_encrypt_secret();
 
-            let options = xtream_mapping_option_from_target_options(
+            let options = match xtream_mapping_option_from_target_options(
                 target,
                 xtream_output,
                 &app_state.app_config,
                 user,
                 encrypt_secret,
-            );
+            ) {
+                Ok(options) => options,
+                Err(err) => {
+                    error!("{err}");
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            };
             return axum::Json(pli.to_info_document(&options)).into_response();
         }
 
@@ -1555,8 +1545,8 @@ mod tests {
 
     fn create_test_vod_item(url: &str, container_extension: &str, item_type: PlaylistItemType) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 176141,
-            provider_id: 813563,
+            virtual_id: 176_141,
+            provider_id: 813_563,
             name: "Test".intern(),
             logo: "".intern(),
             logo_small: "".intern(),
@@ -1570,7 +1560,7 @@ mod tests {
             additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                 name: "Test".intern(),
                 category_id: 0,
-                stream_id: 813563,
+                stream_id: 813_563,
                 stream_icon: "".intern(),
                 direct_source: "".intern(),
                 custom_sid: None,
