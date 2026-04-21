@@ -1,18 +1,18 @@
 use crate::{
     api::{
         api_utils::{
-            create_catchup_session_key, create_session_fingerprint, force_provider_stream_response,
-            get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, is_seek_request,
-            is_session_based_playback, is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
-            admission_failure_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
-            try_option_bad_request, try_option_forbidden, try_result_bad_request, try_result_not_found,
-            try_unwrap_body, RedirectParams,
+            admission_failure_response, create_catchup_session_key, create_session_fingerprint,
+            force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
+            get_user_target_by_credentials, is_seek_request, is_session_based_playback, is_stream_share_enabled,
+            local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
+            should_allow_exhausted_shared_reconnect, stream_response, try_option_bad_request, try_option_forbidden,
+            try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::handle_hls_stream_request,
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
-        model::{AppState, UserApiRequestQueryOrBody, UserApiRequest},
+        model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
     },
     auth::Fingerprint,
     repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const},
@@ -22,12 +22,12 @@ use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures::StreamExt;
 use log::{debug, error};
+use shared::model::ConnectFailureReason;
 use shared::{
     model::{FieldGetAccessor, PlaylistEntry, PlaylistItemType, TargetType, UserConnectionPermission, XtreamCluster},
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
 use std::sync::Arc;
-use shared::model::ConnectFailureReason;
 
 async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoResponse + Send {
     api_req.log_sanitized("m3u_api");
@@ -108,6 +108,15 @@ async fn m3u_api_stream(
         true,
         format!("Failed to read m3u item for stream id {req_virtual_id}")
     );
+
+    if !user.allows_item_type(pli.item_type) {
+        return crate::api::model::create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
+    }
     let virtual_id = pli.virtual_id;
 
     if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
@@ -375,6 +384,10 @@ async fn m3u_api_resource(
             return axum::http::StatusCode::NOT_FOUND.into_response();
         }
     };
+
+    if !user.allows_item_type(m3u_item.item_type) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
 
     let stream_url = m3u_item.get_field(resource.as_str());
     match stream_url {

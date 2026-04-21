@@ -6,6 +6,12 @@
 
 ## 🌟 New Features
 
+- **Per-User Output Clusters**: API proxy users can now be restricted to specific clusters on their assigned target via
+  `output_clusters`.
+  - Supported values: `live`, `vod`, `series`.
+  - The filter is evaluated per user and limits which clusters are visible and deliverable for that account.
+  - At least one cluster should be selected if you want an active restriction.
+  - If no cluster is selected, the filter is treated as inactive and Tuliprox serves all clusters for that user.
 - **Input Resolve Filter**: Added `resolve_filter` option to input configuration to selectively resolve only entries matching a filter expression.
 - **Input Probe Filter**: Added `probe_filter` option to input configuration to selectively probe only entries matching a filter expression.
 - **Soft Connections And Soft Priority**: API users can now be configured with `soft_connections` and `soft_priority`.
@@ -162,6 +168,10 @@
   - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
     Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  
     `grace_instant_stream`, `grace_hold_stream`.
+- **api-proxy.yml (`user.credentials[]`)**:
+  - Added `output_clusters` (optional list, default effective behavior `all`): restricts a user to `live`, `vod`,
+    and/or `series` on the assigned target. If no cluster is selected, the filter is inactive and all clusters are
+    served.
 - **config.yml (`web_ui`)**:
   - Added `landing_page` (optional, default `dashboard`): initial view after login.
 - **config.yml (`log`)**:
@@ -205,7 +215,9 @@
       metadata:
         path: /data/library_metadata
         fallback_to_filename: true
+    ```
 
+    ```yaml
     # After
     metadata_update:
       cache_path: /data/library_metadata  # moved here
@@ -223,7 +235,9 @@
     inputs:
       - type: xtream_batch
         url: 'file:///home/tuliprox/config/batch.csv'
+    ```
 
+    ```yaml
     # After
     inputs:
       - type: xtream_batch

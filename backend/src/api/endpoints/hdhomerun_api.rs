@@ -261,23 +261,38 @@ async fn lineup_status(
         let cfg = Arc::clone(&app_state.app_state.app_config);
         let num_of_channels = if let Some((user, target)) = cfg.get_target_for_username(&app_state.device.t_username) {
             if target.has_output(TargetType::M3u) {
+                let credentials = Arc::new(user);
                 if let Some(iter) = iter_raw_m3u_target_playlist(&cfg, &target, None).await {
-                    iter.filter_map(|res| async move { res.ok() }).count().await
+                    iter.filter_map(move |res| {
+                        let credentials = Arc::clone(&credentials);
+                        async move {
+                            let item = res.ok()?;
+                            credentials.allows_item_type(item.item_type).then_some(item)
+                        }
+                    })
+                    .count()
+                    .await
                 } else {
                     0
                 }
             } else if target.has_output(TargetType::Xtream) {
                 let credentials = Arc::new(user);
-                let live =
+                let live = if credentials.allows_cluster(XtreamCluster::Live) {
                     match XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &credentials).await {
                         Ok(stream) => stream.count().await,
                         Err(_) => 0,
-                    };
-                let vod =
+                    }
+                } else {
+                    0
+                };
+                let vod = if credentials.allows_cluster(XtreamCluster::Video) {
                     match XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &credentials).await {
                         Ok(stream) => stream.count().await,
                         Err(_) => 0,
-                    };
+                    }
+                } else {
+                    0
+                };
                 live + vod
             } else {
                 0
@@ -364,8 +379,16 @@ async fn lineup(
             Some(base_url)
         };
 
-        let live_channels = XtreamPlaylistIterator::new(XtreamCluster::Live, cfg, target, None, credentials).await.ok();
-        let vod_channels = XtreamPlaylistIterator::new(XtreamCluster::Video, cfg, target, None, credentials).await.ok();
+        let live_channels = if credentials.allows_cluster(XtreamCluster::Live) {
+            XtreamPlaylistIterator::new(XtreamCluster::Live, cfg, target, None, credentials).await.ok()
+        } else {
+            None
+        };
+        let vod_channels = if credentials.allows_cluster(XtreamCluster::Video) {
+            XtreamPlaylistIterator::new(XtreamCluster::Video, cfg, target, None, credentials).await.ok()
+        } else {
+            None
+        };
         let live_stream = xtream_item_to_lineup_stream(
             Arc::clone(cfg),
             XtreamCluster::Live,

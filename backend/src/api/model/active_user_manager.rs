@@ -3941,6 +3941,7 @@ mod tests {
             exp_date: None,
             max_connections,
             status: None,
+            output_clusters: shared::model::ClusterFlags::all(),
             ui_enabled: true,
             comment: None,
             priority: 0,

@@ -1,6 +1,6 @@
 use crate::{
     error::TuliproxError,
-    model::{ProxyType, ProxyUserStatus},
+    model::{ClusterFlags, ProxyType, ProxyUserStatus, XtreamCluster},
     utils::{
         default_as_true, default_user_priority, deserialize_timestamp, is_blank_optional_string,
         is_default_user_priority, is_true,
@@ -14,7 +14,9 @@ pub enum UserConnectionPermission {
     GracePeriod,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
+fn default_output_clusters() -> ClusterFlags { ClusterFlags::all() }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyUserCredentialsDto {
     pub username: String,
@@ -37,6 +39,8 @@ pub struct ProxyUserCredentialsDto {
     pub max_connections: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProxyUserStatus>,
+    #[serde(default = "default_output_clusters")]
+    pub output_clusters: ClusterFlags,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub ui_enabled: bool,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -92,5 +96,70 @@ impl ProxyUserCredentialsDto {
             }
         }
         true
+    }
+
+    pub fn allows_cluster(&self, cluster: XtreamCluster) -> bool {
+        match cluster {
+            XtreamCluster::Live => self.output_clusters.contains(ClusterFlags::Live),
+            XtreamCluster::Video => self.output_clusters.contains(ClusterFlags::Vod),
+            XtreamCluster::Series => self.output_clusters.contains(ClusterFlags::Series),
+        }
+    }
+}
+
+impl Default for ProxyUserCredentialsDto {
+    fn default() -> Self {
+        Self {
+            username: String::new(),
+            password: String::new(),
+            token: None,
+            proxy: ProxyType::default(),
+            server: None,
+            epg_timeshift: None,
+            epg_request_timeshift: None,
+            created_at: None,
+            exp_date: None,
+            max_connections: 0,
+            status: None,
+            output_clusters: default_output_clusters(),
+            ui_enabled: default_as_true(),
+            comment: None,
+            priority: default_user_priority(),
+            soft_connections: 0,
+            soft_priority: default_user_priority(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_user_credentials_defaults_output_clusters_to_all_when_missing() {
+        let value = serde_json::json!({
+            "username": "alice",
+            "password": "secret"
+        });
+
+        let user: ProxyUserCredentialsDto = serde_json::from_value(value).expect("user should deserialize");
+
+        assert_eq!(user.output_clusters, ClusterFlags::all());
+    }
+
+    #[test]
+    fn proxy_user_credentials_roundtrip_preserves_output_clusters() {
+        let user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            output_clusters: ClusterFlags::Live | ClusterFlags::Series,
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_value(&user).expect("user should serialize");
+        let deserialized: ProxyUserCredentialsDto =
+            serde_json::from_value(serialized).expect("user should deserialize");
+
+        assert_eq!(deserialized.output_clusters, ClusterFlags::Live | ClusterFlags::Series);
     }
 }
