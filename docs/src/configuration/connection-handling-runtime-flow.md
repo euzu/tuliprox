@@ -105,6 +105,10 @@ Possible outcomes are typically:
 - grace / hold briefly
 - evict another stream
 
+If the configured strategy that wins is a user-grace strategy, Tuliprox may later
+re-check only the remaining strategies after that grace if the grace window expires
+without the situation becoming legal in time.
+
 ## 4. Provider-side capacity is checked separately
 
 Even if the user is allowed to stream, Tuliprox still has to check whether the upstream provider can actually serve the playback.
@@ -190,6 +194,11 @@ From the user perspective, this looks like:
 
 This is intentional replacement behavior, not an extra connection slot.
 
+If the request was admitted by user grace first, Tuliprox does not automatically
+deny when that grace later expires. It continues with only the strategies that come
+after the already-used grace. If no remaining strategy can admit the request, the
+result becomes final exhausted/deny.
+
 ## 8. What happens when provider capacity is full
 
 Provider fullness is a separate problem from user fullness.
@@ -201,6 +210,11 @@ Possible visible results:
 - a shared live stream is reused instead of opening a new upstream connection
 
 So a user can be fully valid on the user side and still be blocked on the provider side.
+
+Important:
+
+- provider grace failure stays on the provider path
+- it does not fall through into later user-eviction strategies
 
 ## 9. What happens when a stream ends
 

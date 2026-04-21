@@ -173,7 +173,7 @@ pub(crate) async fn resolve_playback_request_admission(
         );
     }
 
-    let (admission, grace_mode) = resolve_admission_with_strategies(
+    let result = resolve_admission_with_strategies(
         app_state,
         &user.username,
         user.max_connections,
@@ -187,7 +187,7 @@ pub(crate) async fn resolve_playback_request_admission(
     )
     .await;
 
-    (admission, grace_mode, request_class)
+    (result.admission, result.grace_mode, request_class)
 }
 
 async fn should_suppress_eviction_for_recent_request(
@@ -655,6 +655,31 @@ pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOpt
     StreamOptions { stream_retry, buffer_enabled, buffer_size, pipe_provider_stream }
 }
 
+/// Metadata capturing which grace strategy was chosen and the original connection kind,
+/// used to reconstruct the remaining-strategies slice on user-grace failure.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct GraceResolutionContext {
+    /// Index of the grace strategy that was actually used.
+    pub(crate) strategy_index: usize,
+    /// Full effective strategy list for stable reconstruction of the remaining slice.
+    pub(crate) strategies: Vec<AdmissionStrategy>,
+    /// The original `ConnectionKind` from the admission decision that led to this grace.
+    /// Preserved so that the remaining-strategy fallback can return the correct kind
+    /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.
+    pub(crate) kind: Option<crate::api::model::ConnectionKind>,
+}
+
+/// Structured result of evaluating admission strategies.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct AdmissionStrategyResolution {
+    pub(crate) admission: crate::api::model::ConnectionAdmission,
+    pub(crate) grace_mode: Option<crate::api::model::GraceMode>,
+    /// Present only when the request was admitted via a user-grace strategy.
+    pub(crate) grace_context: Option<GraceResolutionContext>,
+}
+
 pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppState>) -> Vec<AdmissionStrategy> {
     let config = app_state.app_config.config.load();
     let stream_config = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref());
@@ -671,59 +696,58 @@ pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppStat
     }
 }
 
+/// Shared strategy-evaluation loop used by both the initial admission path
+/// (`resolve_admission_with_strategies`) and the remaining-strategies path
+/// (`evaluate_remaining_strategies_after_grace`).
+///
+/// Returns `Some(resolution)` when a Grace or a successful Eviction+Retry is found.
+/// Returns `None` when every strategy in `strategies` returns `NoMatch` — the caller
+/// is then responsible for constructing the final exhausted result with the correct
+/// `kind` (preserved from the original admission).
 #[allow(clippy::too_many_arguments)]
-pub(in crate::api) async fn resolve_admission_with_strategies(
-    app_state: &Arc<AppState>,
-    username: &str,
+async fn evaluate_admission_strategy_loop<'a, F>(
+    app_state: &'a Arc<AppState>,
+    username: &'a str,
     max_connections: u32,
     soft_connections: u16,
-    client_ip: &str,
-    request_addr: &std::net::SocketAddr,
-    // This controls whether an existing logical playback session may reopen while the user is already at limit.
-    // It is intentionally independent from whether the session is socket-bound.
+    client_ip: &'a str,
+    request_addr: &'a std::net::SocketAddr,
     use_session_admission: bool,
-    session_token: Option<&str>,
+    session_token: Option<&'a str>,
     activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'_>,
-) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>) {
-    use crate::api::model::{evaluate_strategy, AdmissionDecision, ConnectionAdmission, ConnectionKind, StrategyContext};
+    eviction_reentry_guard: EvictionReentryGuard<'a>,
+    strategies: &'a [shared::model::AdmissionStrategy],
+    base_idx: usize,
+    admission: crate::api::model::ConnectionAdmission,
+    _kind_for_exhausted: Option<crate::api::model::ConnectionKind>,
+    build_grace_ctx: F,
+) -> Option<AdmissionStrategyResolution>
+where
+    F: Fn(usize) -> GraceResolutionContext,
+{
+    use crate::api::model::{evaluate_strategy, AdmissionDecision, StrategyContext};
     use shared::model::UserConnectionPermission;
 
-    let admission = get_admission_for_request(
-        app_state,
-        username,
-        max_connections,
-        soft_connections,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-    )
-        .await;
-
-    if admission.permission != UserConnectionPermission::Exhausted {
-        return (admission, None);
-    }
-
-    let strategies = get_effective_admission_strategies(app_state);
-    if strategies.is_empty() {
-        debug!("No admission strategies configured, denying request for user {username}");
-        return (admission, None);
-    }
-
     let mut candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
-    let ctx = StrategyContext { username, client_ip, strategies: &strategies };
-    for strategy in &strategies {
+    let ctx = StrategyContext { username, client_ip, strategies };
+    let mut idx = 0usize;
+
+    for strategy in strategies {
         match evaluate_strategy(*strategy, &ctx, &candidates) {
             AdmissionDecision::NoMatch => {}
             AdmissionDecision::Grace(mode) => {
                 if app_state.active_users.grant_grace(username).await {
-                    return (
-                        ConnectionAdmission {
+                    // Return a FRESH admission with GracePeriod permission (not the admission
+                    // parameter, which may have Exhausted permission). The kind is preserved from
+                    // the original admission.
+                    return Some(AdmissionStrategyResolution {
+                        admission: crate::api::model::ConnectionAdmission {
                             permission: UserConnectionPermission::GracePeriod,
-                            kind: Some(ConnectionKind::Normal),
+                            kind: admission.kind,
                         },
-                        Some(mode),
-                    );
+                        grace_mode: Some(mode),
+                        grace_context: Some(build_grace_ctx(base_idx + idx)),
+                    });
                 }
                 debug!("Grace grant rejected for user {username}, continuing with later strategies");
             }
@@ -760,20 +784,183 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
                 )
                     .await;
                 if retry_admission.permission == UserConnectionPermission::Allowed {
-                    return (retry_admission, None);
+                    return Some(AdmissionStrategyResolution {
+                        admission: retry_admission,
+                        grace_mode: None,
+                        grace_context: None,
+                    });
                 }
                 debug!("Admission still denied after eviction for user {username}, continuing with later strategies");
                 candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
             }
             AdmissionDecision::Deny => {
-                debug!("Admission strategy denied for user {username}");
-                return (admission, None);
+                // Caller constructs the final exhausted result.
+                return None;
             }
         }
+        idx += 1;
+    }
+
+    // All strategies returned NoMatch — caller constructs the final exhausted result.
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::api) async fn resolve_admission_with_strategies(
+    app_state: &Arc<AppState>,
+    username: &str,
+    max_connections: u32,
+    soft_connections: u16,
+    client_ip: &str,
+    request_addr: &std::net::SocketAddr,
+    // This controls whether an existing logical playback session may reopen while the user is already at limit.
+    // It is intentionally independent from whether the session is socket-bound.
+    use_session_admission: bool,
+    session_token: Option<&str>,
+    activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
+) -> AdmissionStrategyResolution {
+    use shared::model::UserConnectionPermission;
+
+    let admission = get_admission_for_request(
+        app_state,
+        username,
+        max_connections,
+        soft_connections,
+        use_session_admission,
+        session_token,
+        activate_unbound_session,
+    )
+        .await;
+
+    if admission.permission != UserConnectionPermission::Exhausted {
+        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+    }
+
+    let strategies = get_effective_admission_strategies(app_state);
+    if strategies.is_empty() {
+        debug!("No admission strategies configured, denying request for user {username}");
+        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
+    }
+
+    let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
+        strategy_index: global_idx,
+        strategies: strategies.clone(),
+        kind: admission.kind,
+    };
+
+    if let Some(resolution) = evaluate_admission_strategy_loop(
+        app_state,
+        username,
+        max_connections,
+        soft_connections,
+        client_ip,
+        request_addr,
+        use_session_admission,
+        session_token,
+        activate_unbound_session,
+        eviction_reentry_guard,
+        &strategies,
+        0,
+        admission,
+        admission.kind,
+        build_grace_ctx,
+    )
+        .await
+    {
+        return resolution;
     }
 
     debug!("No admission strategy could admit user {username}");
-    (admission, None)
+    AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None }
+}
+
+/// Evaluates only the strategies that come AFTER the already-used grace strategy.
+/// This is called when a user-grace has failed and the system needs to determine
+/// whether a remaining eviction strategy can free a slot.
+///
+/// Rules:
+/// - Only `grace_context.strategies[(strategy_index + 1)..]` are evaluated
+/// - `NoMatch` → continue to next strategy
+/// - `Evict` → kick target, retry admission
+/// - `Grace` → technically possible under current config (only one grace allowed), but handled
+/// - `Deny` → final exhausted
+/// - Empty remaining slice → final exhausted
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(in crate::api) async fn evaluate_remaining_strategies_after_grace(
+    app_state: &Arc<AppState>,
+    username: &str,
+    max_connections: u32,
+    soft_connections: u16,
+    client_ip: &str,
+    request_addr: &std::net::SocketAddr,
+    use_session_admission: bool,
+    session_token: Option<&str>,
+    activate_unbound_session: bool,
+    eviction_reentry_guard: EvictionReentryGuard<'_>,
+    grace_context: &GraceResolutionContext,
+    original_kind: Option<crate::api::model::ConnectionKind>,
+) -> AdmissionStrategyResolution {
+    use shared::model::UserConnectionPermission;
+
+    let remaining = grace_context.strategy_index + 1;
+    let strategies = &grace_context.strategies;
+    if remaining >= strategies.len() {
+        debug!("No remaining strategies after grace for user {username}");
+        return AdmissionStrategyResolution {
+            admission: crate::api::model::ConnectionAdmission {
+                permission: UserConnectionPermission::Exhausted,
+                kind: original_kind,
+            },
+            grace_mode: None,
+            grace_context: None,
+        };
+    }
+
+    // admission.kind is used only inside build_grace_ctx for the Grace case's
+    // GraceResolutionContext.kind. Both paths (helper early-return and caller
+    // exhausted construction) use original_kind, so this is safe.
+    let admission = crate::api::model::ConnectionAdmission {
+        permission: UserConnectionPermission::Exhausted,
+        kind: original_kind,
+    };
+    let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
+        strategy_index: global_idx,
+        strategies: strategies.clone(),
+        kind: original_kind,
+    };
+
+    if let Some(resolution) = evaluate_admission_strategy_loop(
+        app_state,
+        username,
+        max_connections,
+        soft_connections,
+        client_ip,
+        request_addr,
+        use_session_admission,
+        session_token,
+        activate_unbound_session,
+        eviction_reentry_guard,
+        &strategies[remaining..],
+        remaining,
+        admission,
+        original_kind,
+        build_grace_ctx,
+    )
+        .await
+    {
+        return resolution;
+    }
+
+    debug!("No remaining strategy could admit user {username}");
+    AdmissionStrategyResolution {
+        admission: crate::api::model::ConnectionAdmission {
+            permission: UserConnectionPermission::Exhausted,
+            kind: original_kind,
+        },
+        grace_mode: None,
+        grace_context: None,
+    }
 }
 
 struct SessionActivationRequest<'a> {
@@ -793,6 +980,7 @@ struct SessionActivationRequest<'a> {
 struct PlaybackActivationResult {
     admission: crate::api::model::ConnectionAdmission,
     grace_mode: Option<crate::api::model::GraceMode>,
+    grace_context: Option<crate::api::api_utils::GraceResolutionContext>,
     placeholder_transition_version: Option<u64>,
 }
 
@@ -937,6 +1125,7 @@ async fn activate_session_before_stream_open(
                 kind: Some(connection_kind),
             },
             grace_mode: resolved_grace,
+            grace_context: None,
             placeholder_transition_version: None,
         };
     }
@@ -951,6 +1140,7 @@ async fn activate_session_before_stream_open(
                 kind: Some(connection_kind),
             },
             grace_mode: None,
+            grace_context: None,
             placeholder_transition_version: None,
         };
     }
@@ -970,7 +1160,7 @@ async fn activate_session_before_stream_open(
         })
         .await);
 
-    let (admission, grace_mode) = resolve_admission_with_strategies(
+    let result = resolve_admission_with_strategies(
         app_state,
         &user.username,
         user.max_connections,
@@ -987,6 +1177,9 @@ async fn activate_session_before_stream_open(
         },
     )
     .await;
+    let admission = result.admission;
+    let grace_mode = result.grace_mode;
+    let grace_context = result.grace_context;
 
     if admission.permission == UserConnectionPermission::GracePeriod {
         if matches!(grace_mode, Some(crate::api::model::GraceMode::Hold)) {
@@ -1009,6 +1202,7 @@ async fn activate_session_before_stream_open(
     PlaybackActivationResult {
         admission,
         grace_mode,
+        grace_context,
         placeholder_transition_version,
     }
 }
@@ -1242,6 +1436,7 @@ async fn create_stream_response_details(
     is_reopen: bool,
     session_owner: Option<&str>,
     grace_hold_override: Option<bool>,
+    grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy = resolve_streaming_strategy(
         app_state,
@@ -1312,6 +1507,7 @@ async fn create_stream_response_details(
                 disable_provider_grace: false,
                 reconnect_flag: None,
                 provider_handle: streaming_strategy.provider_handle.clone(),
+                grace_resolution_context,
             })
         }
         ProviderStreamState::Available(_provider_name, request_url)
@@ -1417,6 +1613,7 @@ async fn create_stream_response_details(
                 disable_provider_grace: false,
                 reconnect_flag,
                 provider_handle,
+                grace_resolution_context,
             })
         }
     }
@@ -1642,6 +1839,7 @@ pub async fn force_provider_stream_response(
         true,
         Some(user_session.token.as_str()),
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
+        None,
     )
         .await
     {
@@ -1891,6 +2089,7 @@ pub(crate) async fn stream_response(
         false,
         Some(session_token),
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
+        activation.grace_context.clone(),
     )
         .await
     {
@@ -4511,6 +4710,670 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grace_context_is_populated_when_grace_strategy_is_actually_granted() {
+        // Use a DIFFERENT session token than the pre-existing counted session.
+        // Otherwise session-admission may treat it as a valid reopen and skip the exhausted path.
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserOldest,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55401".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:55402".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+        // addr1 and addr2 have DIFFERENT IPs.
+        // EvictUserSameIpOldest will NOT match (different IP), so GraceHoldStream is evaluated.
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-grace-ctx".to_string();
+        user.max_connections = 1;
+
+        // Register the connection first so update_connection succeeds
+        app_state.connection_manager.add_connection(&addr1).await;
+
+        // Create the session — lifecycle starts as Prepared (uncounted)
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-existing-counted",
+                virtual_id: 55401,
+                provider: "provider_1",
+                stream_url: "http://provider-1.example/live/55401.m3u8",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: true,
+            })
+            .await;
+
+        // update_connection promotes the session to Active (counted) and creates a stream.
+        // This exhausts the user's single slot (max_connections = 1).
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55401,
+                meter_uid: 55401,
+                username: "user-grace-ctx",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider_1".intern(),
+                stream_channel: &create_test_live_channel("http://provider-1.example/live/55401.m3u8"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-existing-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        // Now the new request finds the slot exhausted and the grace strategy kicks in.
+        let result = resolve_admission_with_strategies(
+            &app_state,
+            &user.username,
+            user.max_connections,
+            user.soft_connections,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new-request"),
+            true,
+            EvictionReentryGuard::Session("tok-new-request"),
+        )
+        .await;
+
+        assert_eq!(result.admission.permission, UserConnectionPermission::GracePeriod, "grace should be granted");
+        assert!(matches!(result.grace_mode, Some(crate::api::model::GraceMode::Hold)));
+        let ctx = result.grace_context.expect("grace_context must be present when grace is granted");
+        assert_eq!(ctx.strategy_index, 1, "GraceHoldStream is at index 1");
+        assert_eq!(ctx.strategies.len(), 3);
+        assert!(matches!(ctx.strategies[ctx.strategy_index], AdmissionStrategy::GraceHoldStream));
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_evicts_after_used_grace() {
+        // Strategies: [GraceHoldStream, EvictUserOldest]
+        // Grace was used at index 0, so only EvictUserOldest (index 1) is evaluated.
+        // Eviction frees the slot → Allowed.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::EvictUserOldest,
+        ];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserOldest,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55701".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:55702".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "remaining-evict".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted",
+                virtual_id: 55701,
+                provider: "provider-evict",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55701,
+                meter_uid: 55701,
+                username: "remaining-evict",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-evict".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "remaining-evict",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Normal),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Allowed,
+            "EvictUserOldest should free the slot"
+        );
+        assert!(result.grace_context.is_none(), "no grace context on eviction success");
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() {
+        // Strategies: [GraceHoldStream, EvictUserSameIpOldest, EvictUserOldest]
+        // Grace was at index 0, remaining are EvictUserSameIpOldest (index 1) and EvictUserOldest (index 2).
+        // The existing counted session is at a DIFFERENT IP, so EvictUserSameIpOldest → NoMatch.
+        // EvictUserOldest succeeds → Allowed.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::EvictUserSameIpOldest,
+            AdmissionStrategy::EvictUserOldest,
+        ];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::EvictUserSameIpOldest,
+                AdmissionStrategy::EvictUserOldest,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55801".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:55802".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "remaining-skip-no-match".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted",
+                virtual_id: 55801,
+                provider: "provider-skip",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55801,
+                meter_uid: 55801,
+                username: "remaining-skip-no-match",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-skip".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "remaining-skip-no-match",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Normal),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Allowed,
+            "EvictUserSameIpOldest should NoMatch, EvictUserOldest should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_empty_slice_denies() {
+        // Strategies: [GraceHoldStream]
+        // Grace was at index 0, remaining slice is empty → exhausted.
+        let strategies = vec![AdmissionStrategy::GraceHoldStream];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+
+        let addr: SocketAddr = "10.0.0.5:55901".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "no-remaining-strategies",
+            1,
+            0,
+            &fingerprint.client_ip,
+            &fingerprint.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Exhausted,
+            "empty remaining slice should deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
+        // Strategies: [GraceHoldStream]
+        // Grace was at index 0, remaining slice is empty → exhausted.
+        // grace_context.kind is Soft — must be preserved in the exhausted result.
+        let strategies = vec![AdmissionStrategy::GraceHoldStream];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Soft) };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+
+        let addr: SocketAddr = "10.0.0.6:55902".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "soft-kind-user",
+            1,
+            0,
+            &fingerprint.client_ip,
+            &fingerprint.addr,
+            true,
+            Some("tok-soft"),
+            true,
+            EvictionReentryGuard::Session("tok-soft"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Soft),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Exhausted,
+            "empty remaining slice should deny"
+        );
+        assert_eq!(
+            result.admission.kind,
+            Some(crate::api::model::ConnectionKind::Soft),
+            "exhausted result must preserve the original Soft connection kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_does_not_retry_used_prefix() {
+        // Strategies: [GraceHoldStream, GraceInstantStream, EvictUserOldest]
+        // Grace was at index 1 (GraceInstantStream).
+        // Remaining slice: [EvictUserOldest] (index 2).
+        // GraceHoldStream (index 0) must NOT be re-evaluated.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::GraceInstantStream,
+            AdmissionStrategy::EvictUserOldest,
+        ];
+        let strategies_for_config = strategies.clone();
+        let grace_context = GraceResolutionContext { strategy_index: 1, strategies, kind: None };
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(strategies_for_config),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:56001".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.5:56002".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "remaining-no-retry".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted",
+                virtual_id: 56001,
+                provider: "provider-no-retry",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 56001,
+                meter_uid: 56001,
+                username: "remaining-no-retry",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-no-retry".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "remaining-no-retry",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new"),
+            true,
+            EvictionReentryGuard::Session("tok-new"),
+            &grace_context,
+            Some(crate::api::model::ConnectionKind::Normal),
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::Allowed,
+            "only EvictUserOldest should be evaluated, not GraceHoldStream"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_context_kind() {
+        // grace_context.kind = Normal, original_kind = Soft
+        // remaining slice is empty → exhausted result must use original_kind.
+        // This proves the empty-slice branch uses original_kind, not grace_context.kind.
+        let strategies = vec![AdmissionStrategy::GraceHoldStream];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Normal) };
+        let original_kind = Some(crate::api::model::ConnectionKind::Soft);
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
+        });
+
+        let addr: SocketAddr = "10.0.0.7:55903".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint = create_test_fingerprint(addr);
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "kind-mismatch-empty",
+            1,
+            0,
+            &fingerprint.client_ip,
+            &fingerprint.addr,
+            true,
+            Some("tok-empty"),
+            true,
+            EvictionReentryGuard::Session("tok-empty"),
+            &grace_context,
+            original_kind,
+        )
+        .await;
+
+        assert_eq!(result.admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(
+            result.admission.kind,
+            original_kind,
+            "exhausted result must use original_kind (Soft), not grace_context.kind (Normal)"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_remaining_strategies_later_grace_uses_original_kind_not_context_kind() {
+        // grace_context.kind = Normal, original_kind = Soft
+        // Strategies: [GraceHoldStream, GraceInstantStream]
+        // Grace was used at index 0 (GraceHoldStream).
+        // Remaining slice contains GraceInstantStream (index 1).
+        // When the helper returns Grace for the remaining strategy, the new
+        // GraceResolutionContext.kind must be original_kind (Soft), not grace_context.kind (Normal).
+        // This proves build_grace_ctx uses original_kind as source of truth.
+        let strategies = vec![
+            AdmissionStrategy::GraceHoldStream,
+            AdmissionStrategy::GraceInstantStream,
+        ];
+        let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Normal) };
+        let original_kind = Some(crate::api::model::ConnectionKind::Soft);
+
+        let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
+            retry: true,
+            metrics_enabled: true,
+            buffer: None,
+            grace_period_millis: 2_000,
+            grace_period_timeout_secs: 8,
+            grace_period_hold_stream: true,
+            hls_session_ttl_secs: 10,
+            catchup_session_ttl_secs: 10,
+            throttle_str: None,
+            throttle_kbps: 0,
+            shared_burst_buffer_mb: 1,
+            admission_strategies: Some(vec![
+                AdmissionStrategy::GraceHoldStream,
+                AdmissionStrategy::GraceInstantStream,
+            ]),
+        });
+
+        let addr1: SocketAddr = "127.0.0.1:55710".parse().unwrap_or_else(|_| unreachable!());
+        let addr2: SocketAddr = "10.0.0.8:55711".parse().unwrap_or_else(|_| unreachable!());
+        let fingerprint1 = create_test_fingerprint(addr1);
+        let fingerprint2 = create_test_fingerprint(addr2);
+
+        app_state.connection_manager.add_connection(&addr1).await;
+        app_state.connection_manager.add_connection(&addr2).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = "kind-mismatch-grace".to_string();
+        user.max_connections = 1;
+
+        app_state
+            .active_users
+            .create_user_session(crate::api::model::CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-counted-grace",
+                virtual_id: 55710,
+                provider: "provider-grace-kind",
+                stream_url: "http://provider.example/live/1.ts",
+                addr: &addr1,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        app_state
+            .active_users
+            .update_connection(crate::api::model::ActiveUserConnectionParams {
+                uid: 55710,
+                meter_uid: 55710,
+                username: "kind-mismatch-grace",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint1,
+                provider: "provider-grace-kind".intern(),
+                stream_channel: &create_test_live_channel("http://provider.example/live/1.ts"),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-counted-grace"),
+            })
+            .await
+            .expect("stream should be created");
+
+        let result = evaluate_remaining_strategies_after_grace(
+            &app_state,
+            "kind-mismatch-grace",
+            1,
+            0,
+            &fingerprint2.client_ip,
+            &fingerprint2.addr,
+            true,
+            Some("tok-new-grace"),
+            true,
+            EvictionReentryGuard::Session("tok-new-grace"),
+            &grace_context,
+            original_kind,
+        )
+        .await;
+
+        assert_eq!(
+            result.admission.permission,
+            UserConnectionPermission::GracePeriod,
+            "remaining GraceInstantStream should grant GracePeriod"
+        );
+        assert!(
+            result.grace_context.is_some(),
+            "grace_context must be present when grace is granted"
+        );
+        assert_eq!(
+            result.grace_context.as_ref().unwrap().kind,
+            original_kind,
+            "GraceResolutionContext.kind in the result must be original_kind (Soft), not grace_context.kind (Normal)"
+        );
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn resolve_admission_with_strategies_falls_through_after_failed_grace_grant() {
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
@@ -4612,7 +5475,7 @@ mod tests {
             })
             .await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "fallthrough",
             1,
@@ -4625,6 +5488,8 @@ mod tests {
             EvictionReentryGuard::Session("tok-third"),
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Normal));
@@ -4686,7 +5551,7 @@ mod tests {
             EvictionReentryGuard::Session("vod-session"),
         )
             .await;
-        assert_eq!(session_based.0.permission, UserConnectionPermission::Allowed);
+        assert_eq!(session_based.admission.permission, UserConnectionPermission::Allowed);
 
         let connection_based = resolve_admission_with_strategies(
             &app_state,
@@ -4701,7 +5566,7 @@ mod tests {
             EvictionReentryGuard::Session("vod-session"),
         )
             .await;
-        assert_eq!(connection_based.0.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(connection_based.admission.permission, UserConnectionPermission::Exhausted);
     }
 
     #[tokio::test]
@@ -4776,7 +5641,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user",
             1,
@@ -4789,6 +5654,8 @@ mod tests {
             EvictionReentryGuard::SocketPlayback { virtual_id: 9001 },
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
         assert_eq!(grace_mode, None);
@@ -4902,7 +5769,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, _grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user-2",
             1,
@@ -4915,6 +5782,7 @@ mod tests {
             EvictionReentryGuard::SocketPlayback { virtual_id: 9103 },
         )
             .await;
+        let admission = result.admission;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert!(app_state.active_users.active_streams().await.is_empty());
@@ -5024,7 +5892,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user-4",
             1,
@@ -5037,6 +5905,8 @@ mod tests {
             EvictionReentryGuard::Session("session-other"),
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(grace_mode, None);
@@ -5115,7 +5985,7 @@ mod tests {
             .await;
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             "loop-user-3",
             1,
@@ -5128,6 +5998,8 @@ mod tests {
             EvictionReentryGuard::SocketPlayback { virtual_id: 9201 },
         )
             .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
@@ -5769,8 +6641,7 @@ mod tests {
             true,
             EvictionReentryGuard::Session("tok-hls-first"),
         )
-            .await
-            .0;
+            .await;
         let second_admission = resolve_admission_with_strategies(
             &app_state,
             &user.username,
@@ -5783,11 +6654,10 @@ mod tests {
             true,
             EvictionReentryGuard::Session("tok-hls-second"),
         )
-            .await
-            .0;
+            .await;
 
-        assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
-        assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(first_admission.admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(second_admission.admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(app_state.active_users.user_connections(&user.username).await, 0);
     }
 
@@ -5923,7 +6793,7 @@ mod tests {
         assert!(app_state.active_users.active_streams().await.is_empty());
 
         let mut close_rx = app_state.connection_manager.get_close_connection_channel();
-        let (admission, grace_mode) = resolve_admission_with_strategies(
+        let result = resolve_admission_with_strategies(
             &app_state,
             &user.username,
             user.max_connections,
@@ -5936,6 +6806,8 @@ mod tests {
             EvictionReentryGuard::SocketPlayback { virtual_id: 5001 },
         )
         .await;
+        let admission = result.admission;
+        let grace_mode = result.grace_mode;
 
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(grace_mode, None);

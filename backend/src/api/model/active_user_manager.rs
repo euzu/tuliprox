@@ -1183,9 +1183,9 @@ impl ActiveUserManager {
         let mut connections = self.connections.write().await;
         if let Some(connection_data) = connections.by_key.get_mut(username) {
             let now = get_current_timestamp();
-            if connection_data.connections != connection_data.max_connections {
+            if connection_data.connections < connection_data.max_connections {
                 debug!(
-                    "Grace grant denied for {username}, expected connections == max_connections but got {}/{}",
+                    "Grace grant denied for {username}, user not at connection limit ({}/{})",
                     connection_data.connections,
                     connection_data.max_connections
                 );
@@ -3854,7 +3854,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grant_grace_only_at_limit() {
+    async fn test_grant_grace_succeeds_at_and_above_limit_without_prior_grace() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let event_manager = Arc::new(EventManager::new());
@@ -3925,7 +3925,7 @@ mod tests {
             })
             .await;
 
-        assert!(!manager.grant_grace("over-limit").await);
+        assert!(manager.grant_grace("over-limit").await);
     }
 
     fn test_user_credentials(username: &str, max_connections: u32, soft_connections: u16) -> ProxyUserCredentials {

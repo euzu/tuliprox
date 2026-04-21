@@ -202,6 +202,44 @@ Important:
 - config order matters
 - the first matching strategy wins
 - replacement is therefore a policy decision, not a random fallback
+- when a user-admission grace is later exhausted, Tuliprox re-evaluates only the
+  remaining strategies after the already-used grace
+- the grace task carries both the stored `GraceResolutionContext` and the runtime
+  original `ConnectionKind` into that fallback path so exhausted results preserve
+  the correct kind, including `Soft`
+
+### User-grace failure fallback
+
+The current runtime distinguishes strictly between:
+
+- user-grace failure
+- provider-grace failure
+
+Only the user-grace failure path may call
+`evaluate_remaining_strategies_after_grace(...)`.
+
+That helper:
+
+- starts after the already-used grace index
+- never retries the already-consumed prefix
+- may admit by later eviction
+- or may end in final exhausted/deny
+
+Provider grace does not fall through into user-eviction strategies.
+
+```mermaid
+flowchart TD
+    A[user grace granted] --> B[GraceResolutionContext stores strategy_index, strategies, kind]
+    B --> C[create_active_client_stream]
+    C --> D[GracePeriodParams.grace_resolution_context]
+    C --> E[GracePeriodParams.grace_kind from runtime connection_kind]
+    D --> F[stream_grace_period]
+    E --> F
+    F -->|user grace failure| G[evaluate_remaining_strategies_after_grace]
+    G -->|Allowed or GracePeriod| H[activate lifecycle]
+    G -->|Exhausted| I[expire lifecycle and expose UserExhausted]
+    F -->|provider grace failure| J[provider exhausted or provisioning path]
+```
 
 ## 6. Placeholder creation before stream open
 
