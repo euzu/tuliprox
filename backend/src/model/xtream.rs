@@ -131,10 +131,7 @@ pub struct PlaylistXtreamCategory {
 #[cfg(test)]
 mod tests {
     use super::xtream_mapping_option_from_target_options;
-    use crate::model::{
-        AppConfig, Config, ConfigInput, ConfigTarget, MediaToolCapabilities, ProxyUserCredentials, SourcesConfig,
-        TargetOutput, XtreamTargetOutput,
-    };
+    use crate::model::{AppConfig, Config, ConfigInput, ConfigTarget, MediaToolCapabilities, ProxyUserCredentials, SourcesConfig, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput};
     use crate::utils::FileLockManager;
     use crate::ConfigPaths;
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -188,7 +185,7 @@ mod tests {
     }
 
     fn create_test_target() -> (ConfigTarget, XtreamTargetOutput) {
-        let xtream_output = XtreamTargetOutput { flags: Default::default(), trakt: None, filter: None };
+        let xtream_output = XtreamTargetOutput { flags: XtreamTargetFlagsSet::default(), trakt: None, filter: None };
         let target = ConfigTarget {
             id: 1,
             enabled: true,
