@@ -39,6 +39,13 @@ impl EpgData {
     }
 }
 
+fn epg_interval_effect_deps(
+    epg_channel_id: &Option<std::sync::Arc<str>>,
+    epg_data: Option<&Rc<EpgData>>,
+) -> (Option<std::sync::Arc<str>>, Option<u64>) {
+    (epg_channel_id.clone(), epg_data.map(|data| data.fetched_at_secs))
+}
+
 /// Computes current and next programme from a list of programmes.
 fn compute_current_next(
     programmes: &[EpgProgrammeDto],
@@ -123,9 +130,8 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                     .await
                 {
                     if let Some(entry) = response.entries.first() {
-                        let programmes = entry.programmes.clone();
+                        let (current, next) = compute_current_next(&entry.programmes, now_i64);
                         let new_data = Rc::new(EpgData { response, fetched_at_secs: now_secs });
-                        let (current, next) = compute_current_next(&programmes, now_i64);
                         current_next.set(current.map(|cur| (cur, next)));
                         epg_data.set(Some(new_data));
                     } else {
@@ -146,11 +152,11 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
     // Local tick: recompute current/next and detect staleness every 30 seconds
     {
-        let epg_channel_id = epg_channel_id.clone();
+        let interval_deps = epg_interval_effect_deps(&epg_channel_id, (*epg_data).as_ref());
         let epg_data = epg_data.clone();
         let current_next = current_next.clone();
         let needs_refetch = needs_refetch.clone();
-        use_effect_with(epg_channel_id.clone(), move |epg_channel_id| {
+        use_effect_with(interval_deps, move |(epg_channel_id, _)| {
             epg_channel_id.as_ref().map_or_else(
                 || Box::new(|| ()) as Box<dyn FnOnce()>,
                 |_| {
@@ -391,5 +397,19 @@ mod tests {
         assert_eq!(format_user_comment(None), None);
         assert_eq!(format_user_comment(Some("   ".to_string())), None);
         assert_eq!(format_user_comment(Some(" comment ".to_string())), Some("(comment)".to_string()));
+    }
+
+    #[test]
+    fn test_epg_interval_effect_deps_change_when_epg_data_changes() {
+        let channel_id = Some(std::sync::Arc::<str>::from("channel-1"));
+        let first = Rc::new(EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 100 });
+        let second = Rc::new(EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 200 });
+
+        let first_deps = epg_interval_effect_deps(&channel_id, Some(&first));
+        let second_deps = epg_interval_effect_deps(&channel_id, Some(&second));
+
+        assert_ne!(first_deps, second_deps);
+        assert_eq!(first_deps.1, Some(100));
+        assert_eq!(second_deps.1, Some(200));
     }
 }

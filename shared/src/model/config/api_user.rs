@@ -134,7 +134,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proxy_user_credentials_output_clusters_none_means_all() {
+    fn proxy_user_credentials_output_clusters_none_preserved() {
         let value = serde_json::json!({
             "username": "alice",
             "password": "secret"
@@ -159,5 +159,21 @@ mod tests {
             serde_json::from_value(serialized).expect("user should deserialize");
 
         assert_eq!(deserialized.output_clusters, Some(ClusterFlags::Live | ClusterFlags::Series));
+    }
+
+    #[test]
+    fn proxy_user_credentials_roundtrip_preserves_empty_output_clusters() {
+        let user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            output_clusters: Some(ClusterFlags::empty()),
+            ..ProxyUserCredentialsDto::default()
+        };
+
+        let serialized = serde_json::to_value(&user).expect("user should serialize");
+        let deserialized: ProxyUserCredentialsDto =
+            serde_json::from_value(serialized).expect("user should deserialize");
+
+        assert_eq!(deserialized.output_clusters, Some(ClusterFlags::empty()));
     }
 }

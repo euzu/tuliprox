@@ -372,29 +372,40 @@ fn get_applied_epg_timeshift(
     programme: &EpgProgramme,
     epg_processing_options: &EpgProcessingOptions,
 ) -> (String, String, i64, i64) {
+    let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
+    let (start_str, stop_str) = format_epg_timeshift_strings(programme, epg_processing_options, start_ts, stop_ts);
+    (start_str, stop_str, start_ts, stop_ts)
+}
+
+fn get_applied_epg_timestamps(
+    programme: &EpgProgramme,
+    epg_processing_options: &EpgProcessingOptions,
+) -> (i64, i64) {
     match &epg_processing_options.time_shift {
-        EpgTimeShift::None => {
-            (format_xmltv_time(programme.start), format_xmltv_time(programme.stop), programme.start, programme.stop)
-        }
+        EpgTimeShift::None | EpgTimeShift::TimeZone(_) => (programme.start, programme.stop),
         EpgTimeShift::Fixed(m) => {
             let off = i64::from(*m) * 60;
-            let s = programme.start + off;
-            let e = programme.stop + off;
-            (format_xmltv_time(s), format_xmltv_time(e), s, e)
+            (programme.start + off, programme.stop + off)
         }
+    }
+}
+
+fn format_epg_timeshift_strings(
+    programme: &EpgProgramme,
+    epg_processing_options: &EpgProcessingOptions,
+    start_ts: i64,
+    stop_ts: i64,
+) -> (String, String) {
+    match &epg_processing_options.time_shift {
         EpgTimeShift::TimeZone(tz) => {
             let s_dt = chrono::Utc.timestamp_opt(programme.start, 0).unwrap().with_timezone(tz);
             let e_dt = chrono::Utc.timestamp_opt(programme.stop, 0).unwrap().with_timezone(tz);
-            // We use the original timestamps (programme.start/stop) here because TimeZone adjustment
-            // is only for the visual string representation. The absolute event time (UTC) remains unchanged.
-            // Unlike 'Fixed' offset which artificially shifts the event time.
             (
                 s_dt.format("%Y-%m-%d %H:%M:%S").to_string(),
                 e_dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                programme.start,
-                programme.stop,
             )
         }
+        EpgTimeShift::None | EpgTimeShift::Fixed(_) => (format_xmltv_time(start_ts), format_xmltv_time(stop_ts)),
     }
 }
 
@@ -491,7 +502,10 @@ async fn serve_stream_epg(
         let mut seen = HashSet::new();
         items
             .iter()
-            .filter_map(|item| seen.insert(item.epg_channel_id.clone()).then_some(item.epg_channel_id.as_str()))
+            .filter_map(|item| {
+                let epg_channel_id = item.epg_channel_id.as_str();
+                seen.insert(epg_channel_id).then_some(epg_channel_id)
+            })
             .collect()
     };
     let query_ids = unique_ids
@@ -517,19 +531,7 @@ async fn serve_stream_epg(
 
     for (epg_channel_id, channel) in channels {
         let programmes = match channel {
-            Some(ch) => ch.programmes.iter()
-                .filter(|p| p.stop > now && p.start <= window_end)
-                .map(|p| {
-                    let (start_str, stop_str, start_ts, stop_ts) = get_applied_epg_timeshift(p, &epg_processing_options);
-                    EpgProgrammeDto {
-                        start_timestamp: start_ts,
-                        stop_timestamp: stop_ts,
-                        start: start_str,
-                        stop: stop_str,
-                        title: p.title.as_ref().map_or_else(String::new, ToString::to_string),
-                    }
-                })
-                .collect(),
+            Some(ch) => stream_epg_programmes_for_channel(&ch.programmes, &epg_processing_options, now, window_end),
             None => Vec::new(),
         };
 
@@ -541,6 +543,31 @@ async fn serve_stream_epg(
     }
 
     StreamEpgResponse { entries }
+}
+
+fn stream_epg_programmes_for_channel(
+    programmes: &[EpgProgramme],
+    epg_processing_options: &EpgProcessingOptions,
+    now: i64,
+    window_end: i64,
+) -> Vec<EpgProgrammeDto> {
+    programmes
+        .iter()
+        .filter_map(|programme| {
+            let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
+            (stop_ts > now && start_ts <= window_end).then(|| {
+                let (start_str, stop_str) =
+                    format_epg_timeshift_strings(programme, epg_processing_options, start_ts, stop_ts);
+                EpgProgrammeDto {
+                    start: start_str,
+                    stop: stop_str,
+                    start_timestamp: start_ts,
+                    stop_timestamp: stop_ts,
+                    title: programme.title.as_ref().map_or_else(String::new, ToString::to_string),
+                }
+            })
+        })
+        .collect()
 }
 
 fn group_stream_epg_items(
@@ -570,9 +597,12 @@ fn empty_stream_epg_entries(target_id: u16, items: &[StreamEpgItemRequest]) -> V
     let mut seen = HashSet::new();
     items
         .iter()
-        .filter_map(|item| seen.insert(item.epg_channel_id.clone()).then_some(item.epg_channel_id.clone()))
+        .filter_map(|item| {
+            let epg_channel_id = item.epg_channel_id.as_str();
+            seen.insert(epg_channel_id).then_some(epg_channel_id)
+        })
         .map(|epg_channel_id| StreamEpgEntry {
-            epg_channel_id,
+            epg_channel_id: epg_channel_id.to_string(),
             target_id: Some(target_id),
             programmes: Vec::new(),
         })
@@ -727,9 +757,10 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_stream_epg_items, rewrite_epg_channel_resource_url};
+    use super::{group_stream_epg_items, rewrite_epg_channel_resource_url, stream_epg_programmes_for_channel};
+    use crate::utils::{EpgProcessingOptions, EpgTimeShift};
     use shared::{
-        model::{EpgChannel, StreamEpgItemRequest},
+        model::{EpgChannel, EpgProgramme, StreamEpgItemRequest},
         utils::{concat_path, obfuscate_text, Internable},
     };
 
@@ -809,5 +840,36 @@ mod tests {
         let rewritten = rewrite_epg_channel_resource_url(&secret, resource_url, channel);
 
         assert_eq!(rewritten.icon.as_deref(), Some("/api/v1/library/thumbnail/test"));
+    }
+
+    #[test]
+    fn stream_epg_programmes_for_channel_filters_using_shifted_fixed_times() {
+        let now = 10_000;
+        let window_end = now + 8 * 3600;
+        let epg_processing_options = EpgProcessingOptions {
+            rewrite_urls: false,
+            time_shift: EpgTimeShift::Fixed(120),
+            encrypt_secret: [0; 16],
+        };
+        let programmes = vec![
+            EpgProgramme::new_all(now - 7_300, now - 100, "channel-1".intern(), Some("Shifted Into Window".intern()), None),
+            EpgProgramme::new_all(now + 60, now + 600, "channel-1".intern(), Some("Already In Window".intern()), None),
+            EpgProgramme::new_all(
+                window_end + 60,
+                window_end + 600,
+                "channel-1".intern(),
+                Some("Still Outside Window".intern()),
+                None,
+            ),
+        ];
+
+        let filtered = stream_epg_programmes_for_channel(&programmes, &epg_processing_options, now, window_end);
+
+        assert_eq!(
+            filtered.iter().map(|programme| programme.title.as_str()).collect::<Vec<_>>(),
+            vec!["Shifted Into Window", "Already In Window"]
+        );
+        assert_eq!(filtered[0].start_timestamp, now - 100);
+        assert_eq!(filtered[0].stop_timestamp, now + 7_100);
     }
 }

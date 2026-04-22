@@ -2500,22 +2500,52 @@ impl ActiveUserManager {
 
     pub async fn socket_expiry_deadline(&self, addr: &SocketAddr) -> Option<u64> {
         let ttl_secs = self.active_socket_ttl_secs();
-        let connections = self.connections.read().await;
-        let registration = connections.key_by_addr.get(addr)?;
-        if registration.username.is_empty() {
+        {
+            let connections = self.connections.read().await;
+            let registration = connections.key_by_addr.get(addr)?;
+            if registration.username.is_empty() {
+                return None;
+            }
+
+            let has_non_stable_stream = connections
+                .by_key
+                .get(&registration.username)
+                .is_some_and(|connection_data| {
+                    connection_data
+                        .streams
+                        .iter()
+                        .any(|stream| stream.addr == *addr && !is_stable_session_stream(stream))
+                });
+
+            if !has_non_stable_stream {
+                return Some(registration.ts.saturating_add(ttl_secs));
+            }
+        }
+
+        let mut connections = self.connections.write().await;
+        let (username_is_empty, has_non_stable_stream) = {
+            let registration = connections.key_by_addr.get(addr)?;
+            let username = registration.username.as_str();
+            let username_is_empty = username.is_empty();
+            let has_non_stable_stream = !username_is_empty
+                && connections
+                    .by_key
+                    .get(username)
+                    .is_some_and(|connection_data| {
+                        connection_data
+                            .streams
+                            .iter()
+                            .any(|stream| stream.addr == *addr && !is_stable_session_stream(stream))
+                    });
+            (username_is_empty, has_non_stable_stream)
+        };
+        if username_is_empty {
             return None;
         }
 
-        let Some(connection_data) = connections.by_key.get(&registration.username) else {
-            return Some(registration.ts.saturating_add(ttl_secs));
-        };
-
-        let has_non_stable_stream = connection_data
-            .streams
-            .iter()
-            .any(|stream| stream.addr == *addr && !is_stable_session_stream(stream));
+        let registration = connections.key_by_addr.get_mut(addr)?;
         if has_non_stable_stream {
-            return None;
+            registration.ts = current_time_secs();
         }
 
         Some(registration.ts.saturating_add(ttl_secs))
@@ -5883,7 +5913,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_expiry_deadline_ignores_active_vod_streams() {
+    async fn socket_expiry_deadline_refreshes_active_vod_streams() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let event_manager = Arc::new(EventManager::new());
@@ -5934,10 +5964,28 @@ mod tests {
             .await
             .expect("vod stream should be created");
 
+        let previous_registration_ts = {
+            let mut connections = manager.connections.write().await;
+            let registration = connections.key_by_addr.get_mut(&addr).expect("registration should exist");
+            registration.ts = registration.ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
+            registration.ts
+        };
+
+        let deadline = manager
+            .socket_expiry_deadline(&addr)
+            .await
+            .expect("continuous VOD streams should stay scheduled for expiry tracking");
+
+        let refreshed_registration_ts = {
+            let connections = manager.connections.read().await;
+            connections.key_by_addr.get(&addr).expect("registration should still exist").ts
+        };
+
+        assert!(refreshed_registration_ts > previous_registration_ts);
         assert_eq!(
-            manager.socket_expiry_deadline(&addr).await,
-            None,
-            "continuous VOD streams must not expire via HTTP activity TTL"
+            deadline,
+            refreshed_registration_ts.saturating_add(manager.active_socket_ttl_secs()),
+            "continuous VOD streams should refresh their socket expiry deadline"
         );
     }
 

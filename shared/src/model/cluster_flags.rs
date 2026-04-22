@@ -77,6 +77,9 @@ impl TryFrom<&str> for ClusterFlags {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let input = value.trim().trim_matches(|c| ['[', ']', '(', ')'].contains(&c));
+        if input.is_empty() {
+            return Ok(Self::empty());
+        }
         let items = input.split(',').map(str::trim);
         ClusterFlags::from_items(items)
     }
