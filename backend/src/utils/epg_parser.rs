@@ -90,7 +90,9 @@ pub fn parse_xmltv_time(t: &str) -> Option<i64> {
 }
 
 pub fn format_xmltv_time_utc(ts: i64, time_shift: &EpgTimeShift) -> String {
-    let dt = Utc.timestamp_opt(ts, 0).unwrap();
+    let Some(dt) = Utc.timestamp_opt(ts, 0).single() else {
+        return String::new();
+    };
     match time_shift {
         EpgTimeShift::None => dt.format("%Y%m%d%H%M%S %z").to_string(),
         EpgTimeShift::Fixed(minutes) => {
@@ -116,9 +118,9 @@ pub fn apply_timeshift(date_str: &str, shift: &EpgTimeShift) -> String {
 
     // List of supported formats
     let formats = [
+        "%Y-%m-%d %H:%M", // 2026-02-08 11:30
         "%Y-%m-%d:%H-%M", // 2026-02-08:11-30
         "%Y-%m-%d:%H:%M", // 2026-02-08:11:30
-        "%Y-%m-%d %H:%M", // 2026-02-08 11:30
         "%Y-%m-%d-%H-%M", // 2026-02-08-11-30
     ];
 

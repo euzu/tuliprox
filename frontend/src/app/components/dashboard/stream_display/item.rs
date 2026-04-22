@@ -39,11 +39,16 @@ pub struct StreamDisplayItemProps {
 /// Holds the fetched EPG data and its fetch timestamp for staleness checking.
 #[derive(Debug, Clone)]
 struct EpgData {
+    channel_id: std::sync::Arc<str>,
     response: StreamEpgResponse,
     fetched_at_secs: u64,
 }
 
 impl EpgData {
+    fn matches_channel(&self, channel_id: &std::sync::Arc<str>) -> bool {
+        self.channel_id.as_ref() == channel_id.as_ref()
+    }
+
     fn is_stale(&self, now_secs: u64) -> bool {
         let age = now_secs.saturating_sub(self.fetched_at_secs);
         age >= 7 * 3600
@@ -145,7 +150,10 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
                     // Check if cache is valid before fetching
                     if let Some(ref data) = *epg_data {
-                        if !force_refetch && !data.is_stale(now_secs) {
+                        if !data.matches_channel(&epg_channel_id) {
+                            current_next.set(None);
+                            epg_data.set(None);
+                        } else if !force_refetch && !data.is_stale(now_secs) {
                             return;
                         }
                     }
@@ -161,7 +169,11 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                     {
                         if let Some(entry) = response.entries.first() {
                             let (current, next) = compute_current_next(&entry.programmes, now_i64);
-                            let new_data = Rc::new(EpgData { response, fetched_at_secs: now_secs });
+                            let new_data = Rc::new(EpgData {
+                                channel_id: epg_channel_id.clone(),
+                                response,
+                                fetched_at_secs: now_secs,
+                            });
                             current_next.set(current.map(|cur| (cur, next)));
                             epg_data.set(Some(new_data));
                         } else {
@@ -197,10 +209,11 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
             }
             epg_channel_id.as_ref().map_or_else(
                 || Box::new(|| ()) as Box<dyn FnOnce()>,
-                |_| {
+                |channel_id| {
                     let epg_data = epg_data.clone();
                     let current_next = current_next.clone();
                     let needs_refetch = needs_refetch.clone();
+                    let channel_id = channel_id.clone();
 
                     let interval = gloo_timers::callback::Interval::new(30_000, move || {
                         let epg_data = epg_data.clone();
@@ -208,6 +221,15 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         let needs_refetch = needs_refetch.clone();
 
                         let now_secs = current_time_secs();
+
+                        if let Some(data) = (*epg_data).as_ref() {
+                            if !data.matches_channel(&channel_id) {
+                                current_next.set(None);
+                                epg_data.set(None);
+                                needs_refetch.set(true);
+                                return;
+                            }
+                        }
 
                         // Check if cache is stale and needs refetch
                         if let Some(data) = (*epg_data).as_ref() {
@@ -440,10 +462,26 @@ mod tests {
 
     #[test]
     fn test_epg_data_is_stale() {
-        let data = EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 100 };
+        let data = EpgData {
+            channel_id: std::sync::Arc::<str>::from("channel-1"),
+            response: StreamEpgResponse { entries: vec![] },
+            fetched_at_secs: 100,
+        };
         assert!(!data.is_stale(100));
         assert!(!data.is_stale(3600));
         assert!(data.is_stale(25300));
+    }
+
+    #[test]
+    fn test_epg_data_matches_channel() {
+        let data = EpgData {
+            channel_id: std::sync::Arc::<str>::from("channel-1"),
+            response: StreamEpgResponse { entries: vec![] },
+            fetched_at_secs: 100,
+        };
+
+        assert!(data.matches_channel(&std::sync::Arc::<str>::from("channel-1")));
+        assert!(!data.matches_channel(&std::sync::Arc::<str>::from("channel-2")));
     }
 
     #[test]
@@ -456,8 +494,16 @@ mod tests {
     #[test]
     fn test_epg_interval_effect_deps_change_when_epg_data_changes() {
         let channel_id = Some(std::sync::Arc::<str>::from("channel-1"));
-        let first = Rc::new(EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 100 });
-        let second = Rc::new(EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 200 });
+        let first = Rc::new(EpgData {
+            channel_id: std::sync::Arc::<str>::from("channel-1"),
+            response: StreamEpgResponse { entries: vec![] },
+            fetched_at_secs: 100,
+        });
+        let second = Rc::new(EpgData {
+            channel_id: std::sync::Arc::<str>::from("channel-1"),
+            response: StreamEpgResponse { entries: vec![] },
+            fetched_at_secs: 200,
+        });
 
         let first_deps = epg_interval_effect_deps(&channel_id, Some(&first), false);
         let second_deps = epg_interval_effect_deps(&channel_id, Some(&second), false);
@@ -465,7 +511,7 @@ mod tests {
         assert_ne!(first_deps, second_deps);
         assert_eq!(first_deps.1, Some(100));
         assert_eq!(second_deps.1, Some(200));
-        assert_eq!(first_deps.2, false);
-        assert_eq!(second_deps.2, false);
+        assert!(!first_deps.2);
+        assert!(!second_deps.2);
     }
 }

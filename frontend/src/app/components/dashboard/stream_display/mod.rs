@@ -49,17 +49,28 @@ where
     I: IntoIterator<Item = (String, Option<String>)>,
 {
     let mut comments = HashMap::<String, Option<String>>::new();
+
     for (username, comment) in credentials {
+        let normalized = comment.and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
         match comments.get(&username) {
             None => {
-                comments.insert(username, comment);
+                comments.insert(username, normalized);
             }
-            Some(None) if comment.is_some() => {
-                comments.insert(username, comment);
+            Some(None) if normalized.is_some() => {
+                comments.insert(username, normalized);
             }
             Some(Some(_)) | Some(None) => {}
         }
     }
+
     comments
 }
 

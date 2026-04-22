@@ -59,7 +59,9 @@ fn update_webui_field(config: &mut ConfigDto, web_ui_cfg: WebUiConfigDto, modifi
             return;
         }
         let mut cfg = web_ui_cfg;
+        let kick_secs = cfg.kick_secs;
         cfg.clean();
+        cfg.kick_secs = kick_secs;
         config.web_ui = Some(cfg);
         return;
     }
@@ -90,13 +92,12 @@ fn update_webui_field(config: &mut ConfigDto, web_ui_cfg: WebUiConfigDto, modifi
         if web_ui_cfg.player_server.as_deref().is_some_and(|player_server| !player_server.trim().is_empty()) {
             existing.player_server = web_ui_cfg.player_server;
         }
-        if web_ui_cfg.kick_secs != WebUiConfigDto::default().kick_secs {
-            existing.kick_secs = web_ui_cfg.kick_secs;
-        }
         if let Some(stream_info) = web_ui_cfg.stream_info.filter(|stream_info| !stream_info.is_empty()) {
             existing.stream_info = Some(stream_info);
         }
+        let kick_secs = existing.kick_secs;
         existing.clean();
+        existing.kick_secs = kick_secs;
         return;
     }
 
@@ -104,7 +105,9 @@ fn update_webui_field(config: &mut ConfigDto, web_ui_cfg: WebUiConfigDto, modifi
         config.web_ui = None;
     } else {
         let mut cfg = web_ui_cfg;
+        let kick_secs = cfg.kick_secs;
         cfg.clean();
+        cfg.kick_secs = kick_secs;
         config.web_ui = Some(cfg);
     }
 }

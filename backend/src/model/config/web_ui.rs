@@ -3,8 +3,6 @@ use shared::error::TuliproxError;
 use shared::model::view_type::ViewType;
 use shared::model::{ContentSecurityPolicyConfigDto, StreamInfoConfigDto, StreamInfoFields, StreamInfoFieldsSet, WebUiConfigDto};
 use shared::utils::default_kick_secs;
-use shared::apply_flags;
-
 
 #[derive(Debug, Clone)]
 pub struct StreamInfoConfig {
@@ -123,20 +121,7 @@ macros::from_impl!(StreamInfoConfig);
 
 impl From<&StreamInfoConfigDto> for StreamInfoConfig {
     fn from(dto: &StreamInfoConfigDto) -> Self {
-        let mut flags = StreamInfoFieldsSet::new();
-        apply_flags!(
-            dto, flags, StreamInfoFields;
-            (hide_group, HideGroup),
-            (hide_ip, HideIp),
-            (hide_country, HideCountry),
-            (hide_shared, HideShared),
-            (hide_duration, HideDuration),
-            (hide_bandwidth, HideBandwidth),
-            (hide_transferred, HideTransferred),
-            (hide_player, HidePlayer),
-            (hide_user_comment, HideUserComment),
-            (hide_epg, HideEpg)
-        );
+        let flags = dto.get_flags();
         Self { flags }
     }
 }

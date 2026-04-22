@@ -397,12 +397,16 @@ fn format_epg_timeshift_strings(
 ) -> (String, String) {
     match &epg_processing_options.time_shift {
         EpgTimeShift::TimeZone(tz) => {
-            let s_dt = chrono::Utc.timestamp_opt(programme.start, 0).unwrap().with_timezone(tz);
-            let e_dt = chrono::Utc.timestamp_opt(programme.stop, 0).unwrap().with_timezone(tz);
-            (
-                s_dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                e_dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-            )
+            match (
+                chrono::Utc.timestamp_opt(programme.start, 0).single(),
+                chrono::Utc.timestamp_opt(programme.stop, 0).single(),
+            ) {
+                (Some(s_dt), Some(e_dt)) => (
+                    s_dt.with_timezone(tz).format("%Y-%m-%d %H:%M:%S").to_string(),
+                    e_dt.with_timezone(tz).format("%Y-%m-%d %H:%M:%S").to_string(),
+                ),
+                _ => (format_xmltv_time(start_ts), format_xmltv_time(stop_ts)),
+            }
         }
         EpgTimeShift::None | EpgTimeShift::Fixed(_) => (format_xmltv_time(start_ts), format_xmltv_time(stop_ts)),
     }
@@ -522,7 +526,7 @@ async fn serve_stream_epg(
         Ok(results) => results,
         Err(err) => {
             error!("{err}");
-            Vec::new()
+            unique_ids.into_iter().map(|id| (id.intern(), None)).collect()
         }
     };
 
