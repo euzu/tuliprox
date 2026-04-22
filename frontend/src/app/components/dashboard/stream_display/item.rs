@@ -20,6 +20,13 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
+fn only_time(ts: &str) -> String {
+    match ts.split_once(' ') {
+        Some((_date, time)) => time.to_string(),
+        None => ts.to_string(),
+    }
+}
+
 #[derive(Properties, PartialEq, Clone)]
 pub struct StreamDisplayItemProps {
     pub stream: Rc<StreamInfo>,
@@ -46,8 +53,9 @@ impl EpgData {
 fn epg_interval_effect_deps(
     epg_channel_id: &Option<std::sync::Arc<str>>,
     epg_data: Option<&Rc<EpgData>>,
-) -> (Option<std::sync::Arc<str>>, Option<u64>) {
-    (epg_channel_id.clone(), epg_data.map(|data| data.fetched_at_secs))
+    hide_epg: bool,
+) -> (Option<std::sync::Arc<str>>, Option<u64>, bool) {
+    (epg_channel_id.clone(), epg_data.map(|data| data.fetched_at_secs), hide_epg)
 }
 
 /// Computes current and next programme from a list of programmes.
@@ -91,81 +99,100 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
     // Fetch EPG when epg_channel_id is present or when needs_refetch is triggered
     let hide_properties = props.stream_info.as_ref().map_or_else(StreamInfoFieldsSet::new, |cfg| cfg.get_flags());
+    // When EPG becomes hidden, clear stale UI state
+    {
+        let epg_data = epg_data.clone();
+        let current_next = current_next.clone();
+        use_effect_with(hide_properties, move |hide_props| {
+            if hide_props.contains(StreamInfoFields::HideEpg) {
+                epg_data.set(None);
+                current_next.set(None);
+            }
+            || ()
+        });
+    }
     {
         let epg_channel_id = epg_channel_id.clone();
         let epg_data = epg_data.clone();
         let current_next = current_next.clone();
         let needs_refetch = needs_refetch.clone();
-        use_effect_with((epg_channel_id.clone(), *needs_refetch), move |(epg_channel_id, force_refetch)| {
-            let Some(epg_channel_id) = epg_channel_id.clone() else {
-                return;
-            };
-            if hide_properties.contains(StreamInfoFields::HideEpg) {
-                return;
-            }
-            let force_refetch = *force_refetch;
-
-            let epg_channel_id = epg_channel_id.clone();
-            let epg_data = epg_data.clone();
-            let current_next = current_next.clone();
-            let needs_refetch = needs_refetch.clone();
-
-            spawn_local(async move {
-                let now_secs = current_time_secs();
-                let now_i64 = now_secs as i64;
-                let reset_state = || {
-                    current_next.set(None);
-                    epg_data.set(None);
-                    if force_refetch {
-                        needs_refetch.set(false);
-                    }
+        use_effect_with(
+            (epg_channel_id.clone(), *needs_refetch, hide_properties),
+            move |(epg_channel_id, force_refetch, _hide_props)| {
+                let Some(epg_channel_id) = epg_channel_id.clone() else {
+                    return;
                 };
-
-                // Check if cache is valid before fetching
-                if let Some(ref data) = *epg_data {
-                    if !force_refetch && !data.is_stale(now_secs) {
-                        return;
-                    }
+                if hide_properties.contains(StreamInfoFields::HideEpg) {
+                    return;
                 }
+                let force_refetch = *force_refetch;
 
-                // Fetch fresh data
-                let service = PlaylistService::new();
-                if let Some(response) = service
-                    .get_stream_epg(vec![StreamEpgItemRequest {
-                        epg_channel_id: epg_channel_id.to_string(),
-                        target_id: Some(epg_target_id),
-                    }])
-                    .await
-                {
-                    if let Some(entry) = response.entries.first() {
-                        let (current, next) = compute_current_next(&entry.programmes, now_i64);
-                        let new_data = Rc::new(EpgData { response, fetched_at_secs: now_secs });
-                        current_next.set(current.map(|cur| (cur, next)));
-                        epg_data.set(Some(new_data));
+                let epg_channel_id = epg_channel_id.clone();
+                let epg_data = epg_data.clone();
+                let current_next = current_next.clone();
+                let needs_refetch = needs_refetch.clone();
+
+                spawn_local(async move {
+                    let now_secs = current_time_secs();
+                    let now_i64 = now_secs as i64;
+                    let reset_state = || {
+                        current_next.set(None);
+                        epg_data.set(None);
+                        if force_refetch {
+                            needs_refetch.set(false);
+                        }
+                    };
+
+                    // Check if cache is valid before fetching
+                    if let Some(ref data) = *epg_data {
+                        if !force_refetch && !data.is_stale(now_secs) {
+                            return;
+                        }
+                    }
+
+                    // Fetch fresh data
+                    let service = PlaylistService::new();
+                    if let Some(response) = service
+                        .get_stream_epg(vec![StreamEpgItemRequest {
+                            epg_channel_id: epg_channel_id.to_string(),
+                            target_id: Some(epg_target_id),
+                        }])
+                        .await
+                    {
+                        if let Some(entry) = response.entries.first() {
+                            let (current, next) = compute_current_next(&entry.programmes, now_i64);
+                            let new_data = Rc::new(EpgData { response, fetched_at_secs: now_secs });
+                            current_next.set(current.map(|cur| (cur, next)));
+                            epg_data.set(Some(new_data));
+                        } else {
+                            reset_state();
+                            return;
+                        }
                     } else {
                         reset_state();
                         return;
                     }
-                } else {
-                    reset_state();
-                    return;
-                }
 
-                if force_refetch {
-                    needs_refetch.set(false);
-                }
-            });
-        });
+                    if force_refetch {
+                        needs_refetch.set(false);
+                    }
+                });
+            },
+        );
     }
 
     // Local tick: recompute current/next and detect staleness every 30 seconds
     {
-        let interval_deps = epg_interval_effect_deps(&epg_channel_id, (*epg_data).as_ref());
+        let interval_deps = epg_interval_effect_deps(
+            &epg_channel_id,
+            (*epg_data).as_ref(),
+            hide_properties.contains(StreamInfoFields::HideEpg),
+        );
         let epg_data = epg_data.clone();
         let current_next = current_next.clone();
         let needs_refetch = needs_refetch.clone();
-        use_effect_with(interval_deps, move |(epg_channel_id, _)| {
-            if hide_properties.contains(StreamInfoFields::HideEpg) {
+        use_effect_with(interval_deps, move |(epg_channel_id, _, hide_epg)| {
+            if *hide_epg {
                 return Box::new(|| ()) as Box<dyn FnOnce()>;
             }
             epg_channel_id.as_ref().map_or_else(
@@ -242,14 +269,14 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                 if !current.title.is_empty() {
                                     <div class="tp__stream-display__epg">
                                         <span class="tp__stream-display__epg-now">
-                                            <span class="tp__stream-display__epg-time">{&current.start}</span>
+                                            <span class="tp__stream-display__epg-time">{only_time(&current.start)}</span>
                                             {" "}
                                             <span class="tp__stream-display__epg-title">{&current.title}</span>
                                         </span>
                                         if let Some(next) = next_opt.as_ref() {
                                             <span class="tp__stream-display__epg-next">
-                                                {" → "}
-                                                <span class="tp__stream-display__epg-time">{&next.start}</span>
+                                                <span class="tp__stream-display__epg-separator">{" ↦ "}</span>
+                                                <span class="tp__stream-display__epg-time">{only_time(&next.start)}</span>
                                                 {" "}
                                                 <span class="tp__stream-display__epg-title">{&next.title}</span>
                                             </span>
@@ -432,11 +459,13 @@ mod tests {
         let first = Rc::new(EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 100 });
         let second = Rc::new(EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 200 });
 
-        let first_deps = epg_interval_effect_deps(&channel_id, Some(&first));
-        let second_deps = epg_interval_effect_deps(&channel_id, Some(&second));
+        let first_deps = epg_interval_effect_deps(&channel_id, Some(&first), false);
+        let second_deps = epg_interval_effect_deps(&channel_id, Some(&second), false);
 
         assert_ne!(first_deps, second_deps);
         assert_eq!(first_deps.1, Some(100));
         assert_eq!(second_deps.1, Some(200));
+        assert_eq!(first_deps.2, false);
+        assert_eq!(second_deps.2, false);
     }
 }

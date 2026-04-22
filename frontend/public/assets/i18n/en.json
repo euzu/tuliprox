@@ -739,7 +739,19 @@
       "PATH": "Optional path prefix (e.g. /ui) for reverse proxy integration.",
       "PLAYER_SERVER": "Optional server override used specifically for the built-in web player.",
       "USER_UI_ENABLED": "Enables or disables the simplified bouquet editor for standard users.",
-      "COMBINE_VIEWS_STATS_STREAMS": "If set, the Stats and Streams views are combined into a single view."
+      "COMBINE_VIEWS_STATS_STREAMS": "If set, the Stats and Streams views are combined into a single view.",
+      "LANDING_PAGE": "The default view shown when loading the Web UI.",
+      "STREAM_INFO": "Controls which stream information fields are visible in the stream display.",
+      "HIDE_GROUP": "If enabled, the stream group is not shown.",
+      "HIDE_IP": "If enabled, client IP addresses are not displayed.",
+      "HIDE_COUNTRY": "If enabled, client country information is not shown.",
+      "HIDE_SHARED": "If enabled, the shared stream indicator is hidden.",
+      "HIDE_DURATION": "If enabled, stream duration is not displayed.",
+      "HIDE_BANDWIDTH": "If enabled, per-stream bandwidth metrics are hidden.",
+      "HIDE_TRANSFERRED": "If enabled, total bytes transferred is not shown.",
+      "HIDE_PLAYER": "If enabled, the player/user-agent field is hidden.",
+      "HIDE_USER_COMMENT": "If enabled, user comments on streams are not displayed.",
+      "HIDE_EPG": "If enabled, electronic program guide information is suppressed for streams."
     },
     "XTREAM_TARGET_OUTPUT": {
       "SKIP_LIVE_DIRECT_SOURCE": "If enabled, live streams are not linked directly but proxied/resolved.",
@@ -1400,7 +1412,18 @@
     "VIEW_TYPE_RBAC":  "WebUI Users",
     "ADMISSION_STRATEGIES": "Admission Strategies",
     "RUNTIME_CONFIG_REPORT": "Runtime Config Report",
-    "RUNTIME_CONFIG_REPORT_FORMAT": "Runtime Config Report Format"
+    "RUNTIME_CONFIG_REPORT_FORMAT": "Runtime Config Report Format",
+    "STREAM_INFO": "Stream Display Info",
+    "HIDE_GROUP": "Hide Group",
+    "HIDE_IP": "Hide Client IP",
+    "HIDE_COUNTRY": "Hide Country",
+    "HIDE_SHARED": "Hide Shared",
+    "HIDE_DURATION": "Hide Duration",
+    "HIDE_BANDWIDTH": "Hide Bandwidth",
+    "HIDE_TRANSFERRED": "Hide Transferred",
+    "HIDE_PLAYER": "Hide Player",
+    "HIDE_USER_COMMENT": "Hide User Comment",
+    "HIDE_EPG": "Hide EPG"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

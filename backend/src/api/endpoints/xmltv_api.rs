@@ -1,13 +1,12 @@
 use crate::{
     api::{
         api_utils::{
-            empty_json_response_as_array, get_user_target, get_user_target_by_credentials, get_username_from_auth_header,
-            internal_server_error, resource_response, stream_json_or_bin_response_stream, try_option_forbidden,
-            try_unwrap_body,
+            create_api_proxy_user, empty_json_response_as_array, get_user_target, get_user_target_by_credentials,
+            internal_server_error, resource_response, stream_json_or_bin_response_stream,
+            try_option_forbidden, try_unwrap_body,
         },
         model::{AppState, UserApiRequestQueryOrBody, UserApiRequest},
     },
-    auth::AuthBearer,
     model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
         get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const, xtream_get_epg_file_path_for_target,
@@ -616,7 +615,6 @@ fn stream_epg_bad_request(message: &str) -> axum::response::Response {
 /// Handles stream EPG API requests for per-stream programme display.
 pub(crate) async fn stream_epg_api(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-    AuthBearer(token): AuthBearer,
     axum::extract::Json(stream_epg_req): axum::extract::Json<StreamEpgRequest>,
 ) -> impl IntoResponse + Send {
     let grouped_items = match group_stream_epg_items(stream_epg_req.items) {
@@ -624,14 +622,8 @@ pub(crate) async fn stream_epg_api(
         Err(message) => return stream_epg_bad_request(message),
     };
 
-    let Some(username) = get_username_from_auth_header(&token, &app_state) else {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    };
-    let Some(user) = app_state.app_config.get_user_credentials(&username) else {
-        return axum::http::StatusCode::UNAUTHORIZED.into_response();
-    };
-
     let config = app_state.app_config.config.load_full();
+    let user = create_api_proxy_user(&app_state);
     let mut entries = Vec::new();
 
     for (target_id, items) in grouped_items {
@@ -872,4 +864,5 @@ mod tests {
         assert_eq!(filtered[0].start_timestamp, now - 100);
         assert_eq!(filtered[0].stop_timestamp, now + 7_100);
     }
+
 }

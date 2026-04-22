@@ -15,7 +15,9 @@ use crate::{
     edit_field_text_option, generate_form_reducer, html_if,
     i18n::use_translation,
 };
-use shared::model::{view_type::ViewType, ContentSecurityPolicyConfigDto, WebAuthConfigDto, WebUiConfigDto};
+use shared::model::{
+    view_type::ViewType, ContentSecurityPolicyConfigDto, StreamInfoConfigDto, WebAuthConfigDto, WebUiConfigDto,
+};
 use yew::prelude::*;
 
 // Labels
@@ -34,6 +36,17 @@ const LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES: &str = "LABEL.CUSTOM_ATTR
 const LABEL_PATH: &str = "LABEL.PATH";
 const LABEL_COMBINE_VIEWS_STATS_STREAMS: &str = "LABEL.COMBINE_VIEWS_STATS_STREAMS";
 const LABEL_LANDING_PAGE: &str = "LABEL.LANDING_PAGE";
+const LABEL_STREAM_INFO: &str = "LABEL.STREAM_INFO";
+const LABEL_HIDE_GROUP: &str = "LABEL.HIDE_GROUP";
+const LABEL_HIDE_IP: &str = "LABEL.HIDE_IP";
+const LABEL_HIDE_COUNTRY: &str = "LABEL.HIDE_COUNTRY";
+const LABEL_HIDE_SHARED: &str = "LABEL.HIDE_SHARED";
+const LABEL_HIDE_DURATION: &str = "LABEL.HIDE_DURATION";
+const LABEL_HIDE_BANDWIDTH: &str = "LABEL.HIDE_BANDWIDTH";
+const LABEL_HIDE_TRANSFERRED: &str = "LABEL.HIDE_TRANSFERRED";
+const LABEL_HIDE_PLAYER: &str = "LABEL.HIDE_PLAYER";
+const LABEL_HIDE_USER_COMMENT: &str = "LABEL.HIDE_USER_COMMENT";
+const LABEL_HIDE_EPG: &str = "LABEL.HIDE_EPG";
 
 // Reducers for form states
 generate_form_reducer!(
@@ -72,6 +85,23 @@ generate_form_reducer!(
     }
 );
 
+generate_form_reducer!(
+    state: StreamInfoConfigFormState { form: StreamInfoConfigDto },
+    action_name: StreamInfoConfigFormAction,
+    fields {
+        HideGroup => hide_group: bool,
+        HideIp => hide_ip: bool,
+        HideCountry => hide_country: bool,
+        HideShared => hide_shared: bool,
+        HideDuration => hide_duration: bool,
+        HideBandwidth => hide_bandwidth: bool,
+        HideTransferred => hide_transferred: bool,
+        HidePlayer => hide_player: bool,
+        HideUserComment => hide_user_comment: bool,
+        HideEpg => hide_epg: bool,
+    }
+);
+
 #[component]
 pub fn WebUiConfigView() -> Html {
     let translate = use_translation();
@@ -85,6 +115,8 @@ pub fn WebUiConfigView() -> Html {
         use_reducer(|| WebUiAuthConfigFormState { form: WebAuthConfigDto::default(), modified: false });
     let csp_state: UseReducerHandle<CspConfigFormState> =
         use_reducer(|| CspConfigFormState { form: ContentSecurityPolicyConfigDto::default(), modified: false });
+    let stream_info_state: UseReducerHandle<StreamInfoConfigFormState> =
+        use_reducer(|| StreamInfoConfigFormState { form: StreamInfoConfigDto::default(), modified: false });
 
     let view_types = use_memo(webui_state.data().landing_page, |landing_page| {
         enum_iterator::all::<ViewType>()
@@ -104,19 +136,31 @@ pub fn WebUiConfigView() -> Html {
             webui_state.form.clone(),
             auth_state.form.clone(),
             csp_state.form.clone(),
+            stream_info_state.form.clone(),
             webui_state.modified,
             auth_state.modified,
             csp_state.modified,
+            stream_info_state.modified,
         );
         use_emit_mapped(
             deps,
             config_view_ctx.on_form_change.clone(),
-            |(webui_form, auth_form, csp_form, webui_modified, auth_modified, csp_modified)| {
+            |(
+                webui_form,
+                auth_form,
+                csp_form,
+                stream_info_form,
+                webui_modified,
+                auth_modified,
+                csp_modified,
+                stream_info_modified,
+            )| {
                 let mut form = webui_form;
                 form.auth = Some(auth_form);
                 form.content_security_policy = Some(csp_form);
+                form.stream_info = if stream_info_form.is_empty() { None } else { Some(stream_info_form) };
 
-                let modified = webui_modified || auth_modified || csp_modified;
+                let modified = webui_modified || auth_modified || csp_modified || stream_info_modified;
                 ConfigForm::WebUi(modified, form)
             },
         );
@@ -127,6 +171,7 @@ pub fn WebUiConfigView() -> Html {
         let webui_state = webui_state.clone();
         let auth_state = auth_state.clone();
         let csp_state = csp_state.clone();
+        let stream_info_state = stream_info_state.clone();
 
         let webui_cfg = config_ctx.config.as_ref().and_then(|c| c.config.web_ui.clone());
         use_effect_with((webui_cfg, *config_view_ctx.edit_mode), move |(cfg, _mode)| {
@@ -142,10 +187,16 @@ pub fn WebUiConfigView() -> Html {
                 } else {
                     csp_state.dispatch(CspConfigFormAction::SetAll(ContentSecurityPolicyConfigDto::default()));
                 }
+                if let Some(stream_info) = &webui.stream_info {
+                    stream_info_state.dispatch(StreamInfoConfigFormAction::SetAll(stream_info.clone()));
+                } else {
+                    stream_info_state.dispatch(StreamInfoConfigFormAction::SetAll(StreamInfoConfigDto::default()));
+                }
             } else {
                 webui_state.dispatch(WebUiConfigFormAction::SetAll(WebUiConfigDto::default()));
                 auth_state.dispatch(WebUiAuthConfigFormAction::SetAll(WebAuthConfigDto::default()));
                 csp_state.dispatch(CspConfigFormAction::SetAll(ContentSecurityPolicyConfigDto::default()));
+                stream_info_state.dispatch(StreamInfoConfigFormAction::SetAll(StreamInfoConfigDto::default()));
             }
         });
     }
@@ -189,7 +240,20 @@ pub fn WebUiConfigView() -> Html {
             { config_field!(auth_state.form, translate.t(LABEL_TOKEN_TTL_MINS), token_ttl_mins) }
             { config_field_optional!(auth_state.form, translate.t(LABEL_USERFILE), userfile) }
             { config_field_optional!(auth_state.form, translate.t(LABEL_GROUPFILE), groupfile) }
-            </Card>
+           </Card>
+           <Card class="tp__config-view__card">
+            <h1>{translate.t(LABEL_STREAM_INFO)}</h1>
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_GROUP), hide_group) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_IP), hide_ip) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_COUNTRY), hide_country) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_SHARED), hide_shared) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_DURATION), hide_duration) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_BANDWIDTH), hide_bandwidth) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_TRANSFERRED), hide_transferred) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_PLAYER), hide_player) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_USER_COMMENT), hide_user_comment) }
+            { config_field_bool!(stream_info_state.form, translate.t(LABEL_HIDE_EPG), hide_epg) }
+           </Card>
         </>
         }
     };
@@ -234,6 +298,19 @@ pub fn WebUiConfigView() -> Html {
                     { edit_field_number!(auth_state, translate.t(LABEL_TOKEN_TTL_MINS), token_ttl_mins, WebUiAuthConfigFormAction::TokenTtlMins) }
                     { edit_field_text_option!(auth_state, translate.t(LABEL_USERFILE), userfile, WebUiAuthConfigFormAction::Userfile) }
                     { edit_field_text_option!(auth_state, translate.t(LABEL_GROUPFILE), groupfile, WebUiAuthConfigFormAction::Groupfile) }
+                </Card>
+                <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_STREAM_INFO)}</h1>
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_GROUP), hide_group, StreamInfoConfigFormAction::HideGroup) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_IP), hide_ip, StreamInfoConfigFormAction::HideIp) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_COUNTRY), hide_country, StreamInfoConfigFormAction::HideCountry) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_SHARED), hide_shared, StreamInfoConfigFormAction::HideShared) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_DURATION), hide_duration, StreamInfoConfigFormAction::HideDuration) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_BANDWIDTH), hide_bandwidth, StreamInfoConfigFormAction::HideBandwidth) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_TRANSFERRED), hide_transferred, StreamInfoConfigFormAction::HideTransferred) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_PLAYER), hide_player, StreamInfoConfigFormAction::HidePlayer) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_USER_COMMENT), hide_user_comment, StreamInfoConfigFormAction::HideUserComment) }
+                    { edit_field_bool!(stream_info_state, translate.t(LABEL_HIDE_EPG), hide_epg, StreamInfoConfigFormAction::HideEpg) }
                 </Card>
             </>
         }

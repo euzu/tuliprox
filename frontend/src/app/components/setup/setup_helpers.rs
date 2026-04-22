@@ -4,10 +4,9 @@ use crate::app::{
 };
 use shared::{
     model::{
-        ApiProxyConfigDto, AppConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, LibraryConfigDto,
-        LibraryMetadataConfigDto, LibraryPlaylistConfigDto, LogConfigDto, ReverseProxyConfigDto,
-        ReverseProxyDisabledHeaderConfigDto, StreamConfigDto, TargetOutputDto, TargetUserDto, ThumbnailConfigDto,
-        WebAuthConfigDto, WebUiConfigDto,
+        ApiProxyConfigDto, AppConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto,
+        LibraryPlaylistConfigDto, LogConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
+        StreamConfigDto, TargetOutputDto, TargetUserDto, ThumbnailConfigDto, WebUiConfigDto,
     },
     utils::{default_secret, is_default_supported_library_extensions},
 };
@@ -183,7 +182,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
                 }
             }
             ConfigForm::Messaging(_, messaging_cfg) => config.messaging = Some(messaging_cfg),
-            ConfigForm::WebUi(_, web_ui_cfg) => apply_setup_webui_form(config, web_ui_cfg),
+            ConfigForm::WebUi(modified, web_ui_cfg) => apply_setup_webui_form(config, web_ui_cfg, modified),
             ConfigForm::ReverseProxy(_, reverse_proxy_cfg) => config.reverse_proxy = Some(reverse_proxy_cfg),
             ConfigForm::HdHomerun(_, hdhr_cfg) => apply_setup_hdhomerun_form(config, hdhr_cfg),
             ConfigForm::Proxy(_, proxy_cfg) => config.proxy = Some(proxy_cfg),
@@ -221,26 +220,29 @@ fn apply_setup_library_form(config: &mut shared::model::ConfigDto, library_cfg: 
     config.library = Some(library_cfg);
 }
 
-fn is_setup_webui_toggle_only_update(cfg: &WebUiConfigDto) -> bool {
-    cfg.path.as_deref().is_none_or(|path| {
-        let trimmed = path.trim();
-        trimmed.is_empty() || trimmed.chars().all(|c| c == '/')
-    }) && cfg.player_server.as_deref().is_none_or(|player_server| player_server.trim().is_empty())
-        && cfg.kick_secs == WebUiConfigDto::default().kick_secs
-        && cfg.auth.as_ref().is_none_or(WebAuthConfigDto::is_empty)
-        && cfg.content_security_policy.as_ref().is_none_or(ContentSecurityPolicyConfigDto::is_empty)
-}
-
-fn apply_setup_webui_form(config: &mut shared::model::ConfigDto, web_ui_cfg: WebUiConfigDto) {
-    if let Some(existing) = config.web_ui.as_mut() {
-        if is_setup_webui_toggle_only_update(&web_ui_cfg) {
-            existing.enabled = web_ui_cfg.enabled;
-            existing.user_ui_enabled = web_ui_cfg.user_ui_enabled;
-            existing.combine_views_stats_streams = web_ui_cfg.combine_views_stats_streams;
+fn apply_setup_webui_form(config: &mut shared::model::ConfigDto, web_ui_cfg: WebUiConfigDto, modified: bool) {
+    // If there's no existing web_ui config: clean and store the form (empty form -> None).
+    if config.web_ui.is_none() {
+        if web_ui_cfg.is_empty() {
             return;
         }
+        let mut cfg = web_ui_cfg;
+        cfg.clean();
+        config.web_ui = Some(cfg);
+        return;
     }
-    config.web_ui = Some(web_ui_cfg);
+
+    if !modified && web_ui_cfg.is_empty() {
+        return;
+    }
+
+    if modified && web_ui_cfg.is_empty() {
+        config.web_ui = None;
+    } else {
+        let mut cfg = web_ui_cfg;
+        cfg.clean();
+        config.web_ui = Some(cfg);
+    }
 }
 
 fn apply_setup_main_defaults(app_config: &mut AppConfigDto) {
@@ -367,9 +369,9 @@ mod tests {
     };
     use crate::app::{components::map_sources_to_playlist_rows, ConfigContext};
     use shared::model::{
-        AppConfigDto, ConfigInputDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
-        LibraryConfigDto, LibraryScanDirectoryDto, MetadataUpdateConfigDto, ReverseProxyConfigDto, SourcesConfigDto,
-        WebAuthConfigDto, WebUiConfigDto,
+        view_type::ViewType, AppConfigDto, ConfigInputDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto,
+        HdHomeRunDeviceConfigDto, LibraryConfigDto, LibraryScanDirectoryDto, MetadataUpdateConfigDto,
+        ReverseProxyConfigDto, SourcesConfigDto, StreamInfoConfigDto, WebAuthConfigDto, WebUiConfigDto,
     };
     use std::rc::Rc;
 
@@ -622,8 +624,19 @@ mod tests {
             WebUiConfigDto {
                 enabled: false,
                 user_ui_enabled: false,
-                auth: Some(WebAuthConfigDto::default()),
-                content_security_policy: Some(ContentSecurityPolicyConfigDto::default()),
+                path: Some("/dashboard".to_string()),
+                player_server: Some("http://player.local".to_string()),
+                auth: Some(WebAuthConfigDto {
+                    enabled: true,
+                    issuer: "tuliprox".to_string(),
+                    secret: "top-secret".to_string(),
+                    groupfile: Some("groups.txt".to_string()),
+                    ..Default::default()
+                }),
+                content_security_policy: Some(ContentSecurityPolicyConfigDto {
+                    enabled: true,
+                    custom_attributes: Some(vec!["default-src 'self'".to_string()]),
+                }),
                 ..Default::default()
             },
         ));
@@ -636,6 +649,184 @@ mod tests {
         assert_eq!(web_ui.player_server.as_deref(), Some("http://player.local"));
         assert_eq!(web_ui.auth.as_ref().map(|auth| auth.secret.as_str()), Some("top-secret"));
         assert_eq!(web_ui.auth.as_ref().and_then(|auth| auth.groupfile.as_deref()), Some("groups.txt"));
+    }
+
+    #[test]
+    fn setup_webui_explicit_stream_info_clear() {
+        // User explicitly clears all hide_* flags via the form (stream_info=None).
+        // modified=true signals explicit edit; existing stream_info must become None.
+        let mut app_config = AppConfigDto::default();
+        app_config.config.web_ui = Some(WebUiConfigDto {
+            enabled: true,
+            stream_info: Some(StreamInfoConfigDto { hide_ip: true, ..Default::default() }),
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::WebUi(
+            true, // modified=true: explicit edit
+            WebUiConfigDto {
+                enabled: false,
+                stream_info: None, // user cleared all flags
+                ..Default::default()
+            },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        let web_ui = app_cfg.config.web_ui.expect("webui config should be present");
+        assert!(!web_ui.enabled);
+        assert!(web_ui.stream_info.is_none(), "stream_info should be explicitly cleared to None");
+    }
+
+    #[test]
+    fn setup_webui_explicit_landing_page_reset_to_default() {
+        // User explicitly resets landing_page to default while also changing scalars.
+        // The reset landing_page value must be applied literally.
+        let mut app_config = AppConfigDto::default();
+        app_config.config.web_ui = Some(WebUiConfigDto {
+            enabled: true,
+            landing_page: ViewType::Streams, // existing is non-default
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::WebUi(
+            true, // modified=true: explicit edit
+            WebUiConfigDto {
+                enabled: false,
+                landing_page: ViewType::Dashboard, // reset to default
+                ..Default::default()
+            },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        let web_ui = app_cfg.config.web_ui.expect("webui config should be present");
+        assert!(!web_ui.enabled);
+        assert_eq!(web_ui.landing_page, ViewType::Dashboard, "landing_page reset to default must be applied");
+    }
+
+    #[test]
+    fn setup_webui_toggle_only_preserves_stream_info() {
+        // Toggle-only edit with a real synced form snapshot: user changes scalars, untouched
+        // stream_info is emitted literally from the existing config and must be preserved.
+        let mut app_config = AppConfigDto::default();
+        app_config.config.web_ui = Some(WebUiConfigDto {
+            enabled: true,
+            stream_info: Some(StreamInfoConfigDto { hide_ip: true, ..Default::default() }),
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::WebUi(
+            true,
+            WebUiConfigDto {
+                enabled: false,
+                stream_info: Some(StreamInfoConfigDto { hide_ip: true, ..Default::default() }),
+                ..Default::default()
+            },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        let web_ui = app_cfg.config.web_ui.expect("webui config should be present");
+        assert!(!web_ui.enabled);
+        let stream_info = web_ui.stream_info.expect("stream_info should be preserved on toggle-only");
+        assert!(stream_info.hide_ip);
+    }
+
+    #[test]
+    fn setup_webui_toggle_only_preserves_landing_page() {
+        // Toggle-only sparse update (modified=true): landing_page in form matches existing
+        // (form syncs landing_page from existing on open). Landing_page should be preserved.
+        let mut app_config = AppConfigDto::default();
+        app_config.config.web_ui = Some(WebUiConfigDto {
+            enabled: true,
+            landing_page: ViewType::Streams, // existing is non-default
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::WebUi(
+            true, // modified=true: form IS applied
+            WebUiConfigDto {
+                enabled: false,
+                landing_page: ViewType::Streams, // form syncs from existing on open
+                ..Default::default()
+            },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        let web_ui = app_cfg.config.web_ui.expect("webui config should be present");
+        assert!(!web_ui.enabled);
+        assert_eq!(web_ui.landing_page, ViewType::Streams, "landing_page should be preserved on toggle-only");
+    }
+
+    #[test]
+    fn setup_webui_toggle_only_with_nested_field_change_does_selective_update() {
+        // User changed auth issuer (nested field change), landing_page stays at synced value.
+        // modified=true means this is a real form edit and nested values must be applied literally.
+        let mut app_config = AppConfigDto::default();
+        app_config.config.web_ui = Some(WebUiConfigDto {
+            enabled: true,
+            landing_page: ViewType::Streams,
+            auth: Some(WebAuthConfigDto { issuer: "test".to_string(), ..Default::default() }),
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::WebUi(
+            true, // explicit edit: nested values must be applied
+            WebUiConfigDto {
+                enabled: false,
+                landing_page: ViewType::Streams, // form syncs from existing
+                auth: Some(WebAuthConfigDto { issuer: "other".to_string(), ..Default::default() }),
+                ..Default::default()
+            },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        let web_ui = app_cfg.config.web_ui.expect("webui config should be present");
+        assert!(!web_ui.enabled);
+        assert_eq!(web_ui.landing_page, ViewType::Streams);
+        assert_eq!(web_ui.auth.as_ref().map(|a| a.issuer.as_str()), Some("other"));
+    }
+
+    #[test]
+    fn setup_webui_explicit_clear_auth_path_player_server_and_reset_kick_secs() {
+        let mut app_config = AppConfigDto::default();
+        app_config.config.web_ui = Some(WebUiConfigDto {
+            enabled: true,
+            path: Some("/dashboard".to_string()),
+            player_server: Some("http://player.local".to_string()),
+            kick_secs: 321,
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "issuer".to_string(),
+                secret: "top-secret".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let config_ctx = ConfigContext { config: Some(Rc::new(app_config)), api_proxy: None };
+        let mut form_state = crate::app::components::setup::SetupConfigFormState::default();
+        form_state.update_form(ConfigForm::WebUi(
+            true,
+            WebUiConfigDto {
+                enabled: false,
+                path: None,
+                player_server: None,
+                kick_secs: WebUiConfigDto::default().kick_secs,
+                auth: Some(WebAuthConfigDto::default()),
+                ..Default::default()
+            },
+        ));
+
+        let app_cfg = build_setup_app_config(&config_ctx, &form_state, SourcesConfigDto::default());
+        let web_ui = app_cfg.config.web_ui.expect("webui config should be present");
+        assert!(!web_ui.enabled);
+        assert!(web_ui.path.is_none());
+        assert!(web_ui.player_server.is_none());
+        assert_eq!(web_ui.kick_secs, WebUiConfigDto::default().kick_secs);
+        assert!(web_ui.auth.is_none());
     }
 
     #[test]
