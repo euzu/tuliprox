@@ -134,7 +134,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proxy_user_credentials_defaults_output_clusters_to_all_when_missing() {
+    fn proxy_user_credentials_output_clusters_none_means_all() {
         let value = serde_json::json!({
             "username": "alice",
             "password": "secret"

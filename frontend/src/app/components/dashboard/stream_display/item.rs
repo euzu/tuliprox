@@ -46,8 +46,9 @@ fn compute_current_next(
 ) -> (Option<EpgProgrammeDto>, Option<EpgProgrammeDto>) {
     let current = programmes.iter().find(|p| now_secs >= p.start_timestamp && now_secs < p.stop_timestamp).cloned();
 
-    let next =
-        current.as_ref().and_then(|cur| programmes.iter().find(|p| p.start_timestamp > cur.start_timestamp).cloned());
+    let next = current.as_ref().and_then(|cur| {
+        programmes.iter().filter(|p| p.start_timestamp >= cur.stop_timestamp).min_by_key(|p| p.start_timestamp).cloned()
+    });
 
     (current, next)
 }
@@ -96,6 +97,14 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
             spawn_local(async move {
                 let now_secs = current_time_secs();
+                let now_i64 = now_secs as i64;
+                let reset_state = || {
+                    current_next.set(None);
+                    epg_data.set(None);
+                    if force_refetch {
+                        needs_refetch.set(false);
+                    }
+                };
 
                 // Check if cache is valid before fetching
                 if let Some(ref data) = *epg_data {
@@ -113,26 +122,23 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                     }])
                     .await
                 {
-                    let now_i64 = current_time_secs() as i64;
                     if let Some(entry) = response.entries.first() {
                         let programmes = entry.programmes.clone();
-                        let new_data = Rc::new(EpgData { response, fetched_at_secs: current_time_secs() });
+                        let new_data = Rc::new(EpgData { response, fetched_at_secs: now_secs });
                         let (current, next) = compute_current_next(&programmes, now_i64);
                         current_next.set(current.map(|cur| (cur, next)));
                         epg_data.set(Some(new_data));
                     } else {
-                        current_next.set(None);
-                        epg_data.set(None);
-                    }
-                    if force_refetch {
-                        needs_refetch.set(false);
+                        reset_state();
+                        return;
                     }
                 } else {
-                    current_next.set(None);
-                    epg_data.set(None);
-                    if force_refetch {
-                        needs_refetch.set(false);
-                    }
+                    reset_state();
+                    return;
+                }
+
+                if force_refetch {
+                    needs_refetch.set(false);
                 }
             });
         });
@@ -212,7 +218,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                 <span class="tp__stream-display__username"> {stream.username.clone()}</span>
                                 <span class="tp__stream-display__user-comment"> {format_user_comment(props.user_comment.clone())}</span>
                             </div>
-                            if let Some((current, _)) = current_next.as_ref() {
+                            if let Some((current, next_opt)) = current_next.as_ref() {
                                 if !current.title.is_empty() {
                                     <div class="tp__stream-display__epg">
                                         <span class="tp__stream-display__epg-now">
@@ -220,7 +226,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                             {" "}
                                             <span class="tp__stream-display__epg-title">{&current.title}</span>
                                         </span>
-                                        if let Some(next) = current_next.as_ref().and_then(|(_, n)| n.as_ref()) {
+                                        if let Some(next) = next_opt.as_ref() {
                                             <span class="tp__stream-display__epg-next">
                                                 {" → "}
                                                 <span class="tp__stream-display__epg-time">{&next.start}</span>
@@ -357,6 +363,19 @@ mod tests {
         let (current, next) = compute_current_next(&programmes, 250);
         assert_eq!(current.as_ref().map(|p| p.title.as_str()), Some("Show B"));
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn test_compute_current_next_picks_earliest_future_programme_when_unsorted() {
+        let programmes = vec![
+            make_programme("Late Show", 400, 500),
+            make_programme("Current Show", 100, 200),
+            make_programme("Next Show", 200, 300),
+        ];
+
+        let (current, next) = compute_current_next(&programmes, 150);
+        assert_eq!(current.as_ref().map(|p| p.title.as_str()), Some("Current Show"));
+        assert_eq!(next.as_ref().map(|p| p.title.as_str()), Some("Next Show"));
     }
 
     #[test]

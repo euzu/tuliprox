@@ -25,11 +25,18 @@ pub fn create_access_token(secret: &[u8; 32], ttl_secs: u16) -> String {
 }
 
 pub fn verify_access_token(token_str: &str, secret: &[u8; 32]) -> bool {
-    if token_str.len() < 52 {
+    const TOKEN_LEN: usize = 84;
+    const TIMESTAMP_END: usize = 16;
+    const TTL_END: usize = 20;
+
+    if token_str.len() != TOKEN_LEN {
+        return false;
+    }
+    if !token_str.is_ascii() || !token_str.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return false;
     }
 
-    let timestamp_bytes = hex_decode(&token_str[0..16]).unwrap_or_default();
+    let timestamp_bytes = hex_decode(&token_str[..TIMESTAMP_END]).unwrap_or_default();
     if timestamp_bytes.len() != 8 {
         return false;
     }
@@ -40,12 +47,12 @@ pub fn verify_access_token(token_str: &str, secret: &[u8; 32]) -> bool {
         return false;
     }
 
-    let ttl_bytes = hex_decode(&token_str[16..20]).unwrap_or_default();
+    let ttl_bytes = hex_decode(&token_str[TIMESTAMP_END..TTL_END]).unwrap_or_default();
     if ttl_bytes.len() != 2 {
         return false;
     }
     let ttl_secs = u16::from_le_bytes(ttl_bytes.as_slice().try_into().unwrap_or([0; 2]));
-    let signature = hex_decode(&token_str[20..]).unwrap_or_default();
+    let signature = hex_decode(&token_str[TTL_END..]).unwrap_or_default();
 
     let mut payload = Vec::with_capacity(timestamp_bytes.len() + ttl_bytes.len());
     payload.extend_from_slice(&timestamp_bytes);
@@ -65,6 +72,7 @@ pub fn verify_access_token(token_str: &str, secret: &[u8; 32]) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::auth::access_token::{create_access_token, verify_access_token};
+    use std::panic::catch_unwind;
     use std::thread;
 
     #[test]
@@ -85,5 +93,16 @@ mod tests {
         tampered.replace_range(16..20, "ffff");
 
         assert!(!verify_access_token(tampered.as_str(), secret));
+    }
+
+    #[test]
+    fn test_verify_access_token_rejects_non_ascii_without_panicking() {
+        let secret = b"37c30f739e83ba27b4c17b174c31f3a9";
+        let invalid = "é".repeat(84);
+
+        let result = catch_unwind(|| verify_access_token(&invalid, secret));
+
+        assert!(result.is_ok(), "verification should not panic on non-ascii input");
+        assert!(!result.unwrap_or(true));
     }
 }

@@ -213,7 +213,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         <ClusterFlagsInput
                             name="output_clusters"
                             value={form_state.data().output_clusters}
-                            mode={ClusterFlagsInputMode::NoneIsNone}
+                            mode={ClusterFlagsInputMode::NoneIsAll}
                             short_labels={true}
                             on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
                                 instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags));

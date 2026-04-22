@@ -5668,9 +5668,41 @@ mod tests {
         let fresh_addr: SocketAddr = "127.0.0.1:55022".parse().unwrap();
         let stale_fp = Fingerprint::new("fp-stale".to_string(), "127.0.0.1".to_string(), stale_addr);
         let fresh_fp = Fingerprint::new("fp-fresh".to_string(), "127.0.0.1".to_string(), fresh_addr);
+        let mut stale_user = ProxyUserCredentials::default();
+        stale_user.username = "user1".to_string();
+        stale_user.max_connections = 1;
+        let mut fresh_user = ProxyUserCredentials::default();
+        fresh_user.username = "user2".to_string();
+        fresh_user.max_connections = 1;
 
         manager.add_connection(&stale_addr).await;
         manager.add_connection(&fresh_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &stale_user,
+                session_token: "tok-stale-deadline",
+                virtual_id: 9201,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &stale_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &fresh_user,
+                session_token: "tok-fresh-deadline",
+                virtual_id: 9202,
+                provider: "provider-b",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &fresh_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
         manager
             .update_connection(ActiveUserConnectionParams {
                 uid: 201,
@@ -5683,9 +5715,9 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &stale_fp,
                 provider: "provider-a".intern(),
-                stream_channel: &test_channel(9201),
+                stream_channel: &test_adaptive_channel(9201),
                 user_agent: Cow::Borrowed("ua"),
-                session_token: None,
+                session_token: Some("tok-stale-deadline"),
             })
             .await
             .expect("stale stream should register");
@@ -5701,9 +5733,9 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fresh_fp,
                 provider: "provider-b".intern(),
-                stream_channel: &test_channel(9202),
+                stream_channel: &test_adaptive_channel(9202),
                 user_agent: Cow::Borrowed("ua"),
-                session_token: None,
+                session_token: Some("tok-fresh-deadline"),
             })
             .await
             .expect("fresh stream should register");

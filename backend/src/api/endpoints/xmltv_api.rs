@@ -11,7 +11,7 @@ use crate::{
     model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
         get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const, xtream_get_epg_file_path_for_target,
-        xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
+        xtream_get_storage_path, BPlusTreeQuery, epg_query_channels, LockedReceiverStream, XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -494,12 +494,28 @@ async fn serve_stream_epg(
             .filter_map(|item| seen.insert(item.epg_channel_id.clone()).then_some(item.epg_channel_id.as_str()))
             .collect()
     };
+    let query_ids = unique_ids
+        .iter()
+        .map(|id| (*id).intern())
+        .collect::<Vec<Arc<str>>>();
 
-    let mut entries = Vec::with_capacity(unique_ids.len());
+    let channels = match epg_query_channels(
+        &app_state.app_config.file_locks,
+        epg_path,
+        query_ids,
+    )
+    .await
+    {
+        Ok(results) => results,
+        Err(err) => {
+            error!("{err}");
+            Vec::new()
+        }
+    };
 
-    for epg_channel_id in unique_ids {
-        let channel = get_epg_channel(app_state, &epg_channel_id.intern(), epg_path).await;
+    let mut entries = Vec::with_capacity(channels.len());
 
+    for (epg_channel_id, channel) in channels {
         let programmes = match channel {
             Some(ch) => ch.programmes.iter()
                 .filter(|p| p.stop > now && p.start <= window_end)
@@ -585,7 +601,7 @@ pub(crate) async fn stream_epg_api(
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let config = &app_state.app_config.config.load();
+    let config = app_state.app_config.config.load_full();
     let mut entries = Vec::new();
 
     for (target_id, items) in grouped_items {
@@ -593,7 +609,7 @@ pub(crate) async fn stream_epg_api(
             return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
         };
 
-        let Some(epg_path) = get_epg_path_for_target(config, &target) else {
+        let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {
             entries.extend(empty_stream_epg_entries(target_id, &items));
             continue;
         };
