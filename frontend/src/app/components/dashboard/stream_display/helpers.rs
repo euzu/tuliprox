@@ -5,10 +5,13 @@ use crate::{
 };
 use gloo_utils::window;
 use shared::{
-    model::{PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo},
+    model::{PlaylistItemType, StreamChannel, StreamInfo, StreamInfoConfigDto, StreamTechnicalInfo},
     utils::{current_time_secs, default_hls_session_ttl_secs},
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{console, Element};
 use yew::UseStateHandle;
@@ -30,6 +33,15 @@ pub fn is_stream_metrics_enabled(config_ctx: &ConfigContext) -> bool {
         .and_then(|cfg| cfg.config.reverse_proxy.as_ref())
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
         .is_some_and(|stream| stream.metrics_enabled)
+}
+
+pub fn get_stream_info_config(config_ctx: &ConfigContext) -> Option<Rc<StreamInfoConfigDto>> {
+    config_ctx
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.config.web_ui.as_ref())
+        .and_then(|web_ui| web_ui.stream_info.clone())
+        .map(Rc::new)
 }
 
 pub fn get_adaptive_session_ttl_secs(config_ctx: &ConfigContext) -> u64 {

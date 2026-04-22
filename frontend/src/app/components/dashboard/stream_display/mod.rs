@@ -21,9 +21,12 @@ use crate::{
     services::DialogService,
 };
 use gloo_timers::callback::Interval;
+pub use helpers::get_stream_info_config;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, UserCommand},
+    model::{
+        PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto, UserCommand,
+    },
     utils::default_kick_secs,
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
@@ -38,6 +41,7 @@ const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 #[derive(Properties, PartialEq, Clone)]
 pub struct StreamDisplayProps {
     pub streams: Option<Vec<Rc<StreamInfo>>>,
+    pub stream_info_config: Option<Rc<StreamInfoConfigDto>>,
 }
 
 fn build_user_comments<I>(credentials: I) -> HashMap<String, Option<String>>
@@ -308,6 +312,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                                                 stream={stream}
                                                 user_comment={user_comment}
                                                 metrics_enabled={metrics_enabled}
+                                                stream_info={props.stream_info_config.clone()}
                                                 on_popup_click={handle_popup_onclick.clone()}
                                             />
                                         }

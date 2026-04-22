@@ -1,7 +1,7 @@
 use crate::{
     app::{
-        components::{Card, StatusCard, StreamDisplay},
-        StatusContext,
+        components::{dashboard::stream_display::get_stream_info_config, Card, StatusCard, StreamDisplay},
+        ConfigContext, StatusContext,
     },
     hooks::use_service_context,
     html_if,
@@ -22,7 +22,9 @@ pub fn StreamsView(props: &StreamsViewProps) -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();
     let status_ctx = use_context::<StatusContext>().expect("Status context not found");
+    let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let provider_connections = use_state(|| 0);
+    let stream_info_config = get_stream_info_config(&config_ctx);
 
     let memo_streams = {
         let status = status_ctx.status.clone();
@@ -82,7 +84,7 @@ pub fn StreamsView(props: &StreamsViewProps) -> Html {
                  </Card>
             </div>
 
-            <StreamDisplay streams={ (*memo_streams).clone() } />
+            <StreamDisplay streams={ (*memo_streams).clone() } stream_info_config={stream_info_config} />
         </div>
       </div>
     }

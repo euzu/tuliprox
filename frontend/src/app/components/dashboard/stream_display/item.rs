@@ -9,7 +9,10 @@ use crate::{
     utils::format_duration,
 };
 use shared::{
-    model::{EpgProgrammeDto, StreamEpgItemRequest, StreamEpgResponse, StreamInfo},
+    model::{
+        EpgProgrammeDto, StreamEpgItemRequest, StreamEpgResponse, StreamInfo, StreamInfoConfigDto, StreamInfoFields,
+        StreamInfoFieldsSet,
+    },
     utils::{current_time_secs, strip_port},
 };
 use std::rc::Rc;
@@ -22,6 +25,7 @@ pub struct StreamDisplayItemProps {
     pub stream: Rc<StreamInfo>,
     pub user_comment: Option<String>,
     pub metrics_enabled: bool,
+    pub stream_info: Option<Rc<StreamInfoConfigDto>>,
     pub on_popup_click: Callback<(Rc<StreamInfo>, MouseEvent)>,
 }
 
@@ -86,6 +90,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
     let needs_refetch: UseStateHandle<bool> = use_state(|| false);
 
     // Fetch EPG when epg_channel_id is present or when needs_refetch is triggered
+    let hide_properties = props.stream_info.as_ref().map_or_else(StreamInfoFieldsSet::new, |cfg| cfg.get_flags());
     {
         let epg_channel_id = epg_channel_id.clone();
         let epg_data = epg_data.clone();
@@ -95,6 +100,9 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
             let Some(epg_channel_id) = epg_channel_id.clone() else {
                 return;
             };
+            if hide_properties.contains(StreamInfoFields::HideEpg) {
+                return;
+            }
             let force_refetch = *force_refetch;
 
             let epg_channel_id = epg_channel_id.clone();
@@ -157,6 +165,9 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
         let current_next = current_next.clone();
         let needs_refetch = needs_refetch.clone();
         use_effect_with(interval_deps, move |(epg_channel_id, _)| {
+            if hide_properties.contains(StreamInfoFields::HideEpg) {
+                return Box::new(|| ()) as Box<dyn FnOnce()>;
+            }
             epg_channel_id.as_ref().map_or_else(
                 || Box::new(|| ()) as Box<dyn FnOnce()>,
                 |_| {
@@ -222,8 +233,11 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                 <span class="tp__stream-display__provider">{stream.provider.clone()}</span>
                                 {" • "}
                                 <span class="tp__stream-display__username"> {stream.username.clone()}</span>
-                                <span class="tp__stream-display__user-comment"> {format_user_comment(props.user_comment.clone())}</span>
+                                if !hide_properties.contains(StreamInfoFields::HideUserComment) {
+                                    <span class="tp__stream-display__user-comment"> {format_user_comment(props.user_comment.clone())}</span>
+                                }
                             </div>
+                            if !hide_properties.contains(StreamInfoFields::HideEpg) {
                             if let Some((current, next_opt)) = current_next.as_ref() {
                                 if !current.title.is_empty() {
                                     <div class="tp__stream-display__epg">
@@ -243,21 +257,26 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                     </div>
                                 }
                             }
+                            }
                         </div>
                     </div>
                 </div>
            </div>
            <div class="tp__stream-display__row">
             <div class="tp__stream-display__stats">
+                    if !hide_properties.contains(StreamInfoFields::HideGroup) {
                     <div class="tp__stream-display__stat tp__stream-display__stat--category">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.GROUP")}</span>
                         <span class="tp__stream-display__stat-value">{stream.channel.group.to_string()}</span>
                     </div>
+                    }
+                    if !hide_properties.contains(StreamInfoFields::HideIp) {
                     <div class="tp__stream-display__stat tp__stream-display__stat--client">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.CLIENT_IP")}</span>
                         <span class="tp__stream-display__stat-value tp__stream-display__stat-value--ip">{client_ip.clone()}</span>
                     </div>
-                    if display_country_code(stream.country_code.as_deref()).is_some() {
+                    }
+                    if !hide_properties.contains(StreamInfoFields::HideCountry) && display_country_code(stream.country_code.as_deref()).is_some() {
                         <div class="tp__stream-display__stat tp__stream-display__stat--country">
                             <span class="tp__stream-display__stat-label">{translate.t("LABEL.COUNTRY")}</span>
                             <span class="tp__stream-display__stat-value">
@@ -265,23 +284,29 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                             </span>
                         </div>
                     }
+                    if !hide_properties.contains(StreamInfoFields::HideShared) {
                     <div class="tp__stream-display__stat">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.SHARED")}</span>
                         <span class="tp__stream-display__stat-value"><ToggleSwitch value={stream.channel.shared} readonly={true} compact={true}/></span>
                     </div>
+                    }
+                    if !hide_properties.contains(StreamInfoFields::HideDuration) {
                     <div class="tp__stream-display__stat tp__stream-display__stat--duration">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.DURATION")}</span>
                         <span class="tp__stream-display__stat-value tp__stream-display__duration" data-ts={{let s = if stream.started_at == 0 { stream.ts } else { stream.started_at }; s.to_string()}}>
                             {format_duration(current_time_secs().saturating_sub(if stream.started_at == 0 { stream.ts } else { stream.started_at }))}
                         </span>
                     </div>
-                    if props.metrics_enabled && stream.meter_uid != 0 {
+                    }
+                    if  props.metrics_enabled && stream.meter_uid != 0 && !hide_properties.contains(StreamInfoFields::HideBandwidth) {
                         <div class="tp__stream-display__stat">
                             <span class="tp__stream-display__stat-label">{translate.t("LABEL.BANDWIDTH")}</span>
                             <span class="tp__stream-display__stat-value">
                                 <StreamMeterBadge uid={stream.uid} meter_uid={stream.meter_uid} kind={MeterDisplayKind::Bandwidth} />
                             </span>
                         </div>
+                    }
+                    if props.metrics_enabled && stream.meter_uid != 0 && !hide_properties.contains(StreamInfoFields::HideTransferred) {
                         <div class="tp__stream-display__stat">
                             <span class="tp__stream-display__stat-label">{translate.t("LABEL.TRANSFERRED")}</span>
                             <span class="tp__stream-display__stat-value">
@@ -289,12 +314,14 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                             </span>
                         </div>
                     }
+                    if !hide_properties.contains(StreamInfoFields::HidePlayer) {
                     <div class="tp__stream-display__stat tp__stream-display__detail">
                         <span class="tp__stream-display__stat-label">{translate.t("LABEL.PLAYER")}</span>
                         <span class="tp__stream-display__stat-value">
                             <RevealContent preview={Some(html! { &stream.user_agent })}>{&stream.user_agent}</RevealContent>
                         </span>
                     </div>
+                    }
                 </div>
            </div>
            <div class="tp__stream-display__row">

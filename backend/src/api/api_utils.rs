@@ -873,11 +873,11 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
 ///
 /// Rules:
 /// - Only `grace_context.strategies[(strategy_index + 1)..]` are evaluated
-/// - `NoMatch` → continue to next strategy
-/// - `Evict` → kick target, retry admission
-/// - `Grace` → technically possible under current config (only one grace allowed), but handled
-/// - `Deny` → final exhausted
-/// - Empty remaining slice → final exhausted
+/// - `NoMatch` -> continue to next strategy
+/// - `Evict` -> kick target, retry admission
+/// - `Grace` -> technically possible under current config (only one grace allowed), but handled
+/// - `Deny` -> final exhausted
+/// - Empty remaining slice -> final exhausted
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api) async fn evaluate_remaining_strategies_after_grace(
     app_state: &Arc<AppState>,
@@ -1183,7 +1183,7 @@ async fn activate_session_before_stream_open(
                 .await;
         } else if matches!(grace_mode, Some(crate::api::model::GraceMode::Instant)) {
             // Instant: session is provisionally active immediately. Counts against admission limits
-            // until the grace window resolves (success → Active, failure → Expired).
+            // until the grace window resolves (success -> Active, failure -> Expired).
             app_state
                 .active_users
                 .mark_grace_active(&user.username, session_token)
@@ -4795,7 +4795,7 @@ mod tests {
     async fn evaluate_remaining_strategies_evicts_after_used_grace() {
         // Strategies: [GraceHoldStream, EvictUserOldest]
         // Grace was used at index 0, so only EvictUserOldest (index 1) is evaluated.
-        // Eviction frees the slot → Allowed.
+        // Eviction frees the slot -> Allowed.
         let strategies = vec![
             AdmissionStrategy::GraceHoldStream,
             AdmissionStrategy::EvictUserOldest,
@@ -4895,8 +4895,8 @@ mod tests {
     async fn evaluate_remaining_strategies_skips_no_match_and_uses_later_eviction() {
         // Strategies: [GraceHoldStream, EvictUserSameIpOldest, EvictUserOldest]
         // Grace was at index 0, remaining are EvictUserSameIpOldest (index 1) and EvictUserOldest (index 2).
-        // The existing counted session is at a DIFFERENT IP, so EvictUserSameIpOldest → NoMatch.
-        // EvictUserOldest succeeds → Allowed.
+        // The existing counted session is at a DIFFERENT IP, so EvictUserSameIpOldest -> NoMatch.
+        // EvictUserOldest succeeds -> Allowed.
         let strategies = vec![
             AdmissionStrategy::GraceHoldStream,
             AdmissionStrategy::EvictUserSameIpOldest,
@@ -4996,7 +4996,7 @@ mod tests {
     #[tokio::test]
     async fn evaluate_remaining_strategies_empty_slice_denies() {
         // Strategies: [GraceHoldStream]
-        // Grace was at index 0, remaining slice is empty → exhausted.
+        // Grace was at index 0, remaining slice is empty -> exhausted.
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
         let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: None };
 
@@ -5044,7 +5044,7 @@ mod tests {
     #[tokio::test]
     async fn evaluate_remaining_strategies_preserves_soft_kind_on_exhausted() {
         // Strategies: [GraceHoldStream]
-        // Grace was at index 0, remaining slice is empty → exhausted.
+        // Grace was at index 0, remaining slice is empty -> exhausted.
         // grace_context.kind is Soft — must be preserved in the exhausted result.
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
         let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Soft) };
@@ -5197,7 +5197,7 @@ mod tests {
     #[tokio::test]
     async fn evaluate_remaining_strategies_empty_slice_uses_original_kind_not_context_kind() {
         // grace_context.kind = Normal, original_kind = Soft
-        // remaining slice is empty → exhausted result must use original_kind.
+        // remaining slice is empty -> exhausted result must use original_kind.
         // This proves the empty-slice branch uses original_kind, not grace_context.kind.
         let strategies = vec![AdmissionStrategy::GraceHoldStream];
         let grace_context = GraceResolutionContext { strategy_index: 0, strategies, kind: Some(crate::api::model::ConnectionKind::Normal) };

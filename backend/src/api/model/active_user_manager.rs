@@ -106,7 +106,7 @@ pub enum PlaybackLifecycle {
     PendingProvider { data: PendingProviderState },
     Active,
     /// Provisional counted state for `GraceMode::Instant`. Counts against limits immediately
-    /// while the grace window resolves (success → Active, failure → Expired).
+    /// while the grace window resolves (success -> Active, failure -> Expired).
     GraceActive,
     Preserved,
     Expired,
@@ -2093,8 +2093,8 @@ impl ActiveUserManager {
     ///
     /// This corresponds to `Prepared -> GraceActive` in the playback state machine.
     /// The session remains in `GraceActive` until either:
-    /// - `activate_grace_active` confirms it (grace window succeeded → `GraceActive -> Active`)
-    /// - `expire_grace_active` expires it (grace window failed → `GraceActive -> Expired`)
+    /// - `activate_grace_active` confirms it (grace window succeeded -> `GraceActive -> Active`)
+    /// - `expire_grace_active` expires it (grace window failed -> `GraceActive -> Expired`)
     pub async fn mark_grace_active(&self, username: &str, token: &str) {
         let mut user_connections = self.connections.write().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {

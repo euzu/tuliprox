@@ -1,8 +1,67 @@
-use shared::model::view_type::ViewType;
-use shared::error::TuliproxError;
-use shared::model::{ContentSecurityPolicyConfigDto, WebUiConfigDto};
-use shared::utils::default_kick_secs;
 use crate::model::{macros, WebAuthConfig};
+use shared::error::TuliproxError;
+use shared::model::view_type::ViewType;
+use shared::model::{ContentSecurityPolicyConfigDto, StreamInfoConfigDto, StreamInfoFields, StreamInfoFieldsSet, WebUiConfigDto};
+use shared::utils::default_kick_secs;
+use shared::apply_flags;
+
+
+#[derive(Debug, Clone)]
+pub struct StreamInfoConfig {
+    pub flags: StreamInfoFieldsSet,
+}
+
+impl StreamInfoConfig {
+    pub fn is_none(&self) -> bool {
+        self.flags.is_empty()
+    }
+
+    #[inline]
+    pub fn hide_group(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HideGroup)
+    }
+
+    #[inline]
+    pub fn hide_ip(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HideIp)
+    }
+
+    #[inline]
+    pub fn hide_country(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HideCountry)
+    }
+
+    #[inline]
+    pub fn hide_shared(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HideShared)
+    }
+
+    #[inline]
+    pub fn hide_duration(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HideDuration)
+    }
+
+    #[inline]
+    pub fn hide_bandwidth(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HideBandwidth)
+    }
+
+    #[inline]
+    pub fn hide_transferred(&self) -> bool { self.flags.contains(StreamInfoFields::HideTransferred) }
+
+    #[inline]
+    pub fn hide_player(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HidePlayer)
+    }
+
+    #[inline]
+    pub fn hide_user_comment(&self) -> bool { self.flags.contains(StreamInfoFields::HideUserComment) }
+
+    #[inline]
+    pub fn hide_epg(&self) -> bool {
+        self.flags.contains(StreamInfoFields::HideEpg)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ContentSecurityPolicyConfig {
@@ -21,6 +80,7 @@ pub struct WebUiConfig {
     pub kick_secs: u64,
     pub combine_views_stats_streams: bool,
     pub landing_page: ViewType,
+    pub stream_info: Option<StreamInfoConfig>,
 }
 
 impl WebUiConfig {
@@ -59,6 +119,45 @@ impl From<&ContentSecurityPolicyConfig> for ContentSecurityPolicyConfigDto {
     }
 }
 
+macros::from_impl!(StreamInfoConfig);
+
+impl From<&StreamInfoConfigDto> for StreamInfoConfig {
+    fn from(dto: &StreamInfoConfigDto) -> Self {
+        let mut flags = StreamInfoFieldsSet::new();
+        apply_flags!(
+            dto, flags, StreamInfoFields;
+            (hide_group, HideGroup),
+            (hide_ip, HideIp),
+            (hide_country, HideCountry),
+            (hide_shared, HideShared),
+            (hide_duration, HideDuration),
+            (hide_bandwidth, HideBandwidth),
+            (hide_transferred, HideTransferred),
+            (hide_player, HidePlayer),
+            (hide_user_comment, HideUserComment),
+            (hide_epg, HideEpg)
+        );
+        Self { flags }
+    }
+}
+
+impl From<&StreamInfoConfig> for StreamInfoConfigDto {
+    fn from(cfg: &StreamInfoConfig) -> Self {
+        Self {
+            hide_group: cfg.hide_group(),
+            hide_ip: cfg.hide_ip(),
+            hide_country: cfg.hide_country(),
+            hide_shared: cfg.hide_shared(),
+            hide_duration: cfg.hide_duration(),
+            hide_bandwidth: cfg.hide_bandwidth(),
+            hide_transferred: cfg.hide_transferred(),
+            hide_player: cfg.hide_player(),
+            hide_user_comment: cfg.hide_user_comment(),
+            hide_epg: cfg.hide_epg(),
+        }
+    }
+}
+
 macros::from_impl!(WebUiConfig);
 impl From<&WebUiConfigDto> for WebUiConfig {
     fn from(dto: &WebUiConfigDto) -> Self {
@@ -80,11 +179,19 @@ impl From<&WebUiConfigDto> for WebUiConfig {
             kick_secs: dto.kick_secs,
             combine_views_stats_streams: dto.combine_views_stats_streams,
             landing_page: dto.landing_page,
+            stream_info: dto.stream_info.as_ref().map(Into::into),
         }
     }
 }
 impl From<&WebUiConfig> for WebUiConfigDto {
     fn from(instance: &WebUiConfig) -> Self {
+        let stream_info = instance.stream_info.as_ref().and_then(|cfg| {
+            if cfg.is_none() {
+                None
+            } else {
+                Some(cfg.into())
+            }
+        });
         Self {
             enabled: instance.enabled,
             user_ui_enabled: instance.user_ui_enabled,
@@ -95,6 +202,7 @@ impl From<&WebUiConfig> for WebUiConfigDto {
             kick_secs: instance.kick_secs,
             combine_views_stats_streams: instance.combine_views_stats_streams,
             landing_page: instance.landing_page,
+            stream_info,
         }
     }
 }
