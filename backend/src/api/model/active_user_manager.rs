@@ -2500,13 +2500,25 @@ impl ActiveUserManager {
 
     pub async fn socket_expiry_deadline(&self, addr: &SocketAddr) -> Option<u64> {
         let ttl_secs = self.active_socket_ttl_secs();
-        self.connections.read().await.key_by_addr.get(addr).and_then(|registration| {
-            if registration.username.is_empty() {
-                None
-            } else {
-                Some(registration.ts.saturating_add(ttl_secs))
-            }
-        })
+        let connections = self.connections.read().await;
+        let registration = connections.key_by_addr.get(addr)?;
+        if registration.username.is_empty() {
+            return None;
+        }
+
+        let Some(connection_data) = connections.by_key.get(&registration.username) else {
+            return Some(registration.ts.saturating_add(ttl_secs));
+        };
+
+        let has_non_stable_stream = connection_data
+            .streams
+            .iter()
+            .any(|stream| stream.addr == *addr && !is_stable_session_stream(stream));
+        if has_non_stable_stream {
+            return None;
+        }
+
+        Some(registration.ts.saturating_add(ttl_secs))
     }
 
     pub async fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
@@ -5836,6 +5848,65 @@ mod tests {
         assert_eq!(stream.ts, original_ts, "touch_http_activity must not reset the stream start timestamp");
         // addr should be updated to reflect the latest manifest request
         assert_eq!(stream.addr, addr2, "touch_http_activity should update the stream addr");
+    }
+
+    #[tokio::test]
+    async fn socket_expiry_deadline_ignores_active_vod_streams() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55040".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-vod".to_string(), "127.0.0.1".to_string(), addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-vod-expiry".to_string();
+        user.max_connections = 1;
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-vod-expiry",
+                virtual_id: 8888,
+                provider: "provider-a",
+                stream_url: "http://localhost/movie.mkv",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        let mut channel = test_channel(8888);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = "http://localhost/movie.mkv".intern();
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 602,
+                meter_uid: 702,
+                username: "user-vod-expiry",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-vod-expiry"),
+            })
+            .await
+            .expect("vod stream should be created");
+
+        assert_eq!(
+            manager.socket_expiry_deadline(&addr).await,
+            None,
+            "continuous VOD streams must not expire via HTTP activity TTL"
+        );
     }
 
     #[tokio::test]
