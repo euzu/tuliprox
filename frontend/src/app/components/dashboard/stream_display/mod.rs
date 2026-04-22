@@ -40,6 +40,25 @@ pub struct StreamDisplayProps {
     pub streams: Option<Vec<Rc<StreamInfo>>>,
 }
 
+fn build_user_comments<I>(credentials: I) -> HashMap<String, Option<String>>
+where
+    I: IntoIterator<Item = (String, Option<String>)>,
+{
+    let mut comments = HashMap::<String, Option<String>>::new();
+    for (username, comment) in credentials {
+        match comments.get(&username) {
+            None => {
+                comments.insert(username, comment);
+            }
+            Some(None) if comment.is_some() => {
+                comments.insert(username, comment);
+            }
+            Some(Some(_)) | Some(None) => {}
+        }
+    }
+    comments
+}
+
 #[component]
 pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let translate = use_translation();
@@ -55,15 +74,14 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let adaptive_session_ttl_secs = get_adaptive_session_ttl_secs(&config_ctx);
     let metrics_enabled = is_stream_metrics_enabled(&config_ctx);
     let user_comments = use_memo(config_ctx.api_proxy.clone(), |api_proxy| {
-        let mut comments = HashMap::<String, Option<String>>::new();
-        if let Some(api_proxy) = api_proxy.as_ref() {
-            for target_user in &api_proxy.user {
-                for credential in &target_user.credentials {
-                    comments.entry(credential.username.clone()).or_insert_with(|| credential.comment.clone());
-                }
-            }
-        }
-        comments
+        api_proxy.as_ref().map_or_else(HashMap::new, |api_proxy| {
+            build_user_comments(api_proxy.user.iter().flat_map(|target_user| {
+                target_user
+                    .credentials
+                    .iter()
+                    .map(|credential| (credential.username.clone(), credential.comment.clone()))
+            }))
+        })
     });
 
     use_effect_with((), move |_| {
@@ -310,6 +328,33 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             }
            </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_user_comments;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_build_user_comments_prefers_first_non_none_comment() {
+        let comments = build_user_comments([
+            ("alice".to_string(), None),
+            ("alice".to_string(), Some("first".to_string())),
+            ("alice".to_string(), Some("second".to_string())),
+            ("bob".to_string(), Some("kept".to_string())),
+        ]);
+
+        assert_eq!(comments.get("alice"), Some(&Some("first".to_string())));
+        assert_eq!(comments.get("bob"), Some(&Some("kept".to_string())));
+    }
+
+    #[test]
+    fn test_build_user_comments_keeps_existing_some_comment() {
+        let comments =
+            build_user_comments([("alice".to_string(), Some("first".to_string())), ("alice".to_string(), None)]);
+
+        assert_eq!(comments, HashMap::from([("alice".to_string(), Some("first".to_string()))]));
     }
 }
 

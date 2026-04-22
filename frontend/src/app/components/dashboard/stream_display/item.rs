@@ -33,13 +33,7 @@ struct EpgData {
 }
 
 impl EpgData {
-    fn is_valid(&self, now_secs: u64) -> bool {
-        // Valid for 7 hours after fetch (window is 8h, refresh when < 1h remaining)
-        let age = now_secs.saturating_sub(self.fetched_at_secs);
-        age < 7 * 3600
-    }
-
-    fn is_near_expiry(&self, now_secs: u64) -> bool {
+    fn is_stale(&self, now_secs: u64) -> bool {
         let age = now_secs.saturating_sub(self.fetched_at_secs);
         age >= 7 * 3600
     }
@@ -56,6 +50,13 @@ fn compute_current_next(
         current.as_ref().and_then(|cur| programmes.iter().find(|p| p.start_timestamp > cur.start_timestamp).cloned());
 
     (current, next)
+}
+
+fn format_user_comment(user_comment: Option<String>) -> Option<String> {
+    user_comment.and_then(|comment| {
+        let trimmed = comment.trim();
+        (!trimmed.is_empty()).then(|| format!("({trimmed})"))
+    })
 }
 
 #[component]
@@ -98,7 +99,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
                 // Check if cache is valid before fetching
                 if let Some(ref data) = *epg_data {
-                    if !force_refetch && data.is_valid(now_secs) {
+                    if !force_refetch && !data.is_stale(now_secs) {
                         return;
                     }
                 }
@@ -112,19 +113,23 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                     }])
                     .await
                 {
-                    let new_data = Rc::new(EpgData { response, fetched_at_secs: current_time_secs() });
-
-                    // Compute current/next from the fetched data
                     let now_i64 = current_time_secs() as i64;
-                    if let Some(entry) = new_data.response.entries.first() {
-                        let (current, next) = compute_current_next(&entry.programmes, now_i64);
-                        // Only show current programme if one is active; clears stale state otherwise
+                    if let Some(entry) = response.entries.first() {
+                        let programmes = entry.programmes.clone();
+                        let new_data = Rc::new(EpgData { response, fetched_at_secs: current_time_secs() });
+                        let (current, next) = compute_current_next(&programmes, now_i64);
                         current_next.set(current.map(|cur| (cur, next)));
+                        epg_data.set(Some(new_data));
                     } else {
                         current_next.set(None);
+                        epg_data.set(None);
                     }
-
-                    epg_data.set(Some(new_data));
+                    if force_refetch {
+                        needs_refetch.set(false);
+                    }
+                } else {
+                    current_next.set(None);
+                    epg_data.set(None);
                     if force_refetch {
                         needs_refetch.set(false);
                     }
@@ -156,7 +161,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
                         // Check if cache is stale and needs refetch
                         if let Some(data) = (*epg_data).as_ref() {
-                            if data.is_near_expiry(now_secs) {
+                            if data.is_stale(now_secs) {
                                 needs_refetch.set(true);
                                 return;
                             }
@@ -205,7 +210,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                 <span class="tp__stream-display__provider">{stream.provider.clone()}</span>
                                 {" • "}
                                 <span class="tp__stream-display__username"> {stream.username.clone()}</span>
-                                <span class="tp__stream-display__user-comment"> {props.user_comment.clone().map(|c| format!("({c})"))}</span>
+                                <span class="tp__stream-display__user-comment"> {format_user_comment(props.user_comment.clone())}</span>
                             </div>
                             if let Some((current, _)) = current_next.as_ref() {
                                 if !current.title.is_empty() {
@@ -355,21 +360,17 @@ mod tests {
     }
 
     #[test]
-    fn test_epg_data_is_valid_fresh() {
+    fn test_epg_data_is_stale() {
         let data = EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 100 };
-        assert!(data.is_valid(100));
-        assert!(data.is_valid(3600));
-        assert!(!data.is_valid(25300));
+        assert!(!data.is_stale(100));
+        assert!(!data.is_stale(3600));
+        assert!(data.is_stale(25300));
     }
 
     #[test]
-    fn test_epg_data_is_near_expiry() {
-        let data = EpgData { response: StreamEpgResponse { entries: vec![] }, fetched_at_secs: 100 };
-        // At t=25300, age=25200 (exactly 7h), is_near_expiry = true
-        assert!(data.is_near_expiry(25300));
-        // At t=25200, age=25100 (just under 7h), is_near_expiry = false
-        assert!(!data.is_near_expiry(25200));
-        // At t=100, age=0, is_near_expiry = false
-        assert!(!data.is_near_expiry(100));
+    fn test_format_user_comment_trims_and_skips_empty_values() {
+        assert_eq!(format_user_comment(None), None);
+        assert_eq!(format_user_comment(Some("   ".to_string())), None);
+        assert_eq!(format_user_comment(Some(" comment ".to_string())), Some("(comment)".to_string()));
     }
 }

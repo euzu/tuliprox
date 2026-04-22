@@ -1,6 +1,6 @@
 use crate::{
     model::{
-        ConfigTargetOptions, LibraryMetadataFormat, MetadataUpdateConfigDto, ProcessingOrder,
+        ClusterFlags, ConfigTargetOptions, LibraryMetadataFormat, MetadataUpdateConfigDto, ProcessingOrder,
         RuntimeConfigReportFormat, VideoConfigDto,
     },
     utils::{
@@ -33,6 +33,8 @@ pub fn default_as_default() -> String { "default".into() }
 pub const fn is_default_runtime_config_report_format(value: &RuntimeConfigReportFormat) -> bool {
     matches!(value, RuntimeConfigReportFormat::Yaml)
 }
+
+pub fn is_cluster_optional(cf: &Option<ClusterFlags>) -> bool { cf.is_none_or(|c| c.is_all()) }
 
 // Default delay values for resolving VOD or Series requests,
 // used to prevent frequent requests that could trigger a provider ban.

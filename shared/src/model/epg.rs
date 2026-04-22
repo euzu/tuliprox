@@ -119,6 +119,8 @@ pub struct StreamEpgResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamEpgEntry {
     pub epg_channel_id: String,
+    #[serde(default)]
+    pub target_id: Option<u16>,
     pub programmes: Vec<EpgProgrammeDto>,
 }
 

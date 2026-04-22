@@ -1,11 +1,13 @@
 use crate::{
     api::{
         api_utils::{
-            empty_json_response_as_array, get_user_target, get_user_target_by_credentials, internal_server_error,
-            resource_response, stream_json_or_bin_response_stream, try_option_forbidden, try_unwrap_body,
+            empty_json_response_as_array, get_user_target, get_user_target_by_credentials, get_username_from_auth_header,
+            internal_server_error, resource_response, stream_json_or_bin_response_stream, try_option_forbidden,
+            try_unwrap_body,
         },
         model::{AppState, UserApiRequestQueryOrBody, UserApiRequest},
     },
+    auth::AuthBearer,
     model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
         get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const, xtream_get_epg_file_path_for_target,
@@ -23,7 +25,10 @@ use log::{debug, error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
-    model::{EpgChannel, EpgProgramme, ShortEpgDto, ShortEpgResultDto, StreamEpgRequest, StreamEpgResponse, StreamEpgEntry, EpgProgrammeDto},
+    model::{
+        EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry, StreamEpgItemRequest,
+        StreamEpgRequest, StreamEpgResponse,
+    },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
 use std::{
@@ -475,7 +480,7 @@ async fn serve_stream_epg(
     user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
     epg_path: &Path,
-    items: Vec<String>,
+    items: Vec<StreamEpgItemRequest>,
 ) -> StreamEpgResponse {
     let epg_processing_options = get_epg_processing_options(app_state, user, target);
     let now = chrono::Utc::now().timestamp();
@@ -484,14 +489,10 @@ async fn serve_stream_epg(
     // Deduplicate by first occurrence, preserving order
     let unique_ids: Vec<&str> = {
         let mut seen = HashSet::new();
-        items.iter().filter_map(|id| {
-            if seen.contains(id) {
-                None
-            } else {
-                seen.insert(id.clone());
-                Some(id.as_str())
-            }
-        }).collect()
+        items
+            .iter()
+            .filter_map(|item| seen.insert(item.epg_channel_id.clone()).then_some(item.epg_channel_id.as_str()))
+            .collect()
     };
 
     let mut entries = Vec::with_capacity(unique_ids.len());
@@ -518,6 +519,7 @@ async fn serve_stream_epg(
 
         entries.push(StreamEpgEntry {
             epg_channel_id: epg_channel_id.to_string(),
+            target_id: Some(target.id),
             programmes,
         });
     }
@@ -525,31 +527,82 @@ async fn serve_stream_epg(
     StreamEpgResponse { entries }
 }
 
+fn group_stream_epg_items(
+    items: Vec<StreamEpgItemRequest>,
+) -> Result<Vec<(u16, Vec<StreamEpgItemRequest>)>, &'static str> {
+    if items.is_empty() {
+        return Err("items must not be empty");
+    }
+
+    let mut groups = Vec::<(u16, Vec<StreamEpgItemRequest>)>::new();
+    for item in items {
+        let Some(target_id) = item.target_id else {
+            return Err("all items must include target_id");
+        };
+
+        if let Some((_, group_items)) = groups.iter_mut().find(|(group_target_id, _)| *group_target_id == target_id) {
+            group_items.push(item);
+        } else {
+            groups.push((target_id, vec![item]));
+        }
+    }
+
+    Ok(groups)
+}
+
+fn empty_stream_epg_entries(target_id: u16, items: &[StreamEpgItemRequest]) -> Vec<StreamEpgEntry> {
+    let mut seen = HashSet::new();
+    items
+        .iter()
+        .filter_map(|item| seen.insert(item.epg_channel_id.clone()).then_some(item.epg_channel_id.clone()))
+        .map(|epg_channel_id| StreamEpgEntry {
+            epg_channel_id,
+            target_id: Some(target_id),
+            programmes: Vec::new(),
+        })
+        .collect()
+}
+
+fn stream_epg_bad_request(message: &str) -> axum::response::Response {
+    (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": message }))).into_response()
+}
+
 /// Handles stream EPG API requests for per-stream programme display.
 pub(crate) async fn stream_epg_api(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    AuthBearer(token): AuthBearer,
     axum::extract::Json(stream_epg_req): axum::extract::Json<StreamEpgRequest>,
 ) -> impl IntoResponse + Send {
-    let request_items = stream_epg_req.items;
-    let Some(target_id) = request_items.iter().find_map(|item| item.target_id) else {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    let grouped_items = match group_stream_epg_items(stream_epg_req.items) {
+        Ok(groups) => groups,
+        Err(message) => return stream_epg_bad_request(message),
     };
-    let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
+
+    let Some(username) = get_username_from_auth_header(&token, &app_state) else {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
-    let user = ProxyUserCredentials::default();
+    let Some(user) = app_state.app_config.get_user_credentials(&username) else {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    };
 
     let config = &app_state.app_config.config.load();
-    let Some(epg_path) = get_epg_path_for_target(config, &target) else {
-        return (
-            axum::http::StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
-            serde_json::to_string(&StreamEpgResponse::default()).unwrap_or_default(),
-        ).into_response();
-    };
+    let mut entries = Vec::new();
 
-    let items = request_items.into_iter().map(|i| i.epg_channel_id).collect();
-    let result = serve_stream_epg(&app_state, &user, &target, &epg_path, items).await;
+    for (target_id, items) in grouped_items {
+        let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
+            return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
+        };
+
+        let Some(epg_path) = get_epg_path_for_target(config, &target) else {
+            entries.extend(empty_stream_epg_entries(target_id, &items));
+            continue;
+        };
+
+        let result = serve_stream_epg(&app_state, &user, &target, &epg_path, items).await;
+        entries.extend(result.entries);
+    }
+
+    let result = StreamEpgResponse { entries };
 
     match serde_json::to_string(&result) {
         Ok(json) => (
@@ -658,11 +711,55 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_epg_channel_resource_url;
+    use super::{group_stream_epg_items, rewrite_epg_channel_resource_url};
     use shared::{
-        model::EpgChannel,
+        model::{EpgChannel, StreamEpgItemRequest},
         utils::{concat_path, obfuscate_text, Internable},
     };
+
+    #[test]
+    fn test_group_stream_epg_items_rejects_empty_requests() {
+        let err = group_stream_epg_items(Vec::new()).unwrap_err();
+        assert_eq!(err, "items must not be empty");
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_rejects_missing_target() {
+        let err = group_stream_epg_items(vec![StreamEpgItemRequest {
+            epg_channel_id: "epg-1".to_string(),
+            target_id: None,
+        }])
+        .unwrap_err();
+        assert_eq!(err, "all items must include target_id");
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_groups_by_target_in_input_order() {
+        let groups = group_stream_epg_items(vec![
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-1".to_string(),
+                target_id: Some(2),
+            },
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-2".to_string(),
+                target_id: Some(5),
+            },
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-3".to_string(),
+                target_id: Some(2),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, 2);
+        assert_eq!(
+            groups[0].1.iter().map(|item| item.epg_channel_id.as_str()).collect::<Vec<_>>(),
+            vec!["epg-1", "epg-3"]
+        );
+        assert_eq!(groups[1].0, 5);
+        assert_eq!(groups[1].1.iter().map(|item| item.epg_channel_id.as_str()).collect::<Vec<_>>(), vec!["epg-2"]);
+    }
 
     fn sample_channel(icon: Option<&str>) -> EpgChannel {
         EpgChannel {
