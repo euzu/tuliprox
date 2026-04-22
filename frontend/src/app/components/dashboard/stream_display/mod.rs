@@ -21,9 +21,12 @@ use crate::{
     services::DialogService,
 };
 use gloo_timers::callback::Interval;
+pub use helpers::get_stream_info_config;
 use shared::{
     error::TuliproxError,
-    model::{PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, UserCommand},
+    model::{
+        PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto, UserCommand,
+    },
     utils::default_kick_secs,
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
@@ -38,6 +41,37 @@ const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 #[derive(Properties, PartialEq, Clone)]
 pub struct StreamDisplayProps {
     pub streams: Option<Vec<Rc<StreamInfo>>>,
+    pub stream_info_config: Option<Rc<StreamInfoConfigDto>>,
+}
+
+fn build_user_comments<I>(credentials: I) -> HashMap<String, Option<String>>
+where
+    I: IntoIterator<Item = (String, Option<String>)>,
+{
+    let mut comments = HashMap::<String, Option<String>>::new();
+
+    for (username, comment) in credentials {
+        let normalized = comment.and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+        match comments.get(&username) {
+            None => {
+                comments.insert(username, normalized);
+            }
+            Some(None) if normalized.is_some() => {
+                comments.insert(username, normalized);
+            }
+            Some(Some(_)) | Some(None) => {}
+        }
+    }
+
+    comments
 }
 
 #[component]
@@ -54,6 +88,16 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let cleanup_now_secs = use_state(shared::utils::current_time_secs);
     let adaptive_session_ttl_secs = get_adaptive_session_ttl_secs(&config_ctx);
     let metrics_enabled = is_stream_metrics_enabled(&config_ctx);
+    let user_comments = use_memo(config_ctx.api_proxy.clone(), |api_proxy| {
+        api_proxy.as_ref().map_or_else(HashMap::new, |api_proxy| {
+            build_user_comments(api_proxy.user.iter().flat_map(|target_user| {
+                target_user
+                    .credentials
+                    .iter()
+                    .map(|credential| (credential.username.clone(), credential.comment.clone()))
+            }))
+        })
+    });
 
     use_effect_with((), move |_| {
         let interval = Interval::new(1000, update_timestamps);
@@ -272,11 +316,14 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                                 <div class="tp__stream-display__list">
                                     { for streams.iter().cloned().map(|stream| {
                                         let key = format!("{}-{}", stream.addr, stream.uid);
+                                        let user_comment = user_comments.get(stream.username.as_str()).cloned().flatten();
                                         html! {
                                             <StreamDisplayItem
                                                 key={key}
                                                 stream={stream}
+                                                user_comment={user_comment}
                                                 metrics_enabled={metrics_enabled}
+                                                stream_info={props.stream_info_config.clone()}
                                                 on_popup_click={handle_popup_onclick.clone()}
                                             />
                                         }
@@ -297,6 +344,33 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             }
            </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_user_comments;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_build_user_comments_prefers_first_non_none_comment() {
+        let comments = build_user_comments([
+            ("alice".to_string(), None),
+            ("alice".to_string(), Some("first".to_string())),
+            ("alice".to_string(), Some("second".to_string())),
+            ("bob".to_string(), Some("kept".to_string())),
+        ]);
+
+        assert_eq!(comments.get("alice"), Some(&Some("first".to_string())));
+        assert_eq!(comments.get("bob"), Some(&Some("kept".to_string())));
+    }
+
+    #[test]
+    fn test_build_user_comments_keeps_existing_some_comment() {
+        let comments =
+            build_user_comments([("alice".to_string(), Some("first".to_string())), ("alice".to_string(), None)]);
+
+        assert_eq!(comments, HashMap::from([("alice".to_string(), Some("first".to_string()))]));
     }
 }
 

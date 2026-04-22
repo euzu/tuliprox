@@ -119,7 +119,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 user.max_connections = DEFAULT_MAX_CONNECTIONS;
                 user.proxy = ProxyType::Reverse(None);
                 user.status = Some(ProxyUserStatus::Active);
-                user.output_clusters = ClusterFlags::all();
+                user.output_clusters = None;
                 user.ui_enabled = true;
                 let now = Utc::now();
                 user.created_at = Some(now.timestamp());
@@ -212,8 +212,8 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         </div>
                         <ClusterFlagsInput
                             name="output_clusters"
-                            value={Some(form_state.data().output_clusters)}
-                            mode={ClusterFlagsInputMode::NoneIsNone}
+                            value={form_state.data().output_clusters}
+                            mode={ClusterFlagsInputMode::NoneIsAll}
                             short_labels={true}
                             on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
                                 instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags));

@@ -43,10 +43,8 @@ pub struct DownloadsService {
 impl DownloadsService {
     pub fn new() -> Self {
         let base_href = get_base_href();
-        Self {
-            downloads_api_path: concat_path_leading_slash(&base_href, "api/v1/file/download"),
-            downloads_info_api_path: concat_path_leading_slash(&base_href, "api/v1/file/download/info"),
-        }
+        let api = |endpoint: &str| concat_path_leading_slash(&base_href, &format!("api/v1/file/{endpoint}"));
+        Self { downloads_api_path: api("download"), downloads_info_api_path: api("download/info") }
     }
 
     pub async fn queue_download(

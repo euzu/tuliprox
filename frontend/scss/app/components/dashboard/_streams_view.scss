@@ -191,6 +191,10 @@
     color: var(--stream-tech-chip-video-codec-color);
   }
 
+  &__user-comment {
+    color: var(--modest-text-color);
+  }
+
   &__channel_type {
     font-weight: bold;
     color: var(--stream-tech-chip-audio-codec-color);
@@ -281,9 +285,28 @@
     line-height: 1.3;
   }
 
-
   &__duration {
     letter-spacing: 0.12em;
+  }
+
+  &__epg-now {
+    color: var(--theme-brand-positive-strong);
+  }
+
+  &__epg-time {
+    font-size: 0.9rem;
+  }
+
+  &__epg-title {
+    font-weight: 700;
+  }
+
+  &__epg-separator {
+    font-size: 1.2rem;
+  }
+
+  &__epg-next {
+    color: var(--modest-text-color);
   }
 
   &__row {

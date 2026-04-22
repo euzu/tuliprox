@@ -394,6 +394,7 @@ mod tests {
                     audio_codec: "AAC".to_string(),
                     audio_channels: "STEREO".to_string(),
                 }),
+                epg_channel_id: None,
             },
             String::from("VLC/3.0"),
             Some(String::from("DE")),

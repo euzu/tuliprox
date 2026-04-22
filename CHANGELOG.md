@@ -138,12 +138,30 @@
 - **Web UI Landing Page**: Added `landing_page` setting to `web_ui` config to choose the initial view after login.
   Supported values: `dashboard`, `stats`, `streams`, `stream_history`, `downloads`, `users`, `config`,
   `source_editor`, `playlist_update`, `playlist_settings`, `playlist_explorer`, `playlist_epg`, `rbac`.
+- **Stream Display Visibility Controls**: Added optional `web_ui.stream_info` config to hide selected fields in the
+  active stream display.
+  - Supported flags:
+    - `hide_group`
+    - `hide_ip`
+    - `hide_country`
+    - `hide_shared`
+    - `hide_duration`
+    - `hide_bandwidth`
+    - `hide_transferred`
+    - `hide_player`
+    - `hide_user_comment`
+    - `hide_epg`
+  - If all flags are `false`, the config is treated as absent and the default view remains unchanged.
+  - Hidden `epg` also suppresses the per-stream EPG fetch/display work in the dashboard.
 - **Runtime Config Report**: Added opt-in startup dump of the complete effective runtime configuration.
   - `log.runtime_config_report_enabled` (default `false`) — enables the report.
   - `log.runtime_config_report_format` — `yaml` (default) or `json`.
   - Sensitive values (passwords, secrets, tokens, API keys) are automatically redacted.
   - Includes prepared `config.yml`, `source.yml`, loaded mappings/templates/api-proxy sections, and resolved paths.
 - **CVD-Friendly Theme**: Web UI now includes a CVD (color vision deficiency) friendly theme option.
+- **Stream View**:
+  - Displays the user comment in the stream view.
+  - Displays EPG information in the stream view.
 
 ## 🐛 Fixes
 
@@ -174,6 +192,17 @@
     served.
 - **config.yml (`web_ui`)**:
   - Added `landing_page` (optional, default `dashboard`): initial view after login.
+  - Added optional `stream_info` block to hide specific fields in the active stream display:
+    - `hide_group`
+    - `hide_ip`
+    - `hide_country`
+    - `hide_shared`
+    - `hide_duration`
+    - `hide_bandwidth`
+    - `hide_transferred`
+    - `hide_player`
+    - `hide_user_comment`
+    - `hide_epg`
 - **config.yml (`log`)**:
   - Added `runtime_config_report_enabled` (bool, default `false`): enables full runtime config dump at startup.
   - Added `runtime_config_report_format` (`yaml` | `json`, default `yaml`): output format for the runtime config report.

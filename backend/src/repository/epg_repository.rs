@@ -1,13 +1,14 @@
 use crate::model::{Config, ConfigTarget, TargetOutput};
 use crate::model::{Epg};
 use crate::repository::{m3u_get_epg_file_path_for_target, BPlusTree};
-use crate::repository::{xtream_get_epg_file_path_for_target, xtream_get_storage_path};
-use crate::utils::{debug_if_enabled};
+use crate::repository::{xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery};
+use crate::utils::{debug_if_enabled, FileLockManager};
 use shared::error::{ TuliproxError};
 use shared::model::{EpgChannel, PlaylistGroup};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::task;
 
 pub const XML_PREAMBLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE tv SYSTEM "xmltv.dtd">
@@ -120,4 +121,77 @@ pub async fn epg_write_for_target(cfg: &Config, target: &ConfigTarget, target_pa
         }
     }
     Ok(())
+}
+
+/// Queries EPG channels by their ids. Encapsulates lock acquisition, `BPlusTree` open, and batch lookup.
+/// Returns channels in the same order as `query_ids`, with None for ids not found in the DB.
+pub async fn epg_query_channels(
+    file_locks: &FileLockManager,
+    epg_path: &Path,
+    query_ids: Vec<Arc<str>>,
+) -> Result<Vec<(Arc<str>, Option<EpgChannel>)>, TuliproxError> {
+    let file_lock = file_locks.read_lock(epg_path).await;
+    let epg_path = epg_path.to_path_buf();
+
+    task::spawn_blocking(move || {
+        let _guard = file_lock;
+        let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path)
+            .map_err(|e| TuliproxError::RepositoryEpg(format!("failed to open epg db {}: {e}", epg_path.display())))?;
+
+        let mut results = Vec::with_capacity(query_ids.len());
+        for channel_id in &query_ids {
+            let channel = query.query(channel_id)
+                .map_err(|e| TuliproxError::RepositoryEpg(format!("failed to query epg db {}: {e}", epg_path.display())))?;
+            results.push((Arc::clone(channel_id), channel));
+        }
+        Ok(results)
+    })
+    .await
+    .map_err(|e| TuliproxError::RepositoryEpg(format!("epg query task panicked: {e}")))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::BPlusTree;
+    use crate::utils::FileLockManager;
+    use shared::model::EpgChannel;
+    use shared::utils::Internable;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn epg_query_channels_returns_found_channels_in_order() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let path = tmp.path().join("epg.db");
+
+        // Write two channels directly via BPlusTree
+        let mut tree = BPlusTree::<Arc<str>, EpgChannel>::new();
+        tree.insert("ch1".intern(), EpgChannel {
+            id: "ch1".intern(),
+            title: Some("Channel 1".intern()),
+            icon: None,
+            programmes: Vec::new(),
+        });
+        tree.insert("ch2".intern(), EpgChannel {
+            id: "ch2".intern(),
+            title: Some("Channel 2".intern()),
+            icon: None,
+            programmes: Vec::new(),
+        });
+        tree.store(&path).expect("store epg");
+
+        let file_locks = FileLockManager::new();
+        let query_ids = vec!["ch1".intern(), "ch2".intern(), "ch3".intern()];
+
+        let results = epg_query_channels(&file_locks, &path, query_ids).await
+            .expect("epg_query_channels succeeds");
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0.as_ref(), "ch1");
+        assert!(results[0].1.is_some());
+        assert_eq!(results[1].0.as_ref(), "ch2");
+        assert!(results[1].1.is_some());
+        assert_eq!(results[2].0.as_ref(), "ch3");
+        assert!(results[2].1.is_none());
+    }
 }

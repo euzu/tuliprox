@@ -3,7 +3,7 @@ use crate::{
         CommonPlaylistItem, M3uPlaylistItem, PlaylistItem, PlaylistItemType, StreamProperties, XtreamCluster,
         XtreamPlaylistItem,
     },
-    utils::{arc_str_serde, Internable},
+    utils::{arc_str_option_serde, arc_str_serde, Internable},
 };
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use std::sync::Arc;
@@ -35,6 +35,9 @@ pub struct UiPlaylistItem {
     pub rating: f64,
     #[serde(rename = "i", with = "arc_str_serde")]
     pub input_name: Arc<str>,
+    // EPG channel identifier for per-stream programme lookup. None when no EPG is configured.
+    #[serde(rename = "e", default, skip_serializing_if = "Option::is_none", with = "arc_str_option_serde")]
+    pub epg_channel_id: Option<Arc<str>>,
 }
 
 /// Helper to pick the best logo: prefer `logo` if non-empty, else `logo_small`
@@ -95,6 +98,7 @@ impl From<&CommonPlaylistItem> for UiPlaylistItem {
             category_id: item.category_id.unwrap_or(0),
             rating: get_rating(item.additional_properties.as_ref()),
             input_name: Arc::clone(&item.input_name),
+            epg_channel_id: item.epg_channel_id.clone(),
         }
     }
 }
@@ -114,6 +118,7 @@ impl From<XtreamPlaylistItem> for UiPlaylistItem {
             category_id: item.category_id,
             rating: get_rating(item.additional_properties.as_ref()),
             input_name: Arc::clone(&item.input_name),
+            epg_channel_id: item.epg_channel_id,
         }
     }
 }
@@ -133,6 +138,7 @@ impl From<M3uPlaylistItem> for UiPlaylistItem {
             category_id: 0,
             rating: 0.0,
             input_name: Arc::clone(&item.input_name),
+            epg_channel_id: item.epg_channel_id,
         }
     }
 }
@@ -153,6 +159,7 @@ impl From<&PlaylistItem> for UiPlaylistItem {
             category_id: header.category_id,
             rating: get_rating(header.additional_properties.as_ref()),
             input_name: Arc::clone(&header.input_name),
+            epg_channel_id: header.epg_channel_id.clone(),
         }
     }
 }

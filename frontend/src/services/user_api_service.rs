@@ -9,6 +9,10 @@ use shared::{
 };
 use std::rc::Rc;
 
+fn user_playlist_api_path(base_href: &str, endpoint: &str) -> String {
+    concat_path_leading_slash(base_href, &format!("api/v1/user/playlist/{endpoint}"))
+}
+
 #[derive(Debug, Default)]
 pub struct UserApiService {
     user_playlist_categories_path: String,
@@ -19,8 +23,8 @@ impl UserApiService {
     pub fn new() -> Self {
         let base_href = get_base_href();
         Self {
-            user_playlist_categories_path: concat_path_leading_slash(&base_href, "api/v1/user/playlist/categories"),
-            user_playlist_bouquet_path: concat_path_leading_slash(&base_href, "api/v1/user/playlist/bouquet"),
+            user_playlist_categories_path: user_playlist_api_path(&base_href, "categories"),
+            user_playlist_bouquet_path: user_playlist_api_path(&base_href, "bouquet"),
         }
     }
 
@@ -41,5 +45,16 @@ impl UserApiService {
             .await
             .inspect_err(|err| error!("{err}"))
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::user_playlist_api_path;
+
+    #[test]
+    fn user_playlist_api_path_builds_expected_bouquet_route() {
+        assert_eq!(user_playlist_api_path("", "bouquet"), "/api/v1/user/playlist/bouquet");
+        assert_eq!(user_playlist_api_path("/tp", "bouquet"), "/tp/api/v1/user/playlist/bouquet");
     }
 }

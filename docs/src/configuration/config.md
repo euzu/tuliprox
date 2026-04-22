@@ -129,6 +129,17 @@ web_ui:
   kick_secs: 90
   combine_views_stats_streams: false
   landing_page: dashboard
+  stream_info:
+    hide_group: false
+    hide_ip: false
+    hide_country: false
+    hide_shared: false
+    hide_duration: false
+    hide_bandwidth: false
+    hide_transferred: false
+    hide_player: false
+    hide_user_comment: false
+    hide_epg: false
   content_security_policy:
     enabled: true
     custom-attributes:
@@ -145,17 +156,46 @@ web_ui:
 
 ### 2.1 Web UI Parameters
 
-| Parameter                     | Type   | Default     | Technical Impact & Background                                                                                                                                                                                                                           |
-|:------------------------------|:-------|:------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `enabled`                     | Bool   | `true`      | Completely toggles the Web Dashboard and its REST API endpoints on or off.                                                                                                                                                                              |
-| `user_ui_enabled`             | Bool   | `true`      | Allows standard proxy users (not just admins) to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                            |
-| `path`                        | String | `""`        | Base path for the UI (e.g., `admin`). Critical for reverse proxy subfolder setups so assets load from `example.com/admin/assets/`.                                                                                                                      |
-| `player_server`               | String | `default`   | Determines which virtual server block from `api-proxy.yml` is used to construct the streaming URLs when playing a channel directly within the Web UI player.                                                                                            |
-| `kick_secs`                   | Int    | `90`        | **Background:** When you kick a user via the Dashboard, they are not only disconnected but hard-blocked at the IP/User level for X seconds. This prevents their IPTV player's auto-reconnect logic from instantly stealing the provider slot back.      |
-| `combine_views_stats_streams` | Bool   | `false`     | Combines the "Server Stats" and "Active Streams" views into a single unified window in the UI.                                                                                                                                                          |
-| `landing_page`                | String | `dashboard` | Set the initial landing page for the webui. Possible values are `dashboard`, `stats`, `streams`, `stream_history`, `downloads`, `users`, `config`, `source_editor`, `playlist_update`, `playlist_settings`, `playlist_explorer`, `playlist_epg`, `rbac` |
+| Parameter                     | Type   | Default     | Technical Impact & Background                                                                                                                                                                                                                            |
+|:------------------------------|:-------|:------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`                     | Bool   | `true`      | Completely toggles the Web Dashboard and its REST API endpoints on or off.                                                                                                                                                                               |
+| `user_ui_enabled`             | Bool   | `true`      | Allows standard proxy users (not just admins) to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                             |
+| `path`                        | String | `""`        | Base path for the UI (e.g., `admin`). Critical for reverse proxy subfolder setups so assets load from `example.com/admin/assets/`.                                                                                                                       |
+| `player_server`               | String | `default`   | Determines which virtual server block from `api-proxy.yml` is used to construct the streaming URLs when playing a channel directly within the Web UI player.                                                                                             |
+| `kick_secs`                   | Int    | `90`        | **Background:** When you kick a user via the Dashboard, they are not only disconnected but hard-blocked at the IP/User level for X seconds. This prevents their IPTV player's auto-reconnect logic from instantly stealing the provider slot back.       |
+| `combine_views_stats_streams` | Bool   | `false`     | Combines the "Server Stats" and "Active Streams" views into a single unified window in the UI.                                                                                                                                                           |
+| `landing_page`                | String | `dashboard` | Set the initial landing page for the webui. Possible values are `dashboard`, `stats`, `streams`, `stream_history`, `downloads`, `users`, `config`, `source_editor`, `playlist_update`, `playlist_settings`, `playlist_explorer`, `playlist_epg`, `rbac`  |
+| `stream_info`                 | Object | `null`      | Optional visibility controls for fields shown in the active stream display. If omitted, or if all nested `hide_*` flags are `false`, the default dashboard view is unchanged.                                                                            |
 
-### 2.2 Content Security Policy (`content_security_policy`)
+### 2.2 Stream Display Visibility (`stream_info`)
+
+Use this optional block to hide selected fields in the active stream display shown in the dashboard.
+
+```yaml
+web_ui:
+  stream_info:
+    hide_group: true
+    hide_ip: true
+    hide_epg: true
+```
+
+| Parameter             | Type | Default | Technical Impact & Background                                                                                  |
+|:----------------------|:-----|:--------|:---------------------------------------------------------------------------------------------------------------|
+| `hide_group`          | Bool | `false` | Hides the stream group/category label.                                                                         |
+| `hide_ip`             | Bool | `false` | Hides the client IP shown for an active stream.                                                                |
+| `hide_country`        | Bool | `false` | Hides the detected client country flag/code.                                                                   |
+| `hide_shared`         | Bool | `false` | Hides the shared-stream indicator.                                                                             |
+| `hide_duration`       | Bool | `false` | Hides the running playback duration.                                                                           |
+| `hide_bandwidth`      | Bool | `false` | Hides the live bandwidth badge when metrics are available.                                                     |
+| `hide_transferred`    | Bool | `false` | Hides the transferred-bytes badge when metrics are available.                                                  |
+| `hide_player`         | Bool | `false` | Hides the player / user-agent field.                                                                           |
+| `hide_user_comment`   | Bool | `false` | Hides the user comment next to the active stream title.                                                        |
+| `hide_epg`            | Bool | `false` | Hides per-stream EPG information and skips the associated dashboard EPG fetch/update work for that display.    |
+
+* If every `hide_*` flag is `false`, Tuliprox treats the whole `stream_info` block as empty/default.
+* This setting is global for the Web UI. It is not currently per-user.
+
+### 2.3 Content Security Policy (`content_security_policy`)
 
 This block enhances security by restricting which resources the browser is allowed to load.
 
@@ -166,7 +206,7 @@ This block enhances security by restricting which resources the browser is allow
 * **Customization:** Use `custom-attributes` to add specific rules (e.g., allowing external channel logos via
   `img-src`).
 
-### 2.3 Authentication & RBAC (`auth`)
+### 2.4 Authentication & RBAC (`auth`)
 
 Tuliprox features a robust Role-Based Access Control (RBAC) system.
 

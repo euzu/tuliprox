@@ -1484,6 +1484,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         }
     }
 
@@ -2161,7 +2162,7 @@ mod tests {
     /// - `grace_kind = Some(Soft)` (passed directly from `create_active_client_stream`)
     /// - `grace_resolution_context` pointing to [`GraceHoldStream`] (remaining slice is empty)
     /// - user-grace failure (deadline expires, user still at connection limit)
-    /// - remaining strategies exhausted → `expire_pending_provider` is called
+    /// - remaining strategies exhausted -> `expire_pending_provider` is called
     #[tokio::test(start_paused = true)]
     #[allow(clippy::too_many_lines)]
     async fn test_user_grace_failure_preserves_soft_kind_on_exhausted() {
@@ -2267,7 +2268,7 @@ mod tests {
         //   tok-second -> GracePeriod, PendingProvider (NOT counted, grace session)
         //
         // At grace deadline: user_connections = 2 (tok-first + tok-preload), max = 1.
-        // 2 > 1 → user_ok = false → user-grace failure path entered.
+        // 2 > 1 -> user_ok = false -> user-grace failure path entered.
         let preload_addr: std::net::SocketAddr = "127.0.0.1:55203".parse().unwrap_or_else(|_| unreachable!());
         let preload_fingerprint = create_test_fingerprint(preload_addr);
 

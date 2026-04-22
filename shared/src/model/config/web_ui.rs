@@ -1,4 +1,5 @@
 use crate::{
+    apply_flags, create_bitset,
     error::TuliproxError,
     model::{view_type::ViewType, WebAuthConfigDto},
     utils::{
@@ -28,6 +29,78 @@ const RESERVED_PATHS: &[&str] = &[
 ];
 
 fn default_web_ui_path() -> Option<String> { Some("/".to_string()) }
+
+create_bitset!(
+    u16,
+    StreamInfoFields,
+    HideGroup,
+    HideIp,
+    HideCountry,
+    HideShared,
+    HideDuration,
+    HideBandwidth,
+    HideTransferred,
+    HidePlayer,
+    HideUserComment,
+    HideEpg
+);
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+pub struct StreamInfoConfigDto {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_group: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_ip: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_country: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_shared: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_duration: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_bandwidth: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_transferred: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_player: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_user_comment: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_epg: bool,
+}
+
+impl StreamInfoConfigDto {
+    pub fn is_empty(&self) -> bool {
+        !self.hide_group
+            && !self.hide_ip
+            && !self.hide_country
+            && !self.hide_shared
+            && !self.hide_duration
+            && !self.hide_bandwidth
+            && !self.hide_transferred
+            && !self.hide_player
+            && !self.hide_user_comment
+            && !self.hide_epg
+    }
+
+    pub fn get_flags(&self) -> StreamInfoFieldsSet {
+        let mut flags = StreamInfoFieldsSet::new();
+        apply_flags!(
+            self, flags, StreamInfoFields;
+            (hide_group, HideGroup),
+            (hide_ip, HideIp),
+            (hide_country, HideCountry),
+            (hide_shared, HideShared),
+            (hide_duration, HideDuration),
+            (hide_bandwidth, HideBandwidth),
+            (hide_transferred, HideTransferred),
+            (hide_player, HidePlayer),
+            (hide_user_comment, HideUserComment),
+            (hide_epg, HideEpg)
+        );
+        flags
+    }
+}
 
 fn is_blank_or_default_web_ui_path(path: &Option<String>) -> bool {
     path.as_ref().is_none_or(|value| {
@@ -96,6 +169,8 @@ pub struct WebUiConfigDto {
     pub combine_views_stats_streams: bool,
     #[serde(default, skip_serializing_if = "ViewType::is_default")]
     pub landing_page: ViewType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_info: Option<StreamInfoConfigDto>,
 }
 
 impl Default for WebUiConfigDto {
@@ -110,6 +185,7 @@ impl Default for WebUiConfigDto {
             kick_secs: default_kick_secs(),
             combine_views_stats_streams: false,
             landing_page: ViewType::default(),
+            stream_info: None,
         }
     }
 }
@@ -127,6 +203,7 @@ impl WebUiConfigDto {
             && (self.content_security_policy.is_none()
                 || self.content_security_policy.as_ref().is_some_and(|c| c.is_empty()))
             && (self.auth.is_none() || self.auth.as_ref().is_some_and(|c| c.is_empty()))
+            && (self.stream_info.is_none() || self.stream_info.as_ref().is_some_and(|s| s.is_empty()))
     }
 
     pub fn clean(&mut self) {
@@ -135,6 +212,9 @@ impl WebUiConfigDto {
         }
         if self.auth.as_ref().is_some_and(|c| c.is_empty()) {
             self.auth = None;
+        }
+        if self.stream_info.as_ref().is_some_and(|s| s.is_empty()) {
+            self.stream_info = None;
         }
 
         if is_blank_or_default_web_ui_path(&self.path) {
@@ -174,5 +254,52 @@ impl WebUiConfigDto {
             csp.validate()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_info_config_dto_default_has_all_flags_false() {
+        let dto = StreamInfoConfigDto::default();
+        assert!(!dto.hide_group);
+        assert!(!dto.hide_ip);
+        assert!(!dto.hide_country);
+        assert!(!dto.hide_shared);
+        assert!(!dto.hide_duration);
+        assert!(!dto.hide_bandwidth);
+        assert!(!dto.hide_transferred);
+        assert!(!dto.hide_player);
+        assert!(!dto.hide_user_comment);
+        assert!(!dto.hide_epg);
+    }
+
+    #[test]
+    fn stream_info_config_dto_is_empty_when_all_flags_false() {
+        let dto = StreamInfoConfigDto::default();
+        assert!(dto.is_empty());
+    }
+
+    #[test]
+    fn stream_info_config_dto_is_not_empty_when_any_flag_true() {
+        let dto = StreamInfoConfigDto { hide_ip: true, ..StreamInfoConfigDto::default() };
+        assert!(!dto.is_empty());
+    }
+
+    #[test]
+    fn web_ui_config_dto_clean_normalizes_all_false_stream_info_to_none() {
+        let dto = WebUiConfigDto { stream_info: Some(StreamInfoConfigDto::default()), ..WebUiConfigDto::default() };
+        let mut dto = dto;
+        dto.clean();
+        assert!(dto.stream_info.is_none());
+    }
+
+    #[test]
+    fn web_ui_config_dto_is_empty_treats_none_stream_info_as_absent() {
+        let dto = WebUiConfigDto::default();
+        assert!(dto.stream_info.is_none());
+        assert!(dto.is_empty());
     }
 }

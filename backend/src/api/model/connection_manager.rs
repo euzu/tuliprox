@@ -1213,6 +1213,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         };
         StreamInfo::new(0, 0, "test", &addr, "127.0.0.1", provider.intern(), channel, String::new(), None, None)
     }

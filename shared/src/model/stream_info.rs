@@ -1,6 +1,8 @@
 use crate::{
     model::{M3uPlaylistItem, PlaylistEntry, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem},
-    utils::{arc_str_serde, current_time_secs, extract_extension_from_url, is_blank_optional_string},
+    utils::{
+        arc_str_option_serde, arc_str_serde, current_time_secs, extract_extension_from_url, is_blank_optional_string,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,6 +57,10 @@ pub struct StreamChannel {
     pub shared_stream_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub technical: Option<StreamTechnicalInfo>,
+    // EPG channel identifier for per-stream programme lookup.
+    // None when no EPG is configured for the underlying input/target/item.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "arc_str_option_serde")]
+    pub epg_channel_id: Option<Arc<str>>,
 }
 
 pub fn create_stream_channel_with_type(
@@ -85,6 +91,7 @@ impl XtreamPlaylistItem {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
+            epg_channel_id: self.epg_channel_id.clone(),
         }
     }
 }
@@ -106,6 +113,7 @@ impl M3uPlaylistItem {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
+            epg_channel_id: self.epg_channel_id.clone(),
         }
     }
 }

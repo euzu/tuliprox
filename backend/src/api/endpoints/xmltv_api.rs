@@ -1,15 +1,16 @@
 use crate::{
     api::{
         api_utils::{
-            empty_json_response_as_array, get_user_target, get_user_target_by_credentials, internal_server_error,
-            resource_response, stream_json_or_bin_response_stream, try_option_forbidden, try_unwrap_body,
+            create_api_proxy_user, empty_json_response_as_array, get_user_target, get_user_target_by_credentials,
+            internal_server_error, resource_response, stream_json_or_bin_response_stream,
+            try_option_forbidden, try_unwrap_body,
         },
         model::{AppState, UserApiRequestQueryOrBody, UserApiRequest},
     },
     model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
         get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const, xtream_get_epg_file_path_for_target,
-        xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
+        xtream_get_storage_path, BPlusTreeQuery, epg_query_channels, LockedReceiverStream, XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -23,10 +24,14 @@ use log::{debug, error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
-    model::{EpgChannel, EpgProgramme, ShortEpgDto, ShortEpgResultDto},
+    model::{
+        EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry, StreamEpgItemRequest,
+        StreamEpgRequest, StreamEpgResponse,
+    },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -366,29 +371,44 @@ fn get_applied_epg_timeshift(
     programme: &EpgProgramme,
     epg_processing_options: &EpgProcessingOptions,
 ) -> (String, String, i64, i64) {
+    let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
+    let (start_str, stop_str) = format_epg_timeshift_strings(programme, epg_processing_options, start_ts, stop_ts);
+    (start_str, stop_str, start_ts, stop_ts)
+}
+
+fn get_applied_epg_timestamps(
+    programme: &EpgProgramme,
+    epg_processing_options: &EpgProcessingOptions,
+) -> (i64, i64) {
     match &epg_processing_options.time_shift {
-        EpgTimeShift::None => {
-            (format_xmltv_time(programme.start), format_xmltv_time(programme.stop), programme.start, programme.stop)
-        }
+        EpgTimeShift::None | EpgTimeShift::TimeZone(_) => (programme.start, programme.stop),
         EpgTimeShift::Fixed(m) => {
             let off = i64::from(*m) * 60;
-            let s = programme.start + off;
-            let e = programme.stop + off;
-            (format_xmltv_time(s), format_xmltv_time(e), s, e)
+            (programme.start + off, programme.stop + off)
         }
+    }
+}
+
+fn format_epg_timeshift_strings(
+    programme: &EpgProgramme,
+    epg_processing_options: &EpgProcessingOptions,
+    start_ts: i64,
+    stop_ts: i64,
+) -> (String, String) {
+    match &epg_processing_options.time_shift {
         EpgTimeShift::TimeZone(tz) => {
-            let s_dt = chrono::Utc.timestamp_opt(programme.start, 0).unwrap().with_timezone(tz);
-            let e_dt = chrono::Utc.timestamp_opt(programme.stop, 0).unwrap().with_timezone(tz);
-            // We use the original timestamps (programme.start/stop) here because TimeZone adjustment
-            // is only for the visual string representation. The absolute event time (UTC) remains unchanged.
-            // Unlike 'Fixed' offset which artificially shifts the event time.
-            (
-                s_dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                e_dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                programme.start,
-                programme.stop,
-            )
+            match (
+                chrono::Utc.timestamp_opt(programme.start, 0).single(),
+                chrono::Utc.timestamp_opt(programme.stop, 0).single(),
+            ) {
+                (Some(s_dt), Some(e_dt)) => (
+                    s_dt.with_timezone(tz).format("%Y-%m-%d %H:%M:%S").to_string(),
+                    e_dt.with_timezone(tz).format("%Y-%m-%d %H:%M:%S").to_string(),
+                ),
+                _ => (format_xmltv_time(start_ts), format_xmltv_time(stop_ts)),
+            }
         }
+        EpgTimeShift::None | EpgTimeShift::Fixed(_) => (format_xmltv_time(start_ts), format_xmltv_time(stop_ts)),
     }
 }
 
@@ -462,6 +482,176 @@ pub async fn serve_short_epg(
             (axum::http::StatusCode::OK, [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())], json)
                 .into_response()
         }
+        Err(_) => internal_server_error!(),
+    }
+}
+
+/// Serves per-stream EPG data for the UI "now playing" / "up next" display.
+/// Queries epg.db by `epg_channel_id`, filters to 8h window, applies user timeshift.
+/// Returns empty entries for all error/missing cases (no errors surfaced to client).
+async fn serve_stream_epg(
+    app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
+    target: &Arc<ConfigTarget>,
+    epg_path: &Path,
+    items: Vec<StreamEpgItemRequest>,
+) -> StreamEpgResponse {
+    let epg_processing_options = get_epg_processing_options(app_state, user, target);
+    let now = chrono::Utc::now().timestamp();
+    let window_end = now + 8 * 3600;
+
+    // Deduplicate by first occurrence, preserving order
+    let unique_ids: Vec<&str> = {
+        let mut seen = HashSet::new();
+        items
+            .iter()
+            .filter_map(|item| {
+                let epg_channel_id = item.epg_channel_id.as_str();
+                seen.insert(epg_channel_id).then_some(epg_channel_id)
+            })
+            .collect()
+    };
+    let query_ids = unique_ids
+        .iter()
+        .map(|id| (*id).intern())
+        .collect::<Vec<Arc<str>>>();
+
+    let channels = match epg_query_channels(
+        &app_state.app_config.file_locks,
+        epg_path,
+        query_ids,
+    )
+    .await
+    {
+        Ok(results) => results,
+        Err(err) => {
+            error!("{err}");
+            unique_ids.into_iter().map(|id| (id.intern(), None)).collect()
+        }
+    };
+
+    let mut entries = Vec::with_capacity(channels.len());
+
+    for (epg_channel_id, channel) in channels {
+        let programmes = match channel {
+            Some(ch) => stream_epg_programmes_for_channel(&ch.programmes, &epg_processing_options, now, window_end),
+            None => Vec::new(),
+        };
+
+        entries.push(StreamEpgEntry {
+            epg_channel_id: epg_channel_id.to_string(),
+            target_id: Some(target.id),
+            programmes,
+        });
+    }
+
+    StreamEpgResponse { entries }
+}
+
+fn stream_epg_programmes_for_channel(
+    programmes: &[EpgProgramme],
+    epg_processing_options: &EpgProcessingOptions,
+    now: i64,
+    window_end: i64,
+) -> Vec<EpgProgrammeDto> {
+    programmes
+        .iter()
+        .filter_map(|programme| {
+            let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
+            (stop_ts > now && start_ts <= window_end).then(|| {
+                let (start_str, stop_str) =
+                    format_epg_timeshift_strings(programme, epg_processing_options, start_ts, stop_ts);
+                EpgProgrammeDto {
+                    start: start_str,
+                    stop: stop_str,
+                    start_timestamp: start_ts,
+                    stop_timestamp: stop_ts,
+                    title: programme.title.as_ref().map_or_else(String::new, ToString::to_string),
+                }
+            })
+        })
+        .collect()
+}
+
+fn group_stream_epg_items(
+    items: Vec<StreamEpgItemRequest>,
+) -> Result<Vec<(u16, Vec<StreamEpgItemRequest>)>, &'static str> {
+    if items.is_empty() {
+        return Err("items must not be empty");
+    }
+
+    let mut groups = Vec::<(u16, Vec<StreamEpgItemRequest>)>::new();
+    for item in items {
+        let Some(target_id) = item.target_id else {
+            return Err("all items must include target_id");
+        };
+
+        if let Some((_, group_items)) = groups.iter_mut().find(|(group_target_id, _)| *group_target_id == target_id) {
+            group_items.push(item);
+        } else {
+            groups.push((target_id, vec![item]));
+        }
+    }
+
+    Ok(groups)
+}
+
+fn empty_stream_epg_entries(target_id: u16, items: &[StreamEpgItemRequest]) -> Vec<StreamEpgEntry> {
+    let mut seen = HashSet::new();
+    items
+        .iter()
+        .filter_map(|item| {
+            let epg_channel_id = item.epg_channel_id.as_str();
+            seen.insert(epg_channel_id).then_some(epg_channel_id)
+        })
+        .map(|epg_channel_id| StreamEpgEntry {
+            epg_channel_id: epg_channel_id.to_string(),
+            target_id: Some(target_id),
+            programmes: Vec::new(),
+        })
+        .collect()
+}
+
+fn stream_epg_bad_request(message: &str) -> axum::response::Response {
+    (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// Handles stream EPG API requests for per-stream programme display.
+pub(crate) async fn stream_epg_api(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(stream_epg_req): axum::extract::Json<StreamEpgRequest>,
+) -> impl IntoResponse + Send {
+    let grouped_items = match group_stream_epg_items(stream_epg_req.items) {
+        Ok(groups) => groups,
+        Err(message) => return stream_epg_bad_request(message),
+    };
+
+    let config = app_state.app_config.config.load_full();
+    let user = create_api_proxy_user(&app_state);
+    let mut entries = Vec::new();
+
+    for (target_id, items) in grouped_items {
+        let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
+            return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
+        };
+
+        let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {
+            entries.extend(empty_stream_epg_entries(target_id, &items));
+            continue;
+        };
+
+        let result = serve_stream_epg(&app_state, &user, &target, &epg_path, items).await;
+        entries.extend(result.entries);
+    }
+
+    let result = StreamEpgResponse { entries };
+
+    match serde_json::to_string(&result) {
+        Ok(json) => (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
+            json,
+        ).into_response(),
         Err(_) => internal_server_error!(),
     }
 }
@@ -563,11 +753,56 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_epg_channel_resource_url;
+    use super::{group_stream_epg_items, rewrite_epg_channel_resource_url, stream_epg_programmes_for_channel};
+    use crate::utils::{EpgProcessingOptions, EpgTimeShift};
     use shared::{
-        model::EpgChannel,
+        model::{EpgChannel, EpgProgramme, StreamEpgItemRequest},
         utils::{concat_path, obfuscate_text, Internable},
     };
+
+    #[test]
+    fn test_group_stream_epg_items_rejects_empty_requests() {
+        let err = group_stream_epg_items(Vec::new()).unwrap_err();
+        assert_eq!(err, "items must not be empty");
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_rejects_missing_target() {
+        let err = group_stream_epg_items(vec![StreamEpgItemRequest {
+            epg_channel_id: "epg-1".to_string(),
+            target_id: None,
+        }])
+        .unwrap_err();
+        assert_eq!(err, "all items must include target_id");
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_groups_by_target_in_input_order() {
+        let groups = group_stream_epg_items(vec![
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-1".to_string(),
+                target_id: Some(2),
+            },
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-2".to_string(),
+                target_id: Some(5),
+            },
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-3".to_string(),
+                target_id: Some(2),
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, 2);
+        assert_eq!(
+            groups[0].1.iter().map(|item| item.epg_channel_id.as_str()).collect::<Vec<_>>(),
+            vec!["epg-1", "epg-3"]
+        );
+        assert_eq!(groups[1].0, 5);
+        assert_eq!(groups[1].1.iter().map(|item| item.epg_channel_id.as_str()).collect::<Vec<_>>(), vec!["epg-2"]);
+    }
 
     fn sample_channel(icon: Option<&str>) -> EpgChannel {
         EpgChannel {
@@ -602,4 +837,36 @@ mod tests {
 
         assert_eq!(rewritten.icon.as_deref(), Some("/api/v1/library/thumbnail/test"));
     }
+
+    #[test]
+    fn stream_epg_programmes_for_channel_filters_using_shifted_fixed_times() {
+        let now = 10_000;
+        let window_end = now + 8 * 3600;
+        let epg_processing_options = EpgProcessingOptions {
+            rewrite_urls: false,
+            time_shift: EpgTimeShift::Fixed(120),
+            encrypt_secret: [0; 16],
+        };
+        let programmes = vec![
+            EpgProgramme::new_all(now - 7_300, now - 100, "channel-1".intern(), Some("Shifted Into Window".intern()), None),
+            EpgProgramme::new_all(now + 60, now + 600, "channel-1".intern(), Some("Already In Window".intern()), None),
+            EpgProgramme::new_all(
+                window_end + 60,
+                window_end + 600,
+                "channel-1".intern(),
+                Some("Still Outside Window".intern()),
+                None,
+            ),
+        ];
+
+        let filtered = stream_epg_programmes_for_channel(&programmes, &epg_processing_options, now, window_end);
+
+        assert_eq!(
+            filtered.iter().map(|programme| programme.title.as_str()).collect::<Vec<_>>(),
+            vec!["Shifted Into Window", "Already In Window"]
+        );
+        assert_eq!(filtered[0].start_timestamp, now - 100);
+        assert_eq!(filtered[0].stop_timestamp, now + 7_100);
+    }
+
 }

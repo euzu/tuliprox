@@ -56,12 +56,10 @@ pub fn m3u_get_file_path_for_db(target_path: &Path) -> PathBuf {
 }
 
 pub fn m3u_get_epg_file_path_for_target(target_path: &Path) -> PathBuf {
-    let path = target_path.join(storage_const::PATH_M3U).join(concat_string!(
-        storage_const::FILE_M3U,
-        ".",
+    target_path.join(storage_const::PATH_M3U).join(concat_string!(
+        "epg.",
         storage_const::FILE_SUFFIX_DB
-    ));
-    utils::add_prefix_to_filename(&path, "epg_", Some(storage_const::FILE_SUFFIX_DB))
+    ))
 }
 
 pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> {

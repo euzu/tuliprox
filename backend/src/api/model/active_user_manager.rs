@@ -106,7 +106,7 @@ pub enum PlaybackLifecycle {
     PendingProvider { data: PendingProviderState },
     Active,
     /// Provisional counted state for `GraceMode::Instant`. Counts against limits immediately
-    /// while the grace window resolves (success → Active, failure → Expired).
+    /// while the grace window resolves (success -> Active, failure -> Expired).
     GraceActive,
     Preserved,
     Expired,
@@ -2093,8 +2093,8 @@ impl ActiveUserManager {
     ///
     /// This corresponds to `Prepared -> GraceActive` in the playback state machine.
     /// The session remains in `GraceActive` until either:
-    /// - `activate_grace_active` confirms it (grace window succeeded → `GraceActive -> Active`)
-    /// - `expire_grace_active` expires it (grace window failed → `GraceActive -> Expired`)
+    /// - `activate_grace_active` confirms it (grace window succeeded -> `GraceActive -> Active`)
+    /// - `expire_grace_active` expires it (grace window failed -> `GraceActive -> Expired`)
     pub async fn mark_grace_active(&self, username: &str, token: &str) {
         let mut user_connections = self.connections.write().await;
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
@@ -2500,13 +2500,55 @@ impl ActiveUserManager {
 
     pub async fn socket_expiry_deadline(&self, addr: &SocketAddr) -> Option<u64> {
         let ttl_secs = self.active_socket_ttl_secs();
-        self.connections.read().await.key_by_addr.get(addr).and_then(|registration| {
+        {
+            let connections = self.connections.read().await;
+            let registration = connections.key_by_addr.get(addr)?;
             if registration.username.is_empty() {
-                None
-            } else {
-                Some(registration.ts.saturating_add(ttl_secs))
+                return None;
             }
-        })
+
+            let has_non_stable_stream = connections
+                .by_key
+                .get(&registration.username)
+                .is_some_and(|connection_data| {
+                    connection_data
+                        .streams
+                        .iter()
+                        .any(|stream| stream.addr == *addr && !is_stable_session_stream(stream))
+                });
+
+            if !has_non_stable_stream {
+                return Some(registration.ts.saturating_add(ttl_secs));
+            }
+        }
+
+        let mut connections = self.connections.write().await;
+        let (username_is_empty, has_non_stable_stream) = {
+            let registration = connections.key_by_addr.get(addr)?;
+            let username = registration.username.as_str();
+            let username_is_empty = username.is_empty();
+            let has_non_stable_stream = !username_is_empty
+                && connections
+                    .by_key
+                    .get(username)
+                    .is_some_and(|connection_data| {
+                        connection_data
+                            .streams
+                            .iter()
+                            .any(|stream| stream.addr == *addr && !is_stable_session_stream(stream))
+                    });
+            (username_is_empty, has_non_stable_stream)
+        };
+        if username_is_empty {
+            return None;
+        }
+
+        let registration = connections.key_by_addr.get_mut(addr)?;
+        if has_non_stable_stream {
+            registration.ts = current_time_secs();
+        }
+
+        Some(registration.ts.saturating_add(ttl_secs))
     }
 
     pub async fn touch_http_activity(&self, username: &str, token: &str, addr: &SocketAddr) {
@@ -3155,6 +3197,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         }
     }
 
@@ -3173,6 +3216,7 @@ mod tests {
             shared_joined_existing: None,
             shared_stream_id: None,
             technical: None,
+            epg_channel_id: None,
         }
     }
 
@@ -5654,9 +5698,41 @@ mod tests {
         let fresh_addr: SocketAddr = "127.0.0.1:55022".parse().unwrap();
         let stale_fp = Fingerprint::new("fp-stale".to_string(), "127.0.0.1".to_string(), stale_addr);
         let fresh_fp = Fingerprint::new("fp-fresh".to_string(), "127.0.0.1".to_string(), fresh_addr);
+        let mut stale_user = ProxyUserCredentials::default();
+        stale_user.username = "user1".to_string();
+        stale_user.max_connections = 1;
+        let mut fresh_user = ProxyUserCredentials::default();
+        fresh_user.username = "user2".to_string();
+        fresh_user.max_connections = 1;
 
         manager.add_connection(&stale_addr).await;
         manager.add_connection(&fresh_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &stale_user,
+                session_token: "tok-stale-deadline",
+                virtual_id: 9201,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &stale_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &fresh_user,
+                session_token: "tok-fresh-deadline",
+                virtual_id: 9202,
+                provider: "provider-b",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &fresh_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
         manager
             .update_connection(ActiveUserConnectionParams {
                 uid: 201,
@@ -5669,9 +5745,9 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &stale_fp,
                 provider: "provider-a".intern(),
-                stream_channel: &test_channel(9201),
+                stream_channel: &test_adaptive_channel(9201),
                 user_agent: Cow::Borrowed("ua"),
-                session_token: None,
+                session_token: Some("tok-stale-deadline"),
             })
             .await
             .expect("stale stream should register");
@@ -5687,9 +5763,9 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fresh_fp,
                 provider: "provider-b".intern(),
-                stream_channel: &test_channel(9202),
+                stream_channel: &test_adaptive_channel(9202),
                 user_agent: Cow::Borrowed("ua"),
-                session_token: None,
+                session_token: Some("tok-fresh-deadline"),
             })
             .await
             .expect("fresh stream should register");
@@ -5834,6 +5910,83 @@ mod tests {
         assert_eq!(stream.ts, original_ts, "touch_http_activity must not reset the stream start timestamp");
         // addr should be updated to reflect the latest manifest request
         assert_eq!(stream.addr, addr2, "touch_http_activity should update the stream addr");
+    }
+
+    #[tokio::test]
+    async fn socket_expiry_deadline_refreshes_active_vod_streams() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55040".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-vod".to_string(), "127.0.0.1".to_string(), addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-vod-expiry".to_string();
+        user.max_connections = 1;
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-vod-expiry",
+                virtual_id: 8888,
+                provider: "provider-a",
+                stream_url: "http://localhost/movie.mkv",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        let mut channel = test_channel(8888);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = "http://localhost/movie.mkv".intern();
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 602,
+                meter_uid: 702,
+                username: "user-vod-expiry",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-vod-expiry"),
+            })
+            .await
+            .expect("vod stream should be created");
+
+        let previous_registration_ts = {
+            let mut connections = manager.connections.write().await;
+            let registration = connections.key_by_addr.get_mut(&addr).expect("registration should exist");
+            registration.ts = registration.ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
+            registration.ts
+        };
+
+        let deadline = manager
+            .socket_expiry_deadline(&addr)
+            .await
+            .expect("continuous VOD streams should stay scheduled for expiry tracking");
+
+        let refreshed_registration_ts = {
+            let connections = manager.connections.read().await;
+            connections.key_by_addr.get(&addr).expect("registration should still exist").ts
+        };
+
+        assert!(refreshed_registration_ts > previous_registration_ts);
+        assert_eq!(
+            deadline,
+            refreshed_registration_ts.saturating_add(manager.active_socket_ttl_secs()),
+            "continuous VOD streams should refresh their socket expiry deadline"
+        );
     }
 
     #[tokio::test]
@@ -6898,6 +7051,7 @@ mod tests {
                     cluster: XtreamCluster::Live, group: "g".intern(), title: "t".intern(),
                     url: "http://localhost/stream.ts".intern(),
                     shared: false, shared_joined_existing: None, shared_stream_id: None, technical: None,
+                    epg_channel_id: None,
                 },
                 "ua".to_string(), None, Some("tok-orphan"),
             );

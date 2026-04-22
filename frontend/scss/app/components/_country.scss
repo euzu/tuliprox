@@ -7,14 +7,12 @@
 
   &__name {
     min-width: 0;
-    overflow-wrap: anywhere;
-    font-weight: 700;
   }
 
   &__flag {
     display: inline-flex;
-    width: 1rem;
-    height: 0.75rem;
+    width: 1.5rem;
+    height: 1rem;
     overflow: hidden;
     border-radius: 2px;
 

@@ -4,11 +4,11 @@ use crate::{api::{
     endpoints::{
         api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
         extract_accept_header::ExtractAcceptHeader,
-        xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui},
+        xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui, stream_epg_api},
         xtream_api::xtream_get_stream_info_response,
     },
     model::AppState,
-}, auth::create_access_token, auth::permission_layer, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id, utils::{epg::get_input_raw_epg_file_path, file_exists_async}};
+}, auth::{create_access_token, permission_layer}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id, utils::{epg::get_input_raw_epg_file_path, file_exists_async}};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
@@ -546,6 +546,7 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
         .route("/playlist/resolve_url", axum::routing::post(playlist_resolve_url))
         .route("/playlist/update", axum::routing::post(playlist_update))
         .route("/playlist/epg", axum::routing::post(playlist_epg))
+        .route("/playlist/epg/stream", axum::routing::post(stream_epg_api))
         .route("/playlist/live", axum::routing::post(playlist_content_live))
         .route("/playlist/vod", axum::routing::post(playlist_content_vod))
         .route("/playlist/series", axum::routing::post(playlist_content_series))
@@ -578,6 +579,7 @@ pub fn v1_api_playlist_register_with_permissions(
 
     let epg_routes = Router::new()
         .route("/epg", axum::routing::post(playlist_epg))
+        .route("/epg/stream", axum::routing::post(stream_epg_api))
         .layer(permission_layer!(app_state, Permission::EpgRead));
 
     router.nest("/playlist",
@@ -1382,4 +1384,5 @@ mod tests {
         assert!(body_text.contains("Second Show"), "{body_text}");
         assert!(!body_text.contains("Secondary Show"), "{body_text}");
     }
+
 }

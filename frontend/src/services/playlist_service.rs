@@ -5,7 +5,8 @@ use log::error;
 use shared::{
     model::{
         EpgChannel, EpgTv, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, SeriesStreamProperties,
-        UiPlaylistCategories, UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
+        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, UiPlaylistCategories, UiPlaylistGroup,
+        UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::concat_path_leading_slash,
 };
@@ -20,6 +21,7 @@ pub struct PlaylistService {
     playlist_api_epg_path: String,
     playlist_api_series_info_path: String,
     playlist_api_episode_info_path: String,
+    stream_epg_path: String,
 }
 impl Default for PlaylistService {
     fn default() -> Self { Self::new() }
@@ -28,15 +30,18 @@ impl Default for PlaylistService {
 impl PlaylistService {
     pub fn new() -> Self {
         let base_href = get_base_href();
+        let api = |endpoint: &str| concat_path_leading_slash(&base_href, &format!("api/v1/playlist/{endpoint}"));
+
         Self {
-            target_update_api_path: concat_path_leading_slash(&base_href, "api/v1/playlist/update"),
-            playlist_api_live_path: concat_path_leading_slash(&base_href, "api/v1/playlist/live"),
-            playlist_api_vod_path: concat_path_leading_slash(&base_href, "api/v1/playlist/vod"),
-            playlist_api_series_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series"),
-            playlist_api_resolve_url_path: concat_path_leading_slash(&base_href, "api/v1/playlist/resolve_url"),
-            playlist_api_epg_path: concat_path_leading_slash(&base_href, "api/v1/playlist/epg"),
-            playlist_api_series_info_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series_info"),
-            playlist_api_episode_info_path: concat_path_leading_slash(&base_href, "api/v1/playlist/series/episode"),
+            target_update_api_path: api("update"),
+            playlist_api_live_path: api("live"),
+            playlist_api_vod_path: api("vod"),
+            playlist_api_series_path: api("series"),
+            playlist_api_resolve_url_path: api("resolve_url"),
+            playlist_api_epg_path: api("epg"),
+            playlist_api_series_info_path: api("series_info"),
+            playlist_api_episode_info_path: api("series/episode"),
+            stream_epg_path: api("epg/stream"),
         }
     }
     pub async fn update_targets(&self, targets: &[&str]) -> bool {
@@ -133,6 +138,17 @@ impl PlaylistService {
                 None
             }
         }
+    }
+
+    /// Fetches per-stream EPG data for the UI "now playing" / "up next" display.
+    /// Accepts a batch of epg_channel_ids and returns programme data for each,
+    /// filtered to an 8h window with user timeshift applied server-side.
+    pub async fn get_stream_epg(&self, items: Vec<StreamEpgItemRequest>) -> Option<StreamEpgResponse> {
+        let request = StreamEpgRequest { items };
+        request_post(&self.stream_epg_path, &request, None, Some(Encoding::Cbor)).await.unwrap_or_else(|err| {
+            error!("{err}");
+            None
+        })
     }
 
     pub async fn get_series_info(
