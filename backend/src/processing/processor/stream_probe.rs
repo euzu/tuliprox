@@ -105,7 +105,7 @@ pub async fn update_generic_stream_metadata(
         return Err(TuliproxError::Probe(format!("Skipping probe for generic stream {unique_id} due to connection limits")));
     }
 
-    let probe_url = stream_url.to_string();
+    let probe_url = input.resolve_url(stream_url)?.into_owned();
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);

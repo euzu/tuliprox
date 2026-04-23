@@ -116,6 +116,7 @@ pub async fn update_live_stream_metadata(
         &temp_stream_prop,
         use_prefix, no_ext
     );
+    let probe_url_cow = input.resolve_url(&stream_url)?;
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
@@ -134,7 +135,7 @@ pub async fn update_live_stream_metadata(
     let mut success = false;
     let mut not_found = false;
     match FfmpegExecutor::new().probe_url(
-        &stream_url,
+        probe_url_cow.as_ref(),
         user_agent.as_deref(),
         analyze_duration,
         probe_size,
