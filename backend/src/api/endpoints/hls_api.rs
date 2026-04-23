@@ -1,10 +1,11 @@
 use crate::{
     api::{
         api_utils::{
-            connection_priority_for_kind, create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
-            get_hls_session_ttl_secs,
-            admission_failure_response, get_stream_alternative_url, is_seek_request, local_stream_response, try_option_bad_request,
-            try_unwrap_body, HeaderFilter,
+            admission_failure_response, connection_priority_for_kind,
+            create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
+            get_hls_session_ttl_secs, get_stream_alternative_url, is_seek_request, local_stream_response,
+            try_option_bad_request, try_unwrap_body,
+            HeaderFilter,
         },
         model::{
             AppState, CustomVideoStreamType, ProviderAllocation, UserSession,
@@ -26,6 +27,7 @@ use shared::{
 use std::sync::Arc;
 use url::Url;
 use shared::model::ConnectFailureReason;
+use crate::auth::check_network_access_only;
 
 const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
 #EXT-X-VERSION:3
@@ -377,11 +379,13 @@ async fn hls_api_stream(
     axum::extract::Path(params): axum::extract::Path<HlsApiPathParams>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let (user, target) = try_option_bad_request!(
-        app_state.app_config.get_target_for_user(&params.username, &params.password),
-        false,
-        format!("Could not find any user for hls stream {}", params.username)
-    );
+    let Some((user, target)) = app_state.app_config.get_target_for_user(&params.username, &params.password) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    // Network access check only - permission check is done later with full stream info
+    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state) {
+        return e.into_player_response(app_state.app_config.get_auth_error_status());
+    }
     let target_name = &target.name;
     let virtual_id = params.stream_id;
     let input = try_option_bad_request!(
@@ -391,19 +395,12 @@ async fn hls_api_stream(
     );
 
     if user.permission_denied(&app_state) {
-        let denied_channel = resolve_stream_channel(
-            &app_state,
-            &target,
-            &input,
-            virtual_id,
-            &Arc::from(String::new()),
-        )
-        .await;
+        let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, "").await;
         return admission_failure_response(
             &app_state,
             &fingerprint,
             &user,
-            denied_channel,
+            stream_channel,
             input.name.clone(),
             &req_headers,
             ConnectFailureReason::UserAccountExpired,

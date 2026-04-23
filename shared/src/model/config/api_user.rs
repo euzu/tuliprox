@@ -1,6 +1,6 @@
 use crate::{
     error::TuliproxError,
-    model::{ClusterFlags, ProxyType, ProxyUserStatus, XtreamCluster},
+    model::{ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserStatus, XtreamCluster},
     utils::{
         default_as_true, default_user_priority, deserialize_timestamp, is_blank_optional_string, is_cluster_optional,
         is_default_user_priority, is_true,
@@ -49,10 +49,21 @@ pub struct ProxyUserCredentialsDto {
     pub soft_connections: u16,
     #[serde(default = "default_user_priority", skip_serializing_if = "is_default_user_priority")]
     pub soft_priority: i8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<NetworkAccessDto>,
 }
 
 impl ProxyUserCredentialsDto {
-    pub fn prepare(&mut self) { self.trim(); }
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
+        self.trim();
+        if let Some(na) = &mut self.network_access {
+            na.prepare()?;
+            if na.is_empty() {
+                self.network_access = None;
+            }
+        }
+        Ok(())
+    }
 
     fn trim(&mut self) {
         self.username = self.username.trim().to_string();
@@ -125,6 +136,7 @@ impl Default for ProxyUserCredentialsDto {
             priority: default_user_priority(),
             soft_connections: 0,
             soft_priority: default_user_priority(),
+            network_access: None,
         }
     }
 }
@@ -175,5 +187,74 @@ mod tests {
             serde_json::from_value(serialized).expect("user should deserialize");
 
         assert_eq!(deserialized.output_clusters, Some(ClusterFlags::empty()));
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_country_in_network_access() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            network_access: Some(NetworkAccessDto {
+                allowed_countries: Some(vec!["INVALID".to_string()]),
+                allowed_networks: None,
+            }),
+            ..Default::default()
+        };
+        assert!(user.prepare().is_err());
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_cidr_in_network_access() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            network_access: Some(NetworkAccessDto {
+                allowed_countries: None,
+                allowed_networks: Some(vec!["not-a-cidr".to_string()]),
+            }),
+            ..Default::default()
+        };
+        assert!(user.prepare().is_err());
+    }
+
+    #[test]
+    fn prepare_normalizes_empty_network_access_to_none() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            network_access: Some(NetworkAccessDto { allowed_countries: Some(vec![]), allowed_networks: Some(vec![]) }),
+            ..Default::default()
+        };
+        user.prepare().unwrap();
+        assert_eq!(user.network_access, None);
+    }
+
+    #[test]
+    fn prepare_normalizes_and_deduplicates_network_access() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            network_access: Some(NetworkAccessDto {
+                allowed_countries: Some(vec!["de".to_string(), "DE".to_string(), "at".to_string()]),
+                allowed_networks: Some(vec![
+                    "10.0.0.1/8".to_string(), // non-canonical, normalized to 10.0.0.0/8
+                    "10.0.0.0/8".to_string(), // duplicate after normalization
+                    "192.168.1.0/24".to_string(),
+                ]),
+            }),
+            ..Default::default()
+        };
+        user.prepare().unwrap();
+        let na = user.network_access.as_ref();
+        assert!(na.is_some());
+        if let Some(na) = na {
+            assert_eq!(na.allowed_countries, Some(vec!["DE".to_string(), "AT".to_string()]));
+            assert_eq!(na.allowed_networks.as_ref().map(|n| n.len()), Some(2));
+            assert!(na.allowed_networks.as_ref().is_some_and(|networks| networks.iter().any(|n| n == "10.0.0.0/8")));
+            assert!(na
+                .allowed_networks
+                .as_ref()
+                .is_some_and(|networks| networks.iter().any(|n| n == "192.168.1.0/24")));
+        }
     }
 }

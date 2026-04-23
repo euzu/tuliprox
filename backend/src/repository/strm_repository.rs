@@ -1,24 +1,37 @@
-use crate::model::{ApiProxyServerInfo, AppConfig, ProxyUserCredentials};
-use crate::model::{ConfigTarget, StrmTargetFlags, StrmTargetOutput};
-use crate::repository::storage::ensure_target_storage_path;
-use crate::repository::storage_const;
-use crate::utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename,
-                   IO_BUFFER_SIZE};
+use crate::{
+    model::{
+        ApiProxyServerInfo, AppConfig, ConfigInput, ConfigTarget, ProxyUserCredentials, StrmTargetFlags,
+        StrmTargetOutput,
+    },
+    repository::{storage::ensure_target_storage_path, storage_const},
+    utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename, IO_BUFFER_SIZE},
+};
 use chrono::Datelike;
 use filetime::{set_file_times, FileTime};
 use log::{error, trace};
 use serde::Serialize;
-use shared::error::TuliproxError;
-use shared::model::{ClusterFlags, MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle};
-use shared::utils::{arc_str_option_serde, arc_str_serde, clean_playlist_title, extract_extension_from_url, hash_bytes,
-                    hash_string_as_hex, is_blank_optional_arc_str, truncate_string, ExportStyleConfig, CONSTANTS};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::fs::{create_dir_all, remove_dir, remove_file, File};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use shared::model::UUIDType;
-use std::borrow::Cow;
+use shared::{
+    error::TuliproxError,
+    model::{
+        ClusterFlags, MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle,
+        UUIDType,
+    },
+    utils::{
+        arc_str_option_serde, arc_str_serde, clean_playlist_title, extract_extension_from_url, hash_bytes,
+        hash_string_as_hex, is_blank_optional_arc_str, sanitize_sensitive_info, truncate_string, ExportStyleConfig,
+        CONSTANTS, PROVIDER_SCHEME_PREFIX,
+    },
+};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet, VecDeque},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::{
+    fs::{create_dir_all, remove_dir, remove_file, File},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
+};
 
 /// Sanitizes a string to be safe for use as a file or directory name by
 /// following a strict "allow-list" approach and discarding invalid characters.
@@ -36,7 +49,8 @@ fn sanitize_for_filename(text: &str, underscore_whitespace: bool) -> String {
             // Decide which characters to keep or transform.
             if c.is_alphanumeric() {
                 Some(c)
-            } else if "+=,._-@#()[]".contains(c) { // <-- Allow list of safe punctuation, added [ and ] for quality tags.
+            } else if "+=,._-@#()[]".contains(c) {
+                // <-- Allow list of safe punctuation, added [ and ] for quality tags.
                 Some(c)
             } else if c.is_whitespace() {
                 if underscore_whitespace {
@@ -82,7 +96,7 @@ fn style_rename_year<'a>(
     });
 
     let cur_year = u32::try_from(chrono::Utc::now().year()).unwrap_or(0);
-    
+
     // Check if we need to clean the title (remove year if present) or extract year from title
     // We iterate matches to either find the year (if meta_year is None) or remove it (if meta_year is Some)
     let mut new_name = String::with_capacity(name.len());
@@ -92,12 +106,13 @@ fn style_rename_year<'a>(
     for caps in style.year.captures_iter(name) {
         if let Some(year_match) = caps.get(1) {
             if let Ok(year) = year_match.as_str().parse::<u32>() {
-                if (1900..=cur_year + 5).contains(&year) { // Allow slightly future years
+                if (1900..=cur_year + 5).contains(&year) {
+                    // Allow slightly future years
                     // Found a valid year in title
                     if extracted_year.is_none() {
                         extracted_year = Some(year);
                     }
-                    
+
                     // We remove the year from the title in two cases:
                     // A) We have a metadata year (clean up title to avoid "Movie (2000) (2000)")
                     // B) We don't have metadata year (we extract it and remove it from title to re-append consistently later)
@@ -111,21 +126,21 @@ fn style_rename_year<'a>(
             }
         }
     }
-    
+
     new_name.push_str(&name[last_index..]);
 
     // Use metadata year if available, otherwise the one extracted from title
     let final_year = meta_year.or(extracted_year);
-    
+
     // If we modified the string, trim it and return Owned
     if last_index > 0 {
         // Clean up potential double spaces or trailing punctuation left by removal
         // Remove trailing " -", ".", or "_" which might have been separators before the year
         let cleaned = new_name.trim().trim_end_matches(|c| " -_.".contains(c)).trim().to_string();
-        
+
         // Ensure we didn't make the name empty
         if cleaned.is_empty() {
-             return (Cow::Borrowed(name), final_year);
+            return (Cow::Borrowed(name), final_year);
         }
         (Cow::Owned(cleaned), final_year)
     } else {
@@ -134,7 +149,11 @@ fn style_rename_year<'a>(
 }
 
 pub fn strm_get_file_paths(file_prefix: &str, target_path: &Path) -> PathBuf {
-    target_path.join(PathBuf::from(format!("{file_prefix}_{}.{}", storage_const::FILE_STRM, storage_const::FILE_SUFFIX_DB)))
+    target_path.join(PathBuf::from(format!(
+        "{file_prefix}_{}.{}",
+        storage_const::FILE_STRM,
+        storage_const::FILE_SUFFIX_DB
+    )))
 }
 
 #[derive(Serialize)]
@@ -169,9 +188,7 @@ struct StrmItemInfo {
 }
 
 impl StrmItemInfo {
-    pub(crate) fn get_file_ts(&self) -> Option<u64> {
-        self.added
-    }
+    pub(crate) fn get_file_ts(&self) -> Option<u64> { self.added }
 }
 
 fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
@@ -183,61 +200,77 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
     let virtual_id = header.virtual_id;
     let input_name = header.input_name.clone();
     let url = header.url.clone();
-    
+
     // Extract properties based on type
     // We prioritize name/title from additional_properties if available (e.g. from TMDB)
-    let (title, series_name, release_date, series_release_date, added, tmdb_id, season, episode) = match header.item_type {
-        PlaylistItemType::Series
-        | PlaylistItemType::LocalSeries => {
-            let (prop_name, release_date, series_release_date, added, tmdb_id, season, episode) = match header.additional_properties.as_ref() {
-                None => (None, None, None, None, None, None, None),
-                Some(props) => (
-                    // If series props are available, check if we have a valid name there
-                    if let StreamProperties::Series(s) = props { 
-                        if s.name.is_empty() { None } else { Some(s.name.clone()) } 
-                    } else { None },
-                    
-                    props.get_release_date(),
-                    // Extract series-level release date from Episode properties
-                    if let StreamProperties::Episode(ep) = props { ep.series_release_date.clone() } else { None },
-                    props.get_added(),
-                    props.get_tmdb_id().filter(|&id| id != 0),
-                    props.get_season(),
-                    props.get_episode(),
-                )
-            };
-            
+    let (title, series_name, release_date, series_release_date, added, tmdb_id, season, episode) = match header
+        .item_type
+    {
+        PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
+            let (prop_name, release_date, series_release_date, added, tmdb_id, season, episode) =
+                match header.additional_properties.as_ref() {
+                    None => (None, None, None, None, None, None, None),
+                    Some(props) => (
+                        // If series props are available, check if we have a valid name there
+                        if let StreamProperties::Series(s) = props {
+                            if s.name.is_empty() {
+                                None
+                            } else {
+                                Some(s.name.clone())
+                            }
+                        } else {
+                            None
+                        },
+                        props.get_release_date(),
+                        // Extract series-level release date from Episode properties
+                        if let StreamProperties::Episode(ep) = props { ep.series_release_date.clone() } else { None },
+                        props.get_added(),
+                        props.get_tmdb_id().filter(|&id| id != 0),
+                        props.get_season(),
+                        props.get_episode(),
+                    ),
+                };
+
             // For series title, we prefer the one from metadata (prop_name), then header.name, then header.title
             let final_series_name = prop_name.unwrap_or_else(|| {
-                if header.name.is_empty() { header.title.clone() } else { header.name.clone() }
+                if header.name.is_empty() {
+                    header.title.clone()
+                } else {
+                    header.name.clone()
+                }
             });
-            
+
             // Episode title relies on header.title unless we want to look deeper into props
             let ep_title = header.title.clone();
-            
+
             (ep_title, Some(final_series_name), release_date, series_release_date, added, tmdb_id, season, episode)
         }
-        PlaylistItemType::Video
-        | PlaylistItemType::LocalVideo => {
+        PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
             let (prop_name, release_date, added, tmdb_id) = match header.additional_properties.as_ref() {
                 None => (None, None, None, None),
                 Some(props) => (
                     if let StreamProperties::Video(v) = props {
-                         if v.name.is_empty() { None } else { Some(v.name.clone()) }
-                    } else { None },
+                        if v.name.is_empty() {
+                            None
+                        } else {
+                            Some(v.name.clone())
+                        }
+                    } else {
+                        None
+                    },
                     props.get_release_date(),
                     props.get_added(),
                     props.get_tmdb_id().filter(|&id| id != 0),
-                )
+                ),
             };
-            
+
             let final_title = prop_name.unwrap_or_else(|| header.title.clone());
-            
+
             (final_title, None, release_date, None, added, tmdb_id, None, None)
         }
         _ => (header.title.clone(), None, None, None, None, None, None, None),
     };
-    
+
     StrmItemInfo {
         group,
         title,
@@ -294,9 +327,7 @@ async fn cleanup_strm_output_directory(
     processed: &HashSet<String>,
 ) -> Result<(), String> {
     if !(root_path.exists() && root_path.is_dir()) {
-        return Err(format!(
-            "Error: STRM directory does not exist: {}", root_path.display()
-        ));
+        return Err(format!("Error: STRM directory does not exist: {}", root_path.display()));
     }
 
     let to_remove: HashSet<String> = if cleanup {
@@ -304,10 +335,7 @@ async fn cleanup_strm_output_directory(
         let mut found_files = HashSet::new();
         let files = read_files_non_recursive(root_path).await.map_err(|err| err.to_string())?;
         for file_path in files {
-            if let Some(file_name) = file_path
-                .strip_prefix(root_path)
-                .ok()
-                .and_then(|p| p.to_str()) {
+            if let Some(file_name) = file_path.strip_prefix(root_path).ok().and_then(|p| p.to_str()) {
                 found_files.insert(file_name.to_string());
             }
         }
@@ -331,16 +359,20 @@ async fn cleanup_strm_output_directory(
 
 fn filter_strm_item(pli: &PlaylistItem) -> bool {
     let item_type = pli.header.item_type;
-    matches!(item_type, PlaylistItemType::Live | PlaylistItemType::Video | PlaylistItemType::LocalVideo | PlaylistItemType::Series | PlaylistItemType::LocalSeries)
+    matches!(
+        item_type,
+        PlaylistItemType::Live
+            | PlaylistItemType::Video
+            | PlaylistItemType::LocalVideo
+            | PlaylistItemType::Series
+            | PlaylistItemType::LocalSeries
+    )
 }
 
 fn get_relative_path_str(full_path: &Path, root_path: &Path) -> String {
     full_path
         .strip_prefix(root_path)
-        .map_or_else(
-            |_| full_path.to_string_lossy(),
-            |relative| relative.to_string_lossy(),
-        )
+        .map_or_else(|_| full_path.to_string_lossy(), |relative| relative.to_string_lossy())
         .to_string()
 }
 
@@ -365,22 +397,15 @@ fn prepare_filename_parts(
     separator: &str,
     id_format: &str, // e.g. "{tmdb={}}" or "[tmdbid={}]"
 ) -> FilenameParts {
-    let id_string = if tmdb_id > 0 { 
-        id_format.replace("{}", &tmdb_id.to_string()) 
-    } else { 
-        String::new() 
-    };
-    
+    let id_string = if tmdb_id > 0 { id_format.replace("{}", &tmdb_id.to_string()) } else { String::new() };
+
     // Determine source name and date based on type
     let (raw_name, raw_date) = match strm_item_info.item_type {
         PlaylistItemType::Series | PlaylistItemType::LocalSeries => (
-             strm_item_info.series_name.as_ref().unwrap_or(&strm_item_info.title),
-             strm_item_info.series_release_date.as_ref()
+            strm_item_info.series_name.as_ref().unwrap_or(&strm_item_info.title),
+            strm_item_info.series_release_date.as_ref(),
         ),
-        _ => (
-            &strm_item_info.title,
-            strm_item_info.release_date.as_ref()
-        )
+        _ => (&strm_item_info.title, strm_item_info.release_date.as_ref()),
     };
 
     // Use clean_playlist_title to remove IPTV garbage BEFORE parsing years
@@ -422,8 +447,8 @@ fn format_for_kodi(
 
             if flat {
                 if tmdb_id > 0 {
-                     if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                         dir_path.clone_from(path);
+                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
+                        dir_path.clone_from(path);
                     } else {
                         dir_path.push(&folder_name);
                         flat_dedup_paths.insert(tmdb_id, dir_path.clone());
@@ -469,7 +494,7 @@ fn format_for_plex(
     flat: bool,
     flat_dedup_paths: &mut HashMap<u32, PathBuf>,
 ) -> (PathBuf, String) {
-     // Plex ID format: {tmdb-12345}
+    // Plex ID format: {tmdb-12345}
     let parts = prepare_filename_parts(strm_item_info, tmdb_id, separator, &format!("{separator}{{tmdb-{{}}}}"));
     let mut dir_path = PathBuf::new();
 
@@ -479,7 +504,7 @@ fn format_for_plex(
             let final_filename = parts.base_name;
 
             if flat {
-               if tmdb_id > 0 {
+                if tmdb_id > 0 {
                     if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
                         dir_path.clone_from(path);
                     } else {
@@ -539,7 +564,7 @@ fn format_for_emby(
             let final_filename = format!("{}{}", parts.base_name, parts.id_string);
 
             if flat {
-               if tmdb_id > 0 {
+                if tmdb_id > 0 {
                     if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
                         dir_path.clone_from(path);
                     } else {
@@ -556,7 +581,7 @@ fn format_for_emby(
             (dir_path, final_filename)
         }
         PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
-             // For series, the ID goes in the folder name.
+            // For series, the ID goes in the folder name.
             let series_folder_name = format!("{}{}", parts.base_name, parts.id_string);
             let season_num = strm_item_info.season.unwrap_or(1);
             let episode_num = strm_item_info.episode.unwrap_or(1);
@@ -589,7 +614,7 @@ fn format_for_jellyfin(
     flat: bool,
     flat_dedup_paths: &mut HashMap<u32, PathBuf>,
 ) -> (PathBuf, String) {
-     // Jellyfin ID format: [tmdbid-12345]
+    // Jellyfin ID format: [tmdbid-12345]
     let parts = prepare_filename_parts(strm_item_info, tmdb_id, separator, &format!("{separator}[tmdbid-{{}}]"));
     let mut dir_path = PathBuf::new();
 
@@ -600,7 +625,7 @@ fn format_for_jellyfin(
             let final_filename = folder_name.clone();
 
             if flat {
-               if tmdb_id > 0 {
+                if tmdb_id > 0 {
                     if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
                         dir_path.clone_from(path);
                     } else {
@@ -650,7 +675,6 @@ fn style_based_rename(
 ) -> (PathBuf, String) {
     let separator = if underscore_whitespace { "_" } else { " " };
 
-
     let tmdb_id = tmdb.or(strm_item_info.tmdb_id).unwrap_or(0);
 
     // Dispatch the call to the responsible function based on the style.
@@ -662,14 +686,8 @@ fn style_based_rename(
     }
 }
 
-fn prepare_strm_files(
-    new_playlist: &mut [PlaylistGroup],
-    strm_target_output: &StrmTargetOutput,
-) -> Vec<StrmFile> {
-    let channel_count = new_playlist
-        .iter()
-        .map(|g| g.filter_count(filter_strm_item))
-        .sum();
+fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &StrmTargetOutput) -> Vec<StrmFile> {
+    let channel_count = new_playlist.iter().map(|g| g.filter_count(filter_strm_item)).sum();
     // contains all paths (dir + filename) to detect collisions
     let mut all_filenames: HashSet<PathBuf> = HashSet::with_capacity(channel_count);
     // contains only collision filenames (PathBuf)
@@ -681,31 +699,22 @@ fn prepare_strm_files(
     // first we create the names to identify name collisions
     for pg in new_playlist.iter_mut() {
         for pli in pg.channels.iter_mut().filter(|c| filter_strm_item(c)) {
-            
             let strm_item_info = extract_item_info(pli);
 
             let (dir_path, strm_file_name) = style_based_rename(
                 &strm_item_info,
                 pli.get_tmdb_id(),
                 strm_target_output.style,
-                strm_target_output
-                    .flags
-                    .contains(StrmTargetFlags::UnderscoreWhitespace),
+                strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace),
                 strm_target_output.flags.contains(StrmTargetFlags::Flat),
                 &mut flat_dedup_paths,
             );
 
             // Conditionally generate the quality string based on the new config flag
-            let separator = if strm_target_output
-                .flags
-                .contains(StrmTargetFlags::UnderscoreWhitespace)
-            {
-                "_"
-            } else {
-                " "
-            };
+            let separator =
+                if strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace) { "_" } else { " " };
             let quality_string = get_quality(strm_target_output, pli, separator);
-            
+
             // Add category suffix for flat movie structure to avoid collisions
             let category_suffix = if strm_target_output.flags.contains(StrmTargetFlags::Flat)
                 && pli.get_tmdb_id().is_some()
@@ -713,13 +722,13 @@ fn prepare_strm_files(
             {
                 let cat = sanitize_for_filename(&strm_item_info.group, false);
                 format!("{separator}[{cat}]")
-            } else { 
-                String::new() 
+            } else {
+                String::new()
             };
 
             let final_filename = format!("{strm_file_name}{quality_string}{category_suffix}");
             let filename = Arc::new(final_filename);
-            
+
             // Construct the full relative path for collision checking
             let full_relative_path = dir_path.join(filename.as_str());
 
@@ -727,25 +736,15 @@ fn prepare_strm_files(
                 collisions.insert(full_relative_path.clone());
             }
             all_filenames.insert(full_relative_path);
-            result.push(StrmFile {
-                file_name: filename,
-                dir_path,
-                strm_info: strm_item_info,
-            });
+            result.push(StrmFile { file_name: filename, dir_path, strm_info: strm_item_info });
         }
     }
 
     if !collisions.is_empty() {
         // This separator is specifically for the multi-version naming convention.
         let version_separator = " ";
-        let separator = if strm_target_output
-            .flags
-            .contains(StrmTargetFlags::UnderscoreWhitespace)
-        {
-            "_"
-        } else {
-            " "
-        };
+        let separator =
+            if strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace) { "_" } else { " " };
 
         for s in &mut result {
             {
@@ -769,29 +768,23 @@ fn prepare_strm_files(
 }
 
 fn get_quality(strm_target_output: &StrmTargetOutput, pli: &PlaylistItem, separator: &str) -> String {
-    if strm_target_output
-        .flags
-        .contains(StrmTargetFlags::AddQualityToFilename)
-    {
+    if strm_target_output.flags.contains(StrmTargetFlags::AddQualityToFilename) {
         // Use `additional_properties` which are populated by metadata_update_manager/probe
         let (audio, video) = match pli.header.additional_properties.as_ref() {
             None => (None, None),
-            Some(props) => {
-                match props {
-                    StreamProperties::Live(_)
-                    | StreamProperties::Series(_) => (None, None),
-                    StreamProperties::Video(video) =>
-                        video.details.as_ref().map_or_else(|| (None, None), |d| (d.audio.as_deref(), d.video.as_deref())),
-                    StreamProperties::Episode(episode) =>
-                        (episode.audio.as_deref(), episode.video.as_deref())
+            Some(props) => match props {
+                StreamProperties::Live(_) | StreamProperties::Series(_) => (None, None),
+                StreamProperties::Video(video) => {
+                    video.details.as_ref().map_or_else(|| (None, None), |d| (d.audio.as_deref(), d.video.as_deref()))
                 }
-            }
+                StreamProperties::Episode(episode) => (episode.audio.as_deref(), episode.video.as_deref()),
+            },
         };
         if let Some(media_quality) = MediaQuality::from_ffprobe_info(audio, video) {
             let formatted = media_quality.format_for_filename(separator);
             if !formatted.is_empty() {
                 // Hard-coded separator for filename clarity.
-                return format!(" - [{formatted}]")
+                return format!(" - [{formatted}]");
             }
         }
     }
@@ -814,16 +807,9 @@ fn strm_contains_tmdb_marker(s: &str) -> bool {
 /// returning the equivalent no-tmdb path used for identity matching.
 fn strip_tmdb_markers(s: &str) -> String {
     let mut result = s.to_string();
-    for marker_prefix in &[
-        " {tmdb=",
-        " {tmdb-",
-        " [tmdbid=",
-        " [tmdbid-",
-        "_{tmdb=",
-        "_{tmdb-",
-        "_[tmdbid=",
-        "_[tmdbid-",
-    ] {
+    for marker_prefix in
+        &[" {tmdb=", " {tmdb-", " [tmdbid=", " [tmdbid-", "_{tmdb=", "_{tmdb-", "_[tmdbid=", "_[tmdbid-"]
+    {
         while let Some(start) = result.find(marker_prefix) {
             let close_char = if marker_prefix.contains('{') { '}' } else { ']' };
             let search_from = start + marker_prefix.len();
@@ -849,11 +835,10 @@ pub async fn write_strm_playlist(
     }
 
     let config = app_config.config.load();
-    let Some(root_path) = crate::utils::get_file_path(
-        &config.storage_dir,
-        Some(std::path::PathBuf::from(&target_output.directory)),
-    ) else {
-        return Err(TuliproxError::Config(format!("Failed to get file path for {}",target_output.directory)));
+    let Some(root_path) =
+        crate::utils::get_file_path(&config.storage_dir, Some(std::path::PathBuf::from(&target_output.directory)))
+    else {
+        return Err(TuliproxError::Config(format!("Failed to get file path for {}", target_output.directory)));
     };
 
     let user_and_server_info = get_credentials_and_server_info(app_config, target_output.username.as_deref());
@@ -862,12 +847,8 @@ pub async fn write_strm_playlist(
     let strm_index_path =
         strm_get_file_paths(&strm_file_prefix, &ensure_target_storage_path(&config, target.name.as_str()).await?);
     let existing_strm = {
-        let _file_lock = app_config
-            .file_locks
-            .read_lock(&strm_index_path).await;
-        read_strm_file_index(&strm_index_path)
-            .await
-            .unwrap_or_else(|_| HashSet::with_capacity(4096))
+        let _file_lock = app_config.file_locks.read_lock(&strm_index_path).await;
+        read_strm_file_index(&strm_index_path).await.unwrap_or_else(|_| HashSet::with_capacity(4096))
     };
     let mut processed_strm: HashSet<String> = HashSet::with_capacity(existing_strm.len());
 
@@ -885,12 +866,10 @@ pub async fn write_strm_playlist(
     prepare_strm_output_directory(&root_path).await?;
 
     let target_force_redirect = target.options.as_ref().and_then(|o| o.force_redirect.as_ref());
+    let mut input_by_name: HashMap<Arc<str>, Option<Arc<ConfigInput>>> = HashMap::new();
 
-    let strm_files = prepare_strm_files(
-        new_playlist,
-        target_output,
-    );
-    
+    let strm_files = prepare_strm_files(new_playlist, target_output);
+
     for strm_file in strm_files {
         // file paths
         let output_path = truncate_filename(&root_path.join(&strm_file.dir_path), 255);
@@ -898,24 +877,30 @@ pub async fn write_strm_playlist(
 
         let relative_file_path = get_relative_path_str(&file_path, &root_path);
 
-        let (target_relative_file_path, target_file_path) = if strm_file.strm_info.tmdb_id.is_none() {
-            if let Some(enriched_path) = enriched_strm.get(&relative_file_path) {
-                (enriched_path.clone(), root_path.join(enriched_path))
-            } else {
-                (relative_file_path.clone(), file_path)
-            }
-        } else {
-            (relative_file_path.clone(), file_path)
-        };
+        let (target_relative_file_path, target_file_path) = get_target_strm_file_path(
+            &root_path,
+            &enriched_strm,
+            &relative_file_path,
+            file_path,
+            strm_file.strm_info.tmdb_id,
+        );
         let file_exists = target_file_path.exists();
 
         // create content
-        let url = get_strm_url(target_force_redirect, user_and_server_info.as_ref(), &strm_file.strm_info);
-        let mut content = target_output.strm_props.as_ref().map_or_else(Vec::new, std::clone::Clone::clone);
-        content.push(url.to_string());
-        let content_text = content.join("\r\n");
-        let content_as_bytes = content_text.as_bytes();
-        let content_hash = hash_bytes(content_as_bytes);
+        let url = match resolve_strm_file_url(
+            app_config,
+            &mut input_by_name,
+            target_force_redirect,
+            user_and_server_info.as_ref(),
+            &strm_file.strm_info,
+        ) {
+            Ok(url) => url,
+            Err(err) => {
+                failed.push(err);
+                continue;
+            }
+        };
+        let (content_as_bytes, content_hash) = build_strm_content(target_output, &url);
 
         // check if file exists and has same hash
         if file_exists && has_strm_file_same_hash(&target_file_path, content_hash).await {
@@ -923,39 +908,31 @@ pub async fn write_strm_playlist(
             continue; // skip creation
         }
 
-        // if we can't create the directory skip this entry
-        let target_output_path = target_file_path.parent().map_or_else(|| output_path.clone(), std::path::Path::to_path_buf);
-        if !ensure_strm_file_directory(&mut failed, &target_output_path).await {
+        if !write_strm_output_file(
+            &mut failed,
+            &target_file_path,
+            &output_path,
+            &content_as_bytes,
+            strm_file.strm_info.get_file_ts(),
+        )
+        .await
+        {
             continue;
         }
-
-        match write_strm_file(
-            &target_file_path,
-            content_as_bytes,
-            strm_file.strm_info.get_file_ts(),
-        ).await
-        {
-            Ok(()) => {
-                processed_strm.insert(target_relative_file_path);
-            }
-            Err(err) => {
-                failed.push(err);
-            }
-        };
+        processed_strm.insert(target_relative_file_path);
     }
 
     if let Err(err) = write_strm_index_file(app_config, &processed_strm, &strm_index_path).await {
         failed.push(err);
     }
 
-    if let Err(err) =
-        cleanup_strm_output_directory(
-            target_output.flags.contains(StrmTargetFlags::Cleanup),
-            &root_path,
-            &existing_strm,
-            &processed_strm,
-        )
-        .await
+    if let Err(err) = cleanup_strm_output_directory(
+        target_output.flags.contains(StrmTargetFlags::Cleanup),
+        &root_path,
+        &existing_strm,
+        &processed_strm,
+    )
+    .await
     {
         failed.push(err);
     }
@@ -971,9 +948,7 @@ async fn write_strm_index_file(
     entries: &HashSet<String>,
     index_file_path: &PathBuf,
 ) -> Result<(), String> {
-    let _file_lock = cfg
-        .file_locks
-        .write_lock(index_file_path).await;
+    let _file_lock = cfg.file_locks.write_lock(index_file_path).await;
     let file = File::create(index_file_path)
         .await
         .map_err(|err| format!("Failed to create strm index file: {} {err}", index_file_path.display()))?;
@@ -984,35 +959,22 @@ async fn write_strm_index_file(
     for entry in entries {
         let bytes = entry.as_bytes();
         write_counter += bytes.len() + 1;
-        writer
-            .write_all(bytes)
-            .await
-            .map_err(|err| format!("Failed to write strm index entry: {err}"))?;
-        writer
-            .write_all(new_line)
-            .await
-            .map_err(|err| format!("Failed to write strm index entry: {err}"))?;
+        writer.write_all(bytes).await.map_err(|err| format!("Failed to write strm index entry: {err}"))?;
+        writer.write_all(new_line).await.map_err(|err| format!("Failed to write strm index entry: {err}"))?;
         if write_counter >= IO_BUFFER_SIZE {
             write_counter = 0;
             writer.flush().await.map_err(|err| format!("Failed to flush: {err}"))?;
         }
     }
-    writer
-        .flush()
-        .await
-        .map_err(|err| format!("failed to write strm index entry: {err}"))?;
-    writer
-        .shutdown()
-        .await
-        .map_err(|err| format!("failed to write strm index entry: {err}"))?;
+    writer.flush().await.map_err(|err| format!("failed to write strm index entry: {err}"))?;
+    writer.shutdown().await.map_err(|err| format!("failed to write strm index entry: {err}"))?;
     Ok(())
 }
 
 async fn ensure_strm_file_directory(failed: &mut Vec<String>, output_path: &Path) -> bool {
     if !output_path.exists() {
         if let Err(e) = create_dir_all(output_path).await {
-            let err_msg =
-                format!("Failed to create directory for strm playlist: {} {e}", output_path.display());
+            let err_msg = format!("Failed to create directory for strm playlist: {} {e}", output_path.display());
             error!("{err_msg}");
             failed.push(err_msg);
             return false; // skip creation, could not create directory
@@ -1021,11 +983,29 @@ async fn ensure_strm_file_directory(failed: &mut Vec<String>, output_path: &Path
     true
 }
 
-async fn write_strm_file(
-    file_path: &Path,
+async fn write_strm_output_file(
+    failed: &mut Vec<String>,
+    target_file_path: &Path,
+    output_path: &Path,
     content_as_bytes: &[u8],
     timestamp: Option<u64>,
-) -> Result<(), String> {
+) -> bool {
+    let target_output_path =
+        target_file_path.parent().map_or_else(|| output_path.to_path_buf(), std::path::Path::to_path_buf);
+    if !ensure_strm_file_directory(failed, &target_output_path).await {
+        return false;
+    }
+
+    match write_strm_file(target_file_path, content_as_bytes, timestamp).await {
+        Ok(()) => true,
+        Err(err) => {
+            failed.push(err);
+            false
+        }
+    }
+}
+
+async fn write_strm_file(file_path: &Path, content_as_bytes: &[u8], timestamp: Option<u64>) -> Result<(), String> {
     File::create(file_path)
         .await
         .map_err(|err| format!("Failed to create strm file: {err}"))?
@@ -1066,10 +1046,10 @@ async fn has_strm_file_same_hash(file_path: &PathBuf, content_hash: UUIDType) ->
 fn get_credentials_and_server_info(
     cfg: &AppConfig,
     username: Option<&str>,
-) -> Option<(ProxyUserCredentials, ApiProxyServerInfo)> {
+) -> Option<(Arc<ProxyUserCredentials>, ApiProxyServerInfo)> {
     let username = username?;
     let credentials = cfg.get_user_credentials(username)?;
-    let server_info = cfg.get_user_server_info(&credentials)?;
+    let server_info = cfg.get_user_server_info(credentials.as_ref())?;
     Some((credentials, server_info))
 }
 
@@ -1084,16 +1064,85 @@ async fn read_strm_file_index(strm_file_index_path: &Path) -> std::io::Result<Ha
     Ok(result)
 }
 
+fn resolve_strm_file_url(
+    app_config: &AppConfig,
+    input_by_name: &mut HashMap<Arc<str>, Option<Arc<ConfigInput>>>,
+    target_force_redirect: Option<&ClusterFlags>,
+    user_and_server_info: Option<&(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>,
+    str_item_info: &StrmItemInfo,
+) -> Result<Arc<str>, String> {
+    let input = if user_and_server_info.is_none() && str_item_info.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        input_by_name
+            .entry(Arc::clone(&str_item_info.input_name))
+            .or_insert_with(|| app_config.get_input_by_name(&str_item_info.input_name))
+            .clone()
+    } else {
+        None
+    };
+
+    get_strm_url(target_force_redirect, user_and_server_info, input.as_deref(), str_item_info)
+}
+
+fn get_target_strm_file_path(
+    root_path: &Path,
+    enriched_strm: &HashMap<String, String>,
+    relative_file_path: &str,
+    file_path: PathBuf,
+    tmdb_id: Option<u32>,
+) -> (String, PathBuf) {
+    if tmdb_id.is_none() {
+        if let Some(enriched_path) = enriched_strm.get(relative_file_path) {
+            return (enriched_path.clone(), root_path.join(enriched_path));
+        }
+    }
+    (relative_file_path.to_string(), file_path)
+}
+
+fn build_strm_content(target_output: &StrmTargetOutput, url: &str) -> (Vec<u8>, UUIDType) {
+    let mut content = target_output.strm_props.as_ref().map_or_else(Vec::new, std::clone::Clone::clone);
+    content.push(url.to_string());
+    let content_text = content.join("\r\n");
+    let content_as_bytes = content_text.into_bytes();
+    let content_hash = hash_bytes(&content_as_bytes);
+    (content_as_bytes, content_hash)
+}
+
+fn resolve_strm_source_url(input: Option<&ConfigInput>, str_item_info: &StrmItemInfo) -> Result<Arc<str>, String> {
+    if !str_item_info.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return Ok(Arc::clone(&str_item_info.url));
+    }
+
+    let input = input.ok_or_else(|| {
+        format!(
+            "Failed to resolve STRM provider URL for input '{}' because the source input is missing: {}",
+            sanitize_sensitive_info(&str_item_info.input_name),
+            sanitize_sensitive_info(&str_item_info.url)
+        )
+    })?;
+
+    input.resolve_url(&str_item_info.url).map(|resolved| Arc::<str>::from(resolved.into_owned())).map_err(|err| {
+        format!(
+            "Failed to resolve STRM provider URL for input '{}': {} ({err})",
+            sanitize_sensitive_info(&str_item_info.input_name),
+            sanitize_sensitive_info(&str_item_info.url)
+        )
+    })
+}
+
 fn get_strm_url(
     target_force_redirect: Option<&ClusterFlags>,
-    user_and_server_info: Option<&(ProxyUserCredentials, ApiProxyServerInfo)>,
+    user_and_server_info: Option<&(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>,
+    input: Option<&ConfigInput>,
     str_item_info: &StrmItemInfo,
-) -> Arc<str> {
-    let Some((user, server_info)) = user_and_server_info else { return str_item_info.url.clone(); };
+) -> Result<Arc<str>, String> {
+    let Some((user, server_info)) = user_and_server_info else {
+        return resolve_strm_source_url(input, str_item_info);
+    };
 
-    let redirect = user.proxy.is_redirect(str_item_info.item_type) || target_force_redirect.is_some_and(|f| f.has_cluster(str_item_info.item_type));
+    let redirect = user.proxy.is_redirect(str_item_info.item_type)
+        || target_force_redirect.is_some_and(|f| f.has_cluster(str_item_info.item_type));
     if redirect {
-        return str_item_info.url.clone();
+        return Ok(Arc::clone(&str_item_info.url));
     }
 
     if let Some(stream_type) = match str_item_info.item_type {
@@ -1102,21 +1151,21 @@ fn get_strm_url(
         | PlaylistItemType::SeriesInfo
         | PlaylistItemType::LocalSeries
         | PlaylistItemType::LocalSeriesInfo => Some("series"),
-        PlaylistItemType::Video
-        | PlaylistItemType::LocalVideo => Some("movie"),
+        PlaylistItemType::Video | PlaylistItemType::LocalVideo => Some("movie"),
         _ => None,
     } {
         let url = &str_item_info.url;
         let ext = extract_extension_from_url(url).unwrap_or_default();
-        format!(
+        Ok(format!(
             "{}/{stream_type}/{}/{}/{}{ext}",
             server_info.get_base_url(),
-            user.username,
-            user.password,
+            user.as_ref().username,
+            user.as_ref().password,
             str_item_info.virtual_id
-        ).into()
+        )
+        .into())
     } else {
-        str_item_info.url.clone()
+        Ok(Arc::clone(&str_item_info.url))
     }
 }
 
@@ -1128,29 +1177,19 @@ fn get_strm_url(
 #[derive(Debug, Clone)]
 struct DirNode {
     path: PathBuf,
-    is_root: bool, // is root -> do not delete!
+    is_root: bool,   // is root -> do not delete!
     has_files: bool, //  has content -> do not delete!
     children: HashSet<PathBuf>,
     parent: Option<PathBuf>,
 }
 
 impl DirNode {
-    fn new(path: PathBuf, parent: Option<PathBuf>) -> Self {
-        Self::new_with_flag(path, parent, false)
-    }
+    fn new(path: PathBuf, parent: Option<PathBuf>) -> Self { Self::new_with_flag(path, parent, false) }
 
-    fn new_root(path: PathBuf) -> Self {
-        Self::new_with_flag(path, None, true)
-    }
+    fn new_root(path: PathBuf) -> Self { Self::new_with_flag(path, None, true) }
 
     fn new_with_flag(path: PathBuf, parent: Option<PathBuf>, is_root: bool) -> Self {
-        Self {
-            path,
-            is_root,
-            has_files: false,
-            children: HashSet::new(),
-            parent,
-        }
+        Self { path, is_root, has_files: false, children: HashSet::new(), parent }
     }
 }
 
@@ -1200,10 +1239,7 @@ async fn build_directory_tree(root_path: &Path) -> HashMap<PathBuf, DirNode> {
 // now we need to build an ordered flat list,
 // We walk from top to bottom.
 // (PS: you can only delete in reverse order, because delete first children, then the parents)
-fn flatten_tree(
-    root_path: &Path,
-    mut tree_nodes: HashMap<PathBuf, DirNode>,
-) -> Vec<DirNode> {
+fn flatten_tree(root_path: &Path, mut tree_nodes: HashMap<PathBuf, DirNode>) -> Vec<DirNode> {
     let mut paths_to_process = Vec::new(); // List of paths to process
 
     {
@@ -1222,10 +1258,7 @@ fn flatten_tree(
         }
     }
 
-    paths_to_process
-        .iter()
-        .filter_map(|path| tree_nodes.remove(path))
-        .collect()
+    paths_to_process.iter().filter_map(|path| tree_nodes.remove(path)).collect()
 }
 
 async fn delete_empty_dirs_from_tree(root_path: &Path, tree_nodes: HashMap<PathBuf, DirNode>) {
@@ -1242,4 +1275,68 @@ async fn delete_empty_dirs_from_tree(root_path: &Path, tree_nodes: HashMap<PathB
 async fn remove_empty_dirs(root_path: PathBuf) {
     let tree_nodes = build_directory_tree(&root_path).await;
     delete_empty_dirs_from_tree(&root_path, tree_nodes).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_strm_source_url, StrmItemInfo};
+    use crate::model::{ConfigInput, ConfigProvider};
+    use shared::model::{ConfigProviderDto, InputType, PlaylistItemType, ProviderUrlSelectionPolicy};
+    use std::{collections::HashMap, sync::Arc};
+
+    fn make_strm_item(url: &str, input_name: &str) -> StrmItemInfo {
+        StrmItemInfo {
+            group: Arc::from("group"),
+            title: Arc::from("title"),
+            item_type: PlaylistItemType::Live,
+            provider_id: None,
+            virtual_id: 1,
+            input_name: Arc::from(input_name),
+            url: Arc::from(url),
+            series_name: None,
+            release_date: None,
+            series_release_date: None,
+            season: None,
+            episode: None,
+            added: None,
+            tmdb_id: None,
+        }
+    }
+
+    fn make_input_with_provider() -> ConfigInput {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "myprovider".into(),
+            urls: vec!["http://provider.example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        });
+
+        ConfigInput {
+            name: Arc::from("input-a"),
+            input_type: InputType::M3u,
+            headers: HashMap::new(),
+            url: "http://input.example.com".to_string(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_strm_source_url_resolves_provider_scheme_without_user_context() {
+        let input = make_input_with_provider();
+        let strm_item = make_strm_item("provider://myprovider/live/1.ts", "input-a");
+
+        let resolved = resolve_strm_source_url(Some(&input), &strm_item);
+
+        assert_eq!(resolved.as_deref(), Ok("http://provider.example.com/live/1.ts"));
+    }
+
+    #[test]
+    fn resolve_strm_source_url_fails_when_provider_input_is_missing() {
+        let strm_item = make_strm_item("provider://myprovider/live/1.ts", "missing-input");
+
+        let err = resolve_strm_source_url(None, &strm_item).err();
+
+        assert!(err.is_some_and(|message| message.contains("source input is missing")));
+    }
 }

@@ -83,6 +83,13 @@ reverse_proxy:
     max_attempts: 3
     backoff_millis: 250
     backoff_multiplier: 1.0
+  # geoip:
+  #   enabled: true
+  #   # unavailable_policy: deny # default. If GeoIP is disabled, missing, or not loaded,
+  #   # country-based network_access rules deny non-CIDR-matching requests.
+  #   # allow: explicit risk acceptance. Country-based network_access rules
+  #   # allow when GeoIP is unavailable; CIDR-only misses still deny.
+  #   unavailable_policy: deny
   stream:
     shared_burst_buffer_mb: 12 # default 12 MB
   # stream_history:

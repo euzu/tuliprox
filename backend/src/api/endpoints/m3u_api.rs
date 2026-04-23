@@ -1,12 +1,14 @@
 use crate::{
     api::{
         api_utils::{
-            admission_failure_response, create_catchup_session_key, create_session_fingerprint,
-            force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
-            get_user_target_by_credentials, is_seek_request, is_session_based_playback, is_stream_share_enabled,
-            local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
-            should_allow_exhausted_shared_reconnect, stream_response, try_option_bad_request, try_option_forbidden,
-            try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            admission_failure_response, create_catchup_session_key,
+            create_session_fingerprint, force_provider_stream_response, get_session_reservation_ttl_secs,
+            get_user_target, get_user_target_by_credentials, is_seek_request, is_session_based_playback,
+            is_stream_share_enabled, local_stream_response,
+            redirect, redirect_response, resource_response,
+            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            try_option_bad_request, try_result_bad_request, try_result_not_found,
+            try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::handle_hls_stream_request,
@@ -15,6 +17,7 @@ use crate::{
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
     },
     auth::Fingerprint,
+    model::{ConfigTarget, ProxyUserCredentials},
     repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const},
     utils::debug_if_enabled,
 };
@@ -28,20 +31,18 @@ use shared::{
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
 use std::sync::Arc;
+use crate::auth::{check_network_access_only, resolve_api_user_context, ApiUserAuthError};
 
-async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoResponse + Send {
-    api_req.log_sanitized("m3u_api");
-    let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target(api_req, app_state),
-        auth_status,
-        false,
-        format!("Could not find any user for m3u api {}", api_req.username)
-    );
+async fn m3u_api(
+    user: Arc<ProxyUserCredentials>,
+    target: Arc<ConfigTarget>,
+    app_state: &AppState,
+    content_type: &str,
+) -> impl IntoResponse + Send {
+    let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
     match m3u_load_rewrite_playlist(&app_state.app_config, &target, &user).await {
         Ok(m3u_iter) => {
-            // Convert the stream into a stream of `Bytes`
             let content_stream = m3u_iter.map(|mut line| {
                 line.push('\n');
                 Ok::<Bytes, String>(Bytes::from(line))
@@ -50,8 +51,8 @@ async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoRes
             let mut builder = axum::response::Response::builder()
                 .status(axum::http::StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string());
-            if api_req.content_type == "m3u_plus" {
-                builder = builder.header("Content-Disposition", "attachment; filename=\"playlist.m3u\"");
+            if content_type == "m3u_plus" {
+                builder = builder.header(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\"");
             }
             try_unwrap_body!(builder.body(axum::body::Body::from_stream(content_stream)))
         }
@@ -62,37 +63,66 @@ async fn m3u_api(api_req: &UserApiRequest, app_state: &AppState) -> impl IntoRes
     }
 }
 
+fn m3u_api_with_auth(
+    fingerprint: &Fingerprint,
+    app_state: &Arc<AppState>,
+    api_req: &UserApiRequest,
+) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
+    let (user, target) = get_user_target(api_req, app_state)
+        .ok_or(ApiUserAuthError::AuthFailed)?;
+    check_network_access_only(&user, fingerprint, app_state)?;
+    Ok((user, target))
+}
+
+/// Network-only auth for stream endpoints. Permission check is done later by the stream
+/// handler with full stream info for `admission_failure_response`.
+fn m3u_api_stream_network_auth(
+    fingerprint: &Fingerprint,
+    app_state: &Arc<AppState>,
+    api_req: &UserApiRequest,
+    stream_req: &ApiStreamRequest<'_>,
+) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
+    let (user, target) = get_user_target_by_credentials(stream_req.username, stream_req.password, api_req, app_state)
+        .ok_or(ApiUserAuthError::AuthFailed)?;
+    check_network_access_only(&user, fingerprint, app_state)?;
+    Ok((user, target))
+}
+
 async fn m3u_api_get(
+    fingerprint: Fingerprint,
     axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    m3u_api(&api_req, &app_state).await
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = match m3u_api_with_auth(&fingerprint, &app_state, &api_req) {
+        Ok(ctx) => ctx,
+        Err(e) => return e.into_player_response(auth_status),
+    };
+    m3u_api(user, target, &app_state, &api_req.content_type).await.into_response()
 }
 
 async fn m3u_api_post(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     UserApiRequestQueryOrBody(api_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    m3u_api(&api_req, &app_state).await.into_response()
+    let auth_status = app_state.app_config.get_auth_error_status();
+    let (user, target) = match m3u_api_with_auth(&fingerprint, &app_state, &api_req) {
+        Ok(ctx) => ctx,
+        Err(e) => return e.into_player_response(auth_status),
+    };
+    m3u_api(user, target, &app_state, &api_req.content_type).await.into_response()
 }
 
 #[allow(clippy::too_many_lines)]
 async fn m3u_api_stream(
+    user: Arc<ProxyUserCredentials>,
+    target: Arc<ConfigTarget>,
     fingerprint: &Fingerprint,
     req_headers: &axum::http::HeaderMap,
     app_state: &Arc<AppState>,
-    api_req: &UserApiRequest,
     stream_req: ApiStreamRequest<'_>,
-    // _addr: &std::net::SocketAddr,
 ) -> impl IntoResponse + Send {
-    let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target_by_credentials(stream_req.username, stream_req.password, api_req, app_state),
-        auth_status,
-        false,
-        format!("Could not find any user for m3u stream {}", stream_req.username)
-    );
-
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
     let target_name = &target.name;
@@ -347,7 +377,21 @@ async fn m3u_api_stream(
     .into_response()
 }
 
+fn m3u_api_resource_auth(
+    fingerprint: &Fingerprint,
+    app_state: &Arc<AppState>,
+    api_req: &UserApiRequest,
+    username: &str,
+    password: &str,
+) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
+    let (user, target) = get_user_target_by_credentials(username, password, api_req, app_state)
+        .ok_or(ApiUserAuthError::AuthFailed)?;
+    resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state)?;
+    Ok((user, target))
+}
+
 async fn m3u_api_resource(
+    fingerprint: Fingerprint,
     req_headers: axum::http::HeaderMap,
     axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
     axum::extract::Path((username, password, stream_id, resource)): axum::extract::Path<(
@@ -362,15 +406,10 @@ async fn m3u_api_resource(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
     let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target_by_credentials(&username, &password, &api_req, &app_state),
-        auth_status,
-        false,
-        format!("Could not find any user for m3u resource {username}")
-    );
-    if user.permission_denied(&app_state) {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
-    }
+    let (user, target) = match m3u_api_resource_auth(&fingerprint, &app_state, &api_req, &username, &password) {
+        Ok(ctx) => ctx,
+        Err(e) => return e.into_player_response(auth_status),
+    };
 
     let target_name = &target.name;
     if !target.has_output(TargetType::M3u) {
@@ -411,17 +450,24 @@ macro_rules! create_m3u_api_stream {
             axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
             axum::extract::Path((username, password, stream_id)): axum::extract::Path<(String, String, String)>,
             axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-            // axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
         ) -> impl IntoResponse + Send {
-            m3u_api_stream(
-                &fingerprint,
-                &req_headers,
-                &app_state,
-                &api_req,
-                ApiStreamRequest::from($context, &username, &password, &stream_id, ""),
-            )
-            .await
-            .into_response()
+            let stream_req = ApiStreamRequest::from($context, &username, &password, &stream_id, "");
+            let auth_status = app_state.app_config.get_auth_error_status();
+            match m3u_api_stream_network_auth(&fingerprint, &app_state, &api_req, &stream_req) {
+                Ok((user, target)) => {
+                    m3u_api_stream(
+                        user,
+                        target,
+                        &fingerprint,
+                        &req_headers,
+                        &app_state,
+                        stream_req,
+                    )
+                    .await
+                    .into_response()
+                }
+                Err(e) => e.into_player_response(auth_status),
+            }
         }
     };
 }

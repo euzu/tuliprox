@@ -1,6 +1,9 @@
-use crate::utils::{
-    default_as_true, default_trakt_fuzzy_threshold, is_true, DEFAULT_USER_AGENT, TRAKT_API_KEY, TRAKT_API_URL,
-    TRAKT_API_VERSION,
+use crate::{
+    error::TuliproxError,
+    utils::{
+        default_as_true, default_trakt_fuzzy_threshold, is_true, DEFAULT_USER_AGENT, TRAKT_API_KEY, TRAKT_API_URL,
+        TRAKT_API_VERSION,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
@@ -29,14 +32,14 @@ impl fmt::Display for TraktContentType {
 }
 
 impl FromStr for TraktContentType {
-    type Err = String;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "vod" => Ok(TraktContentType::Vod),
             "series" => Ok(TraktContentType::Series),
             "both" => Ok(TraktContentType::Both),
-            _ => Err(format!("Invalid TraktContentType: {}", s)),
+            _ => Err(TuliproxError::Config(format!("Invalid TraktContentType: {}", s))),
         }
     }
 }

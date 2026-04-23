@@ -1,3 +1,4 @@
+use crate::error::TuliproxError;
 use enum_iterator::Sequence;
 use std::{fmt::Display, str::FromStr};
 
@@ -45,7 +46,7 @@ impl Display for ProcessingOrder {
 }
 
 impl FromStr for ProcessingOrder {
-    type Err = &'static str;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let normalized = s.trim().to_lowercase();
@@ -67,7 +68,7 @@ impl FromStr for ProcessingOrder {
             x if x == Self::MFR => Ok(Self::Mfr),
             x if x == Self::MRF => Ok(Self::Mrf),
 
-            _ => Err("invalid processing order"),
+            _ => Err(TuliproxError::Config(format!("Invalid processing order {s}"))),
         }
     }
 }

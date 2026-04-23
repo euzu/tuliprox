@@ -1,8 +1,10 @@
-use super::bplustree::{BPlusTree, MAGIC, STORAGE_VERSION};
-use super::storage_const;
+use super::{
+    bplustree::{BPlusTree, MAGIC, STORAGE_VERSION},
+    storage_const,
+};
 use fs2::FileExt as _;
 use log::{info, trace, warn};
-use shared::model::{ClusterFlags, ConfigPaths, ProxyType, ProxyUserStatus};
+use shared::model::{ClusterFlags, ConfigPaths, NetworkAccessDto, ProxyType, ProxyUserStatus};
 use std::{
     collections::{HashSet, VecDeque},
     ffi::OsStr,
@@ -19,7 +21,7 @@ const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
 const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
 const MARKER_FILE_GUARD_PREFIX: &str = ".db_mergeto_v";
 const MARKER_FILE_GUARD_PREFIX_LEGACY_ALT: &str = ".db_mergedto";
-const MARKER_FILE_API_USER_GUARD: &str = ".userdb_mergeto_v5";
+const MARKER_FILE_API_USER_GUARD: &str = ".userdb_mergeto_v6";
 const MARKER_VERSION_KEY: &str = "migrated_to";
 const MARKER_ROOTS_FINGERPRINT_KEY: &str = "roots_fingerprint";
 
@@ -38,9 +40,7 @@ struct BPlusTreeStartupMigrator {
 }
 
 impl BPlusTreeStartupMigrator {
-    pub fn new(roots: Vec<PathBuf>) -> Self {
-        Self { roots, migration_marker_path: None }
-    }
+    pub fn new(roots: Vec<PathBuf>) -> Self { Self { roots, migration_marker_path: None } }
 
     pub fn new_with_marker(roots: Vec<PathBuf>, migration_marker_path: PathBuf) -> Self {
         Self { roots, migration_marker_path: Some(migration_marker_path) }
@@ -380,9 +380,7 @@ pub fn migrate_bplustree_databases(roots: &[PathBuf]) -> io::Result<BPlusTreeMig
     BPlusTreeStartupMigrator::new(roots.to_vec()).run()
 }
 
-pub fn bplustree_migration_marker_path(marker_dir: &Path) -> PathBuf {
-    marker_dir.join(marker_file_name())
-}
+pub fn bplustree_migration_marker_path(marker_dir: &Path) -> PathBuf { marker_dir.join(marker_file_name()) }
 
 pub fn migrate_bplustree_databases_with_marker(
     roots: &[PathBuf],
@@ -392,9 +390,7 @@ pub fn migrate_bplustree_databases_with_marker(
     BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()
 }
 
-fn marker_file_name() -> String {
-    format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}")
-}
+fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}") }
 
 //
 // The user database has gone through six serialization schemas (MessagePack,
@@ -412,6 +408,7 @@ fn marker_file_name() -> String {
 // overwrite the freshly migrated data.
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredApiUserV1 {
     pub target: String,
     pub username: String,
@@ -429,6 +426,7 @@ struct StoredApiUserV1 {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredApiUserV2 {
     pub target: String,
     pub username: String,
@@ -449,6 +447,7 @@ struct StoredApiUserV2 {
 // V3 mirror — same layout as user_repository::StoredProxyUserCredentials.
 // Defined here so the migration has no dependency on user_repository internals.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredApiUserV3 {
     pub target: String,
     pub username: String,
@@ -512,6 +511,7 @@ impl StoredApiUserV3 {
 // V4 mirror — same layout as user_repository::StoredProxyUserCredentials.
 // Defined here so the migration has no dependency on user_repository internals.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredApiUserV4 {
     pub target: String,
     pub username: String,
@@ -555,18 +555,15 @@ impl StoredApiUserV4 {
         }
     }
 
-    fn from_v2(v2: &StoredApiUserV2) -> Self {
-        Self::from_v3(&StoredApiUserV3::from_v2(v2))
-    }
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v3(&StoredApiUserV3::from_v2(v2)) }
 
-    fn from_v1(v1: &StoredApiUserV1) -> Self {
-        Self::from_v3(&StoredApiUserV3::from_v1(v1))
-    }
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v3(&StoredApiUserV3::from_v1(v1)) }
 }
 
-// V5 mirror — same layout as user_repository::StoredProxyUserCredentials.
+// V5 mirror — same layout as the previous user_repository::StoredProxyUserCredentials.
 // Defined here so the migration has no dependency on user_repository internals.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredApiUserV5 {
     pub target: String,
     pub username: String,
@@ -612,17 +609,71 @@ impl StoredApiUserV5 {
         }
     }
 
-    fn from_v3(v3: &StoredApiUserV3) -> Self {
-        Self::from_v4(&StoredApiUserV4::from_v3(v3))
+    fn from_v3(v3: &StoredApiUserV3) -> Self { Self::from_v4(&StoredApiUserV4::from_v3(v3)) }
+
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v4(&StoredApiUserV4::from_v2(v2)) }
+
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v4(&StoredApiUserV4::from_v1(v1)) }
+}
+
+// V6 mirror — same layout as user_repository::StoredProxyUserCredentials.
+// Defined here so the migration has no dependency on user_repository internals.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredApiUserV6 {
+    pub target: String,
+    pub username: String,
+    pub password: String,
+    pub token: Option<String>,
+    pub proxy: ProxyType,
+    pub server: Option<String>,
+    pub epg_timeshift: Option<String>,
+    pub epg_request_timeshift: Option<String>,
+    pub created_at: Option<i64>,
+    pub exp_date: Option<i64>,
+    pub max_connections: Option<u32>,
+    pub status: Option<ProxyUserStatus>,
+    pub output_clusters: ClusterFlags,
+    pub ui_enabled: bool,
+    pub comment: Option<String>,
+    pub priority: Option<i8>,
+    pub soft_connections: Option<u16>,
+    pub soft_priority: Option<i8>,
+    pub network_access: Option<NetworkAccessDto>,
+}
+
+impl StoredApiUserV6 {
+    fn from_v5(v5: &StoredApiUserV5) -> Self {
+        Self {
+            target: v5.target.clone(),
+            username: v5.username.clone(),
+            password: v5.password.clone(),
+            token: v5.token.clone(),
+            proxy: v5.proxy,
+            server: v5.server.clone(),
+            epg_timeshift: v5.epg_timeshift.clone(),
+            epg_request_timeshift: v5.epg_request_timeshift.clone(),
+            created_at: v5.created_at,
+            exp_date: v5.exp_date,
+            max_connections: v5.max_connections,
+            status: v5.status,
+            output_clusters: v5.output_clusters,
+            ui_enabled: v5.ui_enabled,
+            comment: v5.comment.clone(),
+            priority: v5.priority,
+            soft_connections: v5.soft_connections,
+            soft_priority: v5.soft_priority,
+            network_access: None,
+        }
     }
 
-    fn from_v2(v2: &StoredApiUserV2) -> Self {
-        Self::from_v4(&StoredApiUserV4::from_v2(v2))
-    }
+    fn from_v4(v4: &StoredApiUserV4) -> Self { Self::from_v5(&StoredApiUserV5::from_v4(v4)) }
 
-    fn from_v1(v1: &StoredApiUserV1) -> Self {
-        Self::from_v4(&StoredApiUserV4::from_v1(v1))
-    }
+    fn from_v3(v3: &StoredApiUserV3) -> Self { Self::from_v5(&StoredApiUserV5::from_v3(v3)) }
+
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v5(&StoredApiUserV5::from_v2(v2)) }
+
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v5(&StoredApiUserV5::from_v1(v1)) }
 }
 
 fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
@@ -632,68 +683,76 @@ fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(MARKER_FILE_API_USER_GUARD)
-}
+pub(crate) fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf { config_dir.join(MARKER_FILE_API_USER_GUARD) }
 
-/// Migrates the user database file from V1, V2, V3, or V4 schema to V5 (current) in
+/// Migrates the user database file from V1-V5 schema to V6 (current) in
 /// place and creates a merge-guard file so config-driven merges are skipped
 /// until the operator explicitly removes it.
 ///
 /// Returns `true` when a migration was performed, `false` when the file was
-/// already in V5 format or did not exist.
+/// already in V6 format or did not exist.
 fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result<bool> {
     if !db_path.exists() {
         return Ok(false);
     }
 
-    if BPlusTree::<String, StoredApiUserV5>::load(db_path).is_ok() {
+    if let Ok(tree) = BPlusTree::<String, StoredApiUserV5>::load(db_path) {
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
+        for (key, v5) in &tree {
+            v6_tree.insert(key.clone(), StoredApiUserV6::from_v5(v5));
+        }
+        create_user_db_merge_guard(merge_guard_path)?;
+        v6_tree.store(db_path)?;
+        return Ok(true);
+    }
+
+    if BPlusTree::<String, StoredApiUserV6>::load(db_path).is_ok() {
         return Ok(false);
     }
 
     if let Ok(tree) = BPlusTree::<String, StoredApiUserV4>::load(db_path) {
-        let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
         for (key, v4) in &tree {
-            v5_tree.insert(key.clone(), StoredApiUserV5::from_v4(v4));
+            v6_tree.insert(key.clone(), StoredApiUserV6::from_v4(v4));
         }
         create_user_db_merge_guard(merge_guard_path)?;
-        v5_tree.store(db_path)?;
+        v6_tree.store(db_path)?;
         return Ok(true);
     }
 
     if let Ok(tree) = BPlusTree::<String, StoredApiUserV3>::load(db_path) {
-        let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
         for (key, v3) in &tree {
-            v5_tree.insert(key.clone(), StoredApiUserV5::from_v3(v3));
+            v6_tree.insert(key.clone(), StoredApiUserV6::from_v3(v3));
         }
         create_user_db_merge_guard(merge_guard_path)?;
-        v5_tree.store(db_path)?;
+        v6_tree.store(db_path)?;
         return Ok(true);
     }
 
     if let Ok(tree) = BPlusTree::<String, StoredApiUserV2>::load(db_path) {
-        let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
         for (key, v2) in &tree {
-            v5_tree.insert(key.clone(), StoredApiUserV5::from_v2(v2));
+            v6_tree.insert(key.clone(), StoredApiUserV6::from_v2(v2));
         }
         create_user_db_merge_guard(merge_guard_path)?;
-        v5_tree.store(db_path)?;
+        v6_tree.store(db_path)?;
         return Ok(true);
     }
 
     if let Ok(tree) = BPlusTree::<String, StoredApiUserV1>::load(db_path) {
-        let mut v5_tree: BPlusTree<String, StoredApiUserV5> = BPlusTree::new();
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
         for (key, v1) in &tree {
-            v5_tree.insert(key.clone(), StoredApiUserV5::from_v1(v1));
+            v6_tree.insert(key.clone(), StoredApiUserV6::from_v1(v1));
         }
         create_user_db_merge_guard(merge_guard_path)?;
-        v5_tree.store(db_path)?;
+        v6_tree.store(db_path)?;
         return Ok(true);
     }
 
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("User DB at '{}' exists but could not be read as V1, V2, V3, V4, or V5 format", db_path.display()),
+        format!("User DB at '{}' exists but could not be read as V1, V2, V3, V4, V5, or V6 format", db_path.display()),
     ))
 }
 
@@ -705,7 +764,7 @@ pub struct AllStartupMigrationStats {
 
 /// Runs all startup migrations in sequence:
 /// 1. B+Tree storage-format migration (V1 -> current binary format)
-/// 2. User DB schema migration (V1/V2/V3/V4 -> V5 `MessagePack` layout)
+/// 2. User DB schema migration (V1-V5 -> V6 `MessagePack` layout)
 ///
 /// `config_dir` is the directory that contains `api_user.db` and the merge-guard
 /// marker. `storage_dir` is used for the B+Tree migration marker.
@@ -754,7 +813,7 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
                 );
             }
             if stats.user_db_migrated {
-                info!("User DB schema migrated to V5");
+                info!("User DB schema migrated to V6");
             }
         }
         Err(err) => {
@@ -948,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v2_to_v5_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v2_to_v6_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -980,8 +1039,8 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v5_tree = BPlusTree::<String, StoredApiUserV5>::load(&db_path)?;
-        let user = v5_tree
+        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
+        let user = v6_tree
             .query(&"alice".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "alice missing after migration"))?;
         assert_eq!(user.username, "alice");
@@ -990,12 +1049,13 @@ mod tests {
         assert_eq!(user.priority, None);
         assert_eq!(user.soft_connections, None);
         assert_eq!(user.soft_priority, None);
+        assert_eq!(user.network_access, None);
 
         Ok(())
     }
 
     #[test]
-    fn user_db_schema_migration_v3_to_v5_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v3_to_v6_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1028,20 +1088,21 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v5_tree = BPlusTree::<String, StoredApiUserV5>::load(&db_path)?;
-        let user = v5_tree
+        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
+        let user = v6_tree
             .query(&"bob".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "bob missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, None);
         assert_eq!(user.soft_priority, None);
+        assert_eq!(user.network_access, None);
 
         Ok(())
     }
 
     #[test]
-    fn user_db_schema_migration_v4_to_v5_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v4_to_v6_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1076,19 +1137,20 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v5_tree = BPlusTree::<String, StoredApiUserV5>::load(&db_path)?;
-        let user = v5_tree
+        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
+        let user = v6_tree
             .query(&"carol".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "carol missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));
+        assert_eq!(user.network_access, None);
 
         Ok(())
     }
 
     #[test]
-    fn user_db_schema_v5_is_detected_without_writing_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v5_to_v6_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1121,17 +1183,75 @@ mod tests {
         assert!(!merge_guard_path.exists());
 
         let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
-        assert!(!migrated);
-        assert!(!merge_guard_path.exists());
+        assert!(migrated);
+        assert!(merge_guard_path.exists());
 
-        let v5_tree = BPlusTree::<String, StoredApiUserV5>::load(&db_path)?;
-        let user = v5_tree
+        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
+        let user = v6_tree
             .query(&"dave".to_string())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v5 detection"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v6 migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));
+        assert_eq!(user.network_access, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_db_schema_v6_is_detected_without_writing_merge_guard() -> io::Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
+        let merge_guard_path = user_db_merge_guard_path(temp.path());
+
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
+        v6_tree.insert(
+            "erin".to_string(),
+            StoredApiUserV6 {
+                target: "channels".to_string(),
+                username: "erin".to_string(),
+                password: "secret".to_string(),
+                token: None,
+                proxy: ProxyType::Reverse(None),
+                server: None,
+                epg_timeshift: None,
+                epg_request_timeshift: None,
+                created_at: None,
+                exp_date: None,
+                max_connections: Some(1),
+                status: Some(ProxyUserStatus::Active),
+                output_clusters: ClusterFlags::Live | ClusterFlags::Vod,
+                ui_enabled: true,
+                comment: None,
+                priority: Some(5),
+                soft_connections: Some(2),
+                soft_priority: Some(-4),
+                network_access: Some(NetworkAccessDto {
+                    allowed_countries: Some(vec!["DE".to_string()]),
+                    allowed_networks: Some(vec!["192.168.0.0/16".to_string()]),
+                }),
+            },
+        );
+        let _ = v6_tree.store(&db_path)?;
+        assert!(!merge_guard_path.exists());
+
+        let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
+        assert!(!migrated);
+        assert!(!merge_guard_path.exists());
+
+        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
+        let user = v6_tree
+            .query(&"erin".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "erin missing after v6 detection"))?;
+        assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert_eq!(user.priority, Some(5));
+        assert_eq!(user.soft_connections, Some(2));
+        assert_eq!(user.soft_priority, Some(-4));
+        assert_eq!(
+            user.network_access.as_ref().and_then(|value| value.allowed_countries.as_ref()),
+            Some(&vec!["DE".to_string()])
+        );
 
         Ok(())
     }

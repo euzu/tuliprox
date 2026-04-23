@@ -162,6 +162,8 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Download & Recording Manager**: Provider-aware VOD downloads and live recordings with retries, fairness, and RBAC-controlled actions
 - **Config Editor**: Direct editing of config.yml, source.yml, mapping.yml in the browser
 - **User Management**: API users with category selection, priority, soft-priority, normal/soft connection limits, auto-generated credentials
+- **Network Access Policy UI**: API-user network restrictions can be configured with CIDR and GeoIP country rules, including
+  the global GeoIP-unavailable `deny`/`allow` policy.
 - **RBAC Admin Panel**: Tabbed user/group management, permission checkbox grid, write-without-read warnings
 - **Stream Table**: Real-time stream monitoring with copy-to-clipboard, bandwidth metrics, episode titles
 - **EPG View**: Timeline with channels, now-line, program details
@@ -231,6 +233,12 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **JWT authentication**: Compact bitmask encoding with password-version tracking for automatic token invalidation
 - **Rate limiting**: Per-IP rate limiting with configurable burst and period
 - **Content Security Policy**: Configurable CSP headers
+- **API User Network Access Restrictions**: Per-user `network_access` rules can restrict API proxy accounts by IPv4/IPv6
+  CIDR ranges and/or GeoIP country codes. Matching any configured CIDR or country allows the request; otherwise the
+  request is denied before it is forwarded upstream.
+- **GeoIP-Unavailable Policy**: Country-based network restrictions default to `deny` when GeoIP is disabled, missing, or not
+  loaded. Operators can explicitly accept that risk with `reverse_proxy.geoip.unavailable_policy: allow`; CIDR-only misses,
+  unknown countries, and country mismatches still deny.
 - **SSL/TLS support**: Configurable including `accept_insecure_ssl_certificates` option
 - **Proxy support**: HTTP, HTTPS, SOCKS5 proxies for all outgoing requests
 - **Header stripping**: Configurable removal of referer, Cloudflare, and X-headers

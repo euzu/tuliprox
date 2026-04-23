@@ -218,10 +218,10 @@ impl ApiProxyConfig {
         }
     }
 
-    pub fn get_target_name(&self, username: &str, password: &str) -> Option<(ProxyUserCredentials, String)> {
+    pub fn get_target_name(&self, username: &str, password: &str) -> Option<(Arc<ProxyUserCredentials>, String)> {
         for target_user in &self.user {
             if let Some((credentials, target_name)) = target_user.get_target_name(username, password) {
-                return Some((credentials.clone(), target_name.to_string()));
+                return Some((Arc::clone(&credentials), target_name.to_string()));
             }
         }
         if log::log_enabled!(log::Level::Debug) && !username.eq(API_USER) {
@@ -230,22 +230,22 @@ impl ApiProxyConfig {
         None
     }
 
-    pub fn get_target_name_by_token(&self, token: &str) -> Option<(ProxyUserCredentials, String)> {
+    pub fn get_target_name_by_token(&self, token: &str) -> Option<(Arc<ProxyUserCredentials>, String)> {
         for target_user in &self.user {
             if let Some((credentials, target_name)) = target_user.get_target_name_by_token(token) {
-                return Some((credentials.clone(), target_name.to_string()));
+                return Some((Arc::clone(&credentials), target_name.to_string()));
             }
         }
         None
     }
 
-    pub fn get_user_credentials(&self, username: &str) -> Option<ProxyUserCredentials> {
+    pub fn get_user_credentials(&self, username: &str) -> Option<Arc<ProxyUserCredentials>> {
         let result = self
             .user
             .iter()
-            .flat_map(|target_user| &target_user.credentials)
+            .flat_map(|target_user| target_user.credentials.iter())
             .find(|credential| credential.username == username)
-            .cloned();
+            .map(Arc::clone);
         if result.is_none() && (username != TEST_USER && username != API_USER) {
             debug!("Could not find any user credentials for: {username}");
         }

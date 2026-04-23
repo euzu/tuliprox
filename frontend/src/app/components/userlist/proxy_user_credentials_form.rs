@@ -2,12 +2,13 @@ use crate::{
     app::{
         components::{
             config::HasFormData, select::Select, userlist::proxy_type_input::ProxyTypeInput, ClusterFlagsInput,
-            ClusterFlagsInputMode, DropDownOption, DropDownSelection, TextButton, UserStatus,
+            ClusterFlagsInputMode, DropDownOption, DropDownSelection, Tag, TextButton, UserStatus,
         },
         TargetUser,
     },
-    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_number, edit_field_number_i8,
-    edit_field_number_u16, edit_field_text, edit_field_text_option, generate_form_reducer,
+    config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_list_option,
+    edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text, edit_field_text_option,
+    generate_form_reducer,
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
@@ -15,16 +16,82 @@ use crate::{
 use chrono::{Duration, Utc};
 use shared::{
     model::{
-        permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, ProxyType,
+        permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, NetworkAccessDto, ProxyType,
         ProxyUserCredentialsDto, ProxyUserStatus,
     },
     utils::generate_random_string,
 };
-use std::rc::Rc;
+use std::{net::IpAddr, rc::Rc};
 use yew::prelude::*;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 1;
 const DEFAULT_EXPIRATION_DAYS: i64 = 365;
+
+fn normalize_country_entry(input: &str) -> Result<String, &'static str> {
+    let normalized = input.trim().to_ascii_uppercase();
+    if normalized.len() == 2 && normalized.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        Ok(normalized)
+    } else {
+        Err("MESSAGES.VALIDATION.NETWORK_ACCESS_COUNTRIES")
+    }
+}
+
+fn normalize_network_entry(input: &str) -> Result<String, &'static str> {
+    let normalized = input.trim().to_string();
+    let Some((address, prefix)) = normalized.split_once('/') else {
+        return Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS");
+    };
+    let address = address.trim().to_ascii_lowercase();
+    let prefix = prefix.trim();
+    let Ok(ip) = address.parse::<IpAddr>() else {
+        return Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS");
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS");
+    };
+    let prefix_valid = match ip {
+        IpAddr::V4(_) => prefix <= 32,
+        IpAddr::V6(_) => prefix <= 128,
+    };
+    if prefix_valid {
+        Ok(normalized)
+    } else {
+        Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS")
+    }
+}
+
+fn build_network_access(countries: &[String], networks: &[String]) -> Result<Option<NetworkAccessDto>, String> {
+    let countries_list = countries.iter().filter(|s| !s.trim().is_empty()).cloned().collect::<Vec<_>>();
+    let networks_list = networks.iter().filter(|s| !s.trim().is_empty()).cloned().collect::<Vec<_>>();
+    if countries_list.is_empty() && networks_list.is_empty() {
+        return Ok(None);
+    }
+    let mut dto = NetworkAccessDto {
+        allowed_countries: if countries_list.is_empty() { None } else { Some(countries_list) },
+        allowed_networks: if networks_list.is_empty() { None } else { Some(networks_list) },
+    };
+    dto.prepare().map_err(|e| e.to_string())?;
+    Ok(Some(dto))
+}
+
+fn network_access_changed(
+    original: Option<&NetworkAccessDto>,
+    countries: &[String],
+    networks: &[String],
+) -> Result<bool, String> {
+    let built = build_network_access(countries, networks)?;
+    Ok(original != built.as_ref())
+}
+
+fn validate_network_access(countries: &[String], networks: &[String]) -> Result<(), &'static str> {
+    for country in countries {
+        normalize_country_entry(country)?;
+    }
+    for network in networks {
+        normalize_network_entry(network)?;
+    }
+    Ok(())
+}
 
 generate_form_reducer!(
     state: UserFormState { form: ProxyUserCredentialsDto },
@@ -64,6 +131,8 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let service_ctx = use_service_context();
     let selected_target = use_state(|| None);
     let update = use_state(|| false);
+    let allowed_countries = use_state(Vec::<Rc<Tag>>::new);
+    let allowed_networks = use_state(Vec::<Rc<Tag>>::new);
 
     let form_state: UseReducerHandle<UserFormState> =
         use_reducer(|| UserFormState { form: ProxyUserCredentialsDto::default(), modified: false });
@@ -104,14 +173,30 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         let form_state = form_state.clone();
         let set_selected_target = selected_target.clone();
         let set_update = update.clone();
+        let set_allowed_countries = allowed_countries.clone();
+        let set_allowed_networks = allowed_networks.clone();
         use_effect_with((props.user.clone(), props.server.clone()), move |(user, server)| {
             if let Some(u) = user.clone() {
                 set_update.set(true);
                 set_selected_target.set(Some(u.target.clone()));
-                form_state.dispatch(UserFormAction::SetAll((*u.credentials).clone()));
+                let creds = (*u.credentials).clone();
+                if let Some(na) = &creds.network_access {
+                    set_allowed_countries.set(na.allowed_countries.as_ref().map_or_else(Vec::new, |countries| {
+                        countries.iter().map(|country| Rc::new(Tag { label: country.clone(), class: None })).collect()
+                    }));
+                    set_allowed_networks.set(na.allowed_networks.as_ref().map_or_else(Vec::new, |networks| {
+                        networks.iter().map(|network| Rc::new(Tag { label: network.clone(), class: None })).collect()
+                    }));
+                } else {
+                    set_allowed_countries.set(Vec::new());
+                    set_allowed_networks.set(Vec::new());
+                }
+                form_state.dispatch(UserFormAction::SetAll(creds));
             } else {
                 set_update.set(false);
                 set_selected_target.set(None);
+                set_allowed_countries.set(Vec::new());
+                set_allowed_networks.set(Vec::new());
                 let mut user = ProxyUserCredentialsDto::default();
                 if let Some(api_server) = (*server).first() {
                     user.server = Some(api_server.name.clone());
@@ -154,21 +239,47 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         let target = selected_target.clone();
         let onsave = props.on_save.clone();
         let is_update = update.clone();
+        let countries = allowed_countries.clone();
+        let networks = allowed_networks.clone();
         Callback::from(move |_| {
             let nothing_to_save = || services.toastr.warning(translate_clone.t("MESSAGES.SAVE.USER.NOTHING_TO_SAVE"));
             if let Some(target_name) = (*target).as_ref().cloned() {
                 let original_target = original.as_ref().map(|u| u.target.clone()).unwrap_or_default();
                 let target_changed = target_name != original_target;
-                if target_changed || user.modified() {
-                    let user = user.data();
+                let countries_value = countries.iter().map(|tag| tag.label.clone()).collect::<Vec<_>>();
+                let networks_value = networks.iter().map(|tag| tag.label.clone()).collect::<Vec<_>>();
+                let network_access_changed = match network_access_changed(
+                    original.as_ref().and_then(|u| u.credentials.network_access.as_ref()),
+                    &countries_value,
+                    &networks_value,
+                ) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        services.toastr.error(err);
+                        return;
+                    }
+                };
+                if target_changed || user.modified() || network_access_changed {
+                    let mut user = user.data().clone();
+                    if let Err(message_key) = validate_network_access(&countries_value, &networks_value) {
+                        services.toastr.error(translate_clone.t(message_key));
+                        return;
+                    }
+                    user.network_access = match build_network_access(&countries_value, &networks_value) {
+                        Ok(na) => na,
+                        Err(err) => {
+                            services.toastr.error(err);
+                            return;
+                        }
+                    };
                     if let Err(err) = user.validate() {
                         services.toastr.error(err.to_string());
                     } else {
                         match original.as_ref().map(|t| t.credentials.clone()) {
-                            None => onsave.emit((*is_update, target_name, user.clone())),
+                            None => onsave.emit((*is_update, target_name, user)),
                             Some(original_user) => {
-                                if target_changed || &(*original_user) != user {
-                                    onsave.emit((*is_update, target_name, user.clone()));
+                                if target_changed || (*original_user) != user {
+                                    onsave.emit((*is_update, target_name, user));
                                 } else {
                                     nothing_to_save();
                                 }
@@ -190,6 +301,24 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let instance_proxy = form_state.clone();
     let instance_server = form_state.clone();
     let instance_output_clusters = form_state.clone();
+    let country_services = service_ctx.clone();
+    let country_translate = translate.clone();
+    let create_country_tag = Callback::from(move |value: String| match normalize_country_entry(&value) {
+        Ok(normalized) => Some(Tag { label: normalized, class: None }),
+        Err(message_key) => {
+            country_services.toastr.error(country_translate.t(message_key));
+            None
+        }
+    });
+    let network_services = service_ctx.clone();
+    let network_translate = translate.clone();
+    let create_network_tag = Callback::from(move |value: String| match normalize_network_entry(&value) {
+        Ok(normalized) => Some(Tag { label: normalized, class: None }),
+        Err(message_key) => {
+            network_services.toastr.error(network_translate.t(message_key));
+            None
+        }
+    });
     html! {
         <div class="tp__proxy-user-credentials-form tp__form-page">
           <div class="tp__proxy-user-credentials-form__body tp__form-page__body">
@@ -199,7 +328,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         <div class="tp__proxy-user-credentials-form__playlist-target">
                             <Select name="target"
                                 multi_select={false}
-                                on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
+                                on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
                                   let target = match selections {
                                     DropDownSelection::Empty => None,
                                     DropDownSelection::Single(option) => Some(option),
@@ -215,7 +344,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                             value={form_state.data().output_clusters}
                             mode={ClusterFlagsInputMode::NoneIsAll}
                             short_labels={true}
-                            on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
+                            on_change={Callback::from(move |(_, flags): (String, Option<ClusterFlags>)| {
                                 instance_output_clusters.dispatch(UserFormAction::OutputClusters(flags));
                             })}
                         />
@@ -225,7 +354,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             { config_field_child!(translate.t("LABEL.STATUS"), "PROXY_USER_CREDENTIALS.STATUS", {
                html! { <Select name="status"
                     multi_select={false}
-                    on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
+                    on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
                         let status = match selections {
                             DropDownSelection::Empty => None,
                             DropDownSelection::Single(option) => option.parse::<ProxyUserStatus>().ok(),
@@ -256,7 +385,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                html! {
                 <Select name="server"
                     multi_select={false}
-                    on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
+                    on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
                         let server = match selections {
                             DropDownSelection::Empty => None,
                             DropDownSelection::Single(option) => Some(option.clone()),
@@ -276,6 +405,8 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_REQUEST_TIMESHIFT"), epg_request_timeshift, UserFormAction::EpgRequestTimeshift) }
             { edit_field_bool!(form_state,  translate.t("LABEL.USER_UI_ENABLED"), ui_enabled, UserFormAction::UiEnabled) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.COMMENT"), comment, UserFormAction::Comment) }
+            {edit_field_list_option!(allowed_countries, translate.t("LABEL.ALLOWED_COUNTRIES"), "PROXY_USER_CREDENTIALS.NETWORK_ACCESS_COUNTRIES", translate.t("LABEL.ADD_COUNTRY"), create_country_tag)}
+            {edit_field_list_option!(allowed_networks, translate.t("LABEL.ALLOWED_NETWORKS"), "PROXY_USER_CREDENTIALS.NETWORK_ACCESS_NETWORKS", translate.t("LABEL.ADD_NETWORK"), create_network_tag)}
 
           </div>
           <div class="tp__proxy-user-credentials-form__toolbar tp__form-page__toolbar">
@@ -291,5 +422,86 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
              })}
           </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_network_access_returns_none_for_empty_inputs() {
+        assert_eq!(build_network_access(&[], &[]), Ok(None));
+    }
+
+    #[test]
+    fn network_access_changed_detects_network_only_edit() {
+        let original = None;
+        assert!(network_access_changed(original, &["DE".to_string()], &[]).unwrap());
+    }
+
+    #[test]
+    fn network_access_changed_is_false_for_equivalent_values() {
+        let original = Some(&NetworkAccessDto {
+            allowed_countries: Some(vec!["DE".to_string(), "AT".to_string()]),
+            allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
+        });
+        assert!(!network_access_changed(original, &["DE".to_string(), "AT".to_string()], &["10.0.0.0/8".to_string()])
+            .unwrap());
+    }
+
+    #[test]
+    fn build_network_access_prepares_countries_for_storage() {
+        let result = build_network_access(&["de".to_string(), "DE".to_string()], &[]);
+        let dto = result.unwrap().unwrap();
+        assert_eq!(dto.allowed_countries, Some(vec!["DE".to_string()]));
+    }
+
+    #[test]
+    fn build_network_access_propagates_invalid_cidr_error() {
+        let result = build_network_access(&[], &["not-a-cidr".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_network_access_rejects_invalid_country_codes() {
+        assert_eq!(
+            validate_network_access(&["DEU".to_string()], &[]),
+            Err("MESSAGES.VALIDATION.NETWORK_ACCESS_COUNTRIES")
+        );
+    }
+
+    #[test]
+    fn validate_network_access_rejects_invalid_networks() {
+        assert_eq!(
+            validate_network_access(&[], &["192.168.1.1".to_string()]),
+            Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS")
+        );
+    }
+
+    #[test]
+    fn validate_network_access_accepts_basic_cidr_lists() {
+        assert_eq!(
+            validate_network_access(
+                &["de".to_string(), "at".to_string()],
+                &["192.168.0.0/16".to_string(), "2001:db8::/32".to_string()],
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn normalize_country_entry_uppercases_valid_values() {
+        assert_eq!(normalize_country_entry("de"), Ok("DE".to_string()));
+    }
+
+    #[test]
+    fn normalize_network_entry_accepts_basic_cidr() {
+        assert_eq!(normalize_network_entry("192.168.0.0/16"), Ok("192.168.0.0/16".to_string()));
+    }
+
+    #[test]
+    fn normalize_network_entry_rejects_invalid_prefix_range() {
+        assert_eq!(normalize_network_entry("192.168.0.0/33"), Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS"));
     }
 }

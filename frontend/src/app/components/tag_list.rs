@@ -9,11 +9,15 @@ pub struct Tag {
     pub class: Option<String>,
 }
 
+fn default_create_tag(value: String) -> Option<Tag> { Some(Tag { label: value, class: None }) }
+
 #[derive(Properties, Clone, PartialEq)]
 pub struct TagListProps {
     pub tags: Vec<Rc<Tag>>,
     #[prop_or_else(Callback::noop)]
     pub on_change: Callback<Vec<Rc<Tag>>>,
+    #[prop_or_else(|| Callback::from(default_create_tag))]
+    pub create_tag: Callback<String, Option<Tag>>,
     #[prop_or(true)]
     pub readonly: bool,
     #[prop_or_else(|| "Add tag...".to_string())]
@@ -22,7 +26,7 @@ pub struct TagListProps {
 
 #[component]
 pub fn TagList(props: &TagListProps) -> Html {
-    let TagListProps { tags, on_change, readonly, placeholder } = props.clone();
+    let TagListProps { tags, on_change, create_tag, readonly, placeholder } = props.clone();
 
     let tag_state = use_state(|| tags.clone());
     let new_tag = use_state(String::default);
@@ -61,15 +65,22 @@ pub fn TagList(props: &TagListProps) -> Html {
         let new_tag = new_tag.clone();
         let tag_state = tag_state.clone();
         let on_change = on_change.clone();
+        let create_tag = create_tag.clone();
         Callback::from(move |()| {
             let val = (*new_tag).trim().to_string();
-            if !val.is_empty() && !tag_state.iter().any(|t| t.label == val) {
-                let mut updated = (*tag_state).clone();
-                updated.push(Rc::new(Tag { label: val.clone(), class: None }));
-                on_change.emit(updated.clone());
-                tag_state.set(updated);
+            if val.is_empty() {
+                return;
             }
-            new_tag.set(String::new());
+
+            if let Some(next_tag) = create_tag.emit(val.clone()) {
+                if !tag_state.iter().any(|t| t.label == next_tag.label) {
+                    let mut updated = (*tag_state).clone();
+                    updated.push(Rc::new(next_tag));
+                    on_change.emit(updated.clone());
+                    tag_state.set(updated);
+                    new_tag.set(String::new());
+                }
+            }
         })
     };
 

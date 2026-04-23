@@ -6,6 +6,8 @@ mod auth_bearer;
 mod auth_basic;
 mod access_token;
 mod fingerprint;
+mod api_user_context;
+
 type Rejection = (StatusCode, &'static str);
 
 #[macro_export]
@@ -27,3 +29,4 @@ pub use self::password::*;
 pub use self::fingerprint::*;
 pub use self::auth_basic::*;
 pub use self::auth_bearer::*;
+pub use self::api_user_context::*;
