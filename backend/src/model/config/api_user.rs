@@ -3,13 +3,94 @@ use crate::model::{macros, Config};
 use arc_swap::access::Access;
 use arc_swap::ArcSwap;
 use chrono::Local;
-use log::debug;
+use log::{debug, warn};
 use shared::model::{
-    ClusterFlags, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto, UserConnectionPermission,
-    XtreamCluster,
+    ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto,
+    UserConnectionPermission, XtreamCluster,
 };
 use std::sync::Arc;
 use zeroize::Zeroize;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyUserPermissionDenyReason {
+    Expired,
+    Disabled,
+    Banned,
+    ExpiredStatus,
+    Inactive,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NetworkAccess {
+    pub allowed_countries: Vec<String>,
+    pub allowed_networks: Vec<ipnet::IpNet>,
+}
+
+impl NetworkAccess {
+    pub fn is_empty(&self) -> bool {
+        self.allowed_countries.is_empty() && self.allowed_networks.is_empty()
+    }
+}
+
+impl From<&NetworkAccessDto> for NetworkAccess {
+    fn from(dto: &NetworkAccessDto) -> Self {
+        let mut seen_countries = std::collections::HashSet::new();
+        let allowed_countries: Vec<String> = dto
+            .allowed_countries
+            .as_ref()
+            .map(|countries| {
+                countries
+                    .iter()
+                    .filter_map(|c| {
+                        let upper = c.trim().to_uppercase();
+                        if upper.is_empty() {
+                            None
+                        } else if seen_countries.insert(upper.clone()) {
+                            Some(upper)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let allowed_networks: Vec<ipnet::IpNet> = dto
+            .allowed_networks
+            .as_ref()
+            .map(|networks| {
+                networks
+                    .iter()
+                    .filter_map(|n| match n.trim().parse::<ipnet::IpNet>() {
+                        Ok(net) => Some(net),
+                        Err(err) => {
+                            warn!("Skipping invalid CIDR '{n}': {err}");
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Self { allowed_countries, allowed_networks }
+    }
+}
+
+impl From<&NetworkAccess> for NetworkAccessDto {
+    fn from(instance: &NetworkAccess) -> Self {
+        let allowed_countries = if instance.allowed_countries.is_empty() {
+            None
+        } else {
+            Some(instance.allowed_countries.clone())
+        };
+        let allowed_networks = if instance.allowed_networks.is_empty() {
+            None
+        } else {
+            Some(instance.allowed_networks.iter().map(std::string::ToString::to_string).collect())
+        };
+        Self { allowed_countries, allowed_networks }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ProxyUserCredentials {
@@ -31,6 +112,7 @@ pub struct ProxyUserCredentials {
     pub soft_connections: u16,
     pub soft_priority: i8,
     pub t_is_api_user: bool,
+    pub network_access: Option<NetworkAccess>,
 }
 
 macros::from_impl!(ProxyUserCredentials);
@@ -55,6 +137,7 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             soft_connections: dto.soft_connections,
             soft_priority: dto.soft_priority,
             t_is_api_user: false,
+            network_access: dto.network_access.as_ref().map(NetworkAccess::from).filter(|na| !na.is_empty()),
         }
     }
 }
@@ -79,6 +162,7 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             priority: instance.priority,
             soft_connections: instance.soft_connections,
             soft_priority: instance.soft_priority,
+            network_access: instance.network_access.as_ref().map(NetworkAccessDto::from),
         }
     }
 }
@@ -95,30 +179,50 @@ impl ProxyUserCredentials {
         self.username.eq(username) && self.password.eq(password)
     }
 
+    #[inline]
     pub fn has_permissions(&self, app_state: &AppState) -> bool {
+        self.permission_denied_reason(app_state).is_none()
+    }
+
+    #[inline]
+    pub fn permission_denied(&self, app_state: &AppState) -> bool {
+        !self.has_permissions(app_state)
+    }
+
+    pub fn permission_denied_reason(&self, app_state: &AppState) -> Option<ProxyUserPermissionDenyReason> {
         let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
         if config.user_access_control {
             if let Some(exp_date) = self.exp_date.as_ref() {
                 let now = Local::now();
                 if (exp_date - now.timestamp()) < 0 {
                     debug!("User access denied, expired: {}", self.username);
-                    return false;
+                    return Some(ProxyUserPermissionDenyReason::Expired);
                 }
             }
 
             if let Some(status) = &self.status {
-                if !matches!(status, ProxyUserStatus::Active | ProxyUserStatus::Trial) {
-                    debug!("User access denied, status invalid: {status} for user: {}", self.username);
-                    return false;
+                match status {
+                    ProxyUserStatus::Disabled => {
+                        debug!("User access denied, status disabled: {}", self.username);
+                        return Some(ProxyUserPermissionDenyReason::Disabled);
+                    }
+                    ProxyUserStatus::Banned => {
+                        debug!("User access denied, status banned: {}", self.username);
+                        return Some(ProxyUserPermissionDenyReason::Banned);
+                    }
+                    ProxyUserStatus::Expired => {
+                        debug!("User access denied, status expired: {}", self.username);
+                        return Some(ProxyUserPermissionDenyReason::ExpiredStatus);
+                    }
+                    ProxyUserStatus::Active | ProxyUserStatus::Trial => {}
+                    ProxyUserStatus::Pending => {
+                        debug!("User access denied, status pending: {}", self.username);
+                        return Some(ProxyUserPermissionDenyReason::Inactive);
+                    }
                 }
-            } // NO STATUS SET, ok admins fault, we take this as a valid status
+            }
         }
-        true
-    }
-
-    #[inline]
-    pub fn permission_denied(&self, app_state: &AppState) -> bool {
-        !self.has_permissions(app_state)
+        None
     }
 
     pub fn allows_cluster(&self, cluster: XtreamCluster) -> bool {
@@ -152,30 +256,39 @@ impl Drop for ProxyUserCredentials {
 #[derive(Debug, Clone)]
 pub struct TargetUser {
     pub target: String,
-    pub credentials: Vec<ProxyUserCredentials>,
+    pub credentials: Vec<Arc<ProxyUserCredentials>>,
 }
 
 macros::from_impl!(TargetUser);
 impl From<&TargetUserDto> for TargetUser {
     fn from(dto: &TargetUserDto) -> Self {
-        Self { target: dto.target.clone(), credentials: dto.credentials.iter().map(Into::into).collect() }
+        Self {
+            target: dto.target.clone(),
+            credentials: dto.credentials.iter().map(|c| Arc::new(c.into())).collect(),
+        }
     }
 }
 
 impl From<&TargetUser> for TargetUserDto {
     fn from(instance: &TargetUser) -> Self {
-        Self { target: instance.target.clone(), credentials: instance.credentials.iter().map(Into::into).collect() }
+        Self {
+            target: instance.target.clone(),
+            credentials: instance.credentials.iter().map(|c| c.as_ref().into()).collect(),
+        }
     }
 }
 
 impl TargetUser {
-    pub fn get_target_name(&self, username: &str, password: &str) -> Option<(&ProxyUserCredentials, &str)> {
+    pub fn get_target_name(&self, username: &str, password: &str) -> Option<(Arc<ProxyUserCredentials>, &str)> {
         self.credentials
             .iter()
             .find(|c| c.matches(username, password))
-            .map(|credentials| (credentials, self.target.as_str()))
+            .map(|credentials| (Arc::clone(credentials), self.target.as_str()))
     }
-    pub fn get_target_name_by_token(&self, token: &str) -> Option<(&ProxyUserCredentials, &str)> {
-        self.credentials.iter().find(|c| c.matches_token(token)).map(|credentials| (credentials, self.target.as_str()))
+    pub fn get_target_name_by_token(&self, token: &str) -> Option<(Arc<ProxyUserCredentials>, &str)> {
+        self.credentials
+            .iter()
+            .find(|c| c.matches_token(token))
+            .map(|credentials| (Arc::clone(credentials), self.target.as_str()))
     }
 }

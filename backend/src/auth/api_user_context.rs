@@ -1,0 +1,135 @@
+use crate::api::api_utils::{
+    evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
+    NetworkAccessDecision, NetworkAccessDenyReason,
+};
+use crate::api::model::AppState;
+use crate::model::ProxyUserPermissionDenyReason;
+use axum::response::IntoResponse;
+use log::debug;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub enum PermissionDenyReason {
+    Expired,
+    Disabled,
+    Banned,
+    Inactive,
+}
+
+impl From<ProxyUserPermissionDenyReason> for PermissionDenyReason {
+    fn from(reason: ProxyUserPermissionDenyReason) -> Self {
+        match reason {
+            ProxyUserPermissionDenyReason::Expired | ProxyUserPermissionDenyReason::ExpiredStatus => {
+                PermissionDenyReason::Expired
+            }
+            ProxyUserPermissionDenyReason::Disabled => PermissionDenyReason::Disabled,
+            ProxyUserPermissionDenyReason::Banned => PermissionDenyReason::Banned,
+            ProxyUserPermissionDenyReason::Inactive => PermissionDenyReason::Inactive,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ApiUserAuthError {
+    AuthFailed,
+    PermissionDenied(PermissionDenyReason),
+    NetworkDenied(NetworkAccessDenyReason),
+}
+
+impl std::fmt::Display for ApiUserAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiUserAuthError::AuthFailed => write!(f, "Authentication failed"),
+            ApiUserAuthError::PermissionDenied(reason) => {
+                match reason {
+                    PermissionDenyReason::Expired => write!(f, "User access denied, expired"),
+                    PermissionDenyReason::Disabled => write!(f, "User access denied, status disabled"),
+                    PermissionDenyReason::Banned => write!(f, "User access denied, status banned"),
+                    PermissionDenyReason::Inactive => write!(f, "User access denied, status inactive"),
+                }
+            }
+            ApiUserAuthError::NetworkDenied(reason) => {
+                match reason {
+                    NetworkAccessDenyReason::NoCidrMatch => write!(f, "Network access denied, no CIDR match"),
+                    NetworkAccessDenyReason::NoCountryMatch => write!(f, "Network access denied, no country match"),
+                    NetworkAccessDenyReason::GeoIpUnavailable => write!(f, "Network access denied, GeoIP unavailable"),
+                    NetworkAccessDenyReason::CountryUnknown => write!(f, "Network access denied, country unknown"),
+                }
+            }
+        }
+    }
+}
+
+impl ApiUserAuthError {
+    /// Returns a player-endpoint compatible response with configured auth error status and empty body.
+    /// This is used by proxy player endpoints (m3u, xtream, xmltv, etc.) where external players
+    /// expect empty responses with HTTP status codes only.
+    pub fn into_player_response(self, auth_error_status: axum::http::StatusCode) -> axum::response::Response {
+        let status = match &self {
+            ApiUserAuthError::AuthFailed => auth_error_status,
+            ApiUserAuthError::PermissionDenied(_) | ApiUserAuthError::NetworkDenied(_) => {
+                axum::http::StatusCode::FORBIDDEN
+            }
+        };
+        status.into_response()
+    }
+}
+
+#[derive(Debug)]
+pub struct ApiUserContext {
+    pub user: Arc<crate::model::ProxyUserCredentials>,
+    pub target: Arc<crate::model::ConfigTarget>,
+    pub fingerprint: crate::auth::Fingerprint,
+}
+
+/// Checks only network access (no permission check). Used by stream endpoints
+/// where permission check must happen later with full stream info for `admission_failure_response`.
+pub fn check_network_access_only(
+    user: &Arc<crate::model::ProxyUserCredentials>,
+    fingerprint: &crate::auth::Fingerprint,
+    app_state: &Arc<AppState>,
+) -> Result<(), ApiUserAuthError> {
+    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+        NetworkAccessDecision::Allowed => Ok(()),
+        NetworkAccessDecision::AllowedGeoIpUnavailable => {
+            log_network_access_allowed_geoip_unavailable(&user.username, &fingerprint.client_ip);
+            Ok(())
+        }
+        NetworkAccessDecision::Denied(reason) => {
+            log_network_access_denied(&user.username, &fingerprint.client_ip, reason.as_str());
+            Err(ApiUserAuthError::NetworkDenied(reason))
+        }
+    }
+}
+
+pub fn resolve_api_user_context(
+    user: Arc<crate::model::ProxyUserCredentials>,
+    target: Arc<crate::model::ConfigTarget>,
+    fingerprint: crate::auth::Fingerprint,
+    app_state: &Arc<AppState>,
+) -> Result<ApiUserContext, ApiUserAuthError> {
+    // Permission check
+    if let Some(reason) = user.permission_denied_reason(app_state) {
+        debug!(
+            "User access denied for {}: {:?}",
+            user.username,
+            reason
+        );
+        return Err(ApiUserAuthError::PermissionDenied(reason.into()));
+    }
+
+    // Network access check with policy
+    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(&user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+        NetworkAccessDecision::Allowed => Ok(ApiUserContext { user, target, fingerprint }),
+        NetworkAccessDecision::AllowedGeoIpUnavailable => {
+            log_network_access_allowed_geoip_unavailable(&user.username, &fingerprint.client_ip);
+            Ok(ApiUserContext { user, target, fingerprint })
+        }
+        NetworkAccessDecision::Denied(reason) => {
+            log_network_access_denied(&user.username, &fingerprint.client_ip, reason.as_str());
+            Err(ApiUserAuthError::NetworkDenied(reason))
+        }
+    }
+}

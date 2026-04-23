@@ -127,6 +127,53 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 | `exp_date`              | UnixTs   |    No    | `None`     | Locks the user out after this Unix timestamp. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                                                                                                                                                                                                |
 | `ui_enabled`            | Bool     |    No    | `true`     | Allows this specific user to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                                                                                                                                                                                                                              |
 | `priority`              | Int (i8) |    No    | `0`        | Stream preemption priority. Priority range: `-128` to `127`, where `-128` has the highest priority. Negative numbers are explicitly allowed for top-tier access. (see [user priority](#user-priorities-priority) below)                                                                                                                                                                                                               |
+| `network_access`        | Block    |    No    | `None`     | Per-user network/country access restrictions. Uses OR logic — matching ANY `allowed_network` (CIDR) OR ANY `allowed_country` grants access. Requires GeoIP for country checks. Client IP from `X-Real-IP` / `X-Forwarded-For`. See [Network Access Restrictions](#network-access-restrictions) below.                                                                                                                                 |
+
+---
+
+### Network Access Restrictions
+
+Tuliprox supports per-user network access restrictions to limit streaming based on the client's IP address or geographic location.
+
+**How it works:**
+
+- Uses OR logic — matching ANY `allowed_network` (CIDR range) OR ANY `allowed_country` grants access
+- `allowed_networks`: CIDR notation (e.g., `192.168.0.0/16`, `10.0.0.0/8`, `192.168.1.1/32` for single IPs)
+- `allowed_countries`: ISO 3166-1 alpha-2 country codes (e.g., `DE`, `US`). Requires GeoIP database
+- If no restrictions are configured, all IPs are allowed
+- If GeoIP is unavailable and country restrictions exist, access is denied by default
+- The global `reverse_proxy.geoip.unavailable_policy` setting can explicitly change only the GeoIP-unavailable case:
+  - `deny` (default): country-based restrictions deny when GeoIP is disabled, missing, or not loaded
+  - `allow`: explicit risk acceptance; country-based restrictions allow when GeoIP is unavailable
+- CIDR-only misses, unknown countries, and country mismatches still deny
+
+**Reverse proxy dependency:** Client IP is derived from `X-Real-IP` or `X-Forwarded-For` headers. If your reverse proxy
+doesn't set these, network restrictions will not work correctly.
+
+**Example:**
+
+```yaml
+network_access:
+  allowed_networks:
+    - "10.200.0.0/16"    # VPN range
+    - "192.168.1.1/32"   # Single IP
+  allowed_countries:
+    - DE                 # Germany
+    - AT                 # Austria
+```
+
+Global GeoIP-unavailable policy example:
+
+```yaml
+reverse_proxy:
+  geoip:
+    enabled: true
+    unavailable_policy: deny # default; use allow only as explicit risk acceptance
+```
+
+**Operator logging:** Denied requests emit structured logs:
+`Network access denied: user="john" client_ip="203.0.113.5" reason=no_country_match`. Possible reasons:
+`no_cidr_match`, `no_country_match`, `geoip_unavailable`, `country_unknown`.
 
 ---
 

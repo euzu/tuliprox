@@ -1066,10 +1066,10 @@ async fn has_strm_file_same_hash(file_path: &PathBuf, content_hash: UUIDType) ->
 fn get_credentials_and_server_info(
     cfg: &AppConfig,
     username: Option<&str>,
-) -> Option<(ProxyUserCredentials, ApiProxyServerInfo)> {
+) -> Option<(Arc<ProxyUserCredentials>, ApiProxyServerInfo)> {
     let username = username?;
     let credentials = cfg.get_user_credentials(username)?;
-    let server_info = cfg.get_user_server_info(&credentials)?;
+    let server_info = cfg.get_user_server_info(credentials.as_ref())?;
     Some((credentials, server_info))
 }
 
@@ -1086,7 +1086,7 @@ async fn read_strm_file_index(strm_file_index_path: &Path) -> std::io::Result<Ha
 
 fn get_strm_url(
     target_force_redirect: Option<&ClusterFlags>,
-    user_and_server_info: Option<&(ProxyUserCredentials, ApiProxyServerInfo)>,
+    user_and_server_info: Option<&(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>,
     str_item_info: &StrmItemInfo,
 ) -> Arc<str> {
     let Some((user, server_info)) = user_and_server_info else { return str_item_info.url.clone(); };
@@ -1111,8 +1111,8 @@ fn get_strm_url(
         format!(
             "{}/{stream_type}/{}/{}/{}{ext}",
             server_info.get_base_url(),
-            user.username,
-            user.password,
+            user.as_ref().username,
+            user.as_ref().password,
             str_item_info.virtual_id
         ).into()
     } else {

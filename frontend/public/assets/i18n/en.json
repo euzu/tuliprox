@@ -343,6 +343,9 @@
       "TEMPLATES": "Handlebars templates for Discord message bodies.",
       "URL": "Discord webhook URL for sending notification messages."
     },
+    "GEOIP_CONFIG": {
+      "UNAVAILABLE_POLICY": "`deny` is the secure default. If Geo-IP is disabled, missing, or not loaded, country-based network access rules deny requests that did not match a configured CIDR.\n\n`allow` is an explicit risk acceptance. It allows country-based network access rules when Geo-IP is unavailable. CIDR-only misses, unknown countries, and country mismatches still deny."
+    },
     "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
     "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
     "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",
@@ -582,6 +585,8 @@
       "SOFT_CONNECTIONS": "Additional provider slots above max_connections. Soft connections can be preempted by any normal connection or by a higher-priority soft connection.",
       "SOFT_PRIORITY": "Priority used while this user's connection is consuming a soft slot. Once promoted back to a normal slot, the regular priority applies again.",
       "PASSWORD": "Access password for this user's playlist and streams.",
+      "NETWORK_ACCESS_COUNTRIES": "List of ISO country codes allowed for this user, for example `NL, FR, IT`.\n\nIf set, requests from other countries are denied unless they also match an allowed network.",
+      "NETWORK_ACCESS_NETWORKS": "List of allowed client networks in CIDR notation, for example `192.168.1.5/32, 192.168.0.0/16, 10.0.0.0/8`.\n\nIPs must be written as CIDR. Networks are checked before GeoIP country rules.\n\nCommon masks are /8. /16, /24, /32",
       "PLAYLIST": "Playlist specifically assigned to the user proxy context.\n\nThe `L`, `V`, and `S` toggles control which output clusters this user should receive from that target:\n`L` = Live, `V` = VOD, `S` = Series.\n\nSelect at least one cluster to activate the filter. If no cluster is selected, the cluster filter is inactive and all clusters are delivered for the assigned target.",
       "PROXY": "Proxy access definitions or roles for the designated user.",
       "SERVER": "Target proxy server address or definition.",
@@ -810,6 +815,8 @@
     "ADD_EXTENSION": "Add Extension",
     "ADD_FORMAT": "Add Format",
     "ADD_HEADER": "Add header",
+    "ADD_COUNTRY": "Add country",
+    "ADD_NETWORK": "Add network",
     "ADD_MAPPING": "Add Mapping",
     "ADD_PATTERN": "Add Pattern",
     "ADD_PROPERTY": "Add Property",
@@ -831,6 +838,8 @@
     "ALIASES": "Aliases",
     "ALIAS_NAME": "Alias Name",
     "ALL": "All",
+    "ALLOWED_COUNTRIES": "Allowed Countries",
+    "ALLOWED_NETWORKS": "Allowed Networks",
     "API": "Api",
     "API_CONFIG": "API",
     "API_CONFIGURATION": "API Configuration",
@@ -982,6 +991,7 @@
     "FRIENDLY_NAME": "Friendly Name",
     "FUZZY_MATCHING": "Fuzzy Matching",
     "GEOIP": "Geo-IP",
+    "GEOIP_UNAVAILABLE_POLICY": "Geo-IP unavailable policy",
     "GITHUB": "GitHub",
     "GRACE_PERIOD": "Grace period ms",
     "GRACE_PERIOD_HOLD_STREAM": "Grace Period Hold Stream",
@@ -1552,6 +1562,11 @@
     },
     "TARGET_NOT_EXISTS": "Target does not exist",
     "USER_DELETED": "User successfully deleted"
+    ,
+    "VALIDATION": {
+      "NETWORK_ACCESS_COUNTRIES": "Allowed countries must be comma-separated 2-letter ISO codes such as DE, AT, CH.",
+      "NETWORK_ACCESS_NETWORKS": "Allowed networks must be comma-separated CIDR values such as 192.168.0.0/16 or 2001:db8::/32."
+    }
   },
   "SETUP": {
     "DESC": {

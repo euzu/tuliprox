@@ -8,6 +8,10 @@ use crate::{
         is_true, parse_to_kbps,
     },
 };
+use std::{
+    fmt::{Display, Formatter},
+    str::FromStr,
+};
 
 const STREAM_QUEUE_SIZE: usize = 1024; // mpsc channel holding messages. with 8192byte chunks and 2Mbit/s approx 8MB
 const MIN_SHARED_BURST_BUFFER_MB: u64 = 1;
@@ -32,6 +36,39 @@ impl AdmissionStrategy {
     pub fn is_grace(&self) -> bool { matches!(self, Self::GraceInstantStream | Self::GraceHoldStream) }
 
     pub fn is_grace_hold(&self) -> bool { matches!(self, Self::GraceHoldStream) }
+}
+
+impl Display for AdmissionStrategy {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                AdmissionStrategy::EvictUserSameIpOldest => "evict_user_same_ip_oldest",
+                AdmissionStrategy::EvictUserSameIpLatest => "evict_user_same_ip_latest",
+                AdmissionStrategy::EvictUserOldest => "evict_user_oldest",
+                AdmissionStrategy::EvictUserLatest => "evict_user_latest",
+                AdmissionStrategy::GraceInstantStream => "grace_instant_stream",
+                AdmissionStrategy::GraceHoldStream => "grace_hold_stream",
+            }
+        )
+    }
+}
+
+impl FromStr for AdmissionStrategy {
+    type Err = TuliproxError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "evict_user_same_ip_oldest" => Ok(AdmissionStrategy::EvictUserSameIpOldest),
+            "evict_user_same_ip_latest" => Ok(AdmissionStrategy::EvictUserSameIpLatest),
+            "evict_user_oldest" => Ok(AdmissionStrategy::EvictUserOldest),
+            "evict_user_latest" => Ok(AdmissionStrategy::EvictUserLatest),
+            "grace_instant_stream" => Ok(AdmissionStrategy::GraceInstantStream),
+            "grace_hold_stream" => Ok(AdmissionStrategy::GraceHoldStream),
+            _ => Err(TuliproxError::Config(format!("Unknown admission strategy: {s}"))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]

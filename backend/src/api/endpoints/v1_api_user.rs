@@ -97,11 +97,11 @@ async fn save_config_api_proxy_user(
 
         if user_target_idx == target_idx {
             // Update
-            api_proxy.user[user_target_idx].credentials[user_idx] = ProxyUserCredentials::from(&credential);
+            api_proxy.user[user_target_idx].credentials[user_idx] = Arc::new(ProxyUserCredentials::from(&credential));
         } else {
             // Move: remove from old target and insert into new target
             api_proxy.user[user_target_idx].credentials.remove(user_idx);
-            api_proxy.user[target_idx].credentials.push(ProxyUserCredentials::from(&credential));
+            api_proxy.user[target_idx].credentials.push(Arc::new(ProxyUserCredentials::from(&credential)));
             remove_empty_target = api_proxy.user[user_target_idx].credentials.is_empty();
         }
 
@@ -110,7 +110,7 @@ async fn save_config_api_proxy_user(
         }
     } else {
         // new user
-        api_proxy.user[target_idx].credentials.push(ProxyUserCredentials::from(&credential));
+        api_proxy.user[target_idx].credentials.push(Arc::new(ProxyUserCredentials::from(&credential)));
     }
 
     let new_api_proxy = Arc::new(api_proxy);

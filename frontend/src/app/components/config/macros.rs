@@ -693,6 +693,27 @@ macro_rules! edit_field_list_option {
             </div>
         }
     }};
+    ($state:expr, $label:expr, $field_id:expr, $placeholder:expr, $create_tag:expr) => {{
+        let state = $state.clone();
+        let create_tag = $create_tag.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__list">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$field_id.to_string()}
+                />
+                <$crate::app::components::TagList
+                    tags={(*state).clone()}
+                    placeholder={$placeholder}
+                    readonly={false}
+                    create_tag={create_tag}
+                    on_change={Callback::from(move |value: Vec<std::rc::Rc<$crate::app::components::Tag>>| {
+                        state.set(value);
+                    })}
+                />
+            </div>
+        }
+    }};
 }
 
 #[macro_export]

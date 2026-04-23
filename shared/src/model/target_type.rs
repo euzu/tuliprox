@@ -1,3 +1,4 @@
+use crate::error::TuliproxError;
 use enum_iterator::Sequence;
 use std::{fmt::Display, str::FromStr};
 
@@ -36,7 +37,7 @@ impl Display for TargetType {
 }
 
 impl FromStr for TargetType {
-    type Err = String;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -44,7 +45,7 @@ impl FromStr for TargetType {
             Self::XTREAM => Ok(Self::Xtream),
             Self::STRM => Ok(Self::Strm),
             Self::HDHOMERUN => Ok(Self::HdHomeRun),
-            _ => Err(format!("Unknown TargetType: {}", s)),
+            _ => Err(TuliproxError::Config(format!("Unknown TargetType: {s}"))),
         }
     }
 }

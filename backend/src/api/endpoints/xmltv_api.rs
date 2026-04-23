@@ -1,16 +1,18 @@
 use crate::{
     api::{
         api_utils::{
-            create_api_proxy_user, empty_json_response_as_array, get_user_target, get_user_target_by_credentials,
-            internal_server_error, resource_response, stream_json_or_bin_response_stream,
-            try_option_forbidden, try_unwrap_body,
+            create_api_proxy_user, empty_json_response_as_array, get_user_target,
+            get_user_target_by_credentials, internal_server_error,
+            resource_response,
+            stream_json_or_bin_response_stream, try_unwrap_body,
         },
-        model::{AppState, UserApiRequestQueryOrBody, UserApiRequest},
+        model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
     },
+    auth::Fingerprint,
     model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
-        get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const, xtream_get_epg_file_path_for_target,
-        xtream_get_storage_path, BPlusTreeQuery, epg_query_channels, LockedReceiverStream, XML_PREAMBLE,
+        epg_query_channels, get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
+        xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -20,7 +22,7 @@ use crate::{
 };
 use axum::response::IntoResponse;
 use chrono::{DateTime, TimeZone};
-use log::{debug, error, trace};
+use log::{error, trace};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
@@ -38,6 +40,7 @@ use std::{
 use tokio::{io::AsyncWriteExt, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use crate::auth::resolve_api_user_context;
 use crate::model::ApiProxyServerInfo;
 
 pub fn get_empty_epg_response() -> axum::response::Response {
@@ -667,24 +670,18 @@ pub(crate) async fn stream_epg_api(
 /// let router = xmltv_api_register();
 /// // A GET request to /xmltv.php with valid query parameters will invoke this handler.
 /// ```
-async fn xmltv_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
+async fn xmltv_api(fingerprint: &Fingerprint, api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
     api_req.log_sanitized("xmltv_api");
     let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target(&api_req, app_state),
-        auth_status,
-        false,
-        format!("Could not find any user for xmltv api {}", api_req.username)
-    );
-
-    if user.permission_denied(app_state) {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
+    let Some((user, target)) = get_user_target(&api_req, app_state) else {
+        return auth_status.into_response();
+    };
+    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state) {
+        return e.into_player_response(auth_status);
     }
 
     let config = &app_state.app_config.config.load();
     let Some(epg_path) = get_epg_path_for_target(config, &target) else {
-        // No epg configured,  No processing or timeshift, epg can't be mapped to the channels.
-        // we do not deliver epg
         return get_empty_epg_response();
     };
 
@@ -692,34 +689,34 @@ async fn xmltv_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl I
 }
 
 async fn xmltv_api_get(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
 ) -> impl IntoResponse + Send {
-    xmltv_api(api_req, &app_state).await
+    xmltv_api(&fingerprint, api_req, &app_state).await
 }
 
 async fn xmltv_api_post(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     UserApiRequestQueryOrBody(api_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    xmltv_api(api_req, &app_state).await
+    xmltv_api(&fingerprint, api_req, &app_state).await
 }
 
 async fn epg_api_resource(
+    fingerprint: Fingerprint,
     req_headers: axum::http::HeaderMap,
     axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
     axum::extract::Path((username, password, resource)): axum::extract::Path<(String, String, String)>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, _target) = try_option_forbidden!(
-        get_user_target_by_credentials(&username, &password, &api_req, &app_state),
-        auth_status,
-        false,
-        format!("Could not find any user for epg resource {username}")
-    );
-    if user.permission_denied(&app_state) {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
+    let Some((user, target)) = get_user_target_by_credentials(&username, &password, &api_req, &app_state) else {
+        return auth_status.into_response();
+    };
+    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state) {
+        return e.into_player_response(auth_status);
     }
 
     let encrypt_secret = app_state.get_encrypt_secret();

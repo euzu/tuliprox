@@ -7,6 +7,7 @@ mod cache;
 mod config_type;
 mod epg;
 mod epg_smart_match;
+mod geoip;
 mod hdhomerun;
 mod input;
 mod ipcheck;
@@ -36,8 +37,8 @@ mod web_auth;
 mod web_ui;
 
 mod favourites;
-mod geoip;
 mod library;
+mod network_access;
 mod proxy_user_status;
 mod qos_aggregation;
 
@@ -60,6 +61,7 @@ pub use library::*;
 pub use log::*;
 pub use messaging::*;
 pub use metadata_update::*;
+pub use network_access::*;
 pub use panel_api::*;
 pub use paths::*;
 pub use pattern_template::*;

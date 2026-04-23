@@ -24,7 +24,45 @@ user:
         max_connections: 0
         status: Active
         ui_enabled: true
+        # network_access:
+        #   allowed_networks:
+        #     - "192.168.0.0/16"
+        #     - "10.0.0.0/8"
 
+      - username: vpn-only
+        password: vpnsecret
+        proxy: reverse
+        output_clusters: [live, vod, series]
+        server: external
+        max_connections: 2
+        status: Active
+        # Network access restriction — uses OR logic: matching ANY allowed_network
+        # OR ANY allowed_country is sufficient for access.
+        #
+        # Private/VPN ranges must use CIDR notation (/16, /24, /32 for single IPs).
+        # Country-based restrictions require GeoIP database to be configured.
+        # If GeoIP is unavailable and country restrictions exist, access is denied by default.
+        # To explicitly accept that risk globally, set this in config.yml:
+        #
+        # reverse_proxy:
+        #   geoip:
+        #     unavailable_policy: allow
+        #
+        # The policy is global, not per user. CIDR-only misses, unknown countries,
+        # and country mismatches still deny.
+        #
+        # Client IP is derived from X-Real-IP / X-Forwarded-For headers when behind
+        # a reverse proxy. Ensure your reverse proxy is configured to set these,
+        # otherwise network restrictions may not function correctly.
+        network_access:
+          allowed_networks:
+            - "10.200.0.0/16"    # WireGuard VPN range
+          allowed_countries:
+            - DE                 # Germany
+            - AT                 # Austria
+        ui_enabled: false
+
+      # No network restrictions — allow from any source
       - username: external
         password: externalsecret
         token: "77418"

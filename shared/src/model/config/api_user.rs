@@ -1,6 +1,6 @@
 use crate::{
     error::TuliproxError,
-    model::{ClusterFlags, ProxyType, ProxyUserStatus, XtreamCluster},
+    model::{ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserStatus, XtreamCluster},
     utils::{
         default_as_true, default_user_priority, deserialize_timestamp, is_blank_optional_string, is_cluster_optional,
         is_default_user_priority, is_true,
@@ -49,10 +49,20 @@ pub struct ProxyUserCredentialsDto {
     pub soft_connections: u16,
     #[serde(default = "default_user_priority", skip_serializing_if = "is_default_user_priority")]
     pub soft_priority: i8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<NetworkAccessDto>,
 }
 
 impl ProxyUserCredentialsDto {
-    pub fn prepare(&mut self) { self.trim(); }
+    pub fn prepare(&mut self) {
+        self.trim();
+        if let Some(na) = &mut self.network_access {
+            na.prepare();
+            if na.is_empty() {
+                self.network_access = None;
+            }
+        }
+    }
 
     fn trim(&mut self) {
         self.username = self.username.trim().to_string();
@@ -125,6 +135,7 @@ impl Default for ProxyUserCredentialsDto {
             priority: default_user_priority(),
             soft_connections: 0,
             soft_priority: default_user_priority(),
+            network_access: None,
         }
     }
 }

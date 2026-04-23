@@ -1,9 +1,11 @@
 use crate::{
     api::{
-        api_utils::{internal_server_error, try_unwrap_body},
+        api_utils::{
+            internal_server_error, try_unwrap_body,
+        },
         model::HdHomerunAppState,
     },
-    auth::AuthBasic,
+    auth::{AuthBasic, Fingerprint},
     model::{AppConfig, ConfigInputFlags, ConfigTarget, ProxyUserCredentials},
     processing::parser::xtream::get_xtream_url,
     repository::{iter_raw_m3u_target_playlist, M3uPlaylistIterator, XtreamPlaylistIterator},
@@ -20,6 +22,7 @@ use shared::{
     utils::concat_path,
 };
 use std::sync::Arc;
+use crate::auth::check_network_access_only;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Lineup {
@@ -259,15 +262,15 @@ async fn lineup_status(
         let final_state = if new_state > 100 { 100 } else { new_state };
 
         let cfg = Arc::clone(&app_state.app_state.app_config);
-        let num_of_channels = if let Some((user, target)) = cfg.get_target_for_username(&app_state.device.t_username) {
+        let num_of_channels = if let Some((credentials, target)) = cfg.get_target_for_username(&app_state.device.t_username) {
             if target.has_output(TargetType::M3u) {
-                let credentials = Arc::new(user);
                 if let Some(iter) = iter_raw_m3u_target_playlist(&cfg, &target, None).await {
+                    let cred = Arc::clone(&credentials);
                     iter.filter_map(move |res| {
-                        let credentials = Arc::clone(&credentials);
+                        let cred = Arc::clone(&cred);
                         async move {
                             let item = res.ok()?;
-                            credentials.allows_item_type(item.item_type).then_some(item)
+                            cred.allows_item_type(item.item_type).then_some(item)
                         }
                     })
                     .count()
@@ -276,17 +279,17 @@ async fn lineup_status(
                     0
                 }
             } else if target.has_output(TargetType::Xtream) {
-                let credentials = Arc::new(user);
-                let live = if credentials.allows_cluster(XtreamCluster::Live) {
-                    match XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &credentials).await {
+                let cred = Arc::clone(&credentials);
+                let live = if cred.allows_cluster(XtreamCluster::Live) {
+                    match XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &cred).await {
                         Ok(stream) => stream.count().await,
                         Err(_) => 0,
                     }
                 } else {
                     0
                 };
-                let vod = if credentials.allows_cluster(XtreamCluster::Video) {
-                    match XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &credentials).await {
+                let vod = if cred.allows_cluster(XtreamCluster::Video) {
+                    match XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &cred).await {
                         Ok(stream) => stream.count().await,
                         Err(_) => 0,
                     }
@@ -429,6 +432,7 @@ async fn lineup(
 }
 
 async fn auth_lineup_json(
+    fingerprint: Fingerprint,
     AuthBasic((username, password)): AuthBasic,
     axum::extract::State(app_state): axum::extract::State<Arc<HdHomerunAppState>>,
 ) -> impl IntoResponse {
@@ -437,18 +441,25 @@ async fn auth_lineup_json(
         if !username.eq(&credentials.username) || !password.eq(&credentials.password) {
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
-        let user_credentials = Arc::new(credentials);
+        if let Err(e) = check_network_access_only(&credentials, &fingerprint, &app_state.app_state) {
+            return e.into_player_response(app_state.app_state.app_config.get_auth_error_status());
+        }
+        let user_credentials = Arc::clone(&credentials);
         return lineup(&app_state, &cfg, &user_credentials, &target).await.into_response();
     }
     axum::http::StatusCode::NOT_FOUND.into_response()
 }
 
 async fn lineup_json(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<HdHomerunAppState>>,
 ) -> impl IntoResponse {
     let cfg = Arc::clone(&app_state.app_state.app_config);
     if let Some((credentials, target)) = cfg.get_target_for_username(&app_state.device.t_username) {
-        let user_credentials = Arc::new(credentials);
+        if let Err(e) = check_network_access_only(&credentials, &fingerprint, &app_state.app_state) {
+            return e.into_player_response(app_state.app_state.app_config.get_auth_error_status());
+        }
+        let user_credentials = Arc::clone(&credentials);
         return lineup(&app_state, &cfg, &user_credentials, &target).await.into_response();
     }
     axum::http::StatusCode::NOT_FOUND.into_response()
