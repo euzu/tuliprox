@@ -34,6 +34,7 @@ fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn update_generic_stream_metadata(
     app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
     input: &ConfigInput,
     unique_id: &str,
     stream_url: &str,
@@ -106,6 +107,9 @@ pub async fn update_generic_stream_metadata(
     }
 
     let probe_url = input.resolve_url(stream_url)?.into_owned();
+    let is_remote_probe = reqwest::Url::parse(&probe_url)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
@@ -128,16 +132,31 @@ pub async fn update_generic_stream_metadata(
         acquired_handle.as_ref().and_then(ProbeHandleGuard::handle),
         active_handle,
     );
-    let probe_data = FfmpegExecutor::new().probe_url_with_cancel(
-        &probe_url,
-        user_agent.as_deref(),
-        analyze_duration,
-        probe_size,
-        ffprobe_timeout,
-        config.proxy.as_ref(),
-        cancel_token,
-    )
-    .await;
+    let probe_data = if is_remote_probe {
+        FfmpegExecutor::new()
+            .probe_remote_url_with_cancel(
+                client,
+                &probe_url,
+                user_agent.as_deref(),
+                analyze_duration,
+                probe_size,
+                ffprobe_timeout,
+                cancel_token,
+            )
+            .await
+    } else {
+        FfmpegExecutor::new()
+            .probe_url_with_cancel(
+                &probe_url,
+                user_agent.as_deref(),
+                analyze_duration,
+                probe_size,
+                ffprobe_timeout,
+                config.proxy.as_ref(),
+                cancel_token,
+            )
+            .await
+    };
 
     if let Some(handle) = acquired_handle {
         handle.release().await;

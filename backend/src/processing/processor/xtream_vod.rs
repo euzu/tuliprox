@@ -837,6 +837,7 @@ pub async fn update_vod_metadata(
                 true,
                 true,
             );
+            let probe_url = input.resolve_url(&stream_url)?;
 
             let config = app_config.config.load();
             let metadata_update = config.metadata_update.clone().unwrap_or_default();
@@ -863,13 +864,13 @@ pub async fn update_vod_metadata(
                     temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
                     active_handle,
                 );
-                match FfmpegExecutor::new().probe_url_with_cancel(
-                    &stream_url,
+                match FfmpegExecutor::new().probe_remote_url_with_cancel(
+                    client,
+                    probe_url.as_ref(),
                     user_agent.as_deref(),
                     analyze_duration,
                     probe_size,
                     ffprobe_timeout,
-                    config.proxy.as_ref(),
                     cancel_token,
                 )
                 .await

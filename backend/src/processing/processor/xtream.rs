@@ -11,9 +11,10 @@ use crate::processing::parser::xtream::create_xtream_url;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
 
 /// Updates metadata for a single Live stream (primarily probing)
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn update_live_stream_metadata(
     app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
     input: &ConfigInput,
     id: ProviderIdType,
     save: bool,
@@ -134,13 +135,13 @@ pub async fn update_live_stream_metadata(
 
     let mut success = false;
     let mut not_found = false;
-    match FfmpegExecutor::new().probe_url(
+    match FfmpegExecutor::new().probe_remote_url(
+        client,
         probe_url_cow.as_ref(),
         user_agent.as_deref(),
         analyze_duration,
         probe_size,
         ffprobe_timeout,
-        config.proxy.as_ref(),
     )
     .await
     {
