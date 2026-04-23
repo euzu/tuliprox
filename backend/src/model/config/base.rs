@@ -434,7 +434,7 @@ mod tests {
                 geoip: Some(shared::model::GeoIpConfigDto {
                     enabled: true,
                     url: "https://example.com/db.csv".to_string(),
-                    unavailable_policy: shared::model::GeoIpUnavailablePolicy::Deny,
+                    ..shared::model::GeoIpConfigDto::default()
                 }),
                 ..Default::default()
             }),

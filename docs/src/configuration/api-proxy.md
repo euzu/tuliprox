@@ -127,7 +127,7 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 | `exp_date`              | UnixTs   |    No    | `None`     | Locks the user out after this Unix timestamp. **Requires** `user_access_control: true` in `config.yml` to be enforced.                                                                                                                                                                                                                                                                                                                |
 | `ui_enabled`            | Bool     |    No    | `true`     | Allows this specific user to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                                                                                                                                                                                                                              |
 | `priority`              | Int (i8) |    No    | `0`        | Stream preemption priority. Priority range: `-128` to `127`, where `-128` has the highest priority. Negative numbers are explicitly allowed for top-tier access. (see [user priority](#user-priorities-priority) below)                                                                                                                                                                                                               |
-| `network_access`        | Block    |    No    | `None`     | Per-user network/country access restrictions. Uses OR logic — matching ANY `allowed_network` (CIDR) OR ANY `allowed_country` grants access. Requires GeoIP for country checks. Client IP from `X-Real-IP` / `X-Forwarded-For`. See [Network Access Restrictions](#network-access-restrictions) below.                                                                                                                                 |
+| `network_access`        | Block    |    No    | `None`     | Per-user network/country access restrictions. Uses OR logic — matching ANY `allowed_networks` (CIDR) OR ANY `allowed_countries` grants access. Requires GeoIP for country checks. Client IP from `X-Real-IP` / `X-Forwarded-For`. See [Network Access Restrictions](#network-access-restrictions) below.                                                                                                                              |
 
 ---
 
@@ -137,7 +137,7 @@ Tuliprox supports per-user network access restrictions to limit streaming based 
 
 **How it works:**
 
-- Uses OR logic — matching ANY `allowed_network` (CIDR range) OR ANY `allowed_country` grants access
+- Uses OR logic — matching ANY `allowed_networks` (CIDR range) OR ANY `allowed_countries` grants access
 - `allowed_networks`: CIDR notation (e.g., `192.168.0.0/16`, `10.0.0.0/8`, `192.168.1.1/32` for single IPs)
 - `allowed_countries`: ISO 3166-1 alpha-2 country codes (e.g., `DE`, `US`). Requires GeoIP database
 - If no restrictions are configured, all IPs are allowed

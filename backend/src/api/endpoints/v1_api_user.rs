@@ -23,7 +23,9 @@ async fn save_config_api_proxy_user(
     };
     let _lock = app_state.app_config.file_locks.write_lock(Path::new(&api_proxy_file_path)).await;
 
-    credential.prepare();
+    if let Err(err) = credential.prepare() {
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
+    }
     if let Err(err) = credential.validate() {
         return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }

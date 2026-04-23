@@ -122,7 +122,9 @@ impl ApiProxyConfigDto {
         let mut tokens = HashSet::new();
         for target_user in &mut self.user {
             for user in &mut target_user.credentials {
-                user.prepare();
+                if let Err(err) = user.prepare() {
+                    errors.push(err.to_string());
+                }
                 if usernames.contains(&user.username) {
                     errors.push(format!("Non unique username found {}", &user.username));
                 } else {

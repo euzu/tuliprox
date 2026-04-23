@@ -619,11 +619,13 @@ impl NetworkAccessDenyReason {
 /// Do NOT log passwords or secrets.
 #[allow(clippy::uninlined_format_args)]
 pub fn log_network_access_denied(username: &str, client_ip: &str, reason: &str) {
+    let sanitized_username = sanitize_sensitive_info(username);
+    let sanitized_client_ip = sanitize_sensitive_info(client_ip);
     warn!(
         target: "network_access",
         "Network access denied: user=\"{}\" client_ip=\"{}\" reason={}",
-        username,
-        client_ip,
+        sanitized_username,
+        sanitized_client_ip,
         reason
     );
 }
@@ -654,12 +656,18 @@ pub fn evaluate_network_access(
         return NetworkAccessDecision::Allowed;
     }
 
+    let Ok(parsed_ip) = client_ip.parse::<std::net::IpAddr>() else {
+        return if access.allowed_countries.is_empty() {
+            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch)
+        } else {
+            NetworkAccessDecision::Denied(NetworkAccessDenyReason::CountryUnknown)
+        };
+    };
+
     // CIDR check
-    if let Ok(ip) = client_ip.parse::<std::net::IpAddr>() {
-        for net in &access.allowed_networks {
-            if net.contains(&ip) {
-                return NetworkAccessDecision::Allowed;
-            }
+    for net in &access.allowed_networks {
+        if net.contains(&parsed_ip) {
+            return NetworkAccessDecision::Allowed;
         }
     }
 
@@ -7706,6 +7714,19 @@ mod tests {
         }));
         let geoip = Arc::new(ArcSwapOption::from(Some(Arc::new(GeoIp::new()))));
         let decision = evaluate_network_access(&user, "8.8.8.8", &geoip, GeoIpUnavailablePolicy::Allow);
+        assert_eq!(decision, NetworkAccessDecision::Denied(NetworkAccessDenyReason::CountryUnknown));
+    }
+
+    #[test]
+    fn malformed_ip_denies_even_when_geoip_unavailable_policy_is_allow() {
+        let user = user_with_network_access(Some(NetworkAccess::from(&shared::model::NetworkAccessDto {
+            allowed_countries: Some(vec!["DE".to_string()]),
+            allowed_networks: None,
+        })));
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+
+        let decision = evaluate_network_access(&user, "not-an-ip", &geoip, GeoIpUnavailablePolicy::Allow);
+
         assert_eq!(decision, NetworkAccessDecision::Denied(NetworkAccessDenyReason::CountryUnknown));
     }
 

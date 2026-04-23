@@ -72,14 +72,14 @@ pub fn TagList(props: &TagListProps) -> Html {
                 return;
             }
 
-            let next_tag = create_tag.emit(val.clone()).unwrap_or(Tag { label: val.clone(), class: None });
-
-            if !tag_state.iter().any(|t| t.label == next_tag.label) {
-                let mut updated = (*tag_state).clone();
-                updated.push(Rc::new(next_tag));
-                on_change.emit(updated.clone());
-                tag_state.set(updated);
-                new_tag.set(String::new());
+            if let Some(next_tag) = create_tag.emit(val.clone()) {
+                if !tag_state.iter().any(|t| t.label == next_tag.label) {
+                    let mut updated = (*tag_state).clone();
+                    updated.push(Rc::new(next_tag));
+                    on_change.emit(updated.clone());
+                    tag_state.set(updated);
+                    new_tag.set(String::new());
+                }
             }
         })
     };

@@ -94,7 +94,8 @@ mod tests {
 
     #[test]
     fn geoip_config_with_allow_is_not_empty() {
-        let dto: GeoIpConfigDto = serde_json::from_str(r#"{"enabled": false, "unavailable_policy": "allow"}"#).unwrap();
+        let dto: GeoIpConfigDto =
+            serde_json::from_str(r#"{"enabled": false, "unavailable_policy": "allow", "url": ""}"#).unwrap();
         assert!(!dto.is_empty(), "is_empty() should return false for explicit allow policy");
     }
 

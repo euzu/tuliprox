@@ -36,8 +36,8 @@ user:
         server: external
         max_connections: 2
         status: Active
-        # Network access restriction — uses OR logic: matching ANY allowed_network
-        # OR ANY allowed_country is sufficient for access.
+        # Network access restriction — uses OR logic: matching ANY allowed_networks
+        # OR ANY allowed_countries is sufficient for access.
         #
         # Private/VPN ranges must use CIDR notation (/16, /24, /32 for single IPs).
         # Country-based restrictions require GeoIP database to be configured.

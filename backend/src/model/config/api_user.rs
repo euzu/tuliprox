@@ -137,7 +137,11 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             soft_connections: dto.soft_connections,
             soft_priority: dto.soft_priority,
             t_is_api_user: false,
-            network_access: dto.network_access.as_ref().map(NetworkAccess::from).filter(|na| !na.is_empty()),
+            network_access: dto
+                .network_access
+                .as_ref()
+                .map(NetworkAccess::from)
+                .filter(|network_access| !network_access.is_empty()),
         }
     }
 }

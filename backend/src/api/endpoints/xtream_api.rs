@@ -64,7 +64,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use crate::auth::check_network_access_only;
+use crate::auth::{check_network_access_only, resolve_api_user_context};
 // https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
 // Xtream api -> https://9tzx6f0ozj.apidog.io/
 
@@ -732,11 +732,8 @@ async fn xtream_player_api_resource(
     let Some((user, target)) = get_user_target_by_credentials(resource_req.username, resource_req.password, api_req, app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state) {
         return e.into_player_response(auth_status);
-    }
-    if user.permission_denied(app_state) {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let target_name = &target.name;
     if !target.has_output(TargetType::Xtream) {

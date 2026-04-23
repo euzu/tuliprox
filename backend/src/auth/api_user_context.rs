@@ -6,6 +6,7 @@ use crate::api::model::AppState;
 use crate::model::ProxyUserPermissionDenyReason;
 use axum::response::IntoResponse;
 use log::debug;
+use shared::utils::sanitize_sensitive_info;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -113,7 +114,7 @@ pub fn resolve_api_user_context(
     if let Some(reason) = user.permission_denied_reason(app_state) {
         debug!(
             "User access denied for {}: {:?}",
-            user.username,
+            sanitize_sensitive_info(&user.username),
             reason
         );
         return Err(ApiUserAuthError::PermissionDenied(reason.into()));

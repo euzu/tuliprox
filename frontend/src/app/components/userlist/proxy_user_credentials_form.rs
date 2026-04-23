@@ -21,7 +21,7 @@ use shared::{
     },
     utils::generate_random_string,
 };
-use std::rc::Rc;
+use std::{net::IpAddr, rc::Rc};
 use yew::prelude::*;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 1;
@@ -38,8 +38,22 @@ fn normalize_country_entry(input: &str) -> Result<String, &'static str> {
 
 fn normalize_network_entry(input: &str) -> Result<String, &'static str> {
     let normalized = input.trim().to_string();
-    if normalized.contains('/') && normalized.chars().all(|ch| ch.is_ascii_hexdigit() || matches!(ch, '.' | ':' | '/'))
-    {
+    let Some((address, prefix)) = normalized.split_once('/') else {
+        return Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS");
+    };
+    let address = address.trim().to_ascii_lowercase();
+    let prefix = prefix.trim();
+    let Ok(ip) = address.parse::<IpAddr>() else {
+        return Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS");
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS");
+    };
+    let prefix_valid = match ip {
+        IpAddr::V4(_) => prefix <= 32,
+        IpAddr::V6(_) => prefix <= 128,
+    };
+    if prefix_valid {
         Ok(normalized)
     } else {
         Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS")
@@ -52,10 +66,15 @@ fn build_network_access(countries: &[String], networks: &[String]) -> Option<Net
     if countries_list.is_empty() && networks_list.is_empty() {
         None
     } else {
-        Some(NetworkAccessDto {
+        let mut dto = NetworkAccessDto {
             allowed_countries: if countries_list.is_empty() { None } else { Some(countries_list) },
             allowed_networks: if networks_list.is_empty() { None } else { Some(networks_list) },
-        })
+        };
+        if dto.prepare().is_ok() {
+            Some(dto)
+        } else {
+            None
+        }
     }
 }
 
@@ -452,5 +471,18 @@ mod tests {
     #[test]
     fn normalize_network_entry_accepts_basic_cidr() {
         assert_eq!(normalize_network_entry("192.168.0.0/16"), Ok("192.168.0.0/16".to_string()));
+    }
+
+    #[test]
+    fn normalize_network_entry_rejects_invalid_prefix_range() {
+        assert_eq!(normalize_network_entry("192.168.0.0/33"), Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS"));
+    }
+
+    #[test]
+    fn build_network_access_prepares_countries_for_storage() {
+        assert_eq!(
+            build_network_access(&["de".to_string(), "DE".to_string()], &[]),
+            Some(NetworkAccessDto { allowed_countries: Some(vec!["DE".to_string()]), allowed_networks: None })
+        );
     }
 }

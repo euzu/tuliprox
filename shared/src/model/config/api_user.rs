@@ -54,14 +54,15 @@ pub struct ProxyUserCredentialsDto {
 }
 
 impl ProxyUserCredentialsDto {
-    pub fn prepare(&mut self) {
+    pub fn prepare(&mut self) -> Result<(), TuliproxError> {
         self.trim();
         if let Some(na) = &mut self.network_access {
-            na.prepare();
+            na.prepare()?;
             if na.is_empty() {
                 self.network_access = None;
             }
         }
+        Ok(())
     }
 
     fn trim(&mut self) {

@@ -40,10 +40,7 @@ fn is_grace_strategy(strategy: AdmissionStrategy) -> bool {
     matches!(strategy, AdmissionStrategy::GraceInstantStream | AdmissionStrategy::GraceHoldStream)
 }
 
-pub(crate) fn is_grace_strategy_tag(tag: &str) -> bool {
-    let tag = tag.trim();
-    tag.starts_with("grace_") || AdmissionStrategy::from_str(tag).is_ok_and(is_grace_strategy)
-}
+pub(crate) fn is_grace_strategy_tag(tag: &str) -> bool { tag.trim().starts_with("grace_") }
 
 pub(crate) fn admission_strategy_tags(strategies: Option<&Vec<AdmissionStrategy>>) -> Option<Vec<String>> {
     strategies.map(|entries| entries.iter().map(|entry| (*entry).to_string()).collect())
@@ -273,6 +270,23 @@ mod tests {
         let current = vec!["evict_user_oldest".to_string()];
         let new_tags = add_admission_strategy_tag(&current, AdmissionStrategy::EvictUserSameIpOldest);
         assert_eq!(new_tags, vec!["evict_user_same_ip_oldest".to_string(), "evict_user_oldest".to_string()]);
+    }
+
+    #[test]
+    fn add_admission_strategy_inserts_between_existing_narrower_and_broader_rules() {
+        let current =
+            vec![AdmissionStrategy::EvictUserSameIpOldest.to_string(), AdmissionStrategy::EvictUserOldest.to_string()];
+
+        let new_tags = add_admission_strategy_tag(&current, AdmissionStrategy::EvictUserSameIpLatest);
+
+        assert_eq!(
+            new_tags,
+            vec![
+                AdmissionStrategy::EvictUserSameIpOldest.to_string(),
+                AdmissionStrategy::EvictUserSameIpLatest.to_string(),
+                AdmissionStrategy::EvictUserOldest.to_string(),
+            ]
+        );
     }
 
     #[test]

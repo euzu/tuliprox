@@ -219,7 +219,7 @@ generate_form_reducer!(
 );
 
 fn geoip_unavailable_policy_options() -> Rc<Vec<String>> {
-    Rc::new(all::<GeoIpUnavailablePolicy>().collect::<Vec<_>>().iter().map(ToString::to_string).collect())
+    Rc::new(all::<GeoIpUnavailablePolicy>().map(|policy| policy.to_string()).collect())
 }
 
 #[component]
@@ -624,7 +624,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 <h1>{translate.t(LABEL_GEOIP)}</h1>
                 { config_field_bool!(geoip_state.form, translate.t(LABEL_ENABLED), enabled) }
                 { config_field!(geoip_state.form, translate.t(LABEL_URL), url) }
-                { config_field_child!(translate.t(LABEL_GEOIP_UNAVAILABLE_POLICY), "GEOIP_CONFIG.UNAVAILABLE_POLICY", {
+                { config_field_child!(translate.t(LABEL_GEOIP_UNAVAILABLE_POLICY), "GEO_IP_CONFIG.UNAVAILABLE_POLICY", {
                     html! {
                         <span class="tp__form-field__value">
                             {geoip_state.form.unavailable_policy.to_string()}
@@ -732,7 +732,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 <h1>{translate.t(LABEL_GEOIP)}</h1>
                 { edit_field_bool!(geoip_state, translate.t(LABEL_ENABLED), enabled, GeoIpConfigFormAction::Enabled) }
                 { edit_field_text!(geoip_state, translate.t(LABEL_URL), url, GeoIpConfigFormAction::Url) }
-                { config_field_child!(translate.t(LABEL_GEOIP_UNAVAILABLE_POLICY), "GEOIP_CONFIG.UNAVAILABLE_POLICY", {
+                { config_field_child!(translate.t(LABEL_GEOIP_UNAVAILABLE_POLICY), "GEO_IP_CONFIG.UNAVAILABLE_POLICY", {
                     html! {
                         <RadioButtonGroup
                             multi_select={false}
@@ -982,5 +982,18 @@ pub fn ReverseProxyConfigView() -> Html {
                 }
             }
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geoip_unavailable_policy_roundtrips_through_string_representation() {
+        for policy in all::<GeoIpUnavailablePolicy>() {
+            let parsed = GeoIpUnavailablePolicy::from_str(&policy.to_string()).unwrap_or(GeoIpUnavailablePolicy::Deny);
+            assert_eq!(parsed, policy);
+        }
     }
 }

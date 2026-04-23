@@ -343,9 +343,6 @@
       "TEMPLATES": "Handlebars templates for Discord message bodies.",
       "URL": "Discord webhook URL for sending notification messages."
     },
-    "GEOIP_CONFIG": {
-      "UNAVAILABLE_POLICY": "`deny` is the secure default. If Geo-IP is disabled, missing, or not loaded, country-based network access rules deny requests that did not match a configured CIDR.\n\n`allow` is an explicit risk acceptance. It allows country-based network access rules when Geo-IP is unavailable. CIDR-only misses, unknown countries, and country mismatches still deny."
-    },
     "BEST_MATCH_THRESHOLD": "High-confidence threshold (0-100). Matches above this value are accepted immediately as the best candidate.",
     "DNS_MAX_ADDRS": "Optional limit of resolved IP addresses kept per hostname. Leave empty for no explicit limit.",
     "FUZZY_MATCHING": "Allows fuzzy similarity matching if exact normalized ID matching fails.",
@@ -406,7 +403,8 @@
     },
     "GEO_IP_CONFIG": {
       "ENABLED": "If enabled, Geo-IP lookup is performed for incoming requests.",
-      "URL": "URL to download the Geo-IP database (e.g. MaxMind GeoLite2-City.mmdb)."
+      "URL": "URL to download the Geo-IP database (e.g. MaxMind GeoLite2-City.mmdb).",
+      "UNAVAILABLE_POLICY": "`deny` is the secure default. If Geo-IP is disabled, missing, or not loaded, country-based network access rules deny requests that did not match a configured CIDR.\n\n`allow` is an explicit risk acceptance. It allows country-based network access rules when Geo-IP is unavailable. CIDR-only misses, unknown countries, and country mismatches still deny."
     },
     "HD_HOME_RUN_CONFIG": {
       "AUTH": "Authentication string or token required for HDHomeRun API access.",
@@ -1564,8 +1562,8 @@
     "USER_DELETED": "User successfully deleted"
     ,
     "VALIDATION": {
-      "NETWORK_ACCESS_COUNTRIES": "Allowed countries must be comma-separated 2-letter ISO codes such as DE, AT, CH.",
-      "NETWORK_ACCESS_NETWORKS": "Allowed networks must be comma-separated CIDR values such as 192.168.0.0/16 or 2001:db8::/32."
+      "NETWORK_ACCESS_COUNTRIES": "Enter one 2-letter ISO country code per entry, for example DE.",
+      "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32."
     }
   },
   "SETUP": {

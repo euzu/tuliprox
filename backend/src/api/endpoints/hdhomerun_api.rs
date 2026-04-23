@@ -246,13 +246,20 @@ async fn discover_json(
 }
 
 async fn lineup_status(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<HdHomerunAppState>>,
 ) -> impl IntoResponse {
+    let cfg = Arc::clone(&app_state.app_state.app_config);
+    let network_access_denied = cfg
+        .get_target_for_username(&app_state.device.t_username)
+        .is_none_or(|(credentials, _)| {
+            check_network_access_only(&credentials, &fingerprint, &app_state.app_state).is_err()
+        });
     let current_state = app_state.hd_scan_state.load(std::sync::atomic::Ordering::Acquire);
-    if current_state < 0 {
+    if network_access_denied || current_state < 0 {
         axum::Json(json!({
             "ScanInProgress": 0,
-            "ScanPossible": 1,
+            "ScanPossible": i32::from(!network_access_denied),
             "Source": "Cable",
             "SourceList": ["Cable"],
         }))
@@ -325,9 +332,19 @@ struct LineupPostQuery {
 }
 
 async fn lineup_post(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<HdHomerunAppState>>,
     axum::extract::Query(query): axum::extract::Query<LineupPostQuery>,
 ) -> impl IntoResponse {
+    let cfg = Arc::clone(&app_state.app_state.app_config);
+    let allowed = cfg
+        .get_target_for_username(&app_state.device.t_username)
+        .is_some_and(|(credentials, _)| {
+            check_network_access_only(&credentials, &fingerprint, &app_state.app_state).is_ok()
+        });
+    if !allowed {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
     match query.scan.as_str() {
         "start" => {
             app_state.hd_scan_state.store(0, std::sync::atomic::Ordering::Release);
