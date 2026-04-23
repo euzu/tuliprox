@@ -39,7 +39,8 @@ user:
         # Network access restriction — uses OR logic: matching ANY allowed_networks
         # OR ANY allowed_countries is sufficient for access.
         #
-        # Private/VPN ranges must use CIDR notation (/16, /24, /32 for single IPs).
+        # Private/VPN ranges must use CIDR notation (/16, /24, /32 for single IPv4s,
+        # /128 for a single IPv6, e.g. 2001:db8::/32).
         # Country-based restrictions require GeoIP database to be configured.
         # If GeoIP is unavailable and country restrictions exist, access is denied by default.
         # To explicitly accept that risk globally, set this in config.yml:

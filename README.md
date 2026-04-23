@@ -233,9 +233,9 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **JWT authentication**: Compact bitmask encoding with password-version tracking for automatic token invalidation
 - **Rate limiting**: Per-IP rate limiting with configurable burst and period
 - **Content Security Policy**: Configurable CSP headers
-- **API User Network Access Restrictions**: Per-user `network_access` rules can restrict API proxy accounts by CIDR ranges
-  and/or GeoIP country codes. Matching any configured CIDR or country allows the request; otherwise the request is denied
-  before it is forwarded upstream.
+- **API User Network Access Restrictions**: Per-user `network_access` rules can restrict API proxy accounts by IPv4/IPv6
+  CIDR ranges and/or GeoIP country codes. Matching any configured CIDR or country allows the request; otherwise the
+  request is denied before it is forwarded upstream.
 - **GeoIP-Unavailable Policy**: Country-based network restrictions default to `deny` when GeoIP is disabled, missing, or not
   loaded. Operators can explicitly accept that risk with `reverse_proxy.geoip.unavailable_policy: allow`; CIDR-only misses,
   unknown countries, and country mismatches still deny.

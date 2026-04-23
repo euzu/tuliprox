@@ -1,5 +1,4 @@
 use crate::error::TuliproxError;
-use std::net::IpAddr;
 
 fn is_empty_vec<T>(v: &Option<Vec<T>>) -> bool { v.as_ref().is_none_or(|v| v.is_empty()) }
 
@@ -40,36 +39,48 @@ impl NetworkAccessDto {
             let mut deduped = Vec::new();
             let mut seen = std::collections::HashSet::new();
             for network in networks.drain(..) {
-                let trimmed = network.trim().to_string();
+                let trimmed = network.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
-                let Some((addr, prefix)) = trimmed.split_once('/') else {
-                    return Err(TuliproxError::ProxyUser(format!(
-                        "Invalid network_access.allowed_networks entry '{trimmed}', expected CIDR"
-                    )));
+                let network_str = trimmed.to_string();
+                let ip: std::net::IpAddr = match network_str.split('/').next() {
+                    Some(addr) => addr.trim().parse().map_err(|_| {
+                        TuliproxError::ProxyUser(format!(
+                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
+                        ))
+                    })?,
+                    None => {
+                        return Err(TuliproxError::ProxyUser(format!(
+                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
+                        )));
+                    }
                 };
-                let ip = addr.trim().parse::<IpAddr>().map_err(|_| {
-                    TuliproxError::ProxyUser(format!(
-                        "Invalid network_access.allowed_networks entry '{trimmed}', expected CIDR"
-                    ))
-                })?;
-                let prefix = prefix.trim().parse::<u8>().map_err(|_| {
-                    TuliproxError::ProxyUser(format!(
-                        "Invalid network_access.allowed_networks entry '{trimmed}', expected CIDR"
-                    ))
-                })?;
+                let prefix: u8 = match network_str.split('/').nth(1) {
+                    Some(p) => p.trim().parse().map_err(|_| {
+                        TuliproxError::ProxyUser(format!(
+                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
+                        ))
+                    })?,
+                    None => {
+                        return Err(TuliproxError::ProxyUser(format!(
+                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
+                        )));
+                    }
+                };
                 let prefix_valid = match ip {
-                    IpAddr::V4(_) => prefix <= 32,
-                    IpAddr::V6(_) => prefix <= 128,
+                    std::net::IpAddr::V4(_) => prefix <= 32,
+                    std::net::IpAddr::V6(_) => prefix <= 128,
                 };
                 if !prefix_valid {
                     return Err(TuliproxError::ProxyUser(format!(
-                        "Invalid network_access.allowed_networks entry '{trimmed}', expected CIDR"
+                        "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
                     )));
                 }
-                if seen.insert(trimmed.clone()) {
-                    deduped.push(trimmed);
+                // Normalize to canonical network representation (network address / prefix)
+                let canonical_str = canonicalize_cidr(ip, prefix);
+                if seen.insert(canonical_str.clone()) {
+                    deduped.push(canonical_str);
                 }
             }
             *networks = deduped;
@@ -81,6 +92,23 @@ impl NetworkAccessDto {
             self.allowed_networks = None;
         }
         Ok(())
+    }
+}
+
+fn canonicalize_cidr(ip: std::net::IpAddr, prefix: u8) -> String {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            let network_addr = u32::from(ipv4) & mask;
+            let network_ip = std::net::Ipv4Addr::from(network_addr);
+            format!("{network_ip}/{prefix}")
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            let network_addr = u128::from(ipv6) & mask;
+            let network_ip = std::net::Ipv6Addr::from(network_addr);
+            format!("{network_ip}/{prefix}")
+        }
     }
 }
 
@@ -188,5 +216,42 @@ mod tests {
         let mut dto =
             NetworkAccessDto { allowed_countries: None, allowed_networks: Some(vec!["not-a-cidr".to_string()]) };
         assert!(dto.prepare().is_err());
+    }
+
+    #[test]
+    fn prepare_normalizes_and_deduplicates_cidrs() {
+        // "10.0.0.1/8" should be normalized to "10.0.0.0/8" (canonical network form)
+        // and deduplicated against an explicit "10.0.0.0/8"
+        let mut dto = NetworkAccessDto {
+            allowed_networks: Some(vec![
+                "10.0.0.1/8".to_string(),         // non-canonical, equivalent to 10.0.0.0/8
+                "10.0.0.0/8".to_string(),         // canonical, duplicate after normalization
+                "192.168.1.42/24".to_string(),    // canonical
+                "  192.168.1.0/24  ".to_string(), // needs trimming
+            ]),
+            ..Default::default()
+        };
+        dto.prepare().unwrap();
+        let networks = dto.allowed_networks.unwrap();
+        assert_eq!(networks.len(), 2, "expected 2 unique networks, got {networks:?}");
+        assert!(networks.iter().any(|n| n == "10.0.0.0/8"), "missing 10.0.0.0/8 in {networks:?}");
+        assert!(networks.iter().any(|n| n == "192.168.1.0/24"), "missing 192.168.1.0/24 in {networks:?}");
+    }
+
+    #[test]
+    fn prepare_rejects_invalid_prefix() {
+        let mut dto =
+            NetworkAccessDto { allowed_networks: Some(vec!["192.168.1.0/33".to_string()]), ..Default::default() };
+        assert!(dto.prepare().is_err());
+    }
+
+    #[test]
+    fn prepare_accepts_and_canonicalizes_zero_prefix_networks() {
+        let mut dto = NetworkAccessDto {
+            allowed_networks: Some(vec!["10.1.2.3/0".to_string(), "2001:db8::1/0".to_string()]),
+            ..Default::default()
+        };
+        assert!(dto.prepare().is_ok());
+        assert_eq!(dto.allowed_networks, Some(vec!["0.0.0.0/0".to_string(), "::/0".to_string()]));
     }
 }

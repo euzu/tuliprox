@@ -602,6 +602,7 @@ pub enum NetworkAccessDenyReason {
     NoCountryMatch,
     GeoIpUnavailable,
     CountryUnknown,
+    MalformedClientIp,
 }
 
 impl NetworkAccessDenyReason {
@@ -611,6 +612,7 @@ impl NetworkAccessDenyReason {
             Self::NoCountryMatch => "no_country_match",
             Self::GeoIpUnavailable => "geoip_unavailable",
             Self::CountryUnknown => "country_unknown",
+            Self::MalformedClientIp => "malformed_client_ip",
         }
     }
 }
@@ -657,11 +659,7 @@ pub fn evaluate_network_access(
     }
 
     let Ok(parsed_ip) = client_ip.parse::<std::net::IpAddr>() else {
-        return if access.allowed_countries.is_empty() {
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch)
-        } else {
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::CountryUnknown)
-        };
+        return NetworkAccessDecision::Denied(NetworkAccessDenyReason::MalformedClientIp);
     };
 
     // CIDR check
@@ -7727,7 +7725,7 @@ mod tests {
 
         let decision = evaluate_network_access(&user, "not-an-ip", &geoip, GeoIpUnavailablePolicy::Allow);
 
-        assert_eq!(decision, NetworkAccessDecision::Denied(NetworkAccessDenyReason::CountryUnknown));
+        assert_eq!(decision, NetworkAccessDecision::Denied(NetworkAccessDenyReason::MalformedClientIp));
     }
 
     #[test]

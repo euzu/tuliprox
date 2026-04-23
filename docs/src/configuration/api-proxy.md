@@ -138,7 +138,9 @@ Tuliprox supports per-user network access restrictions to limit streaming based 
 **How it works:**
 
 - Uses OR logic — matching ANY `allowed_networks` (CIDR range) OR ANY `allowed_countries` grants access
-- `allowed_networks`: CIDR notation (e.g., `192.168.0.0/16`, `10.0.0.0/8`, `192.168.1.1/32` for single IPs)
+- `allowed_networks`: CIDR notation for IPv4 and IPv6
+  (e.g., `192.168.0.0/16`, `10.0.0.0/8`, `192.168.1.1/32` for a single IPv4,
+  `2001:db8::/32` or `2001:db8::1/128` for IPv6)
 - `allowed_countries`: ISO 3166-1 alpha-2 country codes (e.g., `DE`, `US`). Requires GeoIP database
 - If no restrictions are configured, all IPs are allowed
 - If GeoIP is unavailable and country restrictions exist, access is denied by default
@@ -157,6 +159,7 @@ network_access:
   allowed_networks:
     - "10.200.0.0/16"    # VPN range
     - "192.168.1.1/32"   # Single IP
+    - "2001:db8::/32"    # IPv6 range
   allowed_countries:
     - DE                 # Germany
     - AT                 # Austria
@@ -173,7 +176,7 @@ reverse_proxy:
 
 **Operator logging:** Denied requests emit structured logs:
 `Network access denied: user="john" client_ip="203.0.113.5" reason=no_country_match`. Possible reasons:
-`no_cidr_match`, `no_country_match`, `geoip_unavailable`, `country_unknown`.
+`no_cidr_match`, `no_country_match`, `geoip_unavailable`, `country_unknown`, `malformed_client_ip`.
 
 ---
 

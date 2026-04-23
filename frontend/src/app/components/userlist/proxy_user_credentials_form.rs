@@ -60,26 +60,27 @@ fn normalize_network_entry(input: &str) -> Result<String, &'static str> {
     }
 }
 
-fn build_network_access(countries: &[String], networks: &[String]) -> Option<NetworkAccessDto> {
+fn build_network_access(countries: &[String], networks: &[String]) -> Result<Option<NetworkAccessDto>, String> {
     let countries_list = countries.iter().filter(|s| !s.trim().is_empty()).cloned().collect::<Vec<_>>();
     let networks_list = networks.iter().filter(|s| !s.trim().is_empty()).cloned().collect::<Vec<_>>();
     if countries_list.is_empty() && networks_list.is_empty() {
-        None
-    } else {
-        let mut dto = NetworkAccessDto {
-            allowed_countries: if countries_list.is_empty() { None } else { Some(countries_list) },
-            allowed_networks: if networks_list.is_empty() { None } else { Some(networks_list) },
-        };
-        if dto.prepare().is_ok() {
-            Some(dto)
-        } else {
-            None
-        }
+        return Ok(None);
     }
+    let mut dto = NetworkAccessDto {
+        allowed_countries: if countries_list.is_empty() { None } else { Some(countries_list) },
+        allowed_networks: if networks_list.is_empty() { None } else { Some(networks_list) },
+    };
+    dto.prepare().map_err(|e| e.to_string())?;
+    Ok(Some(dto))
 }
 
-fn network_access_changed(original: Option<&NetworkAccessDto>, countries: &[String], networks: &[String]) -> bool {
-    original != build_network_access(countries, networks).as_ref()
+fn network_access_changed(
+    original: Option<&NetworkAccessDto>,
+    countries: &[String],
+    networks: &[String],
+) -> Result<bool, String> {
+    let built = build_network_access(countries, networks)?;
+    Ok(original != built.as_ref())
 }
 
 fn validate_network_access(countries: &[String], networks: &[String]) -> Result<(), &'static str> {
@@ -247,18 +248,30 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 let target_changed = target_name != original_target;
                 let countries_value = countries.iter().map(|tag| tag.label.clone()).collect::<Vec<_>>();
                 let networks_value = networks.iter().map(|tag| tag.label.clone()).collect::<Vec<_>>();
-                let network_access_changed = network_access_changed(
+                let network_access_changed = match network_access_changed(
                     original.as_ref().and_then(|u| u.credentials.network_access.as_ref()),
                     &countries_value,
                     &networks_value,
-                );
+                ) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        services.toastr.error(err);
+                        return;
+                    }
+                };
                 if target_changed || user.modified() || network_access_changed {
                     let mut user = user.data().clone();
                     if let Err(message_key) = validate_network_access(&countries_value, &networks_value) {
                         services.toastr.error(translate_clone.t(message_key));
                         return;
                     }
-                    user.network_access = build_network_access(&countries_value, &networks_value);
+                    user.network_access = match build_network_access(&countries_value, &networks_value) {
+                        Ok(na) => na,
+                        Err(err) => {
+                            services.toastr.error(err);
+                            return;
+                        }
+                    };
                     if let Err(err) = user.validate() {
                         services.toastr.error(err.to_string());
                     } else {
@@ -418,13 +431,13 @@ mod tests {
 
     #[test]
     fn build_network_access_returns_none_for_empty_inputs() {
-        assert_eq!(build_network_access(&[], &[]), None);
+        assert_eq!(build_network_access(&[], &[]), Ok(None));
     }
 
     #[test]
     fn network_access_changed_detects_network_only_edit() {
         let original = None;
-        assert!(network_access_changed(original, &["DE".to_string()], &[]));
+        assert!(network_access_changed(original, &["DE".to_string()], &[]).unwrap());
     }
 
     #[test]
@@ -433,7 +446,21 @@ mod tests {
             allowed_countries: Some(vec!["DE".to_string(), "AT".to_string()]),
             allowed_networks: Some(vec!["10.0.0.0/8".to_string()]),
         });
-        assert!(!network_access_changed(original, &["DE".to_string(), "AT".to_string()], &["10.0.0.0/8".to_string()],));
+        assert!(!network_access_changed(original, &["DE".to_string(), "AT".to_string()], &["10.0.0.0/8".to_string()])
+            .unwrap());
+    }
+
+    #[test]
+    fn build_network_access_prepares_countries_for_storage() {
+        let result = build_network_access(&["de".to_string(), "DE".to_string()], &[]);
+        let dto = result.unwrap().unwrap();
+        assert_eq!(dto.allowed_countries, Some(vec!["DE".to_string()]));
+    }
+
+    #[test]
+    fn build_network_access_propagates_invalid_cidr_error() {
+        let result = build_network_access(&[], &["not-a-cidr".to_string()]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -476,13 +503,5 @@ mod tests {
     #[test]
     fn normalize_network_entry_rejects_invalid_prefix_range() {
         assert_eq!(normalize_network_entry("192.168.0.0/33"), Err("MESSAGES.VALIDATION.NETWORK_ACCESS_NETWORKS"));
-    }
-
-    #[test]
-    fn build_network_access_prepares_countries_for_storage() {
-        assert_eq!(
-            build_network_access(&["de".to_string(), "DE".to_string()], &[]),
-            Some(NetworkAccessDto { allowed_countries: Some(vec!["DE".to_string()]), allowed_networks: None })
-        );
     }
 }

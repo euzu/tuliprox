@@ -19,7 +19,7 @@ use crate::{
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
     edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u16,
     edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
-    i18n::use_translation,
+    i18n::{use_translation, YewI18n},
 };
 use enum_iterator::all;
 use shared::{
@@ -220,6 +220,20 @@ generate_form_reducer!(
 
 fn geoip_unavailable_policy_options() -> Rc<Vec<String>> {
     Rc::new(all::<GeoIpUnavailablePolicy>().map(|policy| policy.to_string()).collect())
+}
+
+pub(crate) fn geoip_unavailable_policy_label(translate: &YewI18n, policy: GeoIpUnavailablePolicy) -> String {
+    match policy {
+        GeoIpUnavailablePolicy::Deny => translate.t("LABEL.GEOIP_UNAVAILABLE_POLICY_DENY"),
+        GeoIpUnavailablePolicy::Allow => translate.t("LABEL.GEOIP_UNAVAILABLE_POLICY_ALLOW"),
+    }
+}
+
+fn geoip_unavailable_policy_labels(translate: &YewI18n) -> Rc<Vec<String>> {
+    Rc::new(vec![
+        geoip_unavailable_policy_label(translate, GeoIpUnavailablePolicy::Deny),
+        geoip_unavailable_policy_label(translate, GeoIpUnavailablePolicy::Allow),
+    ])
 }
 
 #[component]
@@ -627,7 +641,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 { config_field_child!(translate.t(LABEL_GEOIP_UNAVAILABLE_POLICY), "GEO_IP_CONFIG.UNAVAILABLE_POLICY", {
                     html! {
                         <span class="tp__form-field__value">
-                            {geoip_state.form.unavailable_policy.to_string()}
+                            {geoip_unavailable_policy_label(&translate, geoip_state.form.unavailable_policy)}
                         </span>
                     }
                 }) }
@@ -738,6 +752,7 @@ pub fn ReverseProxyConfigView() -> Html {
                             multi_select={false}
                             none_allowed={false}
                             options={geoip_unavailable_policy_options()}
+                            labels={Some(geoip_unavailable_policy_labels(&translate))}
                             selected={selected_policy}
                             on_select={Callback::from(move |selections: Rc<Vec<String>>| {
                                 if let Some(selection) = selections.first() {

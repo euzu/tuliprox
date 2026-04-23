@@ -1,9 +1,13 @@
-use crate::api::api_utils::{
-    evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
-    NetworkAccessDecision, NetworkAccessDenyReason,
+use crate::{
+    api::{
+        api_utils::{
+            evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
+            NetworkAccessDecision, NetworkAccessDenyReason,
+        },
+        model::AppState,
+    },
+    model::ProxyUserPermissionDenyReason,
 };
-use crate::api::model::AppState;
-use crate::model::ProxyUserPermissionDenyReason;
 use axum::response::IntoResponse;
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
@@ -41,22 +45,19 @@ impl std::fmt::Display for ApiUserAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApiUserAuthError::AuthFailed => write!(f, "Authentication failed"),
-            ApiUserAuthError::PermissionDenied(reason) => {
-                match reason {
-                    PermissionDenyReason::Expired => write!(f, "User access denied, expired"),
-                    PermissionDenyReason::Disabled => write!(f, "User access denied, status disabled"),
-                    PermissionDenyReason::Banned => write!(f, "User access denied, status banned"),
-                    PermissionDenyReason::Inactive => write!(f, "User access denied, status inactive"),
-                }
-            }
-            ApiUserAuthError::NetworkDenied(reason) => {
-                match reason {
-                    NetworkAccessDenyReason::NoCidrMatch => write!(f, "Network access denied, no CIDR match"),
-                    NetworkAccessDenyReason::NoCountryMatch => write!(f, "Network access denied, no country match"),
-                    NetworkAccessDenyReason::GeoIpUnavailable => write!(f, "Network access denied, GeoIP unavailable"),
-                    NetworkAccessDenyReason::CountryUnknown => write!(f, "Network access denied, country unknown"),
-                }
-            }
+            ApiUserAuthError::PermissionDenied(reason) => match reason {
+                PermissionDenyReason::Expired => write!(f, "User access denied, expired"),
+                PermissionDenyReason::Disabled => write!(f, "User access denied, status disabled"),
+                PermissionDenyReason::Banned => write!(f, "User access denied, status banned"),
+                PermissionDenyReason::Inactive => write!(f, "User access denied, status inactive"),
+            },
+            ApiUserAuthError::NetworkDenied(reason) => match reason {
+                NetworkAccessDenyReason::NoCidrMatch => write!(f, "Network access denied, no CIDR match"),
+                NetworkAccessDenyReason::NoCountryMatch => write!(f, "Network access denied, no country match"),
+                NetworkAccessDenyReason::GeoIpUnavailable => write!(f, "Network access denied, GeoIP unavailable"),
+                NetworkAccessDenyReason::CountryUnknown => write!(f, "Network access denied, country unknown"),
+                NetworkAccessDenyReason::MalformedClientIp => write!(f, "Network access denied, malformed client IP"),
+            },
         }
     }
 }
@@ -104,6 +105,20 @@ pub fn check_network_access_only(
     }
 }
 
+/// Checks network access without logging. Used for high-frequency polling endpoints
+/// (e.g., `HDHomeRun` `lineup_status`) where repeated log output would be noisy.
+pub fn try_check_network_access_only(
+    user: &Arc<crate::model::ProxyUserCredentials>,
+    fingerprint: &crate::auth::Fingerprint,
+    app_state: &Arc<AppState>,
+) -> Result<(), ApiUserAuthError> {
+    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+        NetworkAccessDecision::Allowed | NetworkAccessDecision::AllowedGeoIpUnavailable => Ok(()),
+        NetworkAccessDecision::Denied(reason) => Err(ApiUserAuthError::NetworkDenied(reason)),
+    }
+}
+
 pub fn resolve_api_user_context(
     user: Arc<crate::model::ProxyUserCredentials>,
     target: Arc<crate::model::ConfigTarget>,
@@ -112,11 +127,7 @@ pub fn resolve_api_user_context(
 ) -> Result<ApiUserContext, ApiUserAuthError> {
     // Permission check
     if let Some(reason) = user.permission_denied_reason(app_state) {
-        debug!(
-            "User access denied for {}: {:?}",
-            sanitize_sensitive_info(&user.username),
-            reason
-        );
+        debug!("User access denied for {}: {:?}", sanitize_sensitive_info(&user.username), reason);
         return Err(ApiUserAuthError::PermissionDenied(reason.into()));
     }
 
@@ -127,6 +138,34 @@ pub fn resolve_api_user_context(
         NetworkAccessDecision::AllowedGeoIpUnavailable => {
             log_network_access_allowed_geoip_unavailable(&user.username, &fingerprint.client_ip);
             Ok(ApiUserContext { user, target, fingerprint })
+        }
+        NetworkAccessDecision::Denied(reason) => {
+            log_network_access_denied(&user.username, &fingerprint.client_ip, reason.as_str());
+            Err(ApiUserAuthError::NetworkDenied(reason))
+        }
+    }
+}
+
+/// Checks permission and network access without taking ownership. Used when
+/// user/target are needed after the auth check (avoids unnecessary Arc clones).
+pub fn check_permission_and_network_access_only(
+    user: &Arc<crate::model::ProxyUserCredentials>,
+    fingerprint: &crate::auth::Fingerprint,
+    app_state: &Arc<AppState>,
+) -> Result<(), ApiUserAuthError> {
+    // Permission check
+    if let Some(reason) = user.permission_denied_reason(app_state) {
+        debug!("User access denied for {}: {:?}", sanitize_sensitive_info(&user.username), reason);
+        return Err(ApiUserAuthError::PermissionDenied(reason.into()));
+    }
+
+    // Network access check
+    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+        NetworkAccessDecision::Allowed => Ok(()),
+        NetworkAccessDecision::AllowedGeoIpUnavailable => {
+            log_network_access_allowed_geoip_unavailable(&user.username, &fingerprint.client_ip);
+            Ok(())
         }
         NetworkAccessDecision::Denied(reason) => {
             log_network_access_denied(&user.username, &fingerprint.client_ip, reason.as_str());
