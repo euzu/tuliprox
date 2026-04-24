@@ -4,8 +4,8 @@ use crate::model::{AppConfig};
 use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};
 use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
 use crate::utils::debug_if_enabled;
-use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome};
-use log::{info, warn};
+use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome};
+use log::{debug, info, warn};
 use shared::error::TuliproxError;
 use shared::model::{EpisodeStreamProperties, InputType, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, LiveStreamProperties, M3uPlaylistItem, XtreamCluster, XtreamPlaylistItem};
 use std::sync::Arc;
@@ -107,6 +107,10 @@ pub async fn update_generic_stream_metadata(
     }
 
     let probe_url = input.resolve_url(stream_url)?.into_owned();
+    if !is_supported_probe_url(&probe_url) {
+        debug!("Skipping unsupported generic stream probe for {unique_id}: {probe_url}");
+        return Ok(GenericProbeOutcome::Noop);
+    }
     let is_remote_probe = reqwest::Url::parse(&probe_url)
         .ok()
         .is_some_and(|url| matches!(url.scheme(), "http" | "https"));

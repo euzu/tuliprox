@@ -6,12 +6,12 @@ use reqwest::{
 };
 use serde_json::Value;
 use shared::model::MediaQuality;
-use shared::utils::{default_thumbnail_height, default_thumbnail_width, sanitize_sensitive_info};
+use shared::utils::{default_thumbnail_height, default_thumbnail_width, is_hls_url, sanitize_sensitive_info};
 use std::path::Path;
 use std::io::ErrorKind;
 use std::process::{Output, Stdio};
 use std::time::Duration;
-use tokio::{io::AsyncWriteExt, process::{Child, Command}};
+use tokio::{io::AsyncWriteExt, process::Command};
 use url::Url;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
@@ -254,16 +254,6 @@ impl FfmpegExecutor {
         analyze_duration: u64,
         probe_size: u64,
     ) -> ProbeUrlOutcome {
-        let probe_bytes = match fetch_probe_bytes(client, url, user_agent, probe_size).await {
-            Ok(bytes) => bytes,
-            Err(kind) => return ProbeUrlOutcome::Failed(kind),
-        };
-
-        if probe_bytes.is_empty() {
-            warn!("ffprobe remote stdin probe received no bytes for {}", sanitize_sensitive_info(url));
-            return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
-        }
-
         let mut command = Command::new("ffprobe");
         command
             .kill_on_drop(true)
@@ -283,7 +273,7 @@ impl FfmpegExecutor {
             .arg("-i")
             .arg("pipe:0");
 
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
                 warn!("ffprobe execution failed for {}: {}", sanitize_sensitive_info(url), err);
@@ -291,8 +281,61 @@ impl FfmpegExecutor {
             }
         };
 
-        run_ffprobe_with_stdin(child, &probe_bytes, url).await
+        let Some(mut stdin) = child.stdin.take() else {
+            warn!("ffprobe stdin unavailable for {}", sanitize_sensitive_info(url));
+            return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
+        };
+
+        let max_bytes = if probe_size == 0 { usize::MAX } else { usize::try_from(probe_size).unwrap_or(usize::MAX) };
+        let fetch_result = stream_probe_bytes_to_stdin(&mut stdin, client, url, user_agent, probe_size, max_bytes).await;
+
+        let stdin_err = match fetch_result {
+            Ok(()) => None,
+            Err(ProbeFailureKind::NotFound) => {
+                let _ = child.kill().await;
+                return ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound);
+            }
+            Err(kind) => Some(kind),
+        };
+
+        if let Err(err) = stdin.shutdown().await {
+            if err.kind() != ErrorKind::BrokenPipe {
+                debug!(
+                    "ffprobe stdin shutdown reported {} for {}, continuing with child output",
+                    err,
+                    sanitize_sensitive_info(url)
+                );
+            }
+        }
+        drop(stdin);
+
+        match child.wait_with_output().await {
+            Ok(output) => {
+                if let Some(kind) = stdin_err {
+                    debug!("ffprobe remote stdin probe had fetch error, checking child output for {}", sanitize_sensitive_info(url));
+                    let outcome = parse_ffprobe_output(url, &output);
+                    if matches!(outcome, ProbeUrlOutcome::Success(..)) {
+                        return outcome;
+                    }
+                    ProbeUrlOutcome::Failed(kind)
+                } else {
+                    parse_ffprobe_output(url, &output)
+                }
+            }
+            Err(err) => {
+                warn!("ffprobe execution failed for {}: {}", sanitize_sensitive_info(url), err);
+                ProbeUrlOutcome::Failed(stdin_err.unwrap_or(ProbeFailureKind::Other))
+            }
+        }
     }
+}
+
+#[must_use]
+pub fn is_supported_probe_url(url: &str) -> bool {
+    // TODO: HLS manifests are intentionally unsupported for ffprobe-based metadata extraction for now.
+    // Probing them correctly requires explicit variant selection and base-url aware follow-up fetching,
+    // which we do not model yet. Revisit this once HLS probing semantics are defined.
+    !is_hls_url(url)
 }
 
 fn format_ffmpeg_timeout_error(args: &[String]) -> String {
@@ -303,12 +346,97 @@ fn format_ffmpeg_timeout_error(args: &[String]) -> String {
     )
 }
 
+async fn stream_probe_bytes_to_stdin<W>(
+    stdin: &mut W,
+    client: &Client,
+    url: &str,
+    user_agent: Option<&str>,
+    probe_size_header: u64,
+    max_bytes: usize,
+) -> Result<(), ProbeFailureKind>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut request = client.get(url);
+    if let Some(ua) = user_agent {
+        request = request.header(USER_AGENT, ua);
+    }
+    if probe_size_header > 0 {
+        request = request.header(RANGE, format!("bytes=0-{}", probe_size_header.saturating_sub(1)));
+    }
+
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            warn!("ffprobe fetch failed for {}: {}", sanitize_sensitive_info(url), err);
+            return Err(ProbeFailureKind::Other);
+        }
+    };
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(ProbeFailureKind::NotFound);
+    }
+    if !response.status().is_success() && response.status() != StatusCode::PARTIAL_CONTENT {
+        warn!(
+            "ffprobe fetch returned {} for {}",
+            response.status(),
+            sanitize_sensitive_info(url)
+        );
+        return Err(ProbeFailureKind::Other);
+    }
+
+    let mut total_written: usize = 0;
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(err) => {
+                warn!("ffprobe fetch body failed for {}: {}", sanitize_sensitive_info(url), err);
+                return Err(ProbeFailureKind::Other);
+            }
+        };
+
+        let remaining = max_bytes.saturating_sub(total_written);
+        let to_write = if chunk.len() <= remaining {
+            chunk.len()
+        } else {
+            remaining
+        };
+
+        if to_write > 0 {
+            match stdin.write_all(&chunk[..to_write]).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::BrokenPipe => {
+                    debug!(
+                        "ffprobe closed stdin early for {}, stopping fetch",
+                        sanitize_sensitive_info(url)
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    warn!("ffprobe stdin write failed for {}: {}", sanitize_sensitive_info(url), err);
+                    return Err(ProbeFailureKind::Other);
+                }
+            }
+            total_written += to_write;
+        }
+
+        if total_written >= max_bytes {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
 async fn fetch_probe_bytes(
     client: &Client,
     url: &str,
     user_agent: Option<&str>,
     probe_size: u64,
 ) -> Result<Vec<u8>, ProbeFailureKind> {
+    let max_bytes = if probe_size == 0 { usize::MAX } else { usize::try_from(probe_size).unwrap_or(usize::MAX) };
     let mut request = client.get(url);
     if let Some(ua) = user_agent {
         request = request.header(USER_AGENT, ua);
@@ -337,9 +465,8 @@ async fn fetch_probe_bytes(
         return Err(ProbeFailureKind::Other);
     }
 
-    let capacity = usize::try_from(probe_size.max(1)).unwrap_or(usize::MAX);
-    let mut bytes = Vec::with_capacity(capacity.min(64 * 1024));
-    while bytes.len() < capacity {
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    while bytes.len() < max_bytes {
         let chunk = match response.chunk().await {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
@@ -349,7 +476,7 @@ async fn fetch_probe_bytes(
             }
         };
 
-        let remaining = capacity.saturating_sub(bytes.len());
+        let remaining = max_bytes.saturating_sub(bytes.len());
         if chunk.len() <= remaining {
             bytes.extend_from_slice(&chunk);
         } else {
@@ -361,6 +488,7 @@ async fn fetch_probe_bytes(
     Ok(bytes)
 }
 
+#[cfg(test)]
 async fn write_probe_bytes_to_stdin<W>(stdin: &mut W, probe_bytes: &[u8], url: &str) -> Result<(), ProbeFailureKind>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -381,7 +509,8 @@ where
     }
 }
 
-async fn run_ffprobe_with_stdin(mut child: Child, probe_bytes: &[u8], url: &str) -> ProbeUrlOutcome {
+#[cfg(test)]
+async fn run_ffprobe_with_stdin(mut child: tokio::process::Child, probe_bytes: &[u8], url: &str) -> ProbeUrlOutcome {
     let Some(mut stdin) = child.stdin.take() else {
         warn!("ffprobe stdin unavailable for {}", sanitize_sensitive_info(url));
         return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
@@ -767,6 +896,14 @@ mod tests {
         assert!(!super::is_not_found_probe_error("host not found"));
         assert!(!super::is_not_found_probe_error("file not found"));
         assert!(!super::is_not_found_probe_error("protocol handler not found"));
+    }
+
+    #[test]
+    fn probe_support_rejects_hls_manifest_urls() {
+        assert!(!super::is_supported_probe_url("http://provider.example/live/master.m3u8"));
+        assert!(!super::is_supported_probe_url("http://provider.example/live/master.m3u8?token=abc"));
+        assert!(super::is_supported_probe_url("http://provider.example/live/stream.ts"));
+        assert!(super::is_supported_probe_url("file:///var/media/movie.mkv"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::ptt::ptt_parse_title;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use crate::utils::{debug_if_enabled, trace_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
@@ -837,87 +837,124 @@ pub async fn update_vod_metadata(
                 true,
                 true,
             );
-            let probe_url = input.resolve_url(&stream_url)?;
+            let probe_url = input.resolve_url(&stream_url).map_err(|err| {
+                if matches!(err, shared::error::TuliproxError::ConfigInput(_)) {
+                    shared::error::TuliproxError::ConfigInput(format!(
+                        "Provider config resolution failed for VOD probe URL '{stream_url}': {err}"
+                    ))
+                } else {
+                    shared::error::TuliproxError::Config(format!(
+                        "Failed to resolve probe URL for VOD {display_id}: {err}"
+                    ))
+                }
+            })?;
 
-            let config = app_config.config.load();
-            let metadata_update = config.metadata_update.clone().unwrap_or_default();
-            let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
-            let user_agent = config.default_user_agent.clone();
-            let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
-            let probe_size = metadata_update.ffprobe.probe_size_bytes;
+            if is_supported_probe_url(probe_url.as_ref()) {
 
-            let probe_priority = config.metadata_update.as_ref().map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
+                let config = app_config.config.load();
+                let metadata_update = config.metadata_update.clone().unwrap_or_default();
+                let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
+                let user_agent = config.default_user_agent.clone();
+                let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
+                let probe_size = metadata_update.ffprobe.probe_size_bytes;
 
-            // Acquire Connection logic
-            let temp_handle = if active_handle.is_some() {
-                None
-            } else {
-                active_provider
-                    .acquire_connection_for_probe(&input.name, probe_priority)
-                    .await
-                    .map(|handle| ProbeHandleGuard::new(active_provider, handle))
-            };
+                let probe_priority = config.metadata_update.as_ref().map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
 
-            if active_handle.is_some() || temp_handle.is_some() {
-                debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                let cancel_token = select_cancel_token(
-                    temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
-                    active_handle,
-                );
-                match FfmpegExecutor::new().probe_remote_url_with_cancel(
-                    client,
-                    probe_url.as_ref(),
-                    user_agent.as_deref(),
-                    analyze_duration,
-                    probe_size,
-                    ffprobe_timeout,
-                    cancel_token,
-                )
-                .await
-                {
-                    ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => {
-                        if let Some(details) = properties.details.as_mut() {
-                            if let Some(v) = raw_video {
-                                details.video = Some(v.to_string().into());
-                                properties_updated = true;
+                // Acquire Connection logic
+                let temp_handle = if active_handle.is_some() {
+                    None
+                } else {
+                    active_provider
+                        .acquire_connection_for_probe(&input.name, probe_priority)
+                        .await
+                        .map(|handle| ProbeHandleGuard::new(active_provider, handle))
+                };
+
+                if active_handle.is_some() || temp_handle.is_some() {
+                    debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
+                    let cancel_token = select_cancel_token(
+                        temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
+                        active_handle,
+                    );
+                    let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
+                        .ok()
+                        .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                    let probe_result = if is_remote_probe {
+                        FfmpegExecutor::new().probe_remote_url_with_cancel(
+                            client,
+                            probe_url.as_ref(),
+                            user_agent.as_deref(),
+                            analyze_duration,
+                            probe_size,
+                            ffprobe_timeout,
+                            cancel_token,
+                        )
+                            .await
+                    } else {
+                        FfmpegExecutor::new().probe_url_with_cancel(
+                            probe_url.as_ref(),
+                            user_agent.as_deref(),
+                            analyze_duration,
+                            probe_size,
+                            ffprobe_timeout,
+                            config.proxy.as_ref(),
+                            cancel_token,
+                        )
+                            .await
+                    };
+                    match probe_result {
+                        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => {
+                            if let Some(details) = properties.details.as_mut() {
+                                if let Some(v) = raw_video {
+                                    details.video = Some(v.to_string().into());
+                                    properties_updated = true;
+                                }
+                                if let Some(a) = raw_audio {
+                                    details.audio = Some(a.to_string().into());
+                                    properties_updated = true;
+                                }
+                                if let Some(duration_secs) = stats.duration_secs {
+                                    details.duration_secs = Some(duration_secs.to_string().into());
+                                    properties_updated = true;
+                                }
+                                if let Some(bitrate) = stats.bitrate {
+                                    details.bitrate = bitrate;
+                                    properties_updated = true;
+                                }
                             }
-                            if let Some(a) = raw_audio {
-                                details.audio = Some(a.to_string().into());
-                                properties_updated = true;
+                        }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
+                            probe_failure = Some(ProbeFailureKind::NotFound);
+                        }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
+                            probe_pending = true;
+                            if probe_failure.is_none() {
+                                probe_failure = Some(ProbeFailureKind::Other);
                             }
-                            if let Some(duration_secs) = stats.duration_secs {
-                                details.duration_secs = Some(duration_secs.to_string().into());
-                                properties_updated = true;
-                            }
-                            if let Some(bitrate) = stats.bitrate {
-                                details.bitrate = bitrate;
-                                properties_updated = true;
+                        }
+                        ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
+                            probe_pending = true;
+                            if probe_failure.is_none() {
+                                probe_failure = Some(ProbeFailureKind::Cancelled);
                             }
                         }
                     }
-                    ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
-                        probe_failure = Some(ProbeFailureKind::NotFound);
-                    }
-                    ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
-                        probe_pending = true;
-                        if probe_failure.is_none() {
-                            probe_failure = Some(ProbeFailureKind::Other);
-                        }
-                    }
-                    ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
-                        probe_pending = true;
-                        if probe_failure.is_none() {
-                            probe_failure = Some(ProbeFailureKind::Cancelled);
-                        }
-                    }
+                } else {
+                    probe_pending = true;
+                    warn!("Skipping probe for VOD {display_id} due to connection limits");
+                }
+
+                if let Some(guard) = temp_handle {
+                    guard.release().await;
                 }
             } else {
-                probe_pending = true;
-                warn!("Skipping probe for VOD {display_id} due to connection limits");
-            }
 
-            if let Some(guard) = temp_handle {
-                guard.release().await;
+                debug_if_enabled!(
+                    "Skipping unsupported VOD probe for '{}' (ID: {}): {}",
+                    display_title,
+                    display_id,
+                    probe_url.as_ref()
+                );
             }
         }
     }
