@@ -6,7 +6,7 @@ use reqwest::{
 };
 use serde_json::Value;
 use shared::model::MediaQuality;
-use shared::utils::{default_thumbnail_height, default_thumbnail_width, is_hls_url, sanitize_sensitive_info};
+use shared::utils::{default_thumbnail_height, default_thumbnail_width, is_dash_url, is_hls_url, sanitize_sensitive_info};
 use std::path::Path;
 use std::io::ErrorKind;
 use std::process::{Output, Stdio};
@@ -335,7 +335,8 @@ pub fn is_supported_probe_url(url: &str) -> bool {
     // TODO: HLS manifests are intentionally unsupported for ffprobe-based metadata extraction for now.
     // Probing them correctly requires explicit variant selection and base-url aware follow-up fetching,
     // which we do not model yet. Revisit this once HLS probing semantics are defined.
-    !is_hls_url(url)
+    // DASH manifests are also excluded for the same reason.
+    !is_hls_url(url) && !is_dash_url(url)
 }
 
 fn format_ffmpeg_timeout_error(args: &[String]) -> String {

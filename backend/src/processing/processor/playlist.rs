@@ -27,7 +27,7 @@ use crate::{
         PlaylistSource,
     },
     utils::{
-        debug_if_enabled, epg, ffmpeg::is_supported_probe_url, log_memory_snapshot, m3u, trace_if_enabled, xtream,
+        debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream,
         StepMeasure, StepMeasureCallback,
     },
 };
@@ -1302,13 +1302,6 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             PlaylistItemType::Live => {
                 if let Some((probe_delay, interval_secs, cutoff_ts)) = live_probe_settings {
                     if needs_live_probe(&item, cutoff_ts) {
-                        if !is_supported_probe_url(&item.header.url) {
-                            debug!(
-                                "Skipping unsupported live probe task for input {}: url={}, title=\"{}\"",
-                                input_name, item.header.url, item.header.title
-                            );
-                            continue;
-                        }
                         if let Some(provider_id) = provider_id_from_item(&item) {
                             if queued_live_keys.insert(provider_id.clone()) {
                                 let task = UpdateTask::ProbeLive {
@@ -1356,19 +1349,6 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
         }
 
         if has_probe_details(&item) {
-            continue;
-        }
-
-        if !is_supported_probe_url(&item.header.url) {
-            let scope = if item.header.input_name.is_empty() {
-                input_name.as_ref()
-            } else {
-                item.header.input_name.as_ref()
-            };
-            debug!(
-                "Skipping unsupported generic probe task for input {}: scope={}, url={}, title=\"{}\"",
-                input_name, scope, item.header.url, item.header.title
-            );
             continue;
         }
 
