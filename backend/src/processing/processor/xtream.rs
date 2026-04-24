@@ -5,15 +5,16 @@ use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
 use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
 use crate::utils::{debug_if_enabled};
-use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
 
 /// Updates metadata for a single Live stream (primarily probing)
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn update_live_stream_metadata(
     app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
     input: &ConfigInput,
     id: ProviderIdType,
     save: bool,
@@ -117,6 +118,14 @@ pub async fn update_live_stream_metadata(
         use_prefix, no_ext
     );
     let probe_url_cow = input.resolve_url(&stream_url)?;
+    if !is_supported_probe_url(probe_url_cow.as_ref()) {
+        debug!(
+            "Skipping unsupported live probe for input {}: {}",
+            input.name,
+            probe_url_cow.as_ref()
+        );
+        return Ok(None);
+    }
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
@@ -134,16 +143,31 @@ pub async fn update_live_stream_metadata(
 
     let mut success = false;
     let mut not_found = false;
-    match FfmpegExecutor::new().probe_url(
-        probe_url_cow.as_ref(),
-        user_agent.as_deref(),
-        analyze_duration,
-        probe_size,
-        ffprobe_timeout,
-        config.proxy.as_ref(),
-    )
-    .await
-    {
+    let is_remote_probe = reqwest::Url::parse(probe_url_cow.as_ref())
+        .ok()
+        .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+    let probe_result = if is_remote_probe {
+        FfmpegExecutor::new().probe_remote_url(
+            client,
+            probe_url_cow.as_ref(),
+            user_agent.as_deref(),
+            analyze_duration,
+            probe_size,
+            ffprobe_timeout,
+        )
+        .await
+    } else {
+        FfmpegExecutor::new().probe_url(
+            probe_url_cow.as_ref(),
+            user_agent.as_deref(),
+            analyze_duration,
+            probe_size,
+            ffprobe_timeout,
+            config.proxy.as_ref(),
+        )
+        .await
+    };
+    match probe_result {
         ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
             // 3. Update properties on success
             if let Some(v) = raw_video {

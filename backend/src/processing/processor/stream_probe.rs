@@ -4,8 +4,9 @@ use crate::model::{AppConfig};
 use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};
 use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
 use crate::utils::debug_if_enabled;
-use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome};
-use log::{info, warn};
+use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome};
+use shared::utils::sanitize_sensitive_info;
+use log::{debug, info, warn};
 use shared::error::TuliproxError;
 use shared::model::{EpisodeStreamProperties, InputType, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, LiveStreamProperties, M3uPlaylistItem, XtreamCluster, XtreamPlaylistItem};
 use std::sync::Arc;
@@ -34,6 +35,7 @@ fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn update_generic_stream_metadata(
     app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
     input: &ConfigInput,
     unique_id: &str,
     stream_url: &str,
@@ -106,6 +108,14 @@ pub async fn update_generic_stream_metadata(
     }
 
     let probe_url = input.resolve_url(stream_url)?.into_owned();
+    if !is_supported_probe_url(&probe_url) {
+        let safe_probe_url = sanitize_sensitive_info(&probe_url).into_owned();
+        debug!("Skipping unsupported generic stream probe for {unique_id}: {safe_probe_url}");
+        return Ok(GenericProbeOutcome::Noop);
+    }
+    let is_remote_probe = reqwest::Url::parse(&probe_url)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
@@ -128,16 +138,31 @@ pub async fn update_generic_stream_metadata(
         acquired_handle.as_ref().and_then(ProbeHandleGuard::handle),
         active_handle,
     );
-    let probe_data = FfmpegExecutor::new().probe_url_with_cancel(
-        &probe_url,
-        user_agent.as_deref(),
-        analyze_duration,
-        probe_size,
-        ffprobe_timeout,
-        config.proxy.as_ref(),
-        cancel_token,
-    )
-    .await;
+    let probe_data = if is_remote_probe {
+        FfmpegExecutor::new()
+            .probe_remote_url_with_cancel(
+                client,
+                &probe_url,
+                user_agent.as_deref(),
+                analyze_duration,
+                probe_size,
+                ffprobe_timeout,
+                cancel_token,
+            )
+            .await
+    } else {
+        FfmpegExecutor::new()
+            .probe_url_with_cancel(
+                &probe_url,
+                user_agent.as_deref(),
+                analyze_duration,
+                probe_size,
+                ffprobe_timeout,
+                config.proxy.as_ref(),
+                cancel_token,
+            )
+            .await
+    };
 
     if let Some(handle) = acquired_handle {
         handle.release().await;

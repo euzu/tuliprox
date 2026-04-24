@@ -19,7 +19,7 @@ use crate::repository::{
     get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource, PlaylistSource,
 };
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::ffmpeg::{FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use crate::utils::{debug_if_enabled, xtream};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
@@ -928,6 +928,46 @@ pub async fn update_series_metadata(
                         if active_handle.is_some() || temp_handle.is_some() {
                             let episode_url =
                                 create_xtream_series_episode_url(input_url, input_username, input_password, ep);
+                            let probe_url = match input.resolve_url(&episode_url) {
+                                Ok(url) => url,
+                                Err(err) => {
+                                    if matches!(err, shared::error::TuliproxError::ConfigInput(_)) {
+                                        debug!(
+                                            "Provider config resolution failed for series episode '{}' (S{}E{}): {err}",
+                                            ep.title, ep.season, ep.episode_num
+                                        );
+                                        if probe_failure.is_none() {
+                                            probe_failure = Some(ProbeFailureKind::Other);
+                                        }
+                                    } else {
+                                        warn!(
+                                            "Failed to resolve probe URL for series episode '{}' (S{}E{}): {err}",
+                                            ep.title, ep.season, ep.episode_num
+                                        );
+                                        probe_pending = true;
+                                        if probe_failure.is_none() {
+                                            probe_failure = Some(ProbeFailureKind::Other);
+                                        }
+                                    }
+                                    if let Some(guard) = temp_handle {
+                                        guard.release().await;
+                                    }
+                                    continue;
+                                }
+                            };
+                            if !is_supported_probe_url(probe_url.as_ref()) {
+                                debug!(
+                                    "Skipping unsupported series probe for episode '{}' (S{}E{}): {}",
+                                    ep.title,
+                                    ep.season,
+                                    ep.episode_num,
+                                    probe_url.as_ref()
+                                );
+                                if let Some(guard) = temp_handle {
+                                    guard.release().await;
+                                }
+                                continue;
+                            }
 
                             // Specific logging for the user to follow
                             let missing_reason = if missing_video && missing_audio {
@@ -946,17 +986,33 @@ pub async fn update_series_metadata(
                                 temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
                                 active_handle,
                             );
-                            match FfmpegExecutor::new().probe_url_with_cancel(
-                                &episode_url,
-                                user_agent.as_deref(),
-                                probe_settings.analyze_duration_micros,
-                                probe_settings.probe_size_bytes,
-                                probe_settings.timeout_secs,
-                                config.proxy.as_ref(),
-                                cancel_token,
-                            )
-                            .await
-                            {
+                            let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
+                                .ok()
+                                .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                            let probe_result = if is_remote_probe {
+                                FfmpegExecutor::new().probe_remote_url_with_cancel(
+                                    client,
+                                    probe_url.as_ref(),
+                                    user_agent.as_deref(),
+                                    probe_settings.analyze_duration_micros,
+                                    probe_settings.probe_size_bytes,
+                                    probe_settings.timeout_secs,
+                                    cancel_token,
+                                )
+                                .await
+                            } else {
+                                FfmpegExecutor::new().probe_url_with_cancel(
+                                    probe_url.as_ref(),
+                                    user_agent.as_deref(),
+                                    probe_settings.analyze_duration_micros,
+                                    probe_settings.probe_size_bytes,
+                                    probe_settings.timeout_secs,
+                                    config.proxy.as_ref(),
+                                    cancel_token,
+                                )
+                                .await
+                            };
+                            match probe_result {
                                 ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
                                     if let Some(v) = raw_video {
                                         ep.video = Some(v.to_string().into());

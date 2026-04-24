@@ -1,11 +1,17 @@
 use crate::model::ProxyConfig;
 use log::{debug, warn};
+use reqwest::{
+    header::{RANGE, USER_AGENT},
+    Client, StatusCode,
+};
 use serde_json::Value;
 use shared::model::MediaQuality;
-use shared::utils::{default_thumbnail_height, default_thumbnail_width, sanitize_sensitive_info};
+use shared::utils::{default_thumbnail_height, default_thumbnail_width, is_dash_url, is_hls_url, sanitize_sensitive_info};
 use std::path::Path;
+use std::io::ErrorKind;
+use std::process::{Output, Stdio};
 use std::time::Duration;
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt, process::Command};
 use url::Url;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
@@ -118,62 +124,7 @@ impl FfmpegExecutor {
         let output_result = tokio::time::timeout(timeout_val, command.output()).await;
 
         match output_result {
-            Ok(Ok(output)) => {
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    debug!("ffprobe failed for {}: {}", sanitize_sensitive_info(url), sanitize_sensitive_info(&stderr));
-                    if is_not_found_probe_error(&stderr) {
-                        return ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound);
-                    }
-                    return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
-                }
-
-                if let Ok(json) = serde_json::from_slice::<Value>(&output.stdout) {
-                    if let Some(stream_list) = json.get("streams").and_then(Value::as_array) {
-                        let mut video_stream: Option<&Value> = None;
-                        let mut audio_stream: Option<&Value> = None;
-
-                        for stream in stream_list {
-                            let codec_type = stream.get("codec_type").and_then(Value::as_str);
-                            if video_stream.is_none()
-                                && (codec_type == Some("video")
-                                    || (codec_type.is_none()
-                                        && (stream.get("width").is_some() || stream.get("height").is_some())))
-                                && !is_attached_pic(stream)
-                            {
-                                video_stream = Some(stream);
-                            } else if audio_stream.is_none()
-                                && (codec_type == Some("audio")
-                                    || (codec_type.is_none()
-                                        && (stream.get("channels").is_some()
-                                            || stream.get("channel_layout").is_some())))
-                            {
-                                audio_stream = Some(stream);
-                            }
-                            if video_stream.is_some() && audio_stream.is_some() {
-                                break;
-                            }
-                        }
-
-                        if video_stream.is_some() || audio_stream.is_some() {
-                            let video_str = video_stream.map(Value::to_string);
-                            let audio_str = audio_stream.map(Value::to_string);
-                            let mq = MediaQuality::from_ffprobe_info(audio_str.as_deref(), video_str.as_deref());
-                            if let Some(quality) = mq {
-                                let stats = extract_probe_stream_stats(&json, video_stream, audio_stream);
-                                return ProbeUrlOutcome::Success(
-                                    quality,
-                                    video_stream.cloned(),
-                                    audio_stream.cloned(),
-                                    stats,
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    warn!("Failed to parse ffprobe json output for {}", sanitize_sensitive_info(url));
-                }
-            }
+            Ok(Ok(output)) => return parse_ffprobe_output(url, &output),
             Ok(Err(e)) => {
                 warn!("ffprobe execution failed for {}: {}", sanitize_sensitive_info(url), e);
             }
@@ -183,6 +134,38 @@ impl FfmpegExecutor {
         }
 
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn probe_remote_url(
+        &self,
+        client: &Client,
+        url: &str,
+        user_agent: Option<&str>,
+        analyze_duration: u64,
+        probe_size: u64,
+        timeout_secs: u64,
+    ) -> ProbeUrlOutcome {
+        let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
+        let config_timeout = Duration::from_secs(timeout_secs);
+        let timeout_val = std::cmp::max(analyze_overhead, config_timeout);
+
+        let probe_result = tokio::time::timeout(
+            timeout_val,
+            self.probe_remote_url_inner(client, url, user_agent, analyze_duration, probe_size),
+        )
+        .await;
+
+        if let Ok(outcome) = probe_result {
+            outcome
+        } else {
+            warn!(
+                "ffprobe remote stdin probe timed out after {:?} for {}",
+                timeout_val,
+                sanitize_sensitive_info(url)
+            );
+            ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+        }
     }
 
     /// Wrapper around [`Self::probe_url`] that races the probe against an optional cancellation token.
@@ -208,6 +191,31 @@ impl FfmpegExecutor {
             }
         } else {
             self.probe_url(url, user_agent, analyze_duration, probe_size, timeout_secs, proxy_cfg).await
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn probe_remote_url_with_cancel(
+        &self,
+        client: &Client,
+        url: &str,
+        user_agent: Option<&str>,
+        analyze_duration: u64,
+        probe_size: u64,
+        timeout_secs: u64,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> ProbeUrlOutcome {
+        if let Some(token) = cancel_token {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(url));
+                    ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled)
+                }
+                result = self.probe_remote_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs) => result,
+            }
+        } else {
+            self.probe_remote_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs).await
         }
     }
 
@@ -237,6 +245,98 @@ impl FfmpegExecutor {
             .map_err(|_| format_ffmpeg_timeout_error(args))?
             .map_err(|e| e.to_string())
     }
+
+    async fn probe_remote_url_inner(
+        &self,
+        client: &Client,
+        url: &str,
+        user_agent: Option<&str>,
+        analyze_duration: u64,
+        probe_size: u64,
+    ) -> ProbeUrlOutcome {
+        let mut command = Command::new("ffprobe");
+        command
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .arg("-v")
+            .arg("error")
+            .arg("-show_streams")
+            .arg("-show_format")
+            .arg("-of")
+            .arg("json")
+            .arg("-analyzeduration")
+            .arg(analyze_duration.to_string())
+            .arg("-probesize")
+            .arg(probe_size.to_string())
+            .arg("-i")
+            .arg("pipe:0");
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                warn!("ffprobe execution failed for {}: {}", sanitize_sensitive_info(url), err);
+                return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
+            }
+        };
+
+        let Some(mut stdin) = child.stdin.take() else {
+            warn!("ffprobe stdin unavailable for {}", sanitize_sensitive_info(url));
+            return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
+        };
+
+        let max_bytes = if probe_size == 0 { usize::MAX } else { usize::try_from(probe_size).unwrap_or(usize::MAX) };
+        let fetch_result = stream_probe_bytes_to_stdin(&mut stdin, client, url, user_agent, probe_size, max_bytes).await;
+
+        let stdin_err = match fetch_result {
+            Ok(()) => None,
+            Err(ProbeFailureKind::NotFound) => {
+                let _ = child.kill().await;
+                return ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound);
+            }
+            Err(kind) => Some(kind),
+        };
+
+        if let Err(err) = stdin.shutdown().await {
+            if err.kind() != ErrorKind::BrokenPipe {
+                debug!(
+                    "ffprobe stdin shutdown reported {} for {}, continuing with child output",
+                    err,
+                    sanitize_sensitive_info(url)
+                );
+            }
+        }
+        drop(stdin);
+
+        match child.wait_with_output().await {
+            Ok(output) => {
+                if let Some(kind) = stdin_err {
+                    debug!("ffprobe remote stdin probe had fetch error, checking child output for {}", sanitize_sensitive_info(url));
+                    let outcome = parse_ffprobe_output(url, &output);
+                    if matches!(outcome, ProbeUrlOutcome::Success(..)) {
+                        return outcome;
+                    }
+                    ProbeUrlOutcome::Failed(kind)
+                } else {
+                    parse_ffprobe_output(url, &output)
+                }
+            }
+            Err(err) => {
+                warn!("ffprobe execution failed for {}: {}", sanitize_sensitive_info(url), err);
+                ProbeUrlOutcome::Failed(stdin_err.unwrap_or(ProbeFailureKind::Other))
+            }
+        }
+    }
+}
+
+#[must_use]
+pub fn is_supported_probe_url(url: &str) -> bool {
+    // TODO: HLS manifests are intentionally unsupported for ffprobe-based metadata extraction for now.
+    // Probing them correctly requires explicit variant selection and base-url aware follow-up fetching,
+    // which we do not model yet. Revisit this once HLS probing semantics are defined.
+    // DASH manifests are also excluded for the same reason.
+    !is_hls_url(url) && !is_dash_url(url)
 }
 
 fn format_ffmpeg_timeout_error(args: &[String]) -> String {
@@ -245,6 +345,200 @@ fn format_ffmpeg_timeout_error(args: &[String]) -> String {
         "Timed out running ffmpeg after {}s: {summary}",
         FFMPEG_TIMEOUT.as_secs()
     )
+}
+
+async fn stream_probe_bytes_to_stdin<W>(
+    stdin: &mut W,
+    client: &Client,
+    url: &str,
+    user_agent: Option<&str>,
+    probe_size_header: u64,
+    max_bytes: usize,
+) -> Result<(), ProbeFailureKind>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut request = client.get(url);
+    if let Some(ua) = user_agent {
+        request = request.header(USER_AGENT, ua);
+    }
+    if probe_size_header > 0 {
+        request = request.header(RANGE, format!("bytes=0-{}", probe_size_header.saturating_sub(1)));
+    }
+
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            warn!("ffprobe fetch failed for {}: {}", sanitize_sensitive_info(url), err);
+            return Err(ProbeFailureKind::Other);
+        }
+    };
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(ProbeFailureKind::NotFound);
+    }
+    if !response.status().is_success() && response.status() != StatusCode::PARTIAL_CONTENT {
+        warn!(
+            "ffprobe fetch returned {} for {}",
+            response.status(),
+            sanitize_sensitive_info(url)
+        );
+        return Err(ProbeFailureKind::Other);
+    }
+
+    let mut total_written: usize = 0;
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(err) => {
+                warn!("ffprobe fetch body failed for {}: {}", sanitize_sensitive_info(url), err);
+                return Err(ProbeFailureKind::Other);
+            }
+        };
+
+        let remaining = max_bytes.saturating_sub(total_written);
+        let to_write = if chunk.len() <= remaining {
+            chunk.len()
+        } else {
+            remaining
+        };
+
+        if to_write > 0 {
+            match stdin.write_all(&chunk[..to_write]).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::BrokenPipe => {
+                    debug!(
+                        "ffprobe closed stdin early for {}, stopping fetch",
+                        sanitize_sensitive_info(url)
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    warn!("ffprobe stdin write failed for {}: {}", sanitize_sensitive_info(url), err);
+                    return Err(ProbeFailureKind::Other);
+                }
+            }
+            total_written += to_write;
+        }
+
+        if total_written >= max_bytes {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+async fn fetch_probe_bytes(
+    client: &Client,
+    url: &str,
+    user_agent: Option<&str>,
+    probe_size: u64,
+) -> Result<Vec<u8>, ProbeFailureKind> {
+    let max_bytes = if probe_size == 0 { usize::MAX } else { usize::try_from(probe_size).unwrap_or(usize::MAX) };
+    let mut request = client.get(url);
+    if let Some(ua) = user_agent {
+        request = request.header(USER_AGENT, ua);
+    }
+    if probe_size > 0 {
+        request = request.header(RANGE, format!("bytes=0-{}", probe_size.saturating_sub(1)));
+    }
+
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            warn!("ffprobe fetch failed for {}: {}", sanitize_sensitive_info(url), err);
+            return Err(ProbeFailureKind::Other);
+        }
+    };
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(ProbeFailureKind::NotFound);
+    }
+    if !response.status().is_success() && response.status() != StatusCode::PARTIAL_CONTENT {
+        warn!(
+            "ffprobe fetch returned {} for {}",
+            response.status(),
+            sanitize_sensitive_info(url)
+        );
+        return Err(ProbeFailureKind::Other);
+    }
+
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    while bytes.len() < max_bytes {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(err) => {
+                warn!("ffprobe fetch body failed for {}: {}", sanitize_sensitive_info(url), err);
+                return Err(ProbeFailureKind::Other);
+            }
+        };
+
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        if chunk.len() <= remaining {
+            bytes.extend_from_slice(&chunk);
+        } else {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            break;
+        }
+    }
+
+    Ok(bytes)
+}
+
+#[cfg(test)]
+async fn write_probe_bytes_to_stdin<W>(stdin: &mut W, probe_bytes: &[u8], url: &str) -> Result<(), ProbeFailureKind>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    match stdin.write_all(probe_bytes).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::BrokenPipe => {
+            debug!(
+                "ffprobe closed stdin early for {}, continuing with child output",
+                sanitize_sensitive_info(url)
+            );
+            Ok(())
+        }
+        Err(err) => {
+            warn!("ffprobe stdin write failed for {}: {}", sanitize_sensitive_info(url), err);
+            Err(ProbeFailureKind::Other)
+        }
+    }
+}
+
+#[cfg(test)]
+async fn run_ffprobe_with_stdin(mut child: tokio::process::Child, probe_bytes: &[u8], url: &str) -> ProbeUrlOutcome {
+    let Some(mut stdin) = child.stdin.take() else {
+        warn!("ffprobe stdin unavailable for {}", sanitize_sensitive_info(url));
+        return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
+    };
+
+    if let Err(kind) = write_probe_bytes_to_stdin(&mut stdin, probe_bytes, url).await {
+        return ProbeUrlOutcome::Failed(kind);
+    }
+
+    if let Err(err) = stdin.shutdown().await {
+        if err.kind() != ErrorKind::BrokenPipe {
+            debug!(
+                "ffprobe stdin shutdown reported {} for {}, continuing with child output",
+                err,
+                sanitize_sensitive_info(url)
+            );
+        }
+    }
+    drop(stdin);
+
+    match child.wait_with_output().await {
+        Ok(output) => parse_ffprobe_output(url, &output),
+        Err(err) => {
+            warn!("ffprobe execution failed for {}: {}", sanitize_sensitive_info(url), err);
+            ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+        }
+    }
 }
 
 fn build_ffprobe_proxy_url(proxy_cfg: &ProxyConfig) -> Option<String> {
@@ -283,6 +577,58 @@ fn apply_proxy_to_ffprobe(command: &mut Command, proxy_cfg: Option<&ProxyConfig>
     ] {
         command.env(key, proxy_url.as_str());
     }
+}
+
+fn parse_ffprobe_output(url: &str, output: &Output) -> ProbeUrlOutcome {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        debug!("ffprobe failed for {}: {}", sanitize_sensitive_info(url), sanitize_sensitive_info(&stderr));
+        if is_not_found_probe_error(&stderr) {
+            return ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound);
+        }
+        return ProbeUrlOutcome::Failed(ProbeFailureKind::Other);
+    }
+
+    if let Ok(json) = serde_json::from_slice::<Value>(&output.stdout) {
+        if let Some(stream_list) = json.get("streams").and_then(Value::as_array) {
+            let mut video_stream: Option<&Value> = None;
+            let mut audio_stream: Option<&Value> = None;
+
+            for stream in stream_list {
+                let codec_type = stream.get("codec_type").and_then(Value::as_str);
+                if video_stream.is_none()
+                    && (codec_type == Some("video")
+                        || (codec_type.is_none() && (stream.get("width").is_some() || stream.get("height").is_some())))
+                    && !is_attached_pic(stream)
+                {
+                    video_stream = Some(stream);
+                } else if audio_stream.is_none()
+                    && (codec_type == Some("audio")
+                        || (codec_type.is_none()
+                            && (stream.get("channels").is_some() || stream.get("channel_layout").is_some())))
+                {
+                    audio_stream = Some(stream);
+                }
+                if video_stream.is_some() && audio_stream.is_some() {
+                    break;
+                }
+            }
+
+            if video_stream.is_some() || audio_stream.is_some() {
+                let video_str = video_stream.map(Value::to_string);
+                let audio_str = audio_stream.map(Value::to_string);
+                let mq = MediaQuality::from_ffprobe_info(audio_str.as_deref(), video_str.as_deref());
+                if let Some(quality) = mq {
+                    let stats = extract_probe_stream_stats(&json, video_stream, audio_stream);
+                    return ProbeUrlOutcome::Success(quality, video_stream.cloned(), audio_stream.cloned(), stats);
+                }
+            }
+        }
+    } else {
+        warn!("Failed to parse ffprobe json output for {}", sanitize_sensitive_info(url));
+    }
+
+    ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
 }
 
 /// Returns `true` when the stream is an embedded thumbnail / cover art
@@ -387,12 +733,93 @@ fn build_thumbnail_args(input_path: &str, output_path: &Path, scale_filter: &str
 mod tests {
     use super::{
         build_ffprobe_proxy_url, build_thumbnail_args, build_thumbnail_scale_filter, extract_probe_stream_stats,
-        format_ffmpeg_timeout_error, FFMPEG_TIMEOUT, ProbeStreamStats,
+        fetch_probe_bytes, format_ffmpeg_timeout_error, run_ffprobe_with_stdin, write_probe_bytes_to_stdin, FFMPEG_TIMEOUT,
+        ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome,
     };
     use crate::model::ProxyConfig;
     use serde_json::json;
     use shared::utils::{default_thumbnail_height, default_thumbnail_width};
-    use std::path::Path;
+    use std::{io, path::Path, pin::Pin, task::{Context, Poll}};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+        net::TcpListener,
+        process::Command,
+    };
+
+    async fn start_test_http_server(
+        status_line: &str,
+        body: &'static [u8],
+    ) -> std::io::Result<(String, Arc<Mutex<Vec<u8>>>, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let request_capture = Arc::new(Mutex::new(Vec::new()));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let request_capture_clone = Arc::clone(&request_capture);
+        let accepted_clone = Arc::clone(&accepted);
+        let content_length = body.len();
+        let status_line = status_line.to_string();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    continue;
+                };
+                accepted_clone.fetch_add(1, Ordering::SeqCst);
+                let request_capture = Arc::clone(&request_capture_clone);
+                let status_line = status_line.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 4096];
+                    if let Ok(read) = socket.read(&mut buf).await {
+                        if read > 0 {
+                            let mut guard = request_capture.lock().expect("request capture mutex poisoned");
+                            guard.extend_from_slice(&buf[..read]);
+                        }
+                    }
+                    let response_head = format!(
+                        "{status_line}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(response_head.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Ok((format!("http://127.0.0.1:{}/probe.ts", addr.port()), request_capture, accepted, handle))
+    }
+
+    fn spawn_stdin_test_child(script: &str) -> tokio::process::Child {
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("test child should spawn")
+    }
+
+    struct ErroringWriter;
+
+    impl AsyncWrite for ErroringWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "synthetic write failure")))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn build_ffprobe_proxy_url_injects_credentials() {
@@ -473,6 +900,14 @@ mod tests {
     }
 
     #[test]
+    fn probe_support_rejects_hls_manifest_urls() {
+        assert!(!super::is_supported_probe_url("http://provider.example/live/master.m3u8"));
+        assert!(!super::is_supported_probe_url("http://provider.example/live/master.m3u8?token=abc"));
+        assert!(super::is_supported_probe_url("http://provider.example/live/stream.ts"));
+        assert!(super::is_supported_probe_url("file:///var/media/movie.mkv"));
+    }
+
+    #[test]
     fn extract_probe_stream_stats_prefers_format_section() {
         let payload = json!({
             "format": {
@@ -506,5 +941,94 @@ mod tests {
                 bitrate: Some(1500),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_probe_bytes_caps_response_and_sets_headers() {
+        let (url, request_capture, accepted, handle) = match start_test_http_server("HTTP/1.1 200 OK", b"abcdefghij").await
+        {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping fetch_probe_bytes_caps_response_and_sets_headers: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to start test http server: {err}"),
+        };
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("http client should build");
+        let bytes = fetch_probe_bytes(&client, &url, Some("test-agent/1.0"), 5)
+            .await
+            .expect("fetch should succeed");
+
+        assert_eq!(bytes, b"abcde");
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+
+        let request_text =
+            String::from_utf8_lossy(&request_capture.lock().expect("request capture mutex poisoned")).to_ascii_lowercase();
+        assert!(request_text.contains("range: bytes=0-4"));
+        assert!(request_text.contains("user-agent: test-agent/1.0"));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_probe_bytes_maps_404_to_not_found() {
+        let (url, _request_capture, _accepted, handle) =
+            match start_test_http_server("HTTP/1.1 404 Not Found", b"missing").await {
+                Ok(server) => server,
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("skipping fetch_probe_bytes_maps_404_to_not_found: {err}");
+                    return;
+                }
+                Err(err) => panic!("failed to start test http server: {err}"),
+            };
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("http client should build");
+        let result = fetch_probe_bytes(&client, &url, None, 16).await;
+
+        assert!(matches!(result, Err(ProbeFailureKind::NotFound)));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn run_ffprobe_with_stdin_tolerates_early_child_exit_on_success() {
+        let child = spawn_stdin_test_child(
+            "dd bs=1 count=1 of=/dev/null 2>/dev/null; \
+             printf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":1920,\"height\":1080},{\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2}],\"format\":{\"duration\":\"10\",\"bit_rate\":\"1000\"}}'",
+        );
+        let probe_bytes = vec![b'x'; 1024 * 1024];
+
+        let outcome = run_ffprobe_with_stdin(child, &probe_bytes, "https://example.com/live.ts").await;
+
+        assert!(matches!(outcome, ProbeUrlOutcome::Success(..)));
+    }
+
+    #[tokio::test]
+    async fn run_ffprobe_with_stdin_uses_child_failure_after_early_close() {
+        let child = spawn_stdin_test_child(
+            "dd bs=1 count=1 of=/dev/null 2>/dev/null; \
+             printf '%s' 'Invalid data found when processing input' >&2; \
+             exit 1",
+        );
+        let probe_bytes = vec![b'x'; 1024 * 1024];
+
+        let outcome = run_ffprobe_with_stdin(child, &probe_bytes, "https://example.com/live.ts").await;
+
+        assert!(matches!(outcome, ProbeUrlOutcome::Failed(ProbeFailureKind::Other)));
+    }
+
+    #[tokio::test]
+    async fn write_probe_bytes_to_stdin_keeps_non_broken_pipe_failures_fatal() {
+        let mut writer = ErroringWriter;
+        let result = write_probe_bytes_to_stdin(&mut writer, b"abcdef", "https://example.com/live.ts").await;
+
+        assert!(matches!(result, Err(ProbeFailureKind::Other)));
     }
 }

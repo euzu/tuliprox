@@ -27,7 +27,8 @@ use crate::{
         PlaylistSource,
     },
     utils::{
-        debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream, StepMeasure, StepMeasureCallback,
+        debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream,
+        StepMeasure, StepMeasureCallback,
     },
 };
 use futures::{FutureExt, StreamExt};
