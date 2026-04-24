@@ -80,6 +80,7 @@ crc32fast = "1.5.0"
 memchr = "2.8.0"
 http-body-util = "0.1.3"
 lru = "0.12"
+ipnet = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

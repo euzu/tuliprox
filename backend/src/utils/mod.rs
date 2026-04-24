@@ -9,7 +9,7 @@ mod trakt;
 mod json_utils;
 mod binary_utils;
 mod telegram;
-mod geoip;
+pub(crate) mod geoip;
 mod db_viewer;
 pub(crate) mod stream_history_viewer;
 mod epg_parser;

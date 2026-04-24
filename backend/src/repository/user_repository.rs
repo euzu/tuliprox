@@ -1,6 +1,6 @@
-use crate::model::Config;
-use crate::model::PlaylistXtreamCategory;
+use crate::model::{Config, NetworkAccess, PlaylistXtreamCategory};
 use crate::model::{AppConfig, ProxyUserCredentials, TargetUser};
+use std::sync::Arc;
 use crate::repository::storage_const;
 use crate::repository::xtream_get_playlist_categories;
 use crate::repository::BPlusTree;
@@ -16,7 +16,7 @@ use std::io::Error;
 use std::path::{Path, PathBuf};
 use tokio::task;
 
-// V5 (current): added output_clusters. V1-V4 are migrated to V5 at startup
+// V6 (current): added network_access. V1-V5 are migrated to V6 at startup
 // by `bplustree_migration::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredProxyUserCredentials {
@@ -38,6 +38,8 @@ struct StoredProxyUserCredentials {
     pub priority: Option<i8>,
     pub soft_connections: Option<u16>,
     pub soft_priority: Option<i8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<shared::model::NetworkAccessDto>,
 }
 
 impl StoredProxyUserCredentials {
@@ -61,6 +63,7 @@ impl StoredProxyUserCredentials {
             priority: if proxy.priority != 0 { Some(proxy.priority) } else { None },
             soft_connections: if proxy.soft_connections > 0 { Some(proxy.soft_connections) } else { None },
             soft_priority: if proxy.soft_priority != 0 { Some(proxy.soft_priority) } else { None },
+            network_access: proxy.network_access.as_ref().map(Into::into),
         }
     }
 
@@ -84,6 +87,7 @@ impl StoredProxyUserCredentials {
             soft_connections: stored.soft_connections.unwrap_or(0),
             soft_priority: stored.soft_priority.unwrap_or(0),
             t_is_api_user: false,
+            network_access: stored.network_access.as_ref().map(NetworkAccess::from),
         }
     }
 }
@@ -167,10 +171,10 @@ fn collect_target_users(user_tree: &BPlusTree<String, StoredProxyUserCredentials
         let target_name = stored_user.target.clone();
         match target_users.entry(target_name) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().credentials.push(proxy_user);
+                entry.get_mut().credentials.push(Arc::new(proxy_user));
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(TargetUser { target: stored_user.target.clone(), credentials: vec![proxy_user] });
+                entry.insert(TargetUser { target: stored_user.target.clone(), credentials: vec![Arc::new(proxy_user)] });
             }
         }
     }
@@ -505,7 +509,7 @@ mod tests {
         let user = TargetUser {
             target: "test".to_string(),
             credentials: vec![
-                ProxyUserCredentials {
+                Arc::new(ProxyUserCredentials {
                     username: "Test".to_string(),
                     password: "Test".to_string(),
                     token: Some("Test".to_string()),
@@ -524,8 +528,9 @@ mod tests {
                     soft_connections: 0,
                     soft_priority: 0,
                     t_is_api_user: false,
-                },
-                ProxyUserCredentials {
+                    network_access: None,
+                }),
+                Arc::new(ProxyUserCredentials {
                     username: "Test2".to_string(),
                     password: "Test".to_string(),
                     token: Some("Test".to_string()),
@@ -544,8 +549,9 @@ mod tests {
                     soft_connections: 0,
                     soft_priority: 0,
                     t_is_api_user: false,
-                },
-                ProxyUserCredentials {
+                    network_access: None,
+                }),
+                Arc::new(ProxyUserCredentials {
                     username: "Test3".to_string(),
                     password: "Test".to_string(),
                     token: Some("Test".to_string()),
@@ -564,8 +570,9 @@ mod tests {
                     soft_connections: 0,
                     soft_priority: 0,
                     t_is_api_user: false,
-                },
-                ProxyUserCredentials {
+                    network_access: None,
+                }),
+                Arc::new(ProxyUserCredentials {
                     username: "Test4".to_string(),
                     password: "Test".to_string(),
                     token: Some("Test".to_string()),
@@ -584,7 +591,11 @@ mod tests {
                     soft_connections: 2,
                     soft_priority: -3,
                     t_is_api_user: false,
-                },
+                    network_access: Some(crate::model::NetworkAccess {
+                        allowed_countries: vec!["DE".to_string(), "AT".to_string()],
+                        allowed_networks: vec!["10.0.0.0/8".parse().unwrap(), "192.168.1.0/24".parse().unwrap()],
+                    }),
+                }),
             ],
         };
 
@@ -626,6 +637,15 @@ mod tests {
         assert_eq!(test4.soft_connections, 2);
         assert_eq!(test4.soft_priority, -3);
         assert_eq!(test4.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        // Verify network_access round-trip (allowed_countries + allowed_networks).
+        let test4_na = test4.network_access.as_ref().expect("Test4 network_access should be set");
+        let mut countries = test4_na.allowed_countries.clone();
+        countries.sort();
+        assert_eq!(countries, vec!["AT", "DE"]);
+        let networks: Vec<String> = test4_na.allowed_networks.iter().map(std::string::ToString::to_string).collect();
+        assert_eq!(networks.len(), 2);
+        assert!(networks.iter().any(|n| n == "10.0.0.0/8"));
+        assert!(networks.iter().any(|n| n == "192.168.1.0/24"));
     }
 
     #[tokio::test]

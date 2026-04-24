@@ -1,3 +1,4 @@
+use crate::error::TuliproxError;
 use enum_iterator::Sequence;
 use std::{fmt::Display, str::FromStr};
 
@@ -37,7 +38,7 @@ impl Display for StrmExportStyle {
 }
 
 impl FromStr for StrmExportStyle {
-    type Err = String;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -45,7 +46,7 @@ impl FromStr for StrmExportStyle {
             Self::PLEX => Ok(Self::Plex),
             Self::EMBY => Ok(Self::Emby),
             Self::JELLYFIN => Ok(Self::Jellyfin),
-            _ => Err(format!("Unknown StrmExportStyle: {}", s)),
+            _ => Err(TuliproxError::Config(format!("Unknown StrmExportStyle: {s}"))),
         }
     }
 }

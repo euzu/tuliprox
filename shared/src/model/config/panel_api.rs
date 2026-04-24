@@ -111,14 +111,14 @@ impl fmt::Display for PanelApiProvisioningMethod {
 }
 
 impl FromStr for PanelApiProvisioningMethod {
-    type Err = String;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_uppercase().as_str() {
             "HEAD" => Ok(Self::Head),
             "GET" => Ok(Self::Get),
             "POST" => Ok(Self::Post),
-            _ => Err("Unknown provisioning method: {s}".to_string()),
+            _ => Err(TuliproxError::Config(format!("Unknown provisioning method: {s}"))),
         }
     }
 }

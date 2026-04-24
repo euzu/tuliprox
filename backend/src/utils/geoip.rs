@@ -12,7 +12,6 @@ pub struct GeoIp {
     tree: BPlusTree<u32, (u32, String)>,
 }
 
-
 impl GeoIp {
 
     fn seed_private_ranges(tree: &mut BPlusTree<u32, (u32, String)>) {
@@ -91,13 +90,25 @@ impl Default for GeoIp {
 }
 
 #[cfg(test)]
-mod test {
-    // https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/asn-country/asn-country-ipv4.csv
+impl GeoIp {
+    /// Creates a `GeoIp` instance for testing that returns the specified country for any IPv4 address.
+    #[cfg(test)]
+    pub fn test_new(country: &str) -> Self {
+        let mut tree = BPlusTree::new();
+        tree.insert(0, (u32::MAX, country.to_string()));
+        Self { tree }
+    }
+}
 
-    // use crate::utils::geoip::GeoIp;
+
+// #[cfg(test)]
+// mod test {
     // use std::fs::File;
     // use std::path::PathBuf;
     // use crate::utils::file_reader;
+
+    // https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/asn-country/asn-country-ipv4.csv
+
 
     // #[test]
     // pub fn test_csv() {
@@ -115,4 +126,4 @@ mod test {
     //         panic!("GeoIP lookup returned no result");
     //     }
     // }
-}
+// }

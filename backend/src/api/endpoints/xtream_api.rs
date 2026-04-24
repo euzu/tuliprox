@@ -4,13 +4,15 @@ use crate::{
     api::{
         api_utils,
         api_utils::{
-            admission_failure_response, create_api_proxy_user, create_catchup_session_key, create_session_fingerprint,
-            empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response,
-            get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, internal_server_error,
-            is_seek_request, is_session_based_playback, is_stream_share_enabled, local_stream_response, redirect,
-            redirect_response, resource_response, separate_number_and_remainder,
-            should_allow_exhausted_shared_reconnect, stream_response, try_option_bad_request, try_option_forbidden,
-            try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            admission_failure_response, create_api_proxy_user, create_catchup_session_key,
+            create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
+            force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
+            get_user_target_by_credentials, internal_server_error, is_seek_request, is_session_based_playback,
+            is_stream_share_enabled, local_stream_response,
+            redirect, redirect_response, resource_response,
+            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            try_option_bad_request, try_result_bad_request, try_result_not_found,
+            try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::handle_hls_stream_request,
@@ -62,6 +64,9 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use crate::auth::{check_network_access_only, check_permission_and_network_access_only};
+// https://github.com/tellytv/go.xtream-codes/blob/master/structs.go
+// Xtream api -> https://9tzx6f0ozj.apidog.io/
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ApiStreamContext {
@@ -207,7 +212,7 @@ async fn xtream_player_api_stream(
     app_state: &Arc<AppState>,
     api_req: &UserApiRequest,
     stream_req: ApiStreamRequest<'_>,
-    user_target: Option<(ProxyUserCredentials, Arc<ConfigTarget>)>,
+    user_target: Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)>,
 ) -> impl IntoResponse + Send {
     // if log::log_enabled!(log::Level::Debug) {
     //     debug!(
@@ -225,14 +230,18 @@ async fn xtream_player_api_stream(
 
     let auth_status = app_state.app_config.get_auth_error_status();
     let (user, target) = match user_target {
-        None => try_option_forbidden!(
-            get_user_target_by_credentials(stream_req.username, stream_req.password, api_req, app_state),
-            auth_status,
-            false,
-            format!("Could not find any user for xc stream {}", stream_req.username)
-        ),
+        None => {
+            let Some((user, target)) = get_user_target_by_credentials(stream_req.username, stream_req.password, api_req, app_state) else {
+                return auth_status.into_response();
+            };
+            (user, target)
+        }
         Some((user, target)) => (user, target),
     };
+    // Network access check only - permission check is done later with full stream info
+    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+        return e.into_player_response(auth_status);
+    }
 
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
@@ -713,20 +722,18 @@ async fn xtream_player_api_stream_with_token(
 }
 
 async fn xtream_player_api_resource(
+    fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
     api_req: &UserApiRequest,
     app_state: &Arc<AppState>,
     resource_req: ApiStreamRequest<'_>,
 ) -> impl IntoResponse {
     let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target_by_credentials(resource_req.username, resource_req.password, api_req, app_state),
-        auth_status,
-        false,
-        format!("Could not find any user xc resource {}", resource_req.username)
-    );
-    if user.permission_denied(app_state) {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
+    let Some((user, target)) = get_user_target_by_credentials(resource_req.username, resource_req.password, api_req, app_state) else {
+        return auth_status.into_response();
+    };
+    if let Err(e) = check_permission_and_network_access_only(&user, fingerprint, app_state) {
+        return e.into_player_response(auth_status);
     }
     let target_name = &target.name;
     if !target.has_output(TargetType::Xtream) {
@@ -787,6 +794,7 @@ macro_rules! create_xtream_player_api_stream {
 macro_rules! create_xtream_player_api_resource {
     ($fn_name:ident, $context:expr) => {
         async fn $fn_name(
+            fingerprint: Fingerprint,
             axum::extract::Path((username, password, stream_id, resource)): axum::extract::Path<(
                 String,
                 String,
@@ -798,6 +806,7 @@ macro_rules! create_xtream_player_api_resource {
             req_headers: HeaderMap,
         ) -> impl IntoResponse {
             xtream_player_api_resource(
+                &fingerprint,
                 &req_headers,
                 &api_req,
                 &app_state,
@@ -845,12 +854,9 @@ async fn xtream_player_api_timeshift_stream(
     let api_req = UserApiRequest::merge_prefer_primary(&path_req, &query_req);
 
     let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target_by_credentials(&api_req.username, &api_req.password, &api_req, &app_state),
-        auth_status,
-        false,
-        format!("Could not find any user {}", api_req.username)
-    );
+    let Some((user, target)) = get_user_target_by_credentials(&api_req.username, &api_req.password, &api_req, &app_state) else {
+        return auth_status.into_response();
+    };
 
     let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
     let start = apply_timeshift(&api_req.start, &epg_timeshift);
@@ -894,12 +900,9 @@ async fn xtream_player_api_timeshift_query_stream(
     }
 
     let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target_by_credentials(&api_req.username, &api_req.password, &api_req, &app_state),
-        auth_status,
-        false,
-        format!("Could not find any user {}", api_req.username)
-    );
+    let Some((user, target)) = get_user_target_by_credentials(&api_req.username, &api_req.password, &api_req, &app_state) else {
+        return auth_status.into_response();
+    };
 
     let epg_timeshift = parse_timeshift(user.epg_request_timeshift.as_deref());
     let start = apply_timeshift(&api_req.start, &epg_timeshift);
@@ -1292,15 +1295,15 @@ macro_rules! skip_flag_optional {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn xtream_player_api(api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
+async fn xtream_player_api(fingerprint: &Fingerprint, api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
     api_req.log_sanitized("xtream_player_api");
     let auth_status = app_state.app_config.get_auth_error_status();
-    let (user, target) = try_option_forbidden!(
-        get_user_target(&api_req, app_state),
-        auth_status,
-        false,
-        format!("Could not find any user for xc player api {}", api_req.username)
-    );
+    let Some((user, target)) = get_user_target(&api_req, app_state) else {
+        return auth_status.into_response();
+    };
+    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+        return e.into_player_response(auth_status);
+    }
     if !target.has_output(TargetType::Xtream) {
         return get_user_info(&user, app_state).await.map_or_else(
             || axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -1460,17 +1463,19 @@ where
 }
 
 async fn xtream_player_api_get(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
 ) -> impl IntoResponse + Send {
-    xtream_player_api(api_req, &app_state).await
+    xtream_player_api(&fingerprint, api_req, &app_state).await
 }
 
 async fn xtream_player_api_post(
+    fingerprint: Fingerprint,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     UserApiRequestQueryOrBody(api_req): UserApiRequestQueryOrBody,
 ) -> impl IntoResponse + Send {
-    xtream_player_api(api_req, &app_state).await
+    xtream_player_api(&fingerprint, api_req, &app_state).await
 }
 
 macro_rules! register_xtream_api {

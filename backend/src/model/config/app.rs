@@ -1,15 +1,15 @@
 use crate::api::model::TransportStreamBuffer;
 use crate::model::{
     ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse,
-    GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, MediaToolCapabilities, ProxyUserCredentials,
-    ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
+    GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, MediaToolCapabilities,
+    ProxyUserCredentials, ReverseProxyDisabledHeaderConfig, SourcesConfig, TargetOutput,
 };
 use crate::utils;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, warn};
 use rand::Rng;
 use shared::error::TuliproxError;
-use shared::model::ConfigPaths;
+use shared::model::{ConfigPaths, GeoIpUnavailablePolicy};
 use shared::utils::{
     CHANNEL_UNAVAILABLE, LOW_PRIORITY_PREEMPTED, PANEL_API_PROVISIONING, PROVIDER_CONNECTIONS_EXHAUSTED,
     USER_ACCOUNT_EXPIRED, USER_CONNECTIONS_EXHAUSTED,
@@ -153,14 +153,14 @@ impl AppConfig {
         config.reverse_proxy.as_ref().map(|r| r.rewrite_secret)
     }
 
-    fn intern_get_target_for_user(&self, user_target: Option<(ProxyUserCredentials, String)>) -> Option<(ProxyUserCredentials, Arc<ConfigTarget>)> {
+    fn intern_get_target_for_user(&self, user_target: Option<(Arc<ProxyUserCredentials>, String)>) -> Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)> {
         match user_target {
             Some((user, target_name)) => {
                 let sources = self.sources.load();
                 for source in &sources.sources {
                     for target in &source.targets {
                         if target_name.eq_ignore_ascii_case(&target.name) {
-                            return Some((user, Arc::clone(target)));
+                            return Some((Arc::clone(&user), Arc::clone(target)));
                         }
                     }
                 }
@@ -186,7 +186,7 @@ impl AppConfig {
         None
     }
 
-    pub fn get_target_for_username(&self, username: &str) -> Option<(ProxyUserCredentials, Arc<ConfigTarget>)> {
+    pub fn get_target_for_username(&self, username: &str) -> Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)> {
         if let Some(credentials) = self.get_user_credentials(username) {
             return self.api_proxy.load().as_ref()
                 .and_then(|api_proxy| self.intern_get_target_for_user(api_proxy.get_target_name(&credentials.username, &credentials.password)));
@@ -194,15 +194,15 @@ impl AppConfig {
         None
     }
 
-    pub fn get_target_for_user(&self, username: &str, password: &str) -> Option<(ProxyUserCredentials, Arc<ConfigTarget>)> {
+    pub fn get_target_for_user(&self, username: &str, password: &str) -> Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)> {
         self.api_proxy.load().as_ref().and_then(|api_proxy| self.intern_get_target_for_user(api_proxy.get_target_name(username, password)))
     }
 
-    pub fn get_target_for_user_by_token(&self, token: &str) -> Option<(ProxyUserCredentials, Arc<ConfigTarget>)> {
-        self.api_proxy.load().as_ref().as_ref().and_then(|api_proxy| self.intern_get_target_for_user(api_proxy.get_target_name_by_token(token)))
+    pub fn get_target_for_user_by_token(&self, token: &str) -> Option<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>)> {
+        self.api_proxy.load().as_ref().and_then(|api_proxy| self.intern_get_target_for_user(api_proxy.get_target_name_by_token(token)))
     }
 
-    pub fn get_user_credentials(&self, username: &str) -> Option<ProxyUserCredentials> {
+    pub fn get_user_credentials(&self, username: &str) -> Option<Arc<ProxyUserCredentials>> {
         self.api_proxy.load().as_ref().as_ref().and_then(|api_proxy| api_proxy.get_user_credentials(username))
     }
 
@@ -464,6 +464,10 @@ impl AppConfig {
 
     pub fn get_grace_options(&self) -> GracePeriodOptions {
         self.config.load().get_grace_options()
+    }
+
+    pub fn get_geoip_unavailable_policy(&self) -> GeoIpUnavailablePolicy {
+        self.config.load().get_geoip_unavailable_policy()
     }
 
     pub async fn is_ffprobe_enabled(&self) -> bool {

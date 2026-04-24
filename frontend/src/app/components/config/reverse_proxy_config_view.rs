@@ -4,11 +4,15 @@ use crate::{
     app::{
         components::{
             config::{
+                add_admission_strategy_tag, admission_strategy_label, admission_strategy_tag_label,
+                admission_strategy_tags, available_admission_strategies,
                 config_page::{ConfigForm, LABEL_REVERSE_PROXY_CONFIG},
                 config_view_context::ConfigViewContext,
-                use_emit_mapped_option,
+                displayed_admission_strategy_tags, filter_disabled_grace_strategies, move_admission_strategy_tag,
+                parse_admission_strategy_tags, remove_admission_strategy_tag, use_emit_mapped_option,
+                AdmissionStrategiesDto,
             },
-            Card, Chip, IconButton, TextButton,
+            Card, Chip, IconButton, RadioButtonGroup, TextButton,
         },
         context::ConfigContext,
     },
@@ -16,18 +20,18 @@ use crate::{
     edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u16,
     edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::{use_translation, YewI18n},
-    utils::t_safe,
 };
+use enum_iterator::all;
 use shared::{
     model::{
-        AdmissionStrategy, CacheConfigDto, GeoIpConfigDto, QosAggregationConfigDto, RateLimitConfigDto,
+        CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, QosAggregationConfigDto, RateLimitConfigDto,
         ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto,
         StreamConfigDto, StreamHistoryConfigDto,
     },
     utils::{default_secret, format_float_localized},
 };
+use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
-
 const LABEL_CACHE: &str = "LABEL.CACHE";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SIZE: &str = "LABEL.SIZE";
@@ -71,6 +75,7 @@ const LABEL_CF_HEADER: &str = "LABEL.CF_HEADER";
 const LABEL_CUSTOM_HEADERS: &str = "LABEL.CUSTOM_HEADERS";
 const LABEL_ADD_HEADER: &str = "LABEL.ADD_HEADER";
 const LABEL_GEOIP: &str = "LABEL.GEOIP";
+const LABEL_GEOIP_UNAVAILABLE_POLICY: &str = "LABEL.GEOIP_UNAVAILABLE_POLICY";
 const LABEL_URL: &str = "LABEL.URL";
 
 const LABEL_STREAM_HISTORY: &str = "LABEL.STREAM_HISTORY";
@@ -80,12 +85,6 @@ const LABEL_STREAM_HISTORY_RETENTION_DAYS: &str = "LABEL.STREAM_HISTORY_RETENTIO
 const LABEL_QOS_AGGREGATION: &str = "LABEL.QOS_AGGREGATION";
 const LABEL_QOS_AGGREGATION_ENABLED: &str = "LABEL.QOS_AGGREGATION_ENABLED";
 const LABEL_INTERVAL_SECS: &str = "LABEL.INTERVAL_SECS";
-const LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST: &str = "LABEL.ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST";
-const LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST: &str = "LABEL.ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST";
-const LABEL_ADMISSION_STRATEGY_EVICT_USER_OLDEST: &str = "LABEL.ADMISSION_STRATEGY_EVICT_USER_OLDEST";
-const LABEL_ADMISSION_STRATEGY_EVICT_USER_LATEST: &str = "LABEL.ADMISSION_STRATEGY_EVICT_USER_LATEST";
-const LABEL_ADMISSION_STRATEGY_GRACE_INSTANT_STREAM: &str = "LABEL.ADMISSION_STRATEGY_GRACE_INSTANT_STREAM";
-const LABEL_ADMISSION_STRATEGY_GRACE_HOLD_STREAM: &str = "LABEL.ADMISSION_STRATEGY_GRACE_HOLD_STREAM";
 
 generate_form_reducer!(
     state: CacheConfigFormState { form: CacheConfigDto },
@@ -125,202 +124,6 @@ pub struct FailoverPatternsDto {
 
 impl FailoverPatternsDto {
     pub fn is_empty(&self) -> bool { self.patterns.is_empty() }
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct AdmissionStrategiesDto {
-    pub strategies: Option<Vec<String>>,
-}
-
-fn admission_strategy_tag(strategy: AdmissionStrategy) -> &'static str {
-    match strategy {
-        AdmissionStrategy::EvictUserSameIpOldest => "evict_user_same_ip_oldest",
-        AdmissionStrategy::EvictUserSameIpLatest => "evict_user_same_ip_latest",
-        AdmissionStrategy::EvictUserOldest => "evict_user_oldest",
-        AdmissionStrategy::EvictUserLatest => "evict_user_latest",
-        AdmissionStrategy::GraceInstantStream => "grace_instant_stream",
-        AdmissionStrategy::GraceHoldStream => "grace_hold_stream",
-    }
-}
-
-fn parse_admission_strategy_tag(tag: &str) -> Option<AdmissionStrategy> {
-    match tag.trim() {
-        "evict_user_same_ip_oldest" => Some(AdmissionStrategy::EvictUserSameIpOldest),
-        "evict_user_same_ip_latest" => Some(AdmissionStrategy::EvictUserSameIpLatest),
-        "evict_user_oldest" => Some(AdmissionStrategy::EvictUserOldest),
-        "evict_user_latest" => Some(AdmissionStrategy::EvictUserLatest),
-        "grace_instant_stream" => Some(AdmissionStrategy::GraceInstantStream),
-        "grace_hold_stream" => Some(AdmissionStrategy::GraceHoldStream),
-        _ => None,
-    }
-}
-
-fn admission_strategy_label_key(strategy: AdmissionStrategy) -> &'static str {
-    match strategy {
-        AdmissionStrategy::EvictUserSameIpOldest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_OLDEST,
-        AdmissionStrategy::EvictUserSameIpLatest => LABEL_ADMISSION_STRATEGY_EVICT_USER_SAME_IP_LATEST,
-        AdmissionStrategy::EvictUserOldest => LABEL_ADMISSION_STRATEGY_EVICT_USER_OLDEST,
-        AdmissionStrategy::EvictUserLatest => LABEL_ADMISSION_STRATEGY_EVICT_USER_LATEST,
-        AdmissionStrategy::GraceInstantStream => LABEL_ADMISSION_STRATEGY_GRACE_INSTANT_STREAM,
-        AdmissionStrategy::GraceHoldStream => LABEL_ADMISSION_STRATEGY_GRACE_HOLD_STREAM,
-    }
-}
-
-fn admission_strategy_label(translate: &YewI18n, strategy: AdmissionStrategy) -> String {
-    t_safe(translate, admission_strategy_label_key(strategy)).unwrap_or_else(|| match strategy {
-        AdmissionStrategy::EvictUserSameIpOldest => "Evict same-IP oldest stream".to_string(),
-        AdmissionStrategy::EvictUserSameIpLatest => "Evict same-IP latest stream".to_string(),
-        AdmissionStrategy::EvictUserOldest => "Evict user oldest stream".to_string(),
-        AdmissionStrategy::EvictUserLatest => "Evict user latest stream".to_string(),
-        AdmissionStrategy::GraceInstantStream => "Grace instant stream".to_string(),
-        AdmissionStrategy::GraceHoldStream => "Grace hold stream".to_string(),
-    })
-}
-
-fn is_grace_strategy(strategy: AdmissionStrategy) -> bool {
-    matches!(strategy, AdmissionStrategy::GraceInstantStream | AdmissionStrategy::GraceHoldStream)
-}
-
-fn is_grace_strategy_tag(tag: &str) -> bool {
-    let tag = tag.trim();
-    tag.starts_with("grace_") || parse_admission_strategy_tag(tag).is_some_and(is_grace_strategy)
-}
-
-fn admission_strategy_tags(strategies: Option<&Vec<AdmissionStrategy>>) -> Option<Vec<String>> {
-    strategies.map(|entries| entries.iter().map(|entry| admission_strategy_tag(*entry).to_string()).collect())
-}
-
-fn parse_admission_strategy_tags(tags: Option<&[String]>) -> Option<Vec<AdmissionStrategy>> {
-    let tags = tags?;
-    let mut parsed = Vec::new();
-    for tag in tags {
-        if let Some(strategy) = parse_admission_strategy_tag(tag) {
-            if !parsed.contains(&strategy) {
-                parsed.push(strategy);
-            }
-        }
-    }
-    Some(parsed)
-}
-
-fn filter_disabled_grace_strategy_tags(tags: Vec<String>, grace_period_millis: u64) -> Vec<String> {
-    if grace_period_millis == 0 {
-        tags.into_iter().filter(|tag| !is_grace_strategy_tag(tag)).collect()
-    } else {
-        tags
-    }
-}
-
-fn filter_disabled_grace_strategies(
-    strategies: Option<Vec<AdmissionStrategy>>,
-    grace_period_millis: u64,
-) -> Option<Vec<AdmissionStrategy>> {
-    strategies.map(|entries| {
-        if grace_period_millis == 0 {
-            entries.into_iter().filter(|strategy| !is_grace_strategy(*strategy)).collect()
-        } else {
-            entries
-        }
-    })
-}
-
-fn admission_strategy_tag_label(translate: &YewI18n, tag: &str) -> String {
-    parse_admission_strategy_tag(tag)
-        .map(|strategy| admission_strategy_label(translate, strategy))
-        .unwrap_or_else(|| tag.to_string())
-}
-
-fn legacy_admission_strategy_tags(stream: &StreamConfigDto) -> Vec<String> {
-    if stream.grace_period_millis == 0 {
-        Vec::new()
-    } else {
-        vec![admission_strategy_tag(if stream.grace_period_hold_stream {
-            AdmissionStrategy::GraceHoldStream
-        } else {
-            AdmissionStrategy::GraceInstantStream
-        })
-        .to_string()]
-    }
-}
-
-fn displayed_admission_strategy_tags(state: &AdmissionStrategiesDto, stream: &StreamConfigDto) -> Vec<String> {
-    filter_disabled_grace_strategy_tags(
-        state.strategies.clone().unwrap_or_else(|| {
-            admission_strategy_tags(stream.admission_strategies.as_ref())
-                .unwrap_or_else(|| legacy_admission_strategy_tags(stream))
-        }),
-        stream.grace_period_millis,
-    )
-}
-
-fn available_admission_strategies(selected_tags: &[String], grace_period_millis: u64) -> Vec<AdmissionStrategy> {
-    let has_grace = selected_tags.iter().filter_map(|tag| parse_admission_strategy_tag(tag)).any(is_grace_strategy);
-
-    [
-        AdmissionStrategy::EvictUserSameIpOldest,
-        AdmissionStrategy::EvictUserSameIpLatest,
-        AdmissionStrategy::EvictUserOldest,
-        AdmissionStrategy::EvictUserLatest,
-        AdmissionStrategy::GraceInstantStream,
-        AdmissionStrategy::GraceHoldStream,
-    ]
-    .into_iter()
-    .filter(|strategy| {
-        let tag = admission_strategy_tag(*strategy);
-        let grace_available = grace_period_millis > 0 || !is_grace_strategy(*strategy);
-        !selected_tags.iter().any(|selected| selected == tag)
-            && grace_available
-            && (!has_grace || !is_grace_strategy(*strategy))
-    })
-    .collect()
-}
-
-fn add_admission_strategy_tag(current: &[String], strategy: AdmissionStrategy) -> Vec<String> {
-    let mut next = current.to_vec();
-    let tag = admission_strategy_tag(strategy).to_string();
-    if next.iter().any(|selected| selected == &tag) {
-        return next;
-    }
-    // When adding a same-IP eviction rule, insert it before any broader user-wide
-    // rule (if present) so the backend ordering validation is satisfied.
-    let is_narrower =
-        matches!(strategy, AdmissionStrategy::EvictUserSameIpOldest | AdmissionStrategy::EvictUserSameIpLatest);
-    if is_narrower {
-        let broader_oldest = admission_strategy_tag(AdmissionStrategy::EvictUserOldest);
-        let broader_latest = admission_strategy_tag(AdmissionStrategy::EvictUserLatest);
-
-        let earliest_pos = next.iter().position(|t| t == broader_oldest || t == broader_latest);
-        if let Some(pos) = earliest_pos {
-            next.insert(pos, tag);
-            return next;
-        }
-    }
-    next.push(tag);
-    next
-}
-
-fn remove_admission_strategy_tag(current: &[String], index: usize) -> Vec<String> {
-    let mut next = current.to_vec();
-    if index < next.len() {
-        next.remove(index);
-    }
-    next
-}
-
-fn move_admission_strategy_tag(current: &[String], index: usize, delta: isize) -> Vec<String> {
-    let mut next = current.to_vec();
-    if let Some(target_index) = index.checked_add_signed(delta) {
-        if index < next.len() && target_index < next.len() {
-            next.swap(index, target_index);
-            // Reject the move if it would create an invalid ordering (broader before narrower).
-            let strategy_dtos: Vec<AdmissionStrategy> =
-                next.iter().filter_map(|t| parse_admission_strategy_tag(t)).collect();
-            if !shared::model::is_valid_admission_strategy_order(&strategy_dtos) {
-                next.swap(index, target_index); // revert
-            }
-        }
-    }
-    next
 }
 
 generate_form_reducer!(
@@ -371,6 +174,7 @@ generate_form_reducer!(
     fields {
         Enabled => enabled: bool,
         Url => url: String,
+        UnavailablePolicy => unavailable_policy: GeoIpUnavailablePolicy,
     }
 );
 
@@ -413,6 +217,24 @@ generate_form_reducer!(
         CustomHeader => custom_header: Vec<String>,
     }
 );
+
+fn geoip_unavailable_policy_options() -> Rc<Vec<String>> {
+    Rc::new(all::<GeoIpUnavailablePolicy>().map(|policy| policy.to_string()).collect())
+}
+
+pub(crate) fn geoip_unavailable_policy_label(translate: &YewI18n, policy: GeoIpUnavailablePolicy) -> String {
+    match policy {
+        GeoIpUnavailablePolicy::Deny => translate.t("LABEL.GEOIP_UNAVAILABLE_POLICY_DENY"),
+        GeoIpUnavailablePolicy::Allow => translate.t("LABEL.GEOIP_UNAVAILABLE_POLICY_ALLOW"),
+    }
+}
+
+fn geoip_unavailable_policy_labels(translate: &YewI18n) -> Rc<Vec<String>> {
+    Rc::new(vec![
+        geoip_unavailable_policy_label(translate, GeoIpUnavailablePolicy::Deny),
+        geoip_unavailable_policy_label(translate, GeoIpUnavailablePolicy::Allow),
+    ])
+}
 
 #[component]
 pub fn ReverseProxyConfigView() -> Html {
@@ -816,6 +638,13 @@ pub fn ReverseProxyConfigView() -> Html {
                 <h1>{translate.t(LABEL_GEOIP)}</h1>
                 { config_field_bool!(geoip_state.form, translate.t(LABEL_ENABLED), enabled) }
                 { config_field!(geoip_state.form, translate.t(LABEL_URL), url) }
+                { config_field_child!(translate.t(LABEL_GEOIP_UNAVAILABLE_POLICY), "GEO_IP_CONFIG.UNAVAILABLE_POLICY", {
+                    html! {
+                        <span class="tp__form-field__value">
+                            {geoip_unavailable_policy_label(&translate, geoip_state.form.unavailable_policy)}
+                        </span>
+                    }
+                }) }
             </Card>
         }
     };
@@ -910,11 +739,31 @@ pub fn ReverseProxyConfigView() -> Html {
     };
 
     let render_geoip_edit = || {
+        let geoip_policy_state = geoip_state.clone();
+        let selected_policy = Rc::new(vec![geoip_state.form.unavailable_policy.to_string()]);
         html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_GEOIP)}</h1>
                 { edit_field_bool!(geoip_state, translate.t(LABEL_ENABLED), enabled, GeoIpConfigFormAction::Enabled) }
                 { edit_field_text!(geoip_state, translate.t(LABEL_URL), url, GeoIpConfigFormAction::Url) }
+                { config_field_child!(translate.t(LABEL_GEOIP_UNAVAILABLE_POLICY), "GEO_IP_CONFIG.UNAVAILABLE_POLICY", {
+                    html! {
+                        <RadioButtonGroup
+                            multi_select={false}
+                            none_allowed={false}
+                            options={geoip_unavailable_policy_options()}
+                            labels={Some(geoip_unavailable_policy_labels(&translate))}
+                            selected={selected_policy}
+                            on_select={Callback::from(move |selections: Rc<Vec<String>>| {
+                                if let Some(selection) = selections.first() {
+                                    geoip_policy_state.dispatch(GeoIpConfigFormAction::UnavailablePolicy(
+                                        GeoIpUnavailablePolicy::from_str(selection).unwrap_or(GeoIpUnavailablePolicy::Deny),
+                                    ));
+                                }
+                            })}
+                        />
+                    }
+                }) }
             </Card>
         }
     };
@@ -1156,92 +1005,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admission_strategy_tags_roundtrip() {
-        let tags = admission_strategy_tags(Some(&vec![
-            AdmissionStrategy::EvictUserOldest,
-            AdmissionStrategy::GraceHoldStream,
-        ]))
-        .unwrap_or_default();
-        assert_eq!(
-            parse_admission_strategy_tags(Some(&tags)),
-            Some(vec![AdmissionStrategy::EvictUserOldest, AdmissionStrategy::GraceHoldStream,])
-        );
-    }
-
-    #[test]
-    fn admission_strategy_tags_roundtrip_evict_user_latest() {
-        let tags = admission_strategy_tags(Some(&vec![AdmissionStrategy::EvictUserLatest])).unwrap_or_default();
-        assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategy::EvictUserLatest]));
-    }
-
-    #[test]
-    fn invalid_admission_strategy_tags_are_ignored() {
-        let tags = vec!["evict_user_latest".to_string(), "not-a-strategy".to_string(), "evict_user_latest".to_string()];
-        assert_eq!(parse_admission_strategy_tags(Some(&tags)), Some(vec![AdmissionStrategy::EvictUserLatest]));
-    }
-
-    #[test]
-    fn displayed_admission_strategies_fall_back_to_legacy_grace() {
-        let state = AdmissionStrategiesDto::default();
-        let stream = StreamConfigDto {
-            grace_period_millis: 2_000,
-            grace_period_hold_stream: true,
-            ..StreamConfigDto::default()
-        };
-
-        assert_eq!(displayed_admission_strategy_tags(&state, &stream), vec!["grace_hold_stream".to_string()]);
-    }
-
-    #[test]
-    fn available_admission_strategies_hide_second_grace_option() {
-        let available = available_admission_strategies(&["grace_hold_stream".to_string()], 2_000);
-        assert!(!available.contains(&AdmissionStrategy::GraceInstantStream));
-        assert!(!available.contains(&AdmissionStrategy::GraceHoldStream));
-        assert!(available.contains(&AdmissionStrategy::EvictUserSameIpOldest));
-        assert!(available.contains(&AdmissionStrategy::EvictUserOldest));
-    }
-
-    #[test]
-    fn available_admission_strategies_hide_grace_when_disabled() {
-        let available = available_admission_strategies(&[], 0);
-        assert!(!available.contains(&AdmissionStrategy::GraceInstantStream));
-        assert!(!available.contains(&AdmissionStrategy::GraceHoldStream));
-        assert!(available.contains(&AdmissionStrategy::EvictUserSameIpOldest));
-        assert!(available.contains(&AdmissionStrategy::EvictUserSameIpLatest));
-        assert!(available.contains(&AdmissionStrategy::EvictUserOldest));
-        assert!(available.contains(&AdmissionStrategy::EvictUserLatest));
-    }
-
-    #[test]
-    fn displayed_admission_strategies_hide_disabled_grace_tags() {
-        let state = AdmissionStrategiesDto { strategies: Some(vec!["grace_hold_stream".to_string()]) };
-        let stream = StreamConfigDto { grace_period_millis: 0, ..StreamConfigDto::default() };
-
-        assert_eq!(displayed_admission_strategy_tags(&state, &stream), Vec::<String>::new());
-    }
-
-    #[test]
-    fn filtered_admission_strategies_drop_grace_when_disabled() {
-        let parsed = parse_admission_strategy_tags(Some(&[
-            "evict_user_same_ip_oldest".to_string(),
-            "grace_hold_stream".to_string(),
-        ]));
-
-        assert_eq!(filter_disabled_grace_strategies(parsed, 0), Some(vec![AdmissionStrategy::EvictUserSameIpOldest]));
-    }
-
-    #[test]
-    fn add_admission_strategy_enforces_narrower_before_broader() {
-        let current = vec!["evict_user_oldest".to_string()];
-        let new_tags = add_admission_strategy_tag(&current, AdmissionStrategy::EvictUserSameIpOldest);
-        assert_eq!(new_tags, vec!["evict_user_same_ip_oldest".to_string(), "evict_user_oldest".to_string()]);
-    }
-
-    #[test]
-    fn move_admission_strategy_reverts_invalid_order() {
-        let current = vec!["evict_user_same_ip_oldest".to_string(), "evict_user_oldest".to_string()];
-        // Attempt to move broader EvictUserOldest up before narrower EvictUserSameIpOldest
-        let next = move_admission_strategy_tag(&current, 1, -1);
-        assert_eq!(next, current);
+    fn geoip_unavailable_policy_roundtrips_through_string_representation() {
+        for policy in all::<GeoIpUnavailablePolicy>() {
+            let parsed = GeoIpUnavailablePolicy::from_str(&policy.to_string()).unwrap_or(GeoIpUnavailablePolicy::Deny);
+            assert_eq!(parsed, policy);
+        }
     }
 }

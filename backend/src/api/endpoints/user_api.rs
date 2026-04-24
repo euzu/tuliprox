@@ -1,6 +1,8 @@
 use crate::{
     api::{
-        api_utils::{get_user_target_by_username, get_username_from_auth_header, try_unwrap_body},
+        api_utils::{
+            get_user_target_by_username, get_username_from_auth_header, try_unwrap_body,
+        },
         model::AppState,
     },
     auth::{validator_api_user, AuthBearer},

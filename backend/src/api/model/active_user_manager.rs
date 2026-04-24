@@ -3992,6 +3992,7 @@ mod tests {
             soft_connections,
             soft_priority: 0,
             t_is_api_user: false,
+            network_access: None,
         }
     }
 

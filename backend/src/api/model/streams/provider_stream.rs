@@ -16,6 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use shared::model::PlaylistItemType;
 use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
+use shared::error::TuliproxError;
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum CustomVideoStreamType {
@@ -42,7 +43,7 @@ impl fmt::Display for CustomVideoStreamType {
 }
 
 impl FromStr for CustomVideoStreamType {
-    type Err = String;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
@@ -52,7 +53,7 @@ impl FromStr for CustomVideoStreamType {
             "low_priority_preempted" => Ok(Self::LowPriorityPreempted),
             "user_account_expired" => Ok(Self::UserAccountExpired),
             "provisioning" => Ok(Self::Provisioning),
-            _ => Err(format!("Unknown stream type: {s}")),
+            _ => Err(TuliproxError::Config(format!("Unknown stream type: {s}"))),
         }
     }
 }

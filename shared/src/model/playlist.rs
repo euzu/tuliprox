@@ -1,5 +1,6 @@
 use crate::{
     create_bitset,
+    error::TuliproxError,
     model::{
         xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
         SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
@@ -48,14 +49,14 @@ impl XtreamCluster {
 }
 
 impl FromStr for XtreamCluster {
-    type Err = String;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "live" => Ok(XtreamCluster::Live),
             "video" | "vod" | "movie" => Ok(XtreamCluster::Video),
             "series" => Ok(XtreamCluster::Series),
-            _ => Err(format!("Invalid XtreamCluster: {s}")),
+            _ => Err(TuliproxError::Config(format!("Invalid XtreamCluster: {s}"))),
         }
     }
 }
@@ -120,7 +121,7 @@ impl From<XtreamCluster> for PlaylistItemType {
 }
 
 impl FromStr for PlaylistItemType {
-    type Err = String;
+    type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -135,7 +136,7 @@ impl FromStr for PlaylistItemType {
             "LiveUnknown" => Ok(PlaylistItemType::LiveUnknown),
             "LiveHls" => Ok(PlaylistItemType::LiveHls),
             "LiveDash" => Ok(PlaylistItemType::LiveDash),
-            _ => Err(format!("Invalid PlaylistItemType: {s}")),
+            _ => Err(TuliproxError::Config(format!("Invalid PlaylistItemType: {s}"))),
         }
     }
 }

@@ -93,6 +93,16 @@
   happens in `main`, making the path easier to test and reuse.
 - **Admission Failure Deduplication**: Repeated admission failure response logic in `hls_api`, `m3u_api`, and `xtream_api`  
   has been centralized into shared helpers.
+- **API User Network Access Restrictions**: API proxy users can now be restricted by source CIDR ranges and/or GeoIP country
+  codes via `network_access`.
+  - Matching any configured CIDR or any configured country is sufficient for access.
+  - Network access checks are centralized in the API user request context so denied requests stop before endpoint handling
+    or upstream forwarding.
+  - Country-based checks require the GeoIP database. If GeoIP is unavailable, the secure default is to deny requests that
+    did not match a configured CIDR.
+  - Operators can explicitly opt into allowing this GeoIP-unavailable country-rule case with
+    `reverse_proxy.geoip.unavailable_policy: allow`.
+  - CIDR-only misses, unknown countries, and country mismatches still deny.
 - **QoS Aggregation Efficiency**:
   - QoS snapshot listing does not rely on a full unbounded materialization path for filtered UI/API reads.
   - Current-day QoS rebuilds are skipped when the history day is unchanged.
@@ -214,6 +224,16 @@
   - Added `qos_aggregation` (optional) with:
     - `enabled` (`bool`)
     - `interval_secs` (`u64`)
+- **config.yml (`reverse_proxy.geoip`)**:
+  - Added `unavailable_policy` (`deny` | `allow`, default `deny`).
+  - `deny` keeps country-based `network_access` restrictions closed when GeoIP is disabled, missing, or not loaded.
+  - `allow` is an explicit risk acceptance that allows country-based `network_access` restrictions only when GeoIP is
+    unavailable. CIDR-only misses, unknown countries, and country mismatches still deny.
+- **api-proxy.yml (`user.credentials[].network_access`)**:
+  - Added optional per-user network restrictions:
+    - `allowed_networks`: CIDR ranges such as `192.168.0.0/16` or `10.0.0.1/32`.
+    - `allowed_countries`: ISO-style country codes resolved through GeoIP.
+  - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 3.3.0 (2026-04-02)
 

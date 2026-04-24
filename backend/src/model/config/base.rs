@@ -1,13 +1,13 @@
 use crate::model::{
-    macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig, LogConfig, MetadataUpdateConfig,
-    MessagingConfig, ProxyConfig, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig, ScheduleConfig, VideoConfig,
-    WebUiConfig,
+    macros, ConfigApi, HdHomeRunConfig, HdHomeRunFlags, IpCheckConfig, LibraryConfig,
+    LogConfig, MetadataUpdateConfig, MessagingConfig, ProxyConfig, ReverseProxyConfig,
+    ReverseProxyDisabledHeaderConfig, ScheduleConfig, VideoConfig, WebUiConfig,
 };
 use crate::utils;
 use log::{error, info};
 use path_clean::PathClean;
 use shared::error::TuliproxError;
-use shared::model::{ConfigDto, HdHomeRunDeviceOverview};
+use shared::model::{ConfigDto, GeoIpUnavailablePolicy, HdHomeRunDeviceOverview};
 use shared::utils::{default_grace_period_millis, default_grace_period_timeout_secs, set_sanitize_sensitive_info, DEFAULT_BACKUP_DIR, DEFAULT_CACHE_DIR, DEFAULT_DOWNLOAD_DIR, DEFAULT_STORAGE_DIR, DEFAULT_STORAGE_TEMP_DIR, DEFAULT_USER_CONFIG_DIR};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -262,6 +262,13 @@ impl Config {
         self.reverse_proxy.as_ref().is_some_and(|r| r.geoip.as_ref().is_some_and(|g| g.enabled))
     }
 
+    pub fn get_geoip_unavailable_policy(&self) -> GeoIpUnavailablePolicy {
+        self.reverse_proxy
+            .as_ref()
+            .and_then(|r| r.geoip.as_ref())
+            .map_or(GeoIpUnavailablePolicy::Deny, |g| g.unavailable_policy)
+    }
+
     pub fn get_disabled_headers(&self) -> Option<ReverseProxyDisabledHeaderConfig> {
         self.reverse_proxy
             .as_ref()
@@ -321,7 +328,7 @@ impl From<&ConfigDto> for Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
-    use shared::model::ConfigDto;
+    use shared::model::{ConfigDto, GeoIpUnavailablePolicy};
     use tempfile::tempdir;
 
     #[test]
@@ -401,5 +408,56 @@ mod tests {
         assert_eq!(stream_history.stream_history_batch_size, 64);
         assert_eq!(stream_history.stream_history_retention_days, 14);
         assert_eq!(stream_history.stream_history_directory, "/var/lib/tuliprox/history");
+    }
+
+    #[test]
+    fn get_geoip_unavailable_policy_no_reverse_proxy_returns_deny() {
+        let dto = ConfigDto::default();
+        let config = Config::from(&dto);
+        assert_eq!(config.get_geoip_unavailable_policy(), GeoIpUnavailablePolicy::Deny);
+    }
+
+    #[test]
+    fn get_geoip_unavailable_policy_no_geoip_returns_deny() {
+        let dto = ConfigDto {
+            reverse_proxy: Some(shared::model::ReverseProxyConfigDto::default()),
+            ..Default::default()
+        };
+        let config = Config::from(&dto);
+        assert_eq!(config.get_geoip_unavailable_policy(), GeoIpUnavailablePolicy::Deny);
+    }
+
+    #[test]
+    fn get_geoip_unavailable_policy_missing_field_returns_deny() {
+        let dto = ConfigDto {
+            reverse_proxy: Some(shared::model::ReverseProxyConfigDto {
+                geoip: Some(shared::model::GeoIpConfigDto {
+                    enabled: true,
+                    url: "https://example.com/db.csv".to_string(),
+                    ..shared::model::GeoIpConfigDto::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config::from(&dto);
+        assert_eq!(config.get_geoip_unavailable_policy(), GeoIpUnavailablePolicy::Deny);
+    }
+
+    #[test]
+    fn get_geoip_unavailable_policy_allow_returns_allow() {
+        let dto = ConfigDto {
+            reverse_proxy: Some(shared::model::ReverseProxyConfigDto {
+                geoip: Some(shared::model::GeoIpConfigDto {
+                    enabled: true,
+                    url: "https://example.com/db.csv".to_string(),
+                    unavailable_policy: shared::model::GeoIpUnavailablePolicy::Allow,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = Config::from(&dto);
+        assert_eq!(config.get_geoip_unavailable_policy(), GeoIpUnavailablePolicy::Allow);
     }
 }

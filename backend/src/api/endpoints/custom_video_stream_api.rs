@@ -4,6 +4,7 @@ use crate::{
 };
 use axum::response::IntoResponse;
 use std::{str::FromStr, sync::Arc};
+use crate::auth::resolve_api_user_context;
 
 async fn cvs_api(
     fingerprint: Fingerprint,
@@ -16,12 +17,12 @@ async fn cvs_api(
         return axum::http::StatusCode::NOT_FOUND.into_response();
     };
 
-    let Some((user, _target)) = app_state.app_config.get_target_for_user(&username, &password) else {
+    let Some((user, target)) = app_state.app_config.get_target_for_user(&username, &password) else {
         return app_state.app_config.get_auth_error_status().into_response();
     };
 
-    if user.permission_denied(&app_state) {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
+    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state) {
+        return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
 
     create_custom_video_stream_response(&app_state, &fingerprint.addr, custom_video_type).into_response()

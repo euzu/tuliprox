@@ -7,6 +7,8 @@ pub struct RadioButtonGroupProps {
     pub options: Rc<Vec<String>>,
     pub selected: Rc<Vec<String>>,
     pub on_select: Callback<Rc<Vec<String>>>,
+    #[prop_or_default]
+    pub labels: Option<Rc<Vec<String>>>, // optional localized labels, same length as options
     #[prop_or(false)]
     pub multi_select: bool,
     #[prop_or(false)]
@@ -62,14 +64,26 @@ pub fn RadioButtonGroup(props: &RadioButtonGroupProps) -> Html {
         })
     };
 
+    let display_label = |option: &String| -> String {
+        if let Some(labels) = &props.labels {
+            if let Some(pos) = props.options.iter().position(|o| o == option) {
+                if let Some(label) = labels.get(pos) {
+                    return label.clone();
+                }
+            }
+        }
+        option.clone()
+    };
+
     html! {
         <div class="tp__radio-button-group">
             { for props.options.iter().map(|option| {
                 let is_selected = (*selections).contains(option);
                 let class = if is_selected { "primary" } else { "" };
                 let onclick = on_click.clone();
+                let label = display_label(option);
                 html! {
-                    <TextButton {onclick} class={class} name={ option.clone() } title={ option.clone() }></TextButton>
+                    <TextButton {onclick} class={class} name={ option.clone() } title={ label } />
                 }
             }) }
         </div>
