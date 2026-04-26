@@ -2,6 +2,7 @@ mod sys_utils;
 mod compression;
 mod file;
 mod network;
+mod epg_merge;
 mod crypto_utils;
 mod step_measure;
 mod logging;
@@ -67,6 +68,7 @@ pub use with;
 
 pub use self::binary_utils::*;
 pub use self::db_viewer::*;
+pub(crate) use self::epg_merge::*;
 pub use self::epg_parser::*;
 pub use self::geoip::*;
 pub use self::logging::*;
