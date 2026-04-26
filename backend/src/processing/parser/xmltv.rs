@@ -98,14 +98,7 @@ impl TVGuide {
 
         let mut channels_by_source = Vec::with_capacity(epgs.len());
         for epg in epgs {
-            let mut source_channels = Vec::with_capacity(epg.children.len());
-            for channel_arc in epg.children {
-                let Ok(channel) = Arc::try_unwrap(channel_arc) else {
-                    error!("Failed to unwrap epg channel");
-                    continue;
-                };
-                source_channels.push(channel);
-            }
+            let source_channels = epg.children.into_iter().map(Arc::unwrap_or_clone).collect();
             channels_by_source.push((epg.priority, source_channels));
         }
 
@@ -601,14 +594,7 @@ pub fn flatten_tvguide(mut tv_guides: Vec<Epg>) -> Option<Epg> {
     let mut channels_by_source = Vec::with_capacity(tv_guides.len());
 
     for guide in tv_guides.drain(..) {
-        let mut source_channels = Vec::with_capacity(guide.children.len());
-        for channel_arc in guide.children {
-            let Ok(channel) = Arc::try_unwrap(channel_arc) else {
-                error!("Failed to unwrap epg channel");
-                continue;
-            };
-            source_channels.push(channel);
-        }
+        let source_channels = guide.children.into_iter().map(Arc::unwrap_or_clone).collect();
         channels_by_source.push((guide.priority, source_channels));
     }
 
@@ -763,6 +749,64 @@ mod tests {
             epg.children[0].programmes.iter().map(|programme| (programme.start, programme.stop)).collect::<Vec<_>>(),
             vec![(10, 20), (30, 40)],
         );
+    }
+
+    #[test]
+    fn tvguide_merge_keeps_shared_arc_channels() {
+        let shared_channel = Arc::new(EpgChannel {
+            id: "demo.channel".intern(),
+            title: Some("Shared".intern()),
+            icon: Some("http://shared/icon.png".intern()),
+            programmes: vec![EpgProgramme::new_all(
+                10,
+                20,
+                "demo.channel".intern(),
+                Some("Shared Show".intern()),
+                None,
+            )],
+        });
+
+        let epg = TVGuide::merge(vec![Epg {
+            logo_override: false,
+            priority: 0,
+            attributes: None,
+            children: vec![Arc::clone(&shared_channel)],
+        }])
+        .expect("merged epg");
+
+        assert_eq!(Arc::strong_count(&shared_channel), 1);
+        assert_eq!(epg.children.len(), 1);
+        assert_eq!(epg.children[0].title.as_deref(), Some("Shared"));
+        assert_eq!(epg.children[0].icon.as_deref(), Some("http://shared/icon.png"));
+    }
+
+    #[test]
+    fn flatten_tvguide_keeps_shared_arc_channels() {
+        let shared_channel = Arc::new(EpgChannel {
+            id: "demo.channel".intern(),
+            title: Some("Shared".intern()),
+            icon: Some("http://shared/icon.png".intern()),
+            programmes: vec![EpgProgramme::new_all(
+                10,
+                20,
+                "demo.channel".intern(),
+                Some("Shared Show".intern()),
+                None,
+            )],
+        });
+
+        let epg = super::flatten_tvguide(vec![Epg {
+            logo_override: false,
+            priority: 0,
+            attributes: None,
+            children: vec![Arc::clone(&shared_channel)],
+        }])
+        .expect("merged epg");
+
+        assert_eq!(Arc::strong_count(&shared_channel), 1);
+        assert_eq!(epg.children.len(), 1);
+        assert_eq!(epg.children[0].title.as_deref(), Some("Shared"));
+        assert_eq!(epg.children[0].icon.as_deref(), Some("http://shared/icon.png"));
     }
 
     #[test]

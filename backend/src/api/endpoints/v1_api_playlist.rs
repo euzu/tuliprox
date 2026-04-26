@@ -123,10 +123,6 @@ fn build_playlist_webplayer_url(
     format!("{base_url}/token/{access_token}/{}/{}/{}", target_id, cluster.as_stream_type(), virtual_id)
 }
 
-fn merge_epg_channels(channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
-    merge_prioritized_channels(channels_by_source)
-}
-
 fn respond_with_rewritten_epg(app_state: &Arc<AppState>, accept: Option<&str>, epg: Vec<EpgChannel>) -> Response {
     let config = app_state.app_config.config.load();
     let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
@@ -215,7 +211,7 @@ async fn load_epg_channels_for_input(
             Ok(None)
         }
     } else {
-        Ok(Some(merge_epg_channels(channels_by_source)))
+        Ok(Some(merge_prioritized_channels(channels_by_source)))
     }
 }
 
@@ -558,10 +554,7 @@ mod tests {
     use shared::foundation::Filter;
     use shared::model::ProcessingOrder;
     use shared::{
-        model::{
-            ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto, EpgProgramme, EpgSourceDto, PlaylistRequest,
-            XtreamCluster,
-        },
+        model::{ConfigPaths, ConfigProviderDto, EpgConfigDto, EpgSourceDto, PlaylistRequest, XtreamCluster},
         utils::Internable,
     };
     use std::sync::Arc;
@@ -889,75 +882,6 @@ mod tests {
         assert_eq!(live, "http://player.example/token/token123/1/live/42");
         assert_eq!(movie, "http://player.example/token/token123/1/movie/42");
         assert_eq!(series, "http://player.example/token/token123/1/series/42");
-    }
-
-    #[test]
-    fn merge_epg_channels_prefers_higher_priority_metadata_and_merges_all_programmes() {
-        let low_priority = EpgChannel {
-            id: "demo.channel".intern(),
-            title: Some("Low".intern()),
-            icon: Some("http://low/icon.png".intern()),
-            programmes: vec![EpgProgramme::new_all(10, 20, "demo.channel".intern(), Some("Low Show".intern()), None)],
-        };
-        let high_priority = EpgChannel {
-            id: "demo.channel".intern(),
-            title: Some("High".intern()),
-            icon: Some("http://high/icon.png".intern()),
-            programmes: vec![EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("High Show".intern()), None)],
-        };
-        let same_priority = EpgChannel {
-            id: "demo.channel".intern(),
-            title: Some("Same".intern()),
-            icon: Some("http://same/icon.png".intern()),
-            programmes: vec![
-                EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("Duplicate".intern()), None),
-                EpgProgramme::new_all(50, 60, "demo.channel".intern(), Some("Second Show".intern()), None),
-            ],
-        };
-
-        let channels = super::merge_epg_channels(vec![
-            (10, vec![low_priority]),
-            (0, vec![high_priority]),
-            (0, vec![same_priority]),
-        ]);
-
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].title.as_deref(), Some("High"));
-        assert_eq!(channels[0].icon.as_deref(), Some("http://high/icon.png"));
-        assert_eq!(channels[0].programmes.len(), 3);
-        assert_eq!(
-            channels[0].programmes.iter().map(|programme| (programme.start, programme.stop)).collect::<Vec<_>>(),
-            vec![(10, 20), (30, 40), (50, 60)],
-        );
-    }
-
-    #[test]
-    fn merge_epg_channels_dedupes_duplicate_programmes_from_winning_source() {
-        let high_priority = EpgChannel {
-            id: "demo.channel".intern(),
-            title: Some("High".intern()),
-            icon: Some("http://high/icon.png".intern()),
-            programmes: vec![
-                EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("High Show".intern()), None),
-                EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("High Show Duplicate".intern()), None),
-            ],
-        };
-        let low_priority = EpgChannel {
-            id: "demo.channel".intern(),
-            title: Some("Low".intern()),
-            icon: Some("http://low/icon.png".intern()),
-            programmes: vec![EpgProgramme::new_all(50, 60, "demo.channel".intern(), Some("Low Show".intern()), None)],
-        };
-
-        let channels = super::merge_epg_channels(vec![(0, vec![high_priority]), (10, vec![low_priority])]);
-
-        assert_eq!(channels.len(), 1);
-        assert_eq!(channels[0].programmes.len(), 2);
-        assert_eq!(
-            channels[0].programmes.iter().map(|programme| (programme.start, programme.stop)).collect::<Vec<_>>(),
-            vec![(30, 40), (50, 60)],
-        );
-        assert_eq!(channels[0].programmes[0].title.as_deref(), Some("High Show"));
     }
 
     #[tokio::test]
