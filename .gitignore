@@ -54,8 +54,13 @@ backend/Cargo.lock
 !README.md
 !CHANGELOG.md
 !CONTRIBUTING.md
+!epg_merge_patch.md
 
 # Ignore ai documentation files
 .c[lor][adu]*
 .dual-graph/
 .dual-graph-context/
+
+# Local analysis outputs
+epg_mapping_analysis.txt
+missing.txt
