@@ -599,7 +599,9 @@ mod tests {
     use arc_swap::ArcSwapOption;
     use serde_json::Value;
     use shared::foundation::Filter;
-    use shared::model::{ClusterSource, InputType, PlaylistItemType, ProcessingOrder, XtreamCluster, XtreamPlaylistItem};
+    use shared::model::{
+        ClusterSource, InputType, PlaylistItemType, ProcessingOrder, ProxyType, XtreamCluster, XtreamPlaylistItem,
+    };
     use shared::utils::Internable;
     use std::sync::Arc;
 
@@ -706,7 +708,8 @@ mod tests {
     #[test]
     fn create_vod_info_keeps_tuliprox_virtual_stream_id_for_redirect_users() {
         let target = test_target();
-        let user = ProxyUserCredentials::default();
+        let mut user = ProxyUserCredentials::default();
+        user.proxy = ProxyType::Redirect;
         let pli = XtreamPlaylistItem {
             virtual_id: 176_141,
             provider_id: 813_563,

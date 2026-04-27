@@ -465,7 +465,11 @@ fn probe_bytes_limit(probe_size: u64) -> usize {
 }
 
 fn seekable_probe_tail_window(probe_size: u64) -> u64 {
-    std::cmp::max(probe_size.max(1), FFPROBE_SEEKABLE_MIN_TAIL_BYTES)
+    if probe_size == 0 {
+        FFPROBE_SEEKABLE_MIN_TAIL_BYTES
+    } else {
+        std::cmp::min(probe_size.max(1), FFPROBE_SEEKABLE_MIN_TAIL_BYTES)
+    }
 }
 
 async fn create_seekable_probe_temp_file() -> Result<tempfile::NamedTempFile, ProbeFailureKind> {
@@ -589,7 +593,7 @@ async fn stage_seekable_probe_file(
     probe_size: u64,
     temp_path: &Path,
 ) -> Result<SeekableProbeStage, ProbeFailureKind> {
-    let head_window = probe_size.max(1);
+    let head_window = seekable_probe_tail_window(probe_size);
     let head_result = fetch_remote_span_to_file(
         client,
         url,
@@ -1488,9 +1492,10 @@ mod tests {
     }
 
     #[test]
-    fn seekable_probe_tail_window_has_a_32mb_floor() {
-        assert_eq!(seekable_probe_tail_window(1), 32 * 1024 * 1024);
-        assert_eq!(seekable_probe_tail_window(64 * 1024 * 1024), 64 * 1024 * 1024);
+    fn seekable_probe_tail_window_respects_probe_size_cap() {
+        assert_eq!(seekable_probe_tail_window(0), 32 * 1024 * 1024);
+        assert_eq!(seekable_probe_tail_window(1), 1);
+        assert_eq!(seekable_probe_tail_window(64 * 1024 * 1024), 32 * 1024 * 1024);
     }
 
     #[test]
@@ -1575,9 +1580,41 @@ mod tests {
 
         assert_eq!(stage.content_length, Some(26));
         assert_eq!(stage.head_bytes, 5);
-        assert_eq!(stage.tail_start, Some(5));
-        assert!(stage.fully_materialized);
+        assert_eq!(stage.tail_start, Some(21));
+        assert!(!stage.fully_materialized);
         assert_eq!(accepted.load(Ordering::SeqCst), 2);
+
+        let staged = tokio::fs::read(&temp_path).await.expect("staged file should be readable");
+        assert_eq!(staged.len(), 26);
+        assert_eq!(&staged[..5], b"abcde");
+        assert_eq!(&staged[5..21], &[0; 16]);
+        assert_eq!(&staged[21..], b"vwxyz");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn stage_seekable_probe_file_with_zero_probe_size_uses_bounded_default_window() {
+        let body = Arc::new(b"abcdefghijklmnopqrstuvwxyz".to_vec());
+        let (url, accepted, handle) = start_range_test_http_server(Arc::clone(&body))
+            .await
+            .expect("range server should start");
+        let tempdir = tempfile::tempdir().expect("tempdir should succeed");
+        let temp_path = tempdir.path().join("probe.bin");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("http client should build");
+
+        let stage = stage_seekable_probe_file(&client, &url, Some("test-agent/1.0"), 0, &temp_path)
+            .await
+            .expect("seekable staging should succeed");
+
+        assert_eq!(stage.content_length, Some(26));
+        assert_eq!(stage.head_bytes, 26);
+        assert_eq!(stage.tail_start, None);
+        assert!(stage.fully_materialized);
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
 
         let staged = tokio::fs::read(&temp_path).await.expect("staged file should be readable");
         assert_eq!(staged, *body);

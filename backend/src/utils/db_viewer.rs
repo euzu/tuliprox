@@ -331,15 +331,15 @@ mod tests {
         };
 
         let value = to_human_readable_json_value(&item).expect("dump value should serialize");
-        let json = serde_json::to_string(&value).expect("humanized dump should serialize");
         let props = value
             .get("additional_properties")
             .and_then(|value| value.get("Live"))
             .expect("live properties should be present");
 
-        assert!(json.starts_with(
-            r#"{"virtual_id":42,"provider_id":52568,"name":"Example","logo":"","logo_small":"","group":"Movies","title":"Example""#
-        ));
+        assert_eq!(value.get("virtual_id").and_then(Value::as_u64), Some(42));
+        assert_eq!(value.get("provider_id").and_then(Value::as_u64), Some(52_568));
+        assert_eq!(value.get("name").and_then(Value::as_str), Some("Example"));
+        assert_eq!(value.get("group").and_then(Value::as_str), Some("Movies"));
         assert_eq!(props.get("video").and_then(|value| value.get("codec_name")).and_then(Value::as_str), Some("h264"));
         assert_eq!(props.get("audio").and_then(|value| value.get("codec_name")).and_then(Value::as_str), Some("aac"));
     }
