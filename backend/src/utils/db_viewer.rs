@@ -1,8 +1,11 @@
 use crate::api::model::{MetadataRetryDbKey, MetadataRetryDbValue};
 use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery, QosSnapshotRecord, VirtualIdRecord};
+use base64::{engine::general_purpose, Engine as _};
 use env_logger::{Builder, Target};
+use lz4_flex::decompress_size_prepended;
 use log::{error, LevelFilter};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use shared::model::{EpgChannel, M3uPlaylistItem, XtreamPlaylistItem};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -186,12 +189,12 @@ where
     println!("[");
     let mut first = true;
     for (_, entry) in iterator {
-        match serde_json::to_string(&entry) {
-            Ok(text) => {
+        match to_human_readable_json_value(&entry).and_then(|value| serde_json::to_string(&value)) {
+            Ok(json) => {
                 if !first {
                     println!(",");
                 }
-                println!("{text}");
+                println!("{json}");
                 first = false;
             }
             Err(err) => {
@@ -205,6 +208,50 @@ where
     error_count == 0
 }
 
+fn to_human_readable_json_value<T: Serialize>(entry: &T) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(entry)?;
+    humanize_dump_value(&mut value);
+    Ok(value)
+}
+
+fn humanize_dump_value(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                humanize_dump_value(item);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, field_value) in fields {
+                if matches!(key.as_str(), "video" | "audio") {
+                    decode_storage_json_field(field_value);
+                } else {
+                    humanize_dump_value(field_value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn decode_storage_json_field(value: &mut Value) {
+    let Value::String(encoded) = value else {
+        return;
+    };
+
+    let Ok(compressed) = general_purpose::STANDARD_NO_PAD.decode(encoded) else {
+        return;
+    };
+    let Ok(decompressed) = decompress_size_prepended(&compressed) else {
+        return;
+    };
+    let Ok(text) = String::from_utf8(decompressed) else {
+        return;
+    };
+
+    *value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+}
+
 fn exit_app(code: i32) {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
@@ -213,11 +260,14 @@ fn exit_app(code: i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::dump_qos_snapshot_db;
-    use tempfile::tempdir;
-    use shared::model::PlaylistItemType;
-    use shared::utils::Internable;
+    use super::{dump_qos_snapshot_db, to_human_readable_json_value};
     use crate::repository::{BPlusTree, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow};
+    use serde_json::Value;
+    use shared::{
+        model::{LiveStreamProperties, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem},
+        utils::Internable,
+    };
+    use tempfile::tempdir;
 
     #[test]
     fn dump_qos_snapshot_db_reads_bplustree_records() {
@@ -251,5 +301,46 @@ mod tests {
         tree.store(&path).expect("tree should store");
 
         assert!(dump_qos_snapshot_db(&path));
+    }
+
+    #[test]
+    fn human_readable_dump_decodes_compressed_video_and_audio_fields() {
+        let item = XtreamPlaylistItem {
+            virtual_id: 42,
+            provider_id: 52_568,
+            name: "Example".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Movies".intern(),
+            title: "Example".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "https://example.invalid/movie.mkv".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                video: Some(r#"{"codec_name":"h264","width":1920,"height":1080}"#.intern()),
+                audio: Some(r#"{"codec_name":"aac","channels":2}"#.intern()),
+                ..LiveStreamProperties::default()
+            }))),
+            item_type: PlaylistItemType::Live,
+            category_id: 7,
+            input_name: "input".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+        };
+
+        let value = to_human_readable_json_value(&item).expect("dump value should serialize");
+        let json = serde_json::to_string(&value).expect("humanized dump should serialize");
+        let props = value
+            .get("additional_properties")
+            .and_then(|value| value.get("Live"))
+            .expect("live properties should be present");
+
+        assert!(json.starts_with(
+            r#"{"virtual_id":42,"provider_id":52568,"name":"Example","logo":"","logo_small":"","group":"Movies","title":"Example""#
+        ));
+        assert_eq!(props.get("video").and_then(|value| value.get("codec_name")).and_then(Value::as_str), Some("h264"));
+        assert_eq!(props.get("audio").and_then(|value| value.get("codec_name")).and_then(Value::as_str), Some("aac"));
     }
 }
