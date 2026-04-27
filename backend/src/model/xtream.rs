@@ -36,10 +36,17 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
 
     let force_redirect = target.options.as_ref().and_then(|o| o.force_redirect);
     let mut reverse_item_types = PlaylistItemTypeSet::empty();
+    let mut resource_proxy_item_types = PlaylistItemTypeSet::empty();
 
     for item_type in all::<PlaylistItemType>() {
         if user.proxy.is_reverse(item_type) && !force_redirect.as_ref().is_some_and(|o| o.has_cluster(item_type)) {
             reverse_item_types.insert(item_type);
+        }
+        if user.proxy.is_redirect(item_type)
+            || user.proxy.is_reverse(item_type)
+            || force_redirect.as_ref().is_some_and(|o| o.has_cluster(item_type))
+        {
+            resource_proxy_item_types.insert(item_type);
         }
     }
 
@@ -92,6 +99,7 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
         flags,
         force_redirect,
         reverse_item_types,
+        resource_proxy_item_types,
         username: user.username.clone(),
         password: user.password.clone(),
         base_url,
@@ -137,7 +145,7 @@ mod tests {
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::foundation::Filter;
     use shared::error::TuliproxError;
-    use shared::model::{InputFetchMethod, InputType, ProcessingOrder};
+    use shared::model::{InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder};
     use shared::utils::Internable;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -225,5 +233,22 @@ mod tests {
             err.to_string().contains("No server info configured"),
             "error should explicitly mention missing server info: {err}"
         );
+    }
+
+    #[test]
+    fn xtream_mapping_options_rewrite_resources_for_redirect_users() {
+        let app_config = create_test_app_config();
+        let (target, xtream_output) = create_test_target();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "viewer".to_string();
+        user.password = "secret".to_string();
+        user.t_is_api_user = true;
+
+        let options =
+            xtream_mapping_option_from_target_options(&target, &xtream_output, &app_config, &user, [0; 16])
+                .expect("mapping options");
+
+        assert!(!options.reverse_item_types.is_set(PlaylistItemType::Live));
+        assert!(options.resource_proxy_item_types.is_set(PlaylistItemType::Live));
     }
 }

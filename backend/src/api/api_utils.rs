@@ -1324,6 +1324,13 @@ pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_i
     modified.replacen(&input_user_info.password, &alt_input_user_info.password, 1)
 }
 
+fn resolve_redirect_location(input: &ConfigInput, stream_url: &str) -> Result<String, TuliproxError> {
+    Ok(match input.resolve_url(stream_url)? {
+        Cow::Borrowed(url) => url.to_string(),
+        Cow::Owned(url) => url,
+    })
+}
+
 async fn get_redirect_alternative_url(
     app_state: &Arc<AppState>,
     redirect_url: &Arc<str>,
@@ -1806,6 +1813,13 @@ where
                     Some(provider_cfg) => get_stream_alternative_url(&url, params.input, &provider_cfg),
                     None => url.to_string(),
                 },
+            };
+            let stream_url = match resolve_redirect_location(params.input, &stream_url) {
+                Ok(url) => url,
+                Err(err) => {
+                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    return Some(StatusCode::BAD_REQUEST.into_response());
+                }
             };
 
             // hls or dash redirect
@@ -3398,7 +3412,7 @@ mod tests {
         },
         auth::Fingerprint,
         model::{
-            AppConfig, Config, ConfigInput, ConfigInputAlias, ConfigTarget,
+            AppConfig, Config, ConfigInput, ConfigInputAlias, ConfigProvider, ConfigTarget,
             MediaToolCapabilities, NetworkAccess, ProcessTargets, ProxyUserCredentials, SourcesConfig,
         },
         utils::{FileLockManager, GeoIp},
@@ -3410,8 +3424,8 @@ mod tests {
     use shared::{
         foundation::Filter,
         model::{
-            ClusterFlags, ConfigPaths, ConfigTargetOptions, InputFetchMethod, InputType, PlaylistItemType,
-            ProcessingOrder, ProxyType, StreamChannel, XtreamCluster,
+            ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, InputFetchMethod, InputType,
+            PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType, StreamChannel, XtreamCluster,
         },
         utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
     };
@@ -3440,6 +3454,27 @@ mod tests {
         // Live cluster should always return false
         headers.insert("range", "bytes=100-".parse().unwrap());
         assert!(!is_seek_request(XtreamCluster::Live, &headers).await);
+    }
+
+    #[test]
+    fn resolve_redirect_location_resolves_provider_scheme_urls() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "develop".intern(),
+            urls: vec!["https://provider.example".intern()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        });
+        let input = ConfigInput {
+            name: "provider".intern(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..ConfigInput::default()
+        };
+
+        let resolved =
+            resolve_redirect_location(&input, "provider://develop/live/provider-user/provider-pass/33486.m3u8")
+                .expect("provider url should resolve");
+
+        assert_eq!(resolved, "https://provider.example/live/provider-user/provider-pass/33486.m3u8");
     }
 
     #[test]
