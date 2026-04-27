@@ -1,7 +1,7 @@
 use crate::model::ProxyConfig;
 use log::{debug, warn};
 use reqwest::{
-    header::{RANGE, USER_AGENT},
+    header::{CONTENT_RANGE, RANGE, USER_AGENT},
     Client, StatusCode,
 };
 use serde_json::Value;
@@ -11,10 +11,17 @@ use std::path::Path;
 use std::io::ErrorKind;
 use std::process::{Output, Stdio};
 use std::time::Duration;
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+    fs::{self, OpenOptions},
+    io::{AsyncSeekExt, AsyncWriteExt},
+    process::Command,
+};
 use url::Url;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
+const FFPROBE_TEMP_DIR: &str = "/tmp/ffprobe";
+const FFPROBE_SEEKABLE_MIN_TAIL_BYTES: u64 = 32 * 1024 * 1024;
+const FFPROBE_TEMP_STALE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeFailureKind {
@@ -36,6 +43,23 @@ pub struct ProbeStreamStats {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FfmpegExecutor;
+
+#[derive(Debug, Clone, Copy)]
+struct SeekableProbeStage {
+    content_length: Option<u64>,
+    head_bytes: u64,
+    tail_start: Option<u64>,
+    fully_materialized: bool,
+    range_supported: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SpanWriteResult {
+    status: StatusCode,
+    total_length: Option<u64>,
+    bytes_written: u64,
+    response_exhausted: bool,
+}
 
 impl FfmpegExecutor {
     #[must_use]
@@ -168,6 +192,38 @@ impl FfmpegExecutor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn probe_remote_seekable_url(
+        &self,
+        client: &Client,
+        url: &str,
+        user_agent: Option<&str>,
+        analyze_duration: u64,
+        probe_size: u64,
+        timeout_secs: u64,
+    ) -> ProbeUrlOutcome {
+        let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
+        let config_timeout = Duration::from_secs(timeout_secs);
+        let timeout_val = std::cmp::max(analyze_overhead, config_timeout);
+
+        let probe_result = tokio::time::timeout(
+            timeout_val,
+            self.probe_remote_seekable_url_inner(client, url, user_agent, analyze_duration, probe_size),
+        )
+        .await;
+
+        if let Ok(outcome) = probe_result {
+            outcome
+        } else {
+            warn!(
+                "ffprobe remote seekable probe timed out after {:?} for {}",
+                timeout_val,
+                sanitize_sensitive_info(url)
+            );
+            ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+        }
+    }
+
     /// Wrapper around [`Self::probe_url`] that races the probe against an optional cancellation token.
     #[allow(clippy::too_many_arguments)]
     pub async fn probe_url_with_cancel(
@@ -216,6 +272,31 @@ impl FfmpegExecutor {
             }
         } else {
             self.probe_remote_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs).await
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn probe_remote_seekable_url_with_cancel(
+        &self,
+        client: &Client,
+        url: &str,
+        user_agent: Option<&str>,
+        analyze_duration: u64,
+        probe_size: u64,
+        timeout_secs: u64,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    ) -> ProbeUrlOutcome {
+        if let Some(token) = cancel_token {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(url));
+                    ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled)
+                }
+                result = self.probe_remote_seekable_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs) => result,
+            }
+        } else {
+            self.probe_remote_seekable_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs).await
         }
     }
 
@@ -328,6 +409,34 @@ impl FfmpegExecutor {
             }
         }
     }
+
+    async fn probe_remote_seekable_url_inner(
+        &self,
+        client: &Client,
+        url: &str,
+        user_agent: Option<&str>,
+        analyze_duration: u64,
+        probe_size: u64,
+    ) -> ProbeUrlOutcome {
+        let temp_file = match create_seekable_probe_temp_file().await {
+            Ok(temp_file) => temp_file,
+            Err(kind) => return ProbeUrlOutcome::Failed(kind),
+        };
+        let temp_path = temp_file.path().to_path_buf();
+
+        let stage = match stage_seekable_probe_file(client, url, user_agent, probe_size, &temp_path).await {
+            Ok(stage) => stage,
+            Err(kind) => return ProbeUrlOutcome::Failed(kind),
+        };
+
+        if !stage.fully_materialized {
+            debug!(
+                "Running seekable ffprobe probe with staged head/tail data for {}",
+                sanitize_sensitive_info(url)
+            );
+        }
+        probe_local_path_with_ffprobe(&temp_path, analyze_duration, probe_size).await
+    }
 }
 
 #[must_use]
@@ -345,6 +454,363 @@ fn format_ffmpeg_timeout_error(args: &[String]) -> String {
         "Timed out running ffmpeg after {}s: {summary}",
         FFMPEG_TIMEOUT.as_secs()
     )
+}
+
+fn probe_bytes_limit(probe_size: u64) -> usize {
+    if probe_size == 0 {
+        usize::MAX
+    } else {
+        usize::try_from(probe_size).unwrap_or(usize::MAX)
+    }
+}
+
+fn seekable_probe_tail_window(probe_size: u64) -> u64 {
+    std::cmp::max(probe_size.max(1), FFPROBE_SEEKABLE_MIN_TAIL_BYTES)
+}
+
+async fn create_seekable_probe_temp_file() -> Result<tempfile::NamedTempFile, ProbeFailureKind> {
+    if let Err(err) = fs::create_dir_all(FFPROBE_TEMP_DIR).await {
+        warn!("Failed to create ffprobe temp dir {FFPROBE_TEMP_DIR}: {err}");
+        return Err(ProbeFailureKind::Other);
+    }
+    if let Err(err) = cleanup_stale_seekable_probe_files().await {
+        debug!("Failed to cleanup stale ffprobe temp files in {FFPROBE_TEMP_DIR}: {err}");
+    }
+
+    tempfile::Builder::new()
+        .prefix("probe-")
+        .suffix(".bin")
+        .tempfile_in(FFPROBE_TEMP_DIR)
+        .map_err(|err| {
+            warn!("Failed to create ffprobe temp file in {FFPROBE_TEMP_DIR}: {err}");
+            ProbeFailureKind::Other
+        })
+}
+
+async fn cleanup_stale_seekable_probe_files() -> std::io::Result<()> {
+    let mut entries = match fs::read_dir(FFPROBE_TEMP_DIR).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with("probe-") {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(modified_elapsed) = modified.elapsed() else {
+            continue;
+        };
+        if modified_elapsed <= FFPROBE_TEMP_STALE_MAX_AGE {
+            continue;
+        }
+
+        if let Err(err) = fs::remove_file(&path).await {
+            debug!("Failed to remove stale ffprobe temp file {}: {}", path.display(), err);
+        }
+    }
+
+    Ok(())
+}
+
+async fn ensure_probe_file_length(path: &Path, content_length: Option<u64>) -> Result<(), ProbeFailureKind> {
+    let Some(content_length) = content_length else {
+        return Ok(());
+    };
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .await
+        .map_err(|err| {
+            warn!(
+                "Failed to open seekable ffprobe temp file {}: {}",
+                path.display(),
+                err
+            );
+            ProbeFailureKind::Other
+        })?;
+    file.set_len(content_length).await.map_err(|err| {
+        warn!(
+            "Failed to resize seekable ffprobe temp file {}: {}",
+            path.display(),
+            err
+        );
+        ProbeFailureKind::Other
+    })
+}
+
+async fn probe_local_path_with_ffprobe(path: &Path, analyze_duration: u64, probe_size: u64) -> ProbeUrlOutcome {
+    let display_path = path.to_string_lossy().into_owned();
+    let mut command = Command::new("ffprobe");
+    command
+        .kill_on_drop(true)
+        .arg("-v")
+        .arg("error")
+        .arg("-show_streams")
+        .arg("-show_format")
+        .arg("-of")
+        .arg("json")
+        .arg("-analyzeduration")
+        .arg(analyze_duration.to_string())
+        .arg("-probesize")
+        .arg(probe_size.to_string())
+        .arg(path);
+
+    match command.output().await {
+        Ok(output) => parse_ffprobe_output(&display_path, &output),
+        Err(err) => {
+            warn!(
+                "ffprobe execution failed for {}: {}",
+                sanitize_sensitive_info(&display_path),
+                err
+            );
+            ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
+        }
+    }
+}
+
+async fn stage_seekable_probe_file(
+    client: &Client,
+    url: &str,
+    user_agent: Option<&str>,
+    probe_size: u64,
+    temp_path: &Path,
+) -> Result<SeekableProbeStage, ProbeFailureKind> {
+    let head_window = probe_size.max(1);
+    let head_result = fetch_remote_span_to_file(
+        client,
+        url,
+        user_agent,
+        Some((0, head_window.saturating_sub(1))),
+        temp_path,
+        0,
+        probe_bytes_limit(head_window),
+        true,
+    )
+    .await?;
+
+    ensure_probe_file_length(temp_path, head_result.total_length).await?;
+
+    let mut stage = SeekableProbeStage {
+        content_length: head_result.total_length,
+        head_bytes: head_result.bytes_written,
+        tail_start: None,
+        fully_materialized: head_result.status != StatusCode::PARTIAL_CONTENT
+            && head_result.response_exhausted
+            && head_result
+                .total_length
+                .is_none_or(|content_length| head_result.bytes_written >= content_length),
+        range_supported: head_result.status == StatusCode::PARTIAL_CONTENT,
+    };
+
+    if stage.fully_materialized || !stage.range_supported {
+        if stage.fully_materialized {
+            debug!(
+                "Seekable ffprobe probe fully materialized from the first pass for {}",
+                sanitize_sensitive_info(url)
+            );
+        }
+        return Ok(stage);
+    }
+
+    let Some(content_length) = stage.content_length else {
+        return Ok(stage);
+    };
+    if content_length <= stage.head_bytes {
+        stage.fully_materialized = true;
+        return Ok(stage);
+    }
+
+    let tail_window = seekable_probe_tail_window(probe_size);
+    let tail_start = content_length.saturating_sub(tail_window).max(stage.head_bytes);
+    if tail_start >= content_length {
+        return Ok(stage);
+    }
+
+    debug!(
+        "Staging seekable ffprobe head/tail windows for {} (head={} bytes, tail_start={})",
+        sanitize_sensitive_info(url),
+        stage.head_bytes,
+        tail_start
+    );
+
+    let tail_result = fetch_remote_span_to_file(
+        client,
+        url,
+        user_agent,
+        Some((tail_start, content_length - 1)),
+        temp_path,
+        tail_start,
+        probe_bytes_limit(content_length - tail_start),
+        false,
+    )
+    .await?;
+
+    if tail_result.status == StatusCode::PARTIAL_CONTENT && tail_result.bytes_written > 0 {
+        stage.tail_start = Some(tail_start);
+        if tail_start == stage.head_bytes && tail_result.bytes_written == content_length - tail_start {
+            stage.fully_materialized = true;
+        }
+    } else {
+        debug!(
+            "Remote server ignored seekable ffprobe tail range for {}, falling back without tail staging",
+            sanitize_sensitive_info(url)
+        );
+        stage.range_supported = false;
+    }
+
+    Ok(stage)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_remote_span_to_file(
+    client: &Client,
+    url: &str,
+    user_agent: Option<&str>,
+    range: Option<(u64, u64)>,
+    path: &Path,
+    offset: u64,
+    max_bytes: usize,
+    allow_full_body_write_on_200: bool,
+) -> Result<SpanWriteResult, ProbeFailureKind> {
+    let mut request = client.get(url);
+    if let Some(ua) = user_agent {
+        request = request.header(USER_AGENT, ua);
+    }
+    if let Some((start, end)) = range {
+        request = request.header(RANGE, format!("bytes={start}-{end}"));
+    }
+
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            warn!("ffprobe fetch failed for {}: {}", sanitize_sensitive_info(url), err);
+            return Err(ProbeFailureKind::Other);
+        }
+    };
+
+    let status = response.status();
+    if status == StatusCode::NOT_FOUND {
+        return Err(ProbeFailureKind::NotFound);
+    }
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        warn!(
+            "ffprobe fetch returned {} for {}",
+            status,
+            sanitize_sensitive_info(url)
+        );
+        return Err(ProbeFailureKind::Other);
+    }
+
+    let total_length = parse_remote_content_length(&response);
+    if status == StatusCode::OK && range.is_some() && !allow_full_body_write_on_200 {
+        return Ok(SpanWriteResult {
+            status,
+            total_length,
+            bytes_written: 0,
+            response_exhausted: false,
+        });
+    }
+
+    ensure_probe_file_length(path, total_length).await?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .await
+        .map_err(|err| {
+            warn!(
+                "Failed to open seekable ffprobe temp file {}: {}",
+                path.display(),
+                err
+            );
+            ProbeFailureKind::Other
+        })?;
+    file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|err| {
+        warn!(
+            "Failed to seek seekable ffprobe temp file {}: {}",
+            path.display(),
+            err
+        );
+        ProbeFailureKind::Other
+    })?;
+
+    let mut bytes_written: usize = 0;
+    let mut response_exhausted = false;
+    while bytes_written < max_bytes {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => {
+                response_exhausted = true;
+                break;
+            }
+            Err(err) => {
+                warn!("ffprobe fetch body failed for {}: {}", sanitize_sensitive_info(url), err);
+                return Err(ProbeFailureKind::Other);
+            }
+        };
+
+        let remaining = max_bytes.saturating_sub(bytes_written);
+        let to_write = chunk.len().min(remaining);
+        if to_write == 0 {
+            break;
+        }
+        file.write_all(&chunk[..to_write]).await.map_err(|err| {
+            warn!(
+                "Failed to write seekable ffprobe temp file {}: {}",
+                path.display(),
+                err
+            );
+            ProbeFailureKind::Other
+        })?;
+        bytes_written += to_write;
+
+        if bytes_written >= max_bytes {
+            break;
+        }
+    }
+
+    Ok(SpanWriteResult {
+        status,
+        total_length,
+        bytes_written: u64::try_from(bytes_written).unwrap_or(u64::MAX),
+        response_exhausted,
+    })
+}
+
+fn parse_remote_content_length(response: &reqwest::Response) -> Option<u64> {
+    if response.status() == StatusCode::PARTIAL_CONTENT {
+        return response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range_total_length);
+    }
+    response.content_length()
+}
+
+fn parse_content_range_total_length(header_value: &str) -> Option<u64> {
+    let (_, total_length) = header_value.rsplit_once('/')?;
+    if total_length == "*" {
+        None
+    } else {
+        total_length.parse::<u64>().ok()
+    }
 }
 
 async fn stream_probe_bytes_to_stdin<W>(
@@ -733,7 +1199,8 @@ fn build_thumbnail_args(input_path: &str, output_path: &Path, scale_filter: &str
 mod tests {
     use super::{
         build_ffprobe_proxy_url, build_thumbnail_args, build_thumbnail_scale_filter, extract_probe_stream_stats,
-        fetch_probe_bytes, format_ffmpeg_timeout_error, run_ffprobe_with_stdin, write_probe_bytes_to_stdin, FFMPEG_TIMEOUT,
+        fetch_probe_bytes, format_ffmpeg_timeout_error, parse_content_range_total_length, run_ffprobe_with_stdin,
+        seekable_probe_tail_window, stage_seekable_probe_file, write_probe_bytes_to_stdin, FFMPEG_TIMEOUT,
         ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome,
     };
     use crate::model::ProxyConfig;
@@ -787,6 +1254,83 @@ mod tests {
         });
 
         Ok((format!("http://127.0.0.1:{}/probe.ts", addr.port()), request_capture, accepted, handle))
+    }
+
+    async fn start_range_test_http_server(
+        body: Arc<Vec<u8>>,
+    ) -> std::io::Result<(String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_clone = Arc::clone(&accepted);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    continue;
+                };
+                accepted_clone.fetch_add(1, Ordering::SeqCst);
+                let body = Arc::clone(&body);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0_u8; 4096];
+                    loop {
+                        match socket.read(&mut buf).await {
+                            Ok(0) => break,
+                            Ok(read) => {
+                                request.extend_from_slice(&buf[..read]);
+                                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => return,
+                        }
+                    }
+
+                    let request_text = String::from_utf8_lossy(&request);
+                    let range_header = request_text
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Range: bytes="))
+                        .or_else(|| request_text.lines().find_map(|line| line.strip_prefix("range: bytes=")));
+
+                    let (status_line, content_range, payload) = if let Some(range_header) = range_header {
+                        let (start, end) = range_header
+                            .split_once('-')
+                            .and_then(|(start, end)| Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?)))
+                            .unwrap_or((0, body.len().saturating_sub(1)));
+                        let bounded_end = end.min(body.len().saturating_sub(1));
+                        let bounded_start = start.min(bounded_end);
+                        (
+                            "HTTP/1.1 206 Partial Content".to_string(),
+                            Some(format!(
+                                "Content-Range: bytes {}-{}/{}\r\n",
+                                bounded_start,
+                                bounded_end,
+                                body.len()
+                            )),
+                            body[bounded_start..=bounded_end].to_vec(),
+                        )
+                    } else {
+                        ("HTTP/1.1 200 OK".to_string(), None, body.as_ref().clone())
+                    };
+
+                    let mut response_head = format!(
+                        "{status_line}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n",
+                        payload.len()
+                    );
+                    if let Some(content_range) = content_range {
+                        response_head.push_str(&content_range);
+                    }
+                    response_head.push_str("\r\n");
+
+                    let _ = socket.write_all(response_head.as_bytes()).await;
+                    let _ = socket.write_all(&payload).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Ok((format!("http://127.0.0.1:{}/probe.mp4", addr.port()), accepted, handle))
     }
 
     fn spawn_stdin_test_child(script: &str) -> tokio::process::Child {
@@ -943,6 +1487,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn seekable_probe_tail_window_has_a_32mb_floor() {
+        assert_eq!(seekable_probe_tail_window(1), 32 * 1024 * 1024);
+        assert_eq!(seekable_probe_tail_window(64 * 1024 * 1024), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_content_range_total_length_extracts_total() {
+        assert_eq!(
+            parse_content_range_total_length("bytes 10-20/999"),
+            Some(999)
+        );
+        assert_eq!(parse_content_range_total_length("bytes 0-1/*"), None);
+    }
+
     #[tokio::test]
     async fn fetch_probe_bytes_caps_response_and_sets_headers() {
         let (url, request_capture, accepted, handle) = match start_test_http_server("HTTP/1.1 200 OK", b"abcdefghij").await
@@ -993,6 +1552,35 @@ mod tests {
         let result = fetch_probe_bytes(&client, &url, None, 16).await;
 
         assert!(matches!(result, Err(ProbeFailureKind::NotFound)));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn stage_seekable_probe_file_writes_head_and_tail_segments() {
+        let body = Arc::new(b"abcdefghijklmnopqrstuvwxyz".to_vec());
+        let (url, accepted, handle) = start_range_test_http_server(Arc::clone(&body))
+            .await
+            .expect("range server should start");
+        let tempdir = tempfile::tempdir().expect("tempdir should succeed");
+        let temp_path = tempdir.path().join("probe.bin");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("http client should build");
+
+        let stage = stage_seekable_probe_file(&client, &url, Some("test-agent/1.0"), 5, &temp_path)
+            .await
+            .expect("seekable staging should succeed");
+
+        assert_eq!(stage.content_length, Some(26));
+        assert_eq!(stage.head_bytes, 5);
+        assert_eq!(stage.tail_start, Some(5));
+        assert!(stage.fully_materialized);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+
+        let staged = tokio::fs::read(&temp_path).await.expect("staged file should be readable");
+        assert_eq!(staged, *body);
 
         handle.abort();
     }

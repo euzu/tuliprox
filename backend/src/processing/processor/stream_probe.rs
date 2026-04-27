@@ -29,6 +29,10 @@ fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool
     !matches!(input_type, InputType::Library)
 }
 
+fn uses_seekable_remote_probe(item_type: PlaylistItemType, is_remote_probe: bool) -> bool {
+    is_remote_probe && !item_type.is_live()
+}
+
 /// Updates metadata (Probing) for a stream URL (M3U, Xtream, Library) and persists it.
 /// - `unique_id`: For M3U this is the `provider_id` (String). For Library this is the `UUID` string.
 ///   For Xtream this is the numeric provider id as string.
@@ -138,7 +142,19 @@ pub async fn update_generic_stream_metadata(
         acquired_handle.as_ref().and_then(ProbeHandleGuard::handle),
         active_handle,
     );
-    let probe_data = if is_remote_probe {
+    let probe_data = if uses_seekable_remote_probe(item_type, is_remote_probe) {
+        FfmpegExecutor::new()
+            .probe_remote_seekable_url_with_cancel(
+                client,
+                &probe_url,
+                user_agent.as_deref(),
+                analyze_duration,
+                probe_size,
+                ffprobe_timeout,
+                cancel_token,
+            )
+            .await
+    } else if is_remote_probe {
         FfmpegExecutor::new()
             .probe_remote_url_with_cancel(
                 client,
@@ -405,6 +421,15 @@ mod tests {
         assert!(requires_provider_connection_for_generic_probe(
             InputType::XtreamBatch
         ));
+    }
+
+    #[test]
+    fn seekable_remote_probe_is_used_only_for_remote_non_live_items() {
+        assert!(!uses_seekable_remote_probe(PlaylistItemType::Live, true));
+        assert!(!uses_seekable_remote_probe(PlaylistItemType::LiveUnknown, true));
+        assert!(uses_seekable_remote_probe(PlaylistItemType::Video, true));
+        assert!(uses_seekable_remote_probe(PlaylistItemType::Series, true));
+        assert!(!uses_seekable_remote_probe(PlaylistItemType::Video, false));
     }
 
     #[test]
