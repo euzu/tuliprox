@@ -2,7 +2,8 @@ use crate::{
     api::model::{AppState, BatchResultCollector, EventMessage, ProviderHandle},
     model::MetadataUpdateConfig,
     processing::processor::{
-        update_generic_stream_metadata, update_live_stream_metadata, update_series_metadata, update_vod_metadata,
+        probe_generic_stream_metadata, update_generic_stream_metadata, update_live_stream_metadata,
+        update_properties, update_series_metadata, update_vod_metadata, GenericProbeMetadataOutcome,
         GenericProbeOutcome, SeriesProbeSettings,
     },
     repository::{
@@ -22,8 +23,8 @@ use shared::{
     create_bitset,
     error::TuliproxError,
     model::{
-        InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, UUIDType, VideoStreamProperties,
-        XtreamCluster, XtreamPlaylistItem,
+        InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties, UUIDType,
+        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
     },
     utils::generate_provider_playlist_uuid,
 };
@@ -3351,6 +3352,47 @@ impl InputWorker {
         }
     }
 
+    fn batchable_generic_probe_xtream_cluster(item_type: PlaylistItemType) -> Option<XtreamCluster> {
+        if item_type.is_live() {
+            Some(XtreamCluster::Live)
+        } else if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
+            Some(XtreamCluster::Video)
+        } else {
+            None
+        }
+    }
+
+    fn apply_pending_generic_probe_base(
+        collector: &BatchResultCollector,
+        cluster: XtreamCluster,
+        provider_id: u32,
+        item: &mut XtreamPlaylistItem,
+    ) {
+        match cluster {
+            XtreamCluster::Video => {
+                if let Some((_, props)) = collector
+                    .vod
+                    .iter()
+                    .rev()
+                    .find(|(id, _)| matches!(id, ProviderIdType::Id(id) if *id == provider_id))
+                {
+                    item.additional_properties = Some(StreamProperties::Video(Box::new(props.clone())));
+                }
+            }
+            XtreamCluster::Live => {
+                if let Some((_, props)) = collector
+                    .live
+                    .iter()
+                    .rev()
+                    .find(|(id, _)| matches!(id, ProviderIdType::Id(id) if *id == provider_id))
+                {
+                    item.additional_properties = Some(StreamProperties::Live(Box::new(props.clone())));
+                }
+            }
+            XtreamCluster::Series => {}
+        }
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn execute_task_inner_static(
         app_state: &Arc<AppState>,
@@ -3503,14 +3545,94 @@ impl InputWorker {
                 }
             }
             UpdateTask::ProbeStream { unique_id, url, item_type, .. } => {
-                // Generic probe doesn't support batching yet and always takes a WRITE lock.
-                // It can target any cluster, so we clear all handles to be safe.
-                if !db_handles.is_empty() {
-                    db_handles.clear();
-                }
                 let task_key = TaskKey::from_task(task);
                 let probe_identifier = if unique_id.trim().is_empty() { url.as_str() } else { unique_id.as_str() };
 
+                if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch)
+                    && Self::batchable_generic_probe_xtream_cluster(*item_type).is_some()
+                {
+                    let cluster =
+                        Self::batchable_generic_probe_xtream_cluster(*item_type).unwrap_or(XtreamCluster::Video);
+                    let Ok(provider_id) = unique_id.parse::<u32>() else {
+                        warn!("Skipping xtream generic probe update with non-numeric id: {unique_id}");
+                        return Ok((false, false));
+                    };
+
+                    let outcome = probe_generic_stream_metadata(
+                        &app_state.app_config,
+                        client,
+                        input.as_ref(),
+                        unique_id,
+                        url,
+                        *item_type,
+                        &app_state.active_provider,
+                        active_handle,
+                        probe_priority,
+                    )
+                        .await?;
+
+                    let metadata = match outcome {
+                        GenericProbeMetadataOutcome::Metadata(metadata) => metadata,
+                        GenericProbeMetadataOutcome::Noop => return Ok((false, false)),
+                        GenericProbeMetadataOutcome::ProbeFailed => {
+                            return Err(shared::error::TuliproxError::Config(format!(
+                                "Probe stream task failed for key {task_key:?} ({probe_identifier})"
+                            )));
+                        }
+                    };
+
+                    let Some(query) =
+                        Self::get_or_open_query(&input.name, app_state, cluster, db_handles, failed_clusters).await
+                    else {
+                        warn!("Item not found in Xtream DB for generic probe: {unique_id}");
+                        return Ok((false, false));
+                    };
+
+                    let query = Arc::clone(&query);
+                    let mut item = match spawn_blocking_limited(move || {
+                        let mut guard = query.lock();
+                        guard.query_zero_copy(&provider_id).ok().flatten()
+                    })
+                        .await
+                    {
+                        Ok(Some(item)) => item,
+                        Ok(None) => {
+                            warn!("Item not found in Xtream DB: {unique_id}");
+                            return Ok((false, false));
+                        }
+                        Err(err) => {
+                            return Err(shared::error::TuliproxError::Config(format!(
+                                "Failed to query generic probe item {unique_id}: {err}"
+                            )));
+                        }
+                    };
+
+                    Self::apply_pending_generic_probe_base(collector, cluster, provider_id, &mut item);
+
+                    update_properties(
+                        &mut item.additional_properties,
+                        *item_type,
+                        &item.name,
+                        item.virtual_id,
+                        metadata.raw_video,
+                        metadata.raw_audio,
+                        metadata.stats,
+                    );
+
+                    match item.additional_properties {
+                        Some(StreamProperties::Live(props)) => collector.add_live(provider_id.into(), *props),
+                        Some(StreamProperties::Video(props)) => collector.add_vod(provider_id.into(), *props),
+                        _ => {}
+                    }
+
+                    return Ok((false, false));
+                }
+
+                // Non-Xtream generic probe still writes directly and can target
+                // M3U or library storage, so release cached Xtream read handles.
+                if !db_handles.is_empty() {
+                    db_handles.clear();
+                }
                 let outcome = update_generic_stream_metadata(
                     &app_state.app_config,
                     client,
@@ -4237,6 +4359,44 @@ mod tests {
         );
 
         assert!(updates.contains_key(&virtual_id));
+    }
+
+    #[test]
+    fn generic_probe_uses_pending_vod_batch_as_update_base() {
+        let mut batch = BatchResultCollector::new();
+        let pending_props = VideoStreamProperties {
+            container_extension: Arc::from("mkv"),
+            ..VideoStreamProperties::default()
+        };
+        batch.add_vod(ProviderIdType::Id(42), pending_props);
+
+        let mut item = XtreamPlaylistItem {
+            virtual_id: 7,
+            provider_id: 42,
+            name: Arc::from("Movie"),
+            logo: Arc::from(""),
+            logo_small: Arc::from(""),
+            group: Arc::from(""),
+            title: Arc::from(""),
+            parent_code: Arc::from(""),
+            rec: Arc::from(""),
+            url: Arc::from(""),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Video,
+            additional_properties: None,
+            item_type: PlaylistItemType::Video,
+            category_id: 0,
+            input_name: Arc::from("input"),
+            channel_no: 0,
+            source_ordinal: 0,
+        };
+
+        InputWorker::apply_pending_generic_probe_base(&batch, XtreamCluster::Video, 42, &mut item);
+
+        let Some(StreamProperties::Video(props)) = item.additional_properties else {
+            panic!("expected pending video properties");
+        };
+        assert_eq!(props.container_extension.as_ref(), "mkv");
     }
 
     #[test]

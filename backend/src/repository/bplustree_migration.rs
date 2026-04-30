@@ -1,3 +1,11 @@
+//! Startup migration helpers for legacy repository files.
+//!
+//! The current B+Tree implementation writes storage format v2. This migrator is
+//! intentionally limited to normalizing legacy v1 headers into v2-compatible
+//! files at startup. It is format-version aware, but it is not a generic typed
+//! v2 -> v3 rewrite tool; that migration must be added at repository call sites
+//! that know the concrete key and value types.
+
 use super::{
     bplustree::{BPlusTree, MAGIC, STORAGE_VERSION},
     storage_const,
