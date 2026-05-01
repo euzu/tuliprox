@@ -1,4 +1,7 @@
-use crate::model::{Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV};
+use crate::model::{
+    Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME,
+    EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV,
+};
 use crate::model::{EpgSmartMatchConfig, PersistedEpgSource};
 use crate::processing::processor::EpgIdCache;
 use crate::utils::compressed_file_reader_async::CompressedFileReaderAsync;
@@ -93,18 +96,7 @@ pub fn normalize_channel_name(name: &str, normalize_config: &EpgSmartMatchConfig
 
 impl TVGuide {
     pub fn merge(epgs: Vec<Epg>) -> Option<Epg> {
-        if let Some(first_epg) = epgs.first() {
-            let first_epg_attributes = first_epg.attributes.clone();
-            let merged_children: Vec<Arc<EpgChannel>> = epgs.into_iter().flat_map(|epg| epg.children).collect();
-            Some(Epg {
-                logo_override: false,
-                priority: 0,
-                attributes: first_epg_attributes,
-                children: merged_children,
-            })
-        } else {
-            None
-        }
+        flatten_tvguide(epgs)
     }
 
     fn prepare_tag(id_cache: &mut EpgIdCache, tag: &mut XmlTag, smart_match: bool) {
@@ -163,6 +155,55 @@ impl TVGuide {
             }
         }
         matched
+    }
+
+    fn channel_display_name(tag: &XmlTag) -> Option<Arc<str>> {
+        tag.children.as_ref().and_then(|children| {
+            children
+                .iter()
+                .find(|child| child.name.as_ref() == EPG_TAG_DISPLAY_NAME)
+                .and_then(|child| child.value.clone())
+        })
+    }
+
+    fn channel_icon(tag: &XmlTag) -> Option<Arc<str>> {
+        match &tag.icon {
+            XmlTagIcon::Src(src) => Some(Arc::clone(src)),
+            XmlTagIcon::Undefined | XmlTagIcon::Exists => None,
+        }
+    }
+
+    fn extract_programme(
+        tag: &XmlTag,
+        epg_id: &Arc<str>,
+        start_attrib: &Arc<str>,
+        stop_attrib: &Arc<str>,
+        tag_title: &Arc<str>,
+        tag_desc: &Arc<str>,
+    ) -> Option<EpgProgramme> {
+        let Some((Some(start), Some(stop))) = tag.attributes.as_ref().map(|a| (a.get(start_attrib), a.get(stop_attrib))) else {
+            error!("Missing start or stop attribute in programme tag, skipping");
+            return None;
+        };
+
+        let (Some(start_time), Some(stop_time)) = (parse_xmltv_time(start), parse_xmltv_time(stop)) else {
+            error!("Failed to parse epg programme time {start} - {stop}");
+            return None;
+        };
+
+        let mut title = None;
+        let mut desc = None;
+        if let Some(children) = tag.children.as_ref() {
+            for child in children {
+                if child.name == *tag_title {
+                    title.clone_from(&child.value);
+                } else if child.name == *tag_desc {
+                    desc.clone_from(&child.value);
+                }
+            }
+        }
+
+        Some(EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc))
     }
 
     /// Finds the best fuzzy match for a channel's normalized EPG ID using phonetic encoding and Jaro-Winkler similarity.
@@ -253,7 +294,12 @@ impl TVGuide {
     ///     assert!(!epg.children.is_empty());
     /// }
     /// ```
-    async fn process_epg_file(id_cache: &mut EpgIdCache, epg_source: &PersistedEpgSource) -> Option<Epg> {
+    async fn process_epg_file(
+        id_cache: &mut EpgIdCache,
+        epg_source: &PersistedEpgSource,
+        source_order: usize,
+        accumulator: &mut EpgMergeAccumulator,
+    ) -> bool {
         let epg_attrib_id = EPG_ATTRIB_ID.intern();
         let epg_attrib_channel = EPG_ATTRIB_CHANNEL.intern();
         let start_attrib = "start".intern();
@@ -263,110 +309,91 @@ impl TVGuide {
 
         match CompressedFileReaderAsync::new(&epg_source.file_path).await {
             Ok(mut reader) => {
-                let mut children: HashMap<Arc<str>, EpgChannel> = HashMap::with_capacity(5000);
-                let mut tv_attributes: Option<HashMap<Arc<str>, Arc<str>>> = None;
+                let mut source_processed: HashSet<Arc<str>> = HashSet::with_capacity(5000);
+                let mut accepted_channels = 0usize;
                 let smart_match = id_cache.smart_match_config.enabled;
                 let fuzzy_matching = smart_match && id_cache.smart_match_config.fuzzy_matching;
                 let mut filter_tags = |mut tag: XmlTag| {
                     match tag.name.as_ref() {
                         EPG_TAG_CHANNEL => {
                             let tag_epg_id = tag.get_attribute_value(&epg_attrib_id).map_or_else(|| "".intern(), Internable::intern);
-                            if !tag_epg_id.is_empty() && !id_cache.processed.contains(&tag_epg_id) {
-                                Self::prepare_tag(id_cache, &mut tag, smart_match);
-                                let mut add_channel = false;
-                                if smart_match {
-                                    if Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching) {
-                                        add_channel = true;
-                                    }
-                                } else if id_cache.channel_epg_id.contains(&tag_epg_id) {
-                                    add_channel = true;
-                                }
+                            if tag_epg_id.is_empty() {
+                                return;
+                            }
 
-                                if add_channel && !children.contains_key(&tag_epg_id) {
-                                    let display_name = tag.children.as_ref().and_then(|children| {
-                                        children.iter()
-                                            .find(|c| c.name.as_ref() == EPG_TAG_DISPLAY_NAME)
-                                            .and_then(|c| c.value.clone())
-                                    });
-                                    children.insert(Arc::clone(&tag_epg_id), EpgChannel {
+                            Self::prepare_tag(id_cache, &mut tag, smart_match);
+                            let add_channel = if smart_match {
+                                id_cache.channel_epg_id.contains(&tag_epg_id)
+                                    || Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching)
+                            } else {
+                                id_cache.channel_epg_id.contains(&tag_epg_id)
+                            };
+
+                            if add_channel {
+                                source_processed.insert(Arc::clone(&tag_epg_id));
+                                id_cache.processed.insert(Arc::clone(&tag_epg_id));
+                                accumulator.upsert_channel(
+                                    epg_source.priority,
+                                    source_order,
+                                    epg_source.logo_override,
+                                    EpgChannel {
                                         id: Arc::clone(&tag_epg_id),
-                                        title: display_name,
-                                        icon: if let XmlTagIcon::Src(src) = &tag.icon { Some(Arc::clone(src)) } else { None },
+                                        title: Self::channel_display_name(&tag),
+                                        icon: Self::channel_icon(&tag),
                                         programmes: vec![],
-                                    });
-                                    id_cache.processed.insert(tag_epg_id);
-                                }
+                                    },
+                                );
+                                accepted_channels += 1;
                             }
                         }
                         EPG_TAG_PROGRAMME => {
                             if let Some(epg_id) = tag.get_attribute_value(&epg_attrib_channel) {
-                                if id_cache.processed.contains(epg_id) /*&& id_cache.channel_epg_id.contains(epg_id) */{
-                                    if let Some(channel) = children.get_mut(epg_id) {
-                                        if let Some((Some(start), Some(stop))) = tag.attributes.as_ref().map(|a| (a.get(&start_attrib), a.get(&stop_attrib))) {
-                                            if let (Some(start_time), Some(stop_time)) = (parse_xmltv_time(start), parse_xmltv_time(stop)) {
-                                                let mut title = None;
-                                                let mut desc = None;
-                                                if let Some(children) = tag.children.as_ref() {
-                                                    for child in children {
-                                                        if child.name == tag_title {
-                                                            title.clone_from(&child.value);
-                                                        } else if child.name == tag_desc {
-                                                            desc.clone_from(&child.value);
-                                                        }
-                                                    }
-                                                    channel.programmes.push(EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc));
-                                                }
-                                            } else {
-                                                error!("Failed to parse epg programme time {start} - {stop}");
-                                            }
-                                        } else {
-                                            error!("Missing start or stop attribute in programme tag, skipping");
-                                        }
-                                    } else {
-                                        error!("Channel {epg_id} not found in EPG, dangling programme");
+                                if source_processed.contains(epg_id) {
+                                    if let Some(programme) =
+                                        Self::extract_programme(&tag, epg_id, &start_attrib, &stop_attrib, &tag_title, &tag_desc)
+                                    {
+                                        accumulator.push_programme(epg_source.priority, source_order, programme);
                                     }
                                 }
                             }
                         }
                         EPG_TAG_TV => {
-                            tv_attributes.clone_from(&tag.attributes);
+                            accumulator.set_attributes_if_preferred(epg_source.priority, source_order, tag.attributes);
                         }
                         _ => {}
                     }
                 };
 
                 parse_tvguide(&mut reader, &mut filter_tags).await;
-
-                if children.is_empty() {
-                    return None;
-                }
-
-                Some(Epg {
-                    logo_override: epg_source.logo_override,
-                    priority: epg_source.priority,
-                    attributes: tv_attributes,
-                    children: children.into_values().map(Arc::new).collect(),
-                })
+                accepted_channels > 0
             }
             Err(e) => {
                 log::warn!("Failed to process EPG file {}: {e}", epg_source.file_path.display());
-                None
+                false
             }
         }
     }
 
     pub async fn filter(&self, id_cache: &mut EpgIdCache) -> Option<Vec<Epg>> {
+        self.filter_merged(id_cache).await.map(|epg| vec![epg])
+    }
+
+    pub async fn filter_merged(&self, id_cache: &mut EpgIdCache) -> Option<Epg> {
+        self.filter_merged_with_icon_overrides(id_cache).await.map(|(epg, _)| epg)
+    }
+
+    pub(crate) async fn filter_merged_with_icon_overrides(
+        &self,
+        id_cache: &mut EpgIdCache,
+    ) -> Option<MergedEpgWithIconOverrides> {
         if id_cache.channel_epg_id.is_empty() && id_cache.normalized.is_empty() {
             return None;
         }
-        let mut epg_sources: Vec<Epg> = vec![];
-        for epg_source in self.get_epg_sources() {
-            if let Some(epg) = Self::process_epg_file(id_cache, epg_source).await {
-                epg_sources.push(epg);
-            }
+        let mut accumulator = EpgMergeAccumulator::new();
+        for (source_order, epg_source) in self.get_epg_sources().iter().enumerate() {
+            Self::process_epg_file(id_cache, epg_source, source_order, &mut accumulator).await;
         }
-        epg_sources.sort_by_key(|a| a.priority);
-        Some(epg_sources)
+        accumulator.finish_epg_with_icon_overrides()
     }
 }
 
@@ -519,103 +546,270 @@ fn collect_tag_attributes(e: &BytesStart, tag_type: XmlTagType) -> HashMap<Arc<s
     attributes
 }
 
-#[derive(Hash, Eq, PartialEq)]
-struct ProgrammeKey {
-    start: i64,
-    stop: i64,
+#[derive(Debug)]
+struct PreferredAttributes {
+    priority: i16,
+    source_order: usize,
+    attributes: HashMap<Arc<str>, Arc<str>>,
 }
 
-impl From<&EpgProgramme> for ProgrammeKey {
-    fn from(p: &EpgProgramme) -> Self {
-        Self {
-            start: p.start,
-            stop: p.stop,
+type FinishedEpgChannels = (Option<HashMap<Arc<str>, Arc<str>>>, Vec<EpgChannel>);
+pub(crate) type MergedEpgWithIconOverrides = (Epg, HashSet<Arc<str>>);
+
+#[derive(Debug)]
+struct ProgrammeMergeEntry {
+    priority: i16,
+    source_order: usize,
+    programme: EpgProgramme,
+}
+
+#[derive(Debug)]
+struct ChannelMergeAcc {
+    priority: i16,
+    source_order: usize,
+    logo_override: bool,
+    icon_logo_override: bool,
+    needs_programme_merge: bool,
+    channel: EpgChannel,
+    programmes: Vec<ProgrammeMergeEntry>,
+}
+
+#[derive(Debug, Default)]
+struct EpgMergeAccumulator {
+    attributes: Option<PreferredAttributes>,
+    channels: HashMap<Arc<str>, ChannelMergeAcc>,
+}
+
+impl EpgMergeAccumulator {
+    fn new() -> Self { Self::default() }
+
+    fn set_attributes_if_preferred(
+        &mut self,
+        priority: i16,
+        source_order: usize,
+        attributes: Option<HashMap<Arc<str>, Arc<str>>>,
+    ) {
+        let Some(attributes) = attributes else {
+            return;
+        };
+        let replace = self
+            .attributes
+            .as_ref()
+            .is_none_or(|current| (priority, source_order) < (current.priority, current.source_order));
+        if replace {
+            self.attributes = Some(PreferredAttributes { priority, source_order, attributes });
         }
     }
-}
 
-struct ChannelAcc {
-    priority: i16,
-    channel: EpgChannel,
-    programmes: HashSet<ProgrammeKey>,
-}
-
-pub fn flatten_tvguide(mut tv_guides: Vec<Epg>) -> Option<Epg> {
-    if tv_guides.is_empty() {
-        return None;
-    }
-
-    let epg_attributes = tv_guides
-        .first()
-        .and_then(|t| t.attributes.clone());
-
-    let mut channels: HashMap<Arc<str>, ChannelAcc> = HashMap::new();
-
-    for guide in tv_guides.drain(..) {
-        for channel_arc in guide.children {
-            let Ok(mut channel) = Arc::try_unwrap(channel_arc) else {
-                error!("Failed to unwrap epg channel");
-                continue;
-            };
-            match channels.entry(Arc::clone(&channel.id)) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let acc = entry.get_mut();
-
-                    if guide.priority < acc.priority {
-                        // high priority
-                        acc.priority = guide.priority;
-                        acc.channel = channel;
-
-                        acc.programmes.clear();
-                        for p in &acc.channel.programmes {
-                            acc.programmes.insert(ProgrammeKey::from(p));
-                        }
-                    } else if guide.priority == acc.priority {
-                        // same priority -> merge
-                        for p in channel.programmes.drain(..) {
-                            let key = ProgrammeKey::from(&p);
-                            if acc.programmes.insert(key) {
-                                acc.channel.programmes.push(p);
-                            }
-                        }
+    fn upsert_channel(&mut self, priority: i16, source_order: usize, logo_override: bool, mut channel: EpgChannel) {
+        match self.channels.entry(Arc::clone(&channel.id)) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let acc = entry.get_mut();
+                acc.needs_programme_merge = true;
+                if (priority, source_order) < (acc.priority, acc.source_order) {
+                    if channel.title.is_none() {
+                        channel.title = acc.channel.title.take();
+                    }
+                    if channel.icon.is_none() {
+                        channel.icon = acc.channel.icon.take();
+                    } else {
+                        acc.icon_logo_override = logo_override;
+                    }
+                    acc.priority = priority;
+                    acc.source_order = source_order;
+                    acc.logo_override = logo_override;
+                    acc.channel.title = channel.title;
+                    acc.channel.icon = channel.icon;
+                } else {
+                    if acc.channel.title.is_none() {
+                        acc.channel.title = channel.title.take();
+                    }
+                    if acc.channel.icon.is_none() {
+                        acc.channel.icon = channel.icon.take();
+                        acc.icon_logo_override = logo_override;
                     }
                 }
-
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let mut set = HashSet::new();
-                    for p in &channel.programmes {
-                        set.insert(ProgrammeKey::from(p));
-                    }
-
-                    entry.insert(ChannelAcc {
-                        priority: guide.priority,
-                        channel,
-                        programmes: set,
-                    });
-                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let icon_logo_override = channel.icon.is_some() && logo_override;
+                entry.insert(ChannelMergeAcc {
+                    priority,
+                    source_order,
+                    logo_override,
+                    icon_logo_override,
+                    needs_programme_merge: false,
+                    channel,
+                    programmes: Vec::new(),
+                });
             }
         }
     }
 
-    let children = channels
-        .into_values()
-        .map(|acc| Arc::new(acc.channel))
-        .collect();
+    fn push_programme(&mut self, priority: i16, source_order: usize, programme: EpgProgramme) {
+        if let Some(channel) = self.channels.get_mut(programme.get_transient_channel_id()) {
+            channel.programmes.push(ProgrammeMergeEntry { priority, source_order, programme });
+        } else {
+            error!("Channel {} not found in EPG, dangling programme", programme.get_transient_channel_id());
+        }
+    }
 
-    Some(Epg {
-        logo_override: false,
-        priority: 0,
-        attributes: epg_attributes,
-        children,
-    })
+    fn add_channel_with_programmes(
+        &mut self,
+        priority: i16,
+        source_order: usize,
+        logo_override: bool,
+        mut channel: EpgChannel,
+    ) {
+        let programmes = std::mem::take(&mut channel.programmes);
+        let channel_id = Arc::clone(&channel.id);
+        self.upsert_channel(priority, source_order, logo_override, channel);
+        if let Some(acc) = self.channels.get_mut(&channel_id) {
+            if !acc.programmes.is_empty() {
+                acc.needs_programme_merge = true;
+            }
+            acc.programmes
+                .extend(programmes.into_iter().map(|programme| ProgrammeMergeEntry { priority, source_order, programme }));
+        }
+    }
+
+    fn finish_channels(mut self) -> Option<FinishedEpgChannels> {
+        if self.channels.is_empty() {
+            return None;
+        }
+
+        let mut channels = self
+            .channels
+            .drain()
+            .map(|(_, mut acc)| {
+                normalize_channel_programmes(&mut acc);
+                acc
+            })
+            .collect::<Vec<_>>();
+
+        channels.sort_by(|left, right| left.channel.id.cmp(&right.channel.id));
+        let channels = channels.into_iter().map(|acc| acc.channel).collect();
+        Some((self.attributes.map(|attributes| attributes.attributes), channels))
+    }
+
+    fn finish(self) -> Option<Epg> {
+        self.finish_channels().map(|(attributes, channels)| Epg {
+            logo_override: false,
+            priority: 0,
+            attributes,
+            children: channels.into_iter().map(Arc::new).collect(),
+        })
+    }
+
+    fn finish_epg_with_icon_overrides(self) -> Option<MergedEpgWithIconOverrides> {
+        let EpgMergeAccumulator { attributes, channels } = self;
+        let mut channels = channels.into_values().collect::<Vec<_>>();
+        if channels.is_empty() {
+            return None;
+        }
+
+        for acc in &mut channels {
+            normalize_channel_programmes(acc);
+        }
+
+        channels.sort_by(|left, right| left.channel.id.cmp(&right.channel.id));
+        let icon_override_channels = channels
+            .iter()
+            .filter(|acc| acc.icon_logo_override)
+            .map(|acc| Arc::clone(&acc.channel.id))
+            .collect::<HashSet<_>>();
+        let children = channels.into_iter().map(|acc| Arc::new(acc.channel)).collect();
+
+        Some((
+            Epg {
+                logo_override: false,
+                priority: 0,
+                attributes: attributes.map(|attributes| attributes.attributes),
+                children,
+            },
+            icon_override_channels,
+        ))
+    }
+}
+
+fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgramme) {
+    if existing.title.is_none() {
+        existing.title = incoming.title;
+    }
+    if existing.desc.is_none() {
+        existing.desc = incoming.desc;
+    }
+}
+
+fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
+    // Always normalize programme order and dedupe, even for single-source channels.
+    // This preserves backfill behavior for duplicate entries within the same source.
+    acc.programmes.sort_by_key(|entry| {
+        (
+            entry.programme.start,
+            entry.programme.stop,
+            entry.priority,
+            entry.source_order,
+        )
+    });
+
+    let programme_entries = std::mem::take(&mut acc.programmes);
+    let mut merged_programmes = Vec::with_capacity(programme_entries.len());
+    let mut entries = programme_entries.into_iter();
+    if let Some(first_entry) = entries.next() {
+        let mut current = first_entry.programme;
+        for entry in entries {
+            if entry.programme.start == current.start && entry.programme.stop == current.stop {
+                backfill_programme_metadata(&mut current, entry.programme);
+            } else {
+                merged_programmes.push(current);
+                current = entry.programme;
+            }
+        }
+        merged_programmes.push(current);
+    }
+
+    merged_programmes.sort_by_key(|programme| (programme.start, programme.stop));
+    acc.channel.programmes = merged_programmes;
+}
+
+pub(crate) fn merge_epg_channels_by_priority(channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
+    let mut accumulator = EpgMergeAccumulator::new();
+    for (source_order, (priority, channels)) in channels_by_source.into_iter().enumerate() {
+        for channel in channels {
+            accumulator.add_channel_with_programmes(priority, source_order, false, channel);
+        }
+    }
+    accumulator.finish_channels().map(|(_, channels)| channels).unwrap_or_default()
+}
+
+pub fn flatten_tvguide(tv_guides: Vec<Epg>) -> Option<Epg> {
+    let mut accumulator = EpgMergeAccumulator::new();
+    for (source_order, guide) in tv_guides.into_iter().enumerate() {
+        accumulator.set_attributes_if_preferred(guide.priority, source_order, guide.attributes);
+        for channel in guide.children {
+            accumulator.add_channel_with_programmes(
+                guide.priority,
+                source_order,
+                guide.logo_override,
+                Arc::unwrap_or_clone(channel),
+            );
+        }
+    }
+    accumulator.finish()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{EpgSmartMatchConfig, PersistedEpgSource, TVGuide};
-    use crate::processing::parser::xmltv::normalize_channel_name;
+    use crate::model::{Epg, EpgSmartMatchConfig, PersistedEpgSource, TVGuide};
+    use crate::processing::parser::xmltv::{
+        flatten_tvguide, merge_epg_channels_by_priority, normalize_channel_name, EpgMergeAccumulator,
+    };
+    use shared::model::{EpgChannel, EpgProgramme};
     use std::collections::HashSet;
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[test]
     /// Tests normalization of a channel name using the default smart match configuration.
@@ -630,6 +824,327 @@ mod tests {
         let epg_normalize = EpgSmartMatchConfig::from(epg_normalize_dto);
         let normalized = normalize_channel_name("Love Nature", &epg_normalize);
         assert_eq!(normalized, "lovenature".to_string());
+    }
+
+    fn epg_channel(id: &str, title: Option<&str>, icon: Option<&str>, programmes: Vec<EpgProgramme>) -> EpgChannel {
+        EpgChannel {
+            id: id.intern(),
+            title: title.map(Internable::intern),
+            icon: icon.map(Internable::intern),
+            programmes,
+        }
+    }
+
+    fn epg_programme(id: &str, start: i64, stop: i64, title: Option<&str>, desc: Option<&str>) -> EpgProgramme {
+        EpgProgramme::new_all(start, stop, id.intern(), title.map(Internable::intern), desc.map(Internable::intern))
+    }
+
+    #[test]
+    fn epg_priority_merge_preserves_high_priority_metadata_and_fills_programme_gaps() {
+        let merged = merge_epg_channels_by_priority(vec![
+            (
+                10,
+                vec![epg_channel(
+                    "demo.channel",
+                    Some("Low"),
+                    Some("http://low/icon.png"),
+                    vec![epg_programme("demo.channel", 10, 20, Some("Low Show"), None)],
+                )],
+            ),
+            (
+                0,
+                vec![epg_channel(
+                    "demo.channel",
+                    Some("High"),
+                    Some("http://high/icon.png"),
+                    vec![epg_programme("demo.channel", 20, 30, Some("High Show"), None)],
+                )],
+            ),
+        ]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].title.as_deref(), Some("High"));
+        assert_eq!(merged[0].icon.as_deref(), Some("http://high/icon.png"));
+        assert_eq!(
+            merged[0].programmes.iter().map(|programme| (programme.start, programme.stop)).collect::<Vec<_>>(),
+            vec![(10, 20), (20, 30)],
+        );
+    }
+
+    #[test]
+    fn epg_priority_merge_backfills_duplicate_programme_metadata_without_overwriting() {
+        let merged = merge_epg_channels_by_priority(vec![
+            (
+                0,
+                vec![epg_channel(
+                    "demo.channel",
+                    Some("High"),
+                    None,
+                    vec![epg_programme("demo.channel", 10, 20, Some("High Title"), None)],
+                )],
+            ),
+            (
+                10,
+                vec![epg_channel(
+                    "demo.channel",
+                    None,
+                    Some("http://fallback/icon.png"),
+                    vec![epg_programme("demo.channel", 10, 20, Some("Low Title"), Some("Recovered desc"))],
+                )],
+            ),
+        ]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].title.as_deref(), Some("High"));
+        assert_eq!(merged[0].icon.as_deref(), Some("http://fallback/icon.png"));
+        assert_eq!(merged[0].programmes.len(), 1);
+        assert_eq!(merged[0].programmes[0].title.as_deref(), Some("High Title"));
+        assert_eq!(merged[0].programmes[0].desc.as_deref(), Some("Recovered desc"));
+    }
+
+    #[test]
+    fn epg_priority_merge_keeps_same_priority_deterministic_order() {
+        let merged = merge_epg_channels_by_priority(vec![
+            (
+                0,
+                vec![epg_channel(
+                    "demo.channel",
+                    Some("First"),
+                    None,
+                    vec![epg_programme("demo.channel", 10, 20, Some("First Title"), None)],
+                )],
+            ),
+            (
+                0,
+                vec![epg_channel(
+                    "demo.channel",
+                    Some("Second"),
+                    Some("http://second/icon.png"),
+                    vec![
+                        epg_programme("demo.channel", 10, 20, Some("Second Title"), Some("Second desc")),
+                        epg_programme("demo.channel", 20, 30, Some("Second Programme"), None),
+                    ],
+                )],
+            ),
+        ]);
+
+        assert_eq!(merged[0].title.as_deref(), Some("First"));
+        assert_eq!(merged[0].icon.as_deref(), Some("http://second/icon.png"));
+        assert_eq!(merged[0].programmes[0].title.as_deref(), Some("First Title"));
+        assert_eq!(merged[0].programmes[0].desc.as_deref(), Some("Second desc"));
+        assert_eq!(merged[0].programmes.len(), 2);
+    }
+
+    #[test]
+    fn epg_priority_merge_flatten_uses_same_backfill_rules() {
+        let flattened = flatten_tvguide(vec![
+            Epg {
+                logo_override: false,
+                priority: 0,
+                attributes: None,
+                children: vec![Arc::new(epg_channel(
+                    "demo.channel",
+                    Some("High"),
+                    None,
+                    vec![epg_programme("demo.channel", 10, 20, Some("High Show"), None)],
+                ))],
+            },
+            Epg {
+                logo_override: false,
+                priority: 10,
+                attributes: None,
+                children: vec![Arc::new(epg_channel(
+                    "demo.channel",
+                    Some("Low"),
+                    Some("http://low/icon.png"),
+                    vec![epg_programme("demo.channel", 20, 30, Some("Low Show"), None)],
+                ))],
+            },
+        ])
+        .expect("flattened epg");
+
+        assert_eq!(flattened.children.len(), 1);
+        assert_eq!(flattened.children[0].title.as_deref(), Some("High"));
+        assert_eq!(flattened.children[0].icon.as_deref(), Some("http://low/icon.png"));
+        assert_eq!(flattened.children[0].programmes.len(), 2);
+    }
+
+    #[test]
+    fn epg_priority_merge_flatten_keeps_shared_arc_channels() {
+        let shared_channel = Arc::new(epg_channel(
+            "demo.channel",
+            Some("Shared"),
+            Some("http://shared/icon.png"),
+            vec![epg_programme("demo.channel", 10, 20, Some("Shared Show"), None)],
+        ));
+
+        let flattened = flatten_tvguide(vec![Epg {
+            logo_override: false,
+            priority: 0,
+            attributes: None,
+            children: vec![Arc::clone(&shared_channel)],
+        }])
+        .expect("flattened epg");
+
+        assert_eq!(flattened.children.len(), 1);
+        assert_eq!(flattened.children[0].title.as_deref(), Some("Shared"));
+        assert_eq!(flattened.children[0].icon.as_deref(), Some("http://shared/icon.png"));
+    }
+
+    #[test]
+    fn epg_priority_merge_tracks_icon_override_per_channel() {
+        let mut accumulator = EpgMergeAccumulator::new();
+        accumulator.add_channel_with_programmes(
+            0,
+            0,
+            false,
+            epg_channel("demo.keep", Some("Keep"), Some("http://keep/icon.png"), vec![]),
+        );
+        accumulator.add_channel_with_programmes(
+            1,
+            1,
+            true,
+            epg_channel("demo.override", Some("Override"), Some("http://override/icon.png"), vec![]),
+        );
+
+        let (_epg, icon_override_channels) = accumulator.finish_epg_with_icon_overrides().expect("merged epg");
+
+        let keep_id: Arc<str> = "demo.keep".intern();
+        let override_id: Arc<str> = "demo.override".intern();
+
+        assert!(!icon_override_channels.contains(&keep_id));
+        assert!(icon_override_channels.contains(&override_id));
+    }
+
+    #[test]
+    fn epg_priority_merge_normalizes_duplicates_within_single_source() {
+        let merged = merge_epg_channels_by_priority(vec![(
+            0,
+            vec![epg_channel(
+                "demo.channel",
+                Some("Demo"),
+                None,
+                vec![
+                    epg_programme("demo.channel", 20, 30, Some("Later"), None),
+                    epg_programme("demo.channel", 10, 20, Some("First"), None),
+                    epg_programme("demo.channel", 10, 20, None, Some("Recovered desc")),
+                ],
+            )],
+        )]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].programmes.iter().map(|programme| (programme.start, programme.stop)).collect::<Vec<_>>(),
+            vec![(10, 20), (20, 30)],
+        );
+        assert_eq!(merged[0].programmes[0].title.as_deref(), Some("First"));
+        assert_eq!(merged[0].programmes[0].desc.as_deref(), Some("Recovered desc"));
+    }
+
+    #[test]
+    fn epg_priority_merge_preserves_exact_id_match_when_smart_match_is_enabled() {
+        let run_test = async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("smart-exact.xml");
+
+            fs::write(
+                &epg_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="demo.channel">
+    <display-name>Completely Different Name</display-name>
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="demo.channel">
+    <title>Exact Match Source</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let mut smart_cfg = EpgSmartMatchConfigDto {
+                enabled: true,
+                ..Default::default()
+            };
+            smart_cfg.prepare().expect("smart match config");
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+            }]);
+            let mut id_cache = EpgIdCache::new(Some(&crate::model::EpgConfig {
+                sources: vec![],
+                smart_match: Some(EpgSmartMatchConfig::from(smart_cfg)),
+            }));
+            id_cache.channel_epg_id.insert("demo.channel".intern());
+
+            let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
+
+            assert_eq!(merged.children.len(), 1);
+            assert_eq!(merged.children[0].id.as_ref(), "demo.channel");
+            assert_eq!(merged.children[0].programmes.len(), 1);
+        };
+
+        tokio::runtime::Runtime::new().unwrap().block_on(run_test);
+    }
+
+    #[test]
+    fn epg_priority_merge_filter_accepts_later_source_for_already_processed_channel() {
+        let run_test = async move {
+            let dir = tempdir().unwrap();
+            let high_path = dir.path().join("high.xml");
+            let low_path = dir.path().join("low.xml");
+
+            fs::write(
+                &high_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="demo.channel">
+    <display-name>High Channel</display-name>
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="demo.channel">
+    <title>High Source</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+            fs::write(
+                &low_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="demo.channel">
+    <display-name>Low Channel</display-name>
+  </channel>
+  <programme start="20260425010000 +0000" stop="20260425020000 +0000" channel="demo.channel">
+    <title>Low Source</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let tv_guide = TVGuide::new(vec![
+                PersistedEpgSource { file_path: high_path, priority: 0, logo_override: false },
+                PersistedEpgSource { file_path: low_path, priority: 10, logo_override: false },
+            ]);
+            let mut id_cache = EpgIdCache::new(None);
+            id_cache.channel_epg_id.insert("demo.channel".intern());
+
+            let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
+
+            assert!(id_cache.processed.contains("demo.channel"));
+            assert_eq!(merged.children.len(), 1);
+            assert_eq!(merged.children[0].title.as_deref(), Some("High Channel"));
+            assert_eq!(merged.children[0].programmes.len(), 2);
+            assert_eq!(
+                merged.children[0]
+                    .programmes
+                    .iter()
+                    .filter_map(|programme| programme.title.as_deref())
+                    .collect::<Vec<_>>(),
+                vec!["High Source", "Low Source"],
+            );
+        };
+
+        tokio::runtime::Runtime::new().unwrap().block_on(run_test);
     }
 
 

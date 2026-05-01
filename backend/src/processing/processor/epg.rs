@@ -1,11 +1,11 @@
-use crate::model::{Epg, TVGuide};
+use crate::model::Epg;
 use crate::model::{EpgConfig, EpgSmartMatchConfig};
 use crate::model::FetchedPlaylist;
 use crate::processing::parser::xmltv::normalize_channel_name;
 use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use std::collections::{HashMap, HashSet};
-use shared::model::{EpgChannel, EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster};
+use shared::model::{EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster};
 use std::sync::Arc;
 use shared::utils::Internable;
 
@@ -164,73 +164,63 @@ impl EpgIdCache {
 async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>, id_cache: &mut EpgIdCache) {
     //id_cache.normalized.retain(|_, v| v.is_some());
     if let Some(tv_guide) = &fp.epg {
-        let mut processed_epgs = vec![];
-        if let Some(epg_sources) = tv_guide.filter(id_cache).await {
+        if let Some((epg_source, icon_override_channels)) = tv_guide.filter_merged_with_icon_overrides(id_cache).await {
             let mut icon_assigned = HashSet::new();
-            for epg_source in epg_sources {
-                // icon tags
-                let icon_tags: HashMap<&Arc<str>, &Arc<EpgChannel>> = epg_source.children.iter()
-                    .filter(|tag| tag.icon.as_ref().is_some_and(|i| !i.is_empty()))
-                    .map(|tag| (&tag.id, tag))
-                    .collect();
+            let icon_tags: HashMap<&Arc<str>, &Arc<str>> = epg_source.children
+                .iter()
+                .filter_map(|tag| tag.icon.as_ref().filter(|icon| !icon.is_empty()).map(|icon| (&tag.id, icon)))
+                .collect();
 
-                let assign_values = |chan: &mut PlaylistItem| {
-                    if id_cache.smart_match_enabled {
-                        // id_cache.processed contains the epg_ids from the xml epg file.
-                        // if the channel has no epg_id or the epg_id is not present in xmltv/tvguide then we need to match one from existing tvguide
-                        let not_found_in_epg = match &chan.header.epg_channel_id {
-                            None => true,
-                            Some(epg_id) => !id_cache.processed.contains(&**epg_id),
-                        };
-                        if not_found_in_epg {
-                            let try_match = |key: &str| {
-                                let normalized = id_cache.normalize(key).intern();
-                                id_cache.normalized.get(&normalized).and_then(|epg_id| {
-                                    epg_id.as_ref().map(|id| {
-                                        trace!("Matched channel {} to epg {id:?}", chan.header.name);
-                                        id.clone()
-                                    })
+            let assign_values = |chan: &mut PlaylistItem| {
+                if id_cache.smart_match_enabled {
+                    // id_cache.processed contains all epg_ids found in any xmltv source.
+                    let not_found_in_epg = match &chan.header.epg_channel_id {
+                        None => true,
+                        Some(epg_id) => !id_cache.processed.contains(&**epg_id),
+                    };
+                    if not_found_in_epg {
+                        let try_match = |key: &str| {
+                            let normalized = id_cache.normalize(key).intern();
+                            id_cache.normalized.get(&normalized).and_then(|epg_id| {
+                                epg_id.as_ref().map(|id| {
+                                    trace!("Matched channel {} to epg {id:?}", chan.header.name);
+                                    id.clone()
                                 })
-                            };
-                            if let Some(new_id) = try_match(&chan.header.name)
-                                .or_else(|| chan.header.epg_channel_id.as_deref().and_then(try_match))
-                            {
-                                chan.header.epg_channel_id = Some(new_id);
-                            }
+                            })
+                        };
+                        if let Some(new_id) =
+                            try_match(&chan.header.name).or_else(|| chan.header.epg_channel_id.as_deref().and_then(try_match))
+                        {
+                            chan.header.epg_channel_id = Some(new_id);
                         }
                     }
-                    if let Some(epg_channel_id) = chan.header.epg_channel_id.as_ref() {
-                        if !icon_assigned.contains(epg_channel_id) &&
-                            (epg_source.logo_override || chan.header.logo.is_empty() || chan.header.logo_small.is_empty()) {
-                            if let Some(icon_tag) = icon_tags.get(epg_channel_id) {
-                                if let Some(icon) = icon_tag.icon.as_ref() {
-                                    icon_assigned.insert(epg_channel_id.clone());
-                                    if epg_source.logo_override || chan.header.logo.is_empty() {
-                                        trace!("Matched channel {} to epg icon {icon}", chan.header.name);
-                                        chan.header.logo = Arc::clone(icon);
-                                    }
-                                    if epg_source.logo_override || chan.header.logo_small.is_empty() {
-                                        chan.header.logo_small = Arc::clone(icon);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                };
-
-                let filter_live = |c: &&mut PlaylistItem| c.header.xtream_cluster == XtreamCluster::Live && c.header.item_type.is_live();
-
-                if fp.is_memory() {
-                    fp.items_mut().filter(filter_live).for_each(assign_values);
-                } else {
-                    warn!("Disk based playlist modification is not supported!");
                 }
-                processed_epgs.push(epg_source);
-            }
-        }
+                if let Some(epg_channel_id) = chan.header.epg_channel_id.as_ref() {
+                    if !icon_assigned.contains(epg_channel_id) &&
+                        (icon_override_channels.contains(epg_channel_id) || chan.header.logo.is_empty() || chan.header.logo_small.is_empty()) {
+                        if let Some(icon) = icon_tags.get(epg_channel_id) {
+                            icon_assigned.insert(epg_channel_id.clone());
+                            if icon_override_channels.contains(epg_channel_id) || chan.header.logo.is_empty() {
+                                trace!("Matched channel {} to epg icon {icon}", chan.header.name);
+                                chan.header.logo = Arc::clone(icon);
+                            }
+                            if icon_override_channels.contains(epg_channel_id) || chan.header.logo_small.is_empty() {
+                                chan.header.logo_small = Arc::clone(icon);
+                            }
+                        }
+                    }
+                }
+            };
 
-        if let Some(epg) = TVGuide::merge(processed_epgs) {
-            new_epg.push(epg);
+            let filter_live = |c: &&mut PlaylistItem| c.header.xtream_cluster == XtreamCluster::Live && c.header.item_type.is_live();
+
+            if fp.is_memory() {
+                fp.items_mut().filter(filter_live).for_each(assign_values);
+            } else {
+                warn!("Disk based playlist modification is not supported!");
+            }
+
+            new_epg.push(epg_source);
         }
     }
 }
