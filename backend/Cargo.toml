@@ -63,6 +63,7 @@ parking_lot = "0.12.5"
 lz4_flex.workspace = true
 brotli.workspace = true
 memmap2 = "0.9.10"
+smallvec = "1.15.1"
 fs2 = "0.4.3"
 notify = "8.2.0"
 arc-swap.workspace = true

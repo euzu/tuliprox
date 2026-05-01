@@ -42,6 +42,7 @@ use shared::{
         CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
     },
 };
+use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -3197,7 +3198,7 @@ pub(crate) fn is_socket_bound_playback_session(item_type: PlaylistItemType, exte
 }
 
 fn session_reacquire_cleanup_addrs(user_session: &UserSession, current_addr: &SocketAddr) -> Vec<SocketAddr> {
-    let mut addrs = Vec::with_capacity(user_session.active_addrs.len().saturating_add(1));
+    let mut addrs: SmallVec<[SocketAddr; 4]> = SmallVec::new();
     if user_session.addr != *current_addr {
         addrs.push(user_session.addr);
     }
@@ -3206,7 +3207,7 @@ fn session_reacquire_cleanup_addrs(user_session: &UserSession, current_addr: &So
             addrs.push(*addr);
         }
     }
-    addrs
+    addrs.into_vec()
 }
 
 pub(crate) fn should_allow_exhausted_shared_reconnect(

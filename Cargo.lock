@@ -4684,6 +4684,7 @@ dependencies = [
  "serde_html_form",
  "serde_json",
  "shared",
+ "smallvec",
  "socket2",
  "strsim",
  "sysinfo",

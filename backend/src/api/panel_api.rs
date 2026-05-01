@@ -16,6 +16,7 @@ use crate::{
     },
     utils::{debug_if_enabled, format_http_status, persist_source_config, read_sources_file_from_path},
 };
+use smallvec::SmallVec;
 use axum::http::{Method, StatusCode};
 use chrono::{NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
@@ -857,10 +858,14 @@ fn find_input_target_names(app_state: &AppState, input_name: &Arc<str>) -> Vec<S
     let sources = app_state.app_config.sources.load();
     for source in &sources.sources {
         if source.inputs.iter().any(|name| name == input_name) {
-            return source.targets.iter().map(|t| t.name.clone()).collect();
+            let mut names: SmallVec<[String; 8]> = SmallVec::new();
+            for target in &source.targets {
+                names.push(target.name.clone());
+            }
+            return names.into_vec();
         }
     }
-    vec![]
+    Vec::new()
 }
 
 fn count_enabled_proxy_users(app_state: &AppState, input_name: &Arc<str>) -> usize {
