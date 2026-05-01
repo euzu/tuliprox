@@ -324,10 +324,31 @@ inputs:
         url: 'http://provider.net'
         username: sub_2
         password: pw2
+        priority: 1
         max_connections: 2
+        exp_date: "2028-11-30 12:00:00"
+        enabled: true
 ```
 
 **Result:** Tuliprox treats this as a single provider source with a total pool of 1 + 2 = **3** concurrent connections.
+
+#### YAML Alias Fields
+
+Alias entries use the same effective connection attributes as a normal input account. The input-level `headers`,
+`epg`, `options`, `persist`, `method`, `panel_api`, `cache_duration`, and provider failover settings remain inherited
+from the parent input; the alias fields below override the concrete account/connection identity.
+
+| Parameter             | Type   | Required | Default | Technical Impact & Details                                                                                                                                                                                                                         |
+|:----------------------|:-------|:--------:|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `id`                  | Int    |    No    |         | Internal/generated alias ID. Normally omit this; Tuliprox assigns IDs from the input/alias order during config preparation.                                                                                                                        |
+| `name`                | String |   Yes    |         | Unique alias name. Used for stable playlist UUID generation and consistent channel numbering across updates.                                                                                                                                       |
+| `url`                 | String |   Yes    |         | Provider base URL, playlist URL, or `provider://<name>` reference. For M3U aliases, credentials can also be extracted from the URL query parameters.                                                                                               |
+| `username`            | String |  Xtream  |         | Account username. Mandatory for regular Xtream YAML aliases. Optional for M3U aliases when credentials are embedded in the playlist URL.                                                                                                           |
+| `password`            | String |  Xtream  |         | Account password. Mandatory for regular Xtream YAML aliases. Optional for M3U aliases when credentials are embedded in the playlist URL.                                                                                                           |
+| `priority`            | Int    |    No    | `0`     | Connection selection priority for this alias. Lower numbers have higher priority; negative numbers are allowed.                                                                                                                                    |
+| `max_connections`     | Int    |    No    | `0`     | Allowed concurrent streams for this alias. In YAML, `0` means unlimited/no explicit limit.                                                                                                                                                         |
+| `exp_date`            | Mixed  |    No    |         | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Used for status tracking and Panel API sync/renewal logic.                                                                                  |
+| `enabled`             | Bool   |    No    | `true`  | If `false`, this alias is ignored when Tuliprox builds the usable connection pool.                                                                                                                                                                 |
 
 ---
 
@@ -364,9 +385,9 @@ inputs:
 **CSV Structure:**
 
 ```csv
-#name;username;password;url;max_connections;priority;exp_date
-my_provider_1;user1;password1;http://p1.com:80;1;0;2028-11-23 12:34:23
-my_provider_2;user2;password2;http://p2.com:8080;1;1;1732365263
+#name;username;password;url;max_connections;priority;exp_date;enabled
+my_provider_1;user1;password1;http://p1.com:80;1;0;2028-11-23 12:34:23;true
+my_provider_2;user2;password2;http://p2.com:8080;1;1;1732365263;true
 ```
 
 ##### `M3uBatch`
@@ -383,19 +404,23 @@ inputs:
 **CSV Structure:**
 
 ```csv
-#url;max_connections;priority
-http://p1.com/get.php?username=u1&password=p1;1;0
-http://p2.com/get.php?username=u2&password=p2;1;5
+#url;max_connections;priority;enabled
+http://p1.com/get.php?username=u1&password=p1;1;0;true
+http://p2.com/get.php?username=u2&password=p2;1;5;true
 ```
 
 #### Field Specifications
 
 | Parameter             | Technical Impact & Details                                                                                                                                                                                                                         |
 |:----------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **`url`**             | Provider base URL or full M3U playlist URL. Required in CSV rows.                                                                                                                                                                                  |
 | **`name`**            | **Crucial:** The first alias is automatically renamed with the `name` from the input definition (e.g., `my_provider_1` gets `my_provider`). This is necessary for stable playlist UUID generation and consistent channel numbering across updates. |
+| **`username`**        | Xtream username. For M3U CSV rows, Tuliprox can also extract credentials from the URL query parameters.                                                                                                                                            |
+| **`password`**        | Xtream password. For M3U CSV rows, Tuliprox can also extract credentials from the URL query parameters.                                                                                                                                            |
 | **`max_connections`** | Defines allowed concurrent streams. Default in CSV is **1**.                                                                                                                                                                                       |
 | **`priority`**        | Lower numbers = higher priority. `0` is higher than `1`. Negative numbers (e.g., `-1`) are allowed for top-tier priority. Items with the lowest values are processed first.                                                                        |
-| **`exp_date`**        | Account expiration. Supports "YYYY-MM-DD HH:MM:SS" (e.g., `2028-11-30 12:00:00`) or Unix timestamps (seconds). Used for auto-cleanup or Panel API sync.                                                                                            |
+| **`exp_date`**        | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Used for auto-cleanup or Panel API sync.                                                                                                    |
+| **`enabled`**         | Enables/disables a CSV alias row. Empty values, `1`, `t`, and `true` are treated as enabled; `0`, `f`, or `false` disable the alias.                                                                                                               |
 
 ---
 

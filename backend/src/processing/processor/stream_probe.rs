@@ -1,16 +1,22 @@
 use crate::api::model::ActiveProviderManager;
 use crate::model::ConfigInput;
-use crate::model::{AppConfig};
+use crate::model::AppConfig;
 use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};
-use crate::repository::{get_input_m3u_playlist_file_path, get_input_storage_path, get_input_local_library_playlist_file_path, xtream_get_file_path, BPlusTreeUpdate};
+use crate::repository::{
+    get_input_local_library_playlist_file_path, get_input_m3u_playlist_file_path, get_input_storage_path,
+    xtream_get_file_path, BPlusTreeUpdate,
+};
 use crate::utils::debug_if_enabled;
 use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome};
 use shared::utils::sanitize_sensitive_info;
 use log::{debug, info, warn};
 use shared::error::TuliproxError;
-use shared::model::{EpisodeStreamProperties, InputType, PlaylistItemType, StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, LiveStreamProperties, M3uPlaylistItem, XtreamCluster, XtreamPlaylistItem};
-use std::sync::Arc;
+use shared::model::{
+    EpisodeStreamProperties, InputType, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType,
+    StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+};
 use shared::model::UUIDType;
+use std::{path::PathBuf, sync::Arc};
 
 enum ProbeStorageKind {
     M3u,
@@ -18,9 +24,35 @@ enum ProbeStorageKind {
     Xtream,
 }
 
+struct PreparedGenericProbe {
+    db_path: PathBuf,
+    storage_kind: ProbeStorageKind,
+    raw_video: Option<Arc<str>>,
+    raw_audio: Option<Arc<str>>,
+    stats: ProbeStreamStats,
+}
+
+enum PreparedGenericProbeOutcome {
+    Prepared(PreparedGenericProbe),
+    Noop,
+    ProbeFailed,
+}
+
+pub struct GenericProbeMetadata {
+    pub raw_video: Option<Arc<str>>,
+    pub raw_audio: Option<Arc<str>>,
+    pub stats: ProbeStreamStats,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenericProbeOutcome {
     Updated,
+    Noop,
+    ProbeFailed,
+}
+
+pub enum GenericProbeMetadataOutcome {
+    Metadata(GenericProbeMetadata),
     Noop,
     ProbeFailed,
 }
@@ -48,12 +80,85 @@ pub async fn update_generic_stream_metadata(
     active_handle: Option<&crate::api::model::ProviderHandle>,
     probe_priority: i8,
 ) -> Result<GenericProbeOutcome, TuliproxError> {
+    let prepared = match prepare_generic_stream_metadata(
+        app_config,
+        client,
+        input,
+        unique_id,
+        stream_url,
+        item_type,
+        active_provider,
+        active_handle,
+        probe_priority,
+    )
+    .await?
+    {
+        PreparedGenericProbeOutcome::Prepared(prepared) => prepared,
+        PreparedGenericProbeOutcome::Noop => return Ok(GenericProbeOutcome::Noop),
+        PreparedGenericProbeOutcome::ProbeFailed => return Ok(GenericProbeOutcome::ProbeFailed),
+    };
+
+    persist_prepared_generic_stream_metadata(app_config, unique_id, item_type, prepared).await
+}
+
+/// Probes a generic stream and returns metadata without writing to storage.
+///
+/// This is used by metadata workers that can batch the eventual B+Tree writes.
+#[allow(clippy::too_many_arguments)]
+pub async fn probe_generic_stream_metadata(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &ConfigInput,
+    unique_id: &str,
+    stream_url: &str,
+    item_type: PlaylistItemType,
+    active_provider: &Arc<ActiveProviderManager>,
+    active_handle: Option<&crate::api::model::ProviderHandle>,
+    probe_priority: i8,
+) -> Result<GenericProbeMetadataOutcome, TuliproxError> {
+    let prepared = match prepare_generic_stream_metadata(
+        app_config,
+        client,
+        input,
+        unique_id,
+        stream_url,
+        item_type,
+        active_provider,
+        active_handle,
+        probe_priority,
+    )
+    .await?
+    {
+        PreparedGenericProbeOutcome::Prepared(prepared) => prepared,
+        PreparedGenericProbeOutcome::Noop => return Ok(GenericProbeMetadataOutcome::Noop),
+        PreparedGenericProbeOutcome::ProbeFailed => return Ok(GenericProbeMetadataOutcome::ProbeFailed),
+    };
+
+    Ok(GenericProbeMetadataOutcome::Metadata(GenericProbeMetadata {
+        raw_video: prepared.raw_video,
+        raw_audio: prepared.raw_audio,
+        stats: prepared.stats,
+    }))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn prepare_generic_stream_metadata(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &ConfigInput,
+    unique_id: &str,
+    stream_url: &str,
+    item_type: PlaylistItemType,
+    active_provider: &Arc<ActiveProviderManager>,
+    active_handle: Option<&crate::api::model::ProviderHandle>,
+    probe_priority: i8,
+) -> Result<PreparedGenericProbeOutcome, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
 
     // Check if probing is enabled globally
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if !ffprobe_enabled {
-        return Ok(GenericProbeOutcome::Noop);
+            return Ok(PreparedGenericProbeOutcome::Noop);
     }
 
     // Determine storage file path based on input type
@@ -78,7 +183,7 @@ pub async fn update_generic_stream_metadata(
                 XtreamCluster::Series
             } else {
                 // Generic probing currently supports live/video/series payload shapes.
-                return Ok(GenericProbeOutcome::Noop);
+            return Ok(PreparedGenericProbeOutcome::Noop);
             };
             (
                 xtream_get_file_path(&storage_path, cluster),
@@ -115,7 +220,7 @@ pub async fn update_generic_stream_metadata(
     if !is_supported_probe_url(&probe_url) {
         let safe_probe_url = sanitize_sensitive_info(&probe_url).into_owned();
         debug!("Skipping unsupported generic stream probe for {unique_id}: {safe_probe_url}");
-        return Ok(GenericProbeOutcome::Noop);
+        return Ok(PreparedGenericProbeOutcome::Noop);
     }
     let is_remote_probe = reqwest::Url::parse(&probe_url)
         .ok()
@@ -185,28 +290,50 @@ pub async fn update_generic_stream_metadata(
     }
 
     let (raw_video, raw_audio, stats) = match probe_data {
-        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => (raw_video, raw_audio, stats),
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => (
+            raw_video.map(|value| Arc::<str>::from(value.to_string())),
+            raw_audio.map(|value| Arc::<str>::from(value.to_string())),
+            stats,
+        ),
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Probe target not found (404) for generic stream: {unique_id}");
             return Err(shared::error::TuliproxError::Probe(format!("Probe target returned 404 Not Found for stream {unique_id}")));
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed or timed out for generic stream: {unique_id}");
-            return Ok(GenericProbeOutcome::ProbeFailed);
+            return Ok(PreparedGenericProbeOutcome::ProbeFailed);
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled) => {
             warn!("Probe cancelled for generic stream: {unique_id}");
-            return Ok(GenericProbeOutcome::ProbeFailed);
+            return Ok(PreparedGenericProbeOutcome::ProbeFailed);
         }
     };
 
+    Ok(PreparedGenericProbeOutcome::Prepared(PreparedGenericProbe {
+        db_path,
+        storage_kind,
+        raw_video,
+        raw_audio,
+        stats,
+    }))
+}
+
+async fn persist_prepared_generic_stream_metadata(
+    app_config: &Arc<AppConfig>,
+    unique_id: &str,
+    item_type: PlaylistItemType,
+    prepared: PreparedGenericProbe,
+) -> Result<GenericProbeOutcome, TuliproxError> {
     // Hold the async file lock while the blocking DB update runs in a blocking thread.
-    let file_lock = app_config.file_locks.write_lock(&db_path).await;
-    let db_path_for_update = db_path.clone();
+    let file_lock = app_config.file_locks.write_lock(&prepared.db_path).await;
+    let db_path_for_update = prepared.db_path;
     let unique_id_for_update = unique_id.to_string();
+    let raw_video = prepared.raw_video;
+    let raw_audio = prepared.raw_audio;
+    let stats = prepared.stats;
     let updated = tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let mut updated = false;
-        match storage_kind {
+        match prepared.storage_kind {
             ProbeStorageKind::M3u => {
                 let key: Arc<str> = Arc::from(unique_id_for_update.as_str());
                 let mut tree_update = BPlusTreeUpdate::<Arc<str>, M3uPlaylistItem>::try_new(&db_path_for_update)
@@ -302,13 +429,13 @@ pub async fn update_generic_stream_metadata(
     }
 }
 
-fn update_properties(
-    props_opt: &mut Option<StreamProperties>, 
-    item_type: PlaylistItemType, 
-    name: &str, 
+pub fn update_properties(
+    props_opt: &mut Option<StreamProperties>,
+    item_type: PlaylistItemType,
+    name: &str,
     virtual_id: u32,
-    raw_video: Option<serde_json::Value>, 
-    raw_audio: Option<serde_json::Value>,
+    raw_video: Option<Arc<str>>,
+    raw_audio: Option<Arc<str>>,
     stats: ProbeStreamStats,
 ) {
     if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
@@ -325,14 +452,14 @@ fn update_properties(
 
        if props.details.is_none() {
            props.details = Some(VideoStreamDetailProperties::default());
-       }
-       if let Some(details) = props.details.as_mut() {
-           if let Some(v) = raw_video {
-               details.video = Some(v.to_string().into());
-           }
-           if let Some(a) = raw_audio {
-               details.audio = Some(a.to_string().into());
-           }
+        }
+        if let Some(details) = props.details.as_mut() {
+            if let Some(v) = raw_video {
+                details.video = Some(v);
+            }
+            if let Some(a) = raw_audio {
+                details.audio = Some(a);
+            }
            if let Some(duration_secs) = stats.duration_secs {
                details.duration_secs = Some(duration_secs.to_string().into());
            }
@@ -361,12 +488,12 @@ fn update_properties(
            }
        };
 
-       if let Some(v) = raw_video {
-           props.video = Some(v.to_string().into());
-       }
-       if let Some(a) = raw_audio {
-           props.audio = Some(a.to_string().into());
-       }
+        if let Some(v) = raw_video {
+            props.video = Some(v);
+        }
+        if let Some(a) = raw_audio {
+            props.audio = Some(a);
+        }
        *props_opt = Some(StreamProperties::Episode(Box::new(props)));
     }
     else if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) {
@@ -379,13 +506,13 @@ fn update_properties(
                ..LiveStreamProperties::default()
            }
        };
-       
-       if let Some(v) = raw_video {
-           props.video = Some(v.to_string().into());
-       }
-       if let Some(a) = raw_audio {
-           props.audio = Some(a.to_string().into());
-       }
+
+        if let Some(v) = raw_video {
+            props.video = Some(v);
+        }
+        if let Some(a) = raw_audio {
+            props.audio = Some(a);
+        }
 
        let now = chrono::Utc::now().timestamp();
        props.last_probed_timestamp = Some(now);
