@@ -8,20 +8,20 @@ use crate::{api::{
         xtream_api::xtream_get_stream_info_response,
     },
     model::AppState,
-}, auth::{create_access_token, permission_layer}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, repository::xtream_get_item_for_stream_id, utils::{epg::get_input_raw_epg_file_path, file_exists_async}};
+}, auth::{create_access_token, permission_layer}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, processing::parser::xmltv::merge_epg_channels_by_priority, repository::xtream_get_item_for_stream_id, utils::{epg::get_input_raw_epg_file_path, file_exists_async}};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
 use shared::utils::deobfuscate_text;
 use shared::{
     model::{
-        permission::Permission, EpgChannel, EpgProgramme,
+        permission::Permission, EpgChannel,
         InputType, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem,
         XtreamCluster,
     },
     utils::{concat_path_leading_slash, sanitize_sensitive_info, Internable},
 };
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::sync::Arc;
 use url::Url;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
@@ -119,76 +119,9 @@ fn build_playlist_webplayer_url(
     )
 }
 
-#[derive(Hash, Eq, PartialEq)]
-struct WebUiProgrammeKey {
-    start: i64,
-    stop: i64,
-}
-
-impl From<&EpgProgramme> for WebUiProgrammeKey {
-    fn from(programme: &EpgProgramme) -> Self {
-        Self {
-            start: programme.start,
-            stop: programme.stop,
-        }
-    }
-}
-
-struct WebUiChannelAcc {
-    priority: i16,
-    channel: EpgChannel,
-    programmes: HashSet<WebUiProgrammeKey>,
-}
-
 fn merge_epg_channels(mut channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
-    let mut merged: HashMap<Arc<str>, WebUiChannelAcc> = HashMap::new();
     channels_by_source.sort_by_key(|(priority, _)| *priority);
-
-    for (priority, channels) in channels_by_source.drain(..) {
-        for channel in channels {
-            match merged.entry(channel.id.clone()) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    let acc = entry.get_mut();
-                    if priority < acc.priority {
-                        let programmes = channel
-                            .programmes
-                            .iter()
-                            .map(WebUiProgrammeKey::from)
-                            .collect::<HashSet<_>>();
-                        *acc = WebUiChannelAcc {
-                            priority,
-                            channel,
-                            programmes,
-                        };
-                    } else if priority == acc.priority {
-                        for programme in channel.programmes {
-                            let key = WebUiProgrammeKey::from(&programme);
-                            if acc.programmes.insert(key) {
-                                acc.channel.programmes.push(programme);
-                            }
-                        }
-                        acc.channel.programmes.sort_by_key(|programme| programme.start);
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let programmes = channel
-                        .programmes
-                        .iter()
-                        .map(WebUiProgrammeKey::from)
-                        .collect::<HashSet<_>>();
-                    entry.insert(WebUiChannelAcc {
-                        priority,
-                        channel,
-                        programmes,
-                    });
-                }
-            }
-        }
-    }
-
-    let mut channels = merged.into_values().map(|entry| entry.channel).collect::<Vec<_>>();
-    channels.sort_by(|left, right| left.id.cmp(&right.id));
-    channels
+    merge_epg_channels_by_priority(channels_by_source)
 }
 
 async fn load_epg_channels_for_input(
@@ -482,6 +415,14 @@ async fn playlist_epg(
             }
         }
         PlaylistEpgRequest::Custom(url) => {
+            let valid_custom_url = Url::parse(&url).is_ok_and(|parsed| matches!(parsed.scheme(), "http" | "https"));
+            if !valid_custom_url {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({"error": "Invalid EPG URL"})),
+                )
+                    .into_response();
+            }
             match parse_xmltv_for_web_ui_from_url(&app_state, &url).await {
                 Ok(epg) => {
                     let config = app_state.app_config.config.load();
@@ -963,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_epg_channels_prefers_higher_priority_source_and_merges_equal_priority_programmes() {
+    fn merge_epg_channels_prefers_higher_priority_metadata_and_fills_lower_priority_gaps() {
         let low_priority = EpgChannel {
             id: "demo.channel".intern(),
             title: Some("Low".intern()),
@@ -1003,14 +944,14 @@ mod tests {
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].title.as_deref(), Some("High"));
         assert_eq!(channels[0].icon.as_deref(), Some("http://high/icon.png"));
-        assert_eq!(channels[0].programmes.len(), 2);
+        assert_eq!(channels[0].programmes.len(), 3);
         assert_eq!(
             channels[0]
                 .programmes
                 .iter()
                 .map(|programme| (programme.start, programme.stop))
                 .collect::<Vec<_>>(),
-            vec![(30, 40), (50, 60)],
+            vec![(10, 20), (30, 40), (50, 60)],
         );
     }
 
@@ -1093,6 +1034,31 @@ mod tests {
             channels[0].programmes[0].title.as_ref().map(std::convert::AsRef::as_ref),
             Some("Morning Show")
         );
+    }
+
+    #[tokio::test]
+    async fn playlist_epg_custom_route_rejects_invalid_url_scheme() {
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            ..Default::default()
+        });
+        let source = ConfigSource {
+            inputs: vec![Arc::clone(&input.name)],
+            targets: vec![],
+        };
+        let app_state = test_app_state(Arc::new(test_app_config(input, source)));
+        let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/playlist/epg")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"Custom":"ftp://example.com/epg.xml"}"#))
+            .expect("request");
+
+        let response = router.into_service::<Body>().oneshot(request).await.expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
