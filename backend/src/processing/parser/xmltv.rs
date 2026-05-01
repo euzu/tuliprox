@@ -323,7 +323,8 @@ impl TVGuide {
 
                             Self::prepare_tag(id_cache, &mut tag, smart_match);
                             let add_channel = if smart_match {
-                                Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching)
+                                id_cache.channel_epg_id.contains(&tag_epg_id)
+                                    || Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching)
                             } else {
                                 id_cache.channel_epg_id.contains(&tag_epg_id)
                             };
@@ -680,40 +681,7 @@ impl EpgMergeAccumulator {
             .channels
             .drain()
             .map(|(_, mut acc)| {
-                if acc.needs_programme_merge {
-                    // Sort once, then compact adjacent duplicates. This avoids a per-channel HashSet
-                    // while preserving ownership moves from parser output into final EPG output.
-                    acc.programmes.sort_by_key(|entry| {
-                        (
-                            entry.programme.start,
-                            entry.programme.stop,
-                            entry.priority,
-                            entry.source_order,
-                        )
-                    });
-
-                    let programme_entries = std::mem::take(&mut acc.programmes);
-                    let mut merged_programmes = Vec::with_capacity(programme_entries.len());
-                    let mut entries = programme_entries.into_iter();
-                    if let Some(first_entry) = entries.next() {
-                        let mut current = first_entry.programme;
-                        for entry in entries {
-                            if entry.programme.start == current.start && entry.programme.stop == current.stop {
-                                backfill_programme_metadata(&mut current, entry.programme);
-                            } else {
-                                merged_programmes.push(current);
-                                current = entry.programme;
-                            }
-                        }
-                        merged_programmes.push(current);
-                    }
-
-                    acc.channel.programmes = merged_programmes;
-                    acc.channel.programmes.sort_by_key(|programme| (programme.start, programme.stop));
-                } else {
-                    acc.channel.programmes =
-                        std::mem::take(&mut acc.programmes).into_iter().map(|entry| entry.programme).collect();
-                }
+                normalize_channel_programmes(&mut acc);
                 acc
             })
             .collect::<Vec<_>>();
@@ -740,37 +708,7 @@ impl EpgMergeAccumulator {
         }
 
         for acc in &mut channels {
-            if acc.needs_programme_merge {
-                acc.programmes.sort_by_key(|entry| {
-                    (
-                        entry.programme.start,
-                        entry.programme.stop,
-                        entry.priority,
-                        entry.source_order,
-                    )
-                });
-
-                let programme_entries = std::mem::take(&mut acc.programmes);
-                let mut merged_programmes = Vec::with_capacity(programme_entries.len());
-                let mut entries = programme_entries.into_iter();
-                if let Some(first_entry) = entries.next() {
-                    let mut current = first_entry.programme;
-                    for entry in entries {
-                        if entry.programme.start == current.start && entry.programme.stop == current.stop {
-                            backfill_programme_metadata(&mut current, entry.programme);
-                        } else {
-                            merged_programmes.push(current);
-                            current = entry.programme;
-                        }
-                    }
-                    merged_programmes.push(current);
-                }
-
-                acc.channel.programmes = merged_programmes;
-                acc.channel.programmes.sort_by_key(|programme| (programme.start, programme.stop));
-            } else {
-                acc.channel.programmes = std::mem::take(&mut acc.programmes).into_iter().map(|entry| entry.programme).collect();
-            }
+            normalize_channel_programmes(acc);
         }
 
         channels.sort_by(|left, right| left.channel.id.cmp(&right.channel.id));
@@ -800,6 +738,38 @@ fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgram
     if existing.desc.is_none() {
         existing.desc = incoming.desc;
     }
+}
+
+fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
+    // Always normalize programme order and dedupe, even for single-source channels.
+    // This preserves backfill behavior for duplicate entries within the same source.
+    acc.programmes.sort_by_key(|entry| {
+        (
+            entry.programme.start,
+            entry.programme.stop,
+            entry.priority,
+            entry.source_order,
+        )
+    });
+
+    let programme_entries = std::mem::take(&mut acc.programmes);
+    let mut merged_programmes = Vec::with_capacity(programme_entries.len());
+    let mut entries = programme_entries.into_iter();
+    if let Some(first_entry) = entries.next() {
+        let mut current = first_entry.programme;
+        for entry in entries {
+            if entry.programme.start == current.start && entry.programme.stop == current.stop {
+                backfill_programme_metadata(&mut current, entry.programme);
+            } else {
+                merged_programmes.push(current);
+                current = entry.programme;
+            }
+        }
+        merged_programmes.push(current);
+    }
+
+    merged_programmes.sort_by_key(|programme| (programme.start, programme.stop));
+    acc.channel.programmes = merged_programmes;
 }
 
 pub(crate) fn merge_epg_channels_by_priority(channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
@@ -1044,6 +1014,77 @@ mod tests {
 
         assert!(!icon_override_channels.contains(&keep_id));
         assert!(icon_override_channels.contains(&override_id));
+    }
+
+    #[test]
+    fn epg_priority_merge_normalizes_duplicates_within_single_source() {
+        let merged = merge_epg_channels_by_priority(vec![(
+            0,
+            vec![epg_channel(
+                "demo.channel",
+                Some("Demo"),
+                None,
+                vec![
+                    epg_programme("demo.channel", 20, 30, Some("Later"), None),
+                    epg_programme("demo.channel", 10, 20, Some("First"), None),
+                    epg_programme("demo.channel", 10, 20, None, Some("Recovered desc")),
+                ],
+            )],
+        )]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].programmes.iter().map(|programme| (programme.start, programme.stop)).collect::<Vec<_>>(),
+            vec![(10, 20), (20, 30)],
+        );
+        assert_eq!(merged[0].programmes[0].title.as_deref(), Some("First"));
+        assert_eq!(merged[0].programmes[0].desc.as_deref(), Some("Recovered desc"));
+    }
+
+    #[test]
+    fn epg_priority_merge_preserves_exact_id_match_when_smart_match_is_enabled() {
+        let run_test = async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("smart-exact.xml");
+
+            fs::write(
+                &epg_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="demo.channel">
+    <display-name>Completely Different Name</display-name>
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="demo.channel">
+    <title>Exact Match Source</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let mut smart_cfg = EpgSmartMatchConfigDto {
+                enabled: true,
+                ..Default::default()
+            };
+            smart_cfg.prepare().expect("smart match config");
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+            }]);
+            let mut id_cache = EpgIdCache::new(Some(&crate::model::EpgConfig {
+                sources: vec![],
+                smart_match: Some(EpgSmartMatchConfig::from(smart_cfg)),
+            }));
+            id_cache.channel_epg_id.insert("demo.channel".intern());
+
+            let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
+
+            assert_eq!(merged.children.len(), 1);
+            assert_eq!(merged.children[0].id.as_ref(), "demo.channel");
+            assert_eq!(merged.children[0].programmes.len(), 1);
+        };
+
+        tokio::runtime::Runtime::new().unwrap().block_on(run_test);
     }
 
     #[test]
