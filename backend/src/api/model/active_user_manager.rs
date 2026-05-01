@@ -240,6 +240,40 @@ impl UserConnectionData {
         }
     }
 
+    fn remove_streams_for_session_and_release_counted(
+        &mut self,
+        session_token: &str,
+        counted_kind: Option<ConnectionKind>,
+    ) -> (u32, bool) {
+        let mut removed_count = 0;
+        let mut connection_changed = false;
+        let mut released_stream_kind = false;
+        let mut stream_idx = 0;
+        while stream_idx < self.streams.len() {
+            if self.streams[stream_idx].session_token.as_deref() != Some(session_token) {
+                stream_idx += 1;
+                continue;
+            }
+
+            let uid = self.streams[stream_idx].uid;
+            if let Some(kind) = self.stream_kinds.remove(&uid) {
+                self.decrement_kind(kind);
+                released_stream_kind = true;
+                connection_changed = true;
+            }
+            self.stream_normal_priorities.remove(&uid);
+            self.streams.swap_remove(stream_idx);
+            removed_count += 1;
+        }
+
+        if let Some(kind) = counted_kind.filter(|_| !released_stream_kind) {
+            self.decrement_kind(kind);
+            connection_changed = true;
+        }
+
+        (removed_count, connection_changed)
+    }
+
     fn try_promote_soft_stream(&mut self) -> Option<PromotionAction> {
         if self.counts.normal >= self.max_connections || (u32::from(self.counts.soft)) <= u32::from(self.soft_connections) {
             return None;
@@ -2269,30 +2303,8 @@ impl ActiveUserManager {
                         .connection_kind
                         .unwrap_or(ConnectionKind::Normal)
                 });
-            let mut removed_count = 0;
-            let mut connection_changed = false;
-            let mut released_stream_kind = false;
-            let mut stream_idx = 0;
-            while stream_idx < connection_data.streams.len() {
-                if connection_data.streams[stream_idx].session_token.as_deref() == Some(session_token) {
-                    let uid = connection_data.streams[stream_idx].uid;
-                    if let Some(kind) = connection_data.stream_kinds.remove(&uid) {
-                        connection_data.decrement_kind(kind);
-                        released_stream_kind = true;
-                        connection_changed = true;
-                    }
-                    connection_data.stream_normal_priorities.remove(&uid);
-                    connection_data.streams.swap_remove(stream_idx);
-                    removed_count += 1;
-                } else {
-                    stream_idx += 1;
-                }
-            }
-
-            if let Some(kind) = counted_kind.filter(|_| !released_stream_kind) {
-                connection_data.decrement_kind(kind);
-                connection_changed = true;
-            }
+            let (removed_count, connection_changed) = connection_data
+                .remove_streams_for_session_and_release_counted(session_token, counted_kind);
 
             // Expire and remove the session immediately. Unlike `release_unbound_session_reservation`
             // which keeps the expired session for TTL-based GC cleanup, terminate_session explicitly
@@ -2364,28 +2376,9 @@ impl ActiveUserManager {
                             .unwrap_or(ConnectionKind::Normal)
                     });
 
-                let mut released_stream_kind = false;
-                let mut stream_idx = 0;
-                while stream_idx < connection_data.streams.len() {
-                    if connection_data.streams[stream_idx].session_token.as_deref() != Some(token) {
-                        stream_idx += 1;
-                        continue;
-                    }
-
-                    let uid = connection_data.streams[stream_idx].uid;
-                    if let Some(kind) = connection_data.stream_kinds.remove(&uid) {
-                        connection_data.decrement_kind(kind);
-                        released_stream_kind = true;
-                        connection_changed = true;
-                    }
-                    connection_data.stream_normal_priorities.remove(&uid);
-                    connection_data.streams.swap_remove(stream_idx);
-                }
-
-                if let Some(kind) = counted_kind.filter(|_| !released_stream_kind) {
-                    connection_data.decrement_kind(kind);
-                    connection_changed = true;
-                }
+                let (_, session_connection_changed) = connection_data
+                    .remove_streams_for_session_and_release_counted(token, counted_kind);
+                connection_changed |= session_connection_changed;
 
                 // Expire and remove the session.
                 connection_data.sessions.swap_remove(session_index);
@@ -6726,6 +6719,7 @@ mod tests {
         assert_eq!(session.addr, first_addr);
         assert_eq!(session.active_addrs, vec![first_addr]);
     }
+
 
     #[tokio::test]
     async fn get_eviction_candidates_keeps_preserved_streams_evictable() {
