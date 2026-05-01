@@ -20,7 +20,6 @@ use url::Url;
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
 const FFPROBE_SEEKABLE_MAX_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
-const FFPROBE_SEEKABLE_SET_LEN_SAFETY_MARGIN: u64 = 1024 * 1024;
 const FFPROBE_TEMP_STALE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -474,12 +473,6 @@ fn seekable_probe_window_bytes(probe_size: u64) -> u64 {
 
 fn seekable_probe_temp_dir() -> PathBuf { std::env::temp_dir().join("ffprobe") }
 
-fn max_seekable_probe_set_len(head_window: u64, tail_window: u64) -> u64 {
-    head_window
-        .saturating_add(tail_window)
-        .saturating_add(FFPROBE_SEEKABLE_SET_LEN_SAFETY_MARGIN)
-}
-
 async fn create_seekable_probe_temp_file() -> Result<tempfile::NamedTempFile, ProbeFailureKind> {
     let temp_dir = seekable_probe_temp_dir();
     if let Err(err) = fs::create_dir_all(&temp_dir).await {
@@ -541,11 +534,10 @@ async fn cleanup_stale_seekable_probe_files(temp_dir: &Path) -> std::io::Result<
     Ok(())
 }
 
-async fn ensure_probe_file_length(path: &Path, content_length: Option<u64>, max_len: u64) -> Result<(), ProbeFailureKind> {
+async fn ensure_probe_file_length(path: &Path, content_length: Option<u64>) -> Result<(), ProbeFailureKind> {
     let Some(content_length) = content_length else {
         return Ok(());
     };
-    let clamped_len = content_length.min(max_len);
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -560,7 +552,7 @@ async fn ensure_probe_file_length(path: &Path, content_length: Option<u64>, max_
             );
             ProbeFailureKind::Other
         })?;
-    file.set_len(clamped_len).await.map_err(|err| {
+    file.set_len(content_length).await.map_err(|err| {
         warn!(
             "Failed to resize seekable ffprobe temp file {}: {}",
             path.display(),
@@ -609,7 +601,6 @@ async fn stage_seekable_probe_file(
 ) -> Result<SeekableProbeStage, ProbeFailureKind> {
     let head_window = seekable_probe_window_bytes(probe_size);
     let tail_window = seekable_probe_window_bytes(probe_size);
-    let max_file_len = max_seekable_probe_set_len(head_window, tail_window);
     let head_result = fetch_remote_span_to_file(
         client,
         url,
@@ -622,7 +613,7 @@ async fn stage_seekable_probe_file(
     )
     .await?;
 
-    ensure_probe_file_length(temp_path, head_result.total_length, max_file_len).await?;
+    ensure_probe_file_length(temp_path, head_result.total_length).await?;
 
     let mut stage = SeekableProbeStage {
         content_length: head_result.total_length,
@@ -1513,18 +1504,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_probe_file_length_clamps_upstream_content_length() {
+    async fn ensure_probe_file_length_preserves_remote_logical_length() {
         let tempdir = tempfile::tempdir().expect("tempdir should succeed");
         let temp_path = tempdir.path().join("probe.bin");
+        let remote_logical_length = 10 * 1024 * 1024;
 
-        ensure_probe_file_length(&temp_path, Some(10 * 1024 * 1024), 4096)
+        ensure_probe_file_length(&temp_path, Some(remote_logical_length))
             .await
             .expect("file length should be set");
 
         let metadata = tokio::fs::metadata(&temp_path)
             .await
             .expect("probe file metadata should be readable");
-        assert_eq!(metadata.len(), 4096);
+        assert_eq!(metadata.len(), remote_logical_length);
     }
 
     #[test]
