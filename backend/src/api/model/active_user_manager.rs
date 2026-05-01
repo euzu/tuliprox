@@ -1543,6 +1543,19 @@ impl ActiveUserManager {
         }
     }
 
+    fn collect_promotions_after_capacity_release(connection_data: &mut UserConnectionData) -> Vec<PromotionAction> {
+        let mut promotions = Vec::new();
+        while let Some(action) = connection_data.try_promote_soft_stream() {
+            let promoted_stream = connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned();
+            if let Some(stream) = promoted_stream.as_ref() {
+                Self::promote_session_for_stream(connection_data, stream);
+            }
+            promotions.push(action);
+        }
+        while connection_data.try_promote_soft_session_reservation() {}
+        promotions
+    }
+
     fn bump_session_transition_version(session: &mut UserSession) -> u64 {
         session.transition_version = session.transition_version.saturating_add(1);
         session.transition_version
@@ -2281,7 +2294,7 @@ impl ActiveUserManager {
     /// Unlike `release_unbound_session_reservation`, this terminates regardless of
     /// whether streams are currently active, and always removes associated streams.
     pub async fn terminate_session(&self, username: &str, session_token: &str) {
-        let (connection_changed, removed_count) = {
+        let (connection_changed, removed_count, promotions) = {
             let mut user_connections = self.connections.write().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return;
@@ -2317,15 +2330,20 @@ impl ActiveUserManager {
                 connection_data.grace_ts = 0;
             }
 
+            let promotions = Self::collect_promotions_after_capacity_release(connection_data);
+
             let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
             drop(user_connections);
             self.log_divergence_snapshot(divergence_snapshot).await;
 
-            (connection_changed, removed_count)
+            (connection_changed, removed_count, promotions)
         };
 
         if connection_changed {
             self.log_active_user().await;
+        }
+        for action in promotions {
+            self.emit_promotion_update(username, action).await;
         }
         debug!(
             "Terminated session {session_token} for user {username}, released {removed_count} streams"
@@ -2339,7 +2357,7 @@ impl ActiveUserManager {
     ///
     /// Removes all sessions whose `addr` or `active_addrs` contains `kick_addr`.
     pub async fn terminate_sessions_for_addr(&self, username: &str, kick_addr: &SocketAddr) {
-        let (connection_changed, removed_count) = {
+        let (connection_changed, removed_count, promotions) = {
             let mut user_connections = self.connections.write().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return;
@@ -2391,15 +2409,20 @@ impl ActiveUserManager {
                 connection_data.grace_ts = 0;
             }
 
+            let promotions = Self::collect_promotions_after_capacity_release(connection_data);
+
             let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
             drop(user_connections);
             self.log_divergence_snapshot(divergence_snapshot).await;
 
-            (connection_changed, removed_count)
+            (connection_changed, removed_count, promotions)
         };
 
         if connection_changed {
             self.log_active_user().await;
+        }
+        for action in promotions {
+            self.emit_promotion_update(username, action).await;
         }
         debug!(
             "Terminated {removed_count} sessions for user {username} at addr {kick_addr}"
@@ -3501,6 +3524,159 @@ mod tests {
             "terminating a session must remove its preserved adaptive stream"
         );
         assert!(connection_data.sessions.iter().all(|session| session.token != token));
+    }
+
+    #[tokio::test]
+    async fn terminate_session_promotes_soft_stream_after_releasing_capacity() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let normal_addr: SocketAddr = "127.0.0.1:55413".parse().unwrap();
+        let soft_addr: SocketAddr = "127.0.0.1:55414".parse().unwrap();
+        let soft_addr_two: SocketAddr = "127.0.0.1:55415".parse().unwrap();
+        let normal_fp = Fingerprint::new("fp-terminate-normal".to_string(), "127.0.0.1".to_string(), normal_addr);
+        let soft_fp = Fingerprint::new("fp-terminate-soft".to_string(), "127.0.0.1".to_string(), soft_addr);
+        let soft_fp_two = Fingerprint::new("fp-terminate-soft-2".to_string(), "127.0.0.1".to_string(), soft_addr_two);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-terminate-promote".to_string();
+        user.max_connections = 1;
+        user.soft_connections = 2;
+
+        manager.add_connection(&normal_addr).await;
+        manager.add_connection(&soft_addr).await;
+        manager.add_connection(&soft_addr_two).await;
+
+        let normal_token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-terminate-normal",
+                virtual_id: 8101,
+                provider: "provider-normal",
+                stream_url: "http://localhost/normal.ts",
+                addr: &normal_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let soft_token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-terminate-soft",
+                virtual_id: 8102,
+                provider: "provider-soft",
+                stream_url: "http://localhost/soft.ts",
+                addr: &soft_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Soft),
+                socket_bound: false,
+            })
+            .await;
+        let soft_token_two = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-terminate-soft-2",
+                virtual_id: 8103,
+                provider: "provider-soft-2",
+                stream_url: "http://localhost/soft-2.ts",
+                addr: &soft_addr_two,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Soft),
+                socket_bound: false,
+            })
+            .await;
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 8101,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &normal_fp,
+                provider: "provider-normal".intern(),
+                stream_channel: &test_channel(8101),
+                user_agent: Cow::Borrowed("ua-normal"),
+                session_token: Some(&normal_token),
+            })
+            .await
+            .expect("normal stream should be registered");
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 8102,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Soft,
+                priority: -5,
+                soft_priority: 9,
+                fingerprint: &soft_fp,
+                provider: "provider-soft".intern(),
+                stream_channel: &test_channel(8102),
+                user_agent: Cow::Borrowed("ua-soft"),
+                session_token: Some(&soft_token),
+            })
+            .await
+            .expect("soft stream should be registered");
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 8103,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Soft,
+                priority: -3,
+                soft_priority: 9,
+                fingerprint: &soft_fp_two,
+                provider: "provider-soft-2".intern(),
+                stream_channel: &test_channel(8103),
+                user_agent: Cow::Borrowed("ua-soft-2"),
+                session_token: Some(&soft_token_two),
+            })
+            .await
+            .expect("second soft stream should be registered");
+
+        {
+            let mut connections = manager.connections.write().await;
+            let connection_data = connections
+                .by_key
+                .get_mut(&user.username)
+                .expect("user data should exist");
+            connection_data.soft_connections = 1;
+        }
+
+        manager.terminate_session(&user.username, &normal_token).await;
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections
+            .by_key
+            .get(&user.username)
+            .expect("user data should remain inspectable");
+        assert_eq!(connection_data.counts.normal, 1);
+        assert_eq!(connection_data.counts.soft, 1);
+        let promoted_uid = [8102_u32, 8103_u32]
+            .into_iter()
+            .find(|uid| connection_data.stream_kinds.get(uid) == Some(&ConnectionKind::Normal))
+            .expect("one soft stream should be promoted to normal");
+        let promoted_token = if promoted_uid == 8102 {
+            soft_token.as_str()
+        } else {
+            soft_token_two.as_str()
+        };
+        let promoted_session = connection_data
+            .sessions
+            .iter()
+            .find(|session| session.token == promoted_token)
+            .expect("promoted soft session should remain");
+        assert_eq!(promoted_session.connection_kind, Some(ConnectionKind::Normal));
+        assert!(matches!(promoted_session.lifecycle, PlaybackLifecycle::Active));
     }
 
     #[tokio::test]
