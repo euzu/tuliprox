@@ -3308,7 +3308,6 @@ where
     }
 
     fn refresh_root_offset(&mut self) -> io::Result<()> {
-        self.last_refresh_at = Instant::now();
         let (new_root_offset, new_has_tombstones) = if self.mmap.is_some() && !self.filepath.as_os_str().is_empty() {
             let file = File::open(&self.filepath)?;
             let metadata = file.metadata()?;
@@ -3361,8 +3360,29 @@ where
                 return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
             }
             (u64::from_le_bytes(root_offset_bytes), has_tombstones)
-        } else if let Some(file) = &mut self.file {
-            Self::read_root_offset_and_tombstone_flag_from_file(file.get_ref())?
+        } else if self.file.is_some() {
+            if self.filepath.as_os_str().is_empty() {
+                if let Some(file) = &mut self.file {
+                    Self::read_root_offset_and_tombstone_flag_from_file(file.get_ref())?
+                } else {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "No data source available"));
+                }
+            } else {
+                let file = File::open(&self.filepath)?;
+                let metadata = file.metadata()?;
+                let current_identity = FileIdentity::from_metadata(&metadata);
+                let replacement_required = self.file_identity != Some(current_identity);
+                let root_state = Self::read_root_offset_and_tombstone_flag_from_file(&file)?;
+
+                if replacement_required {
+                    self.file = Some(utils::file_reader(file));
+                    self.file_identity = Some(current_identity);
+                    self.cache.clear();
+                    self.node_cache.clear();
+                }
+
+                root_state
+            }
         } else {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "No data source available"));
         };
@@ -3374,6 +3394,7 @@ where
             self.node_cache.clear();
         }
 
+        self.last_refresh_at = Instant::now();
         Ok(())
     }
 
@@ -6338,6 +6359,64 @@ mod tests {
         query.refresh()?;
         let refreshed = query.query(&1).map_err(BPlusTreeError::to_io)?.expect("missing replaced key");
         assert_eq!(refreshed.data, "cccc");
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn query_reopens_reader_after_atomic_replace_without_mmap() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_query_reader_replace_target.bin");
+        let replacement_path = tempdir.path().join("tree_query_reader_replace_source.bin");
+
+        let mut tree = BPlusTree::<u32, Record>::new();
+        tree.insert(1, Record { id: 1, data: "aaaa".to_string() });
+        tree.insert(2, Record { id: 2, data: "bbbb".to_string() });
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        query.mmap = None;
+        query.file = Some(utils::file_reader(File::open(&filepath)?));
+        query.file_identity = Some(FileIdentity::from_metadata(&std::fs::metadata(&filepath)?));
+
+        let initial = query.query(&1).map_err(BPlusTreeError::to_io)?.expect("missing initial key");
+        assert_eq!(initial.data, "aaaa");
+
+        let mut replacement = BPlusTree::<u32, Record>::new();
+        replacement.insert(1, Record { id: 1, data: "cccc".to_string() });
+        replacement.insert(2, Record { id: 2, data: "dddd".to_string() });
+        replacement.store(&replacement_path)?;
+
+        let old_len = std::fs::metadata(&filepath)?.len();
+        let replacement_len = std::fs::metadata(&replacement_path)?.len();
+        assert_eq!(old_len, replacement_len, "test requires same-length replacement file");
+
+        std::fs::rename(&replacement_path, &filepath)?;
+
+        query.refresh()?;
+        let refreshed = query.query(&1).map_err(BPlusTreeError::to_io)?.expect("missing replaced key");
+        assert_eq!(refreshed.data, "cccc");
+
+        Ok(())
+    }
+
+    #[test]
+    fn query_refresh_leaves_retry_timestamp_unchanged_on_io_error() -> io::Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let filepath = tempdir.path().join("tree_query_refresh_error.bin");
+
+        let mut tree = BPlusTree::<u32, Record>::new();
+        tree.insert(1, Record { id: 1, data: "aaaa".to_string() });
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, Record>::try_new(&filepath)?;
+        let last_refresh_at = query.last_refresh_at;
+        query.filepath = tempdir.path().join("missing_tree.bin");
+
+        let err = query.refresh().expect_err("refresh should fail when the database path is missing");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(query.last_refresh_at, last_refresh_at);
 
         Ok(())
     }

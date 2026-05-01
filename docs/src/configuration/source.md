@@ -420,7 +420,7 @@ http://p2.com/get.php?username=u2&password=p2;1;5;true
 | **`max_connections`** | Defines allowed concurrent streams. Default in CSV is **1**.                                                                                                                                                                                       |
 | **`priority`**        | Lower numbers = higher priority. `0` is higher than `1`. Negative numbers (e.g., `-1`) are allowed for top-tier priority. Items with the lowest values are processed first.                                                                        |
 | **`exp_date`**        | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Used for auto-cleanup or Panel API sync.                                                                                                    |
-| **`enabled`**         | Enables/disables a CSV alias row. Empty values and `1` are treated as enabled; `0`, `f`, or `false` disable the alias.                                                                                                                             |
+| **`enabled`**         | Enables/disables a CSV alias row. Empty values, `1`, `t`, and `true` are treated as enabled; `0`, `f`, or `false` disable the alias.                                                                                                               |
 
 ---
 

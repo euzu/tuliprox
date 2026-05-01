@@ -3548,84 +3548,82 @@ impl InputWorker {
                 let task_key = TaskKey::from_task(task);
                 let probe_identifier = if unique_id.trim().is_empty() { url.as_str() } else { unique_id.as_str() };
 
-                if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch)
-                    && Self::batchable_generic_probe_xtream_cluster(*item_type).is_some()
-                {
-                    let cluster =
-                        Self::batchable_generic_probe_xtream_cluster(*item_type).unwrap_or(XtreamCluster::Video);
-                    let Ok(provider_id) = unique_id.parse::<u32>() else {
-                        warn!("Skipping xtream generic probe update with non-numeric id: {unique_id}");
-                        return Ok((false, false));
-                    };
+                if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
+                    if let Some(cluster) = Self::batchable_generic_probe_xtream_cluster(*item_type) {
+                        let Ok(provider_id) = unique_id.parse::<u32>() else {
+                            warn!("Skipping xtream generic probe update with non-numeric id: {unique_id}");
+                            return Ok((false, false));
+                        };
 
-                    let outcome = probe_generic_stream_metadata(
-                        &app_state.app_config,
-                        client,
-                        input.as_ref(),
-                        unique_id,
-                        url,
-                        *item_type,
-                        &app_state.active_provider,
-                        active_handle,
-                        probe_priority,
-                    )
+                        let outcome = probe_generic_stream_metadata(
+                            &app_state.app_config,
+                            client,
+                            input.as_ref(),
+                            unique_id,
+                            url,
+                            *item_type,
+                            &app_state.active_provider,
+                            active_handle,
+                            probe_priority,
+                        )
                         .await?;
 
-                    let metadata = match outcome {
-                        GenericProbeMetadataOutcome::Metadata(metadata) => metadata,
-                        GenericProbeMetadataOutcome::Noop => return Ok((false, false)),
-                        GenericProbeMetadataOutcome::ProbeFailed => {
-                            return Err(shared::error::TuliproxError::Config(format!(
-                                "Probe stream task failed for key {task_key:?} ({probe_identifier})"
-                            )));
-                        }
-                    };
+                        let metadata = match outcome {
+                            GenericProbeMetadataOutcome::Metadata(metadata) => metadata,
+                            GenericProbeMetadataOutcome::Noop => return Ok((false, false)),
+                            GenericProbeMetadataOutcome::ProbeFailed => {
+                                return Err(shared::error::TuliproxError::Config(format!(
+                                    "Probe stream task failed for key {task_key:?} ({probe_identifier})"
+                                )));
+                            }
+                        };
 
-                    let Some(query) =
-                        Self::get_or_open_query(&input.name, app_state, cluster, db_handles, failed_clusters).await
-                    else {
-                        warn!("Item not found in Xtream DB for generic probe: {unique_id}");
-                        return Ok((false, false));
-                    };
-
-                    let query = Arc::clone(&query);
-                    let mut item = match spawn_blocking_limited(move || {
-                        let mut guard = query.lock();
-                        guard.query_zero_copy(&provider_id).ok().flatten()
-                    })
-                        .await
-                    {
-                        Ok(Some(item)) => item,
-                        Ok(None) => {
-                            warn!("Item not found in Xtream DB: {unique_id}");
+                        let Some(query) =
+                            Self::get_or_open_query(&input.name, app_state, cluster, db_handles, failed_clusters).await
+                        else {
+                            warn!("Item not found in Xtream DB for generic probe: {unique_id}");
                             return Ok((false, false));
+                        };
+
+                        let query = Arc::clone(&query);
+                        let mut item = match spawn_blocking_limited(move || {
+                            let mut guard = query.lock();
+                            guard.query_zero_copy(&provider_id).ok().flatten()
+                        })
+                        .await
+                        {
+                            Ok(Some(item)) => item,
+                            Ok(None) => {
+                                warn!("Item not found in Xtream DB: {unique_id}");
+                                return Ok((false, false));
+                            }
+                            Err(err) => {
+                                return Err(shared::error::TuliproxError::Config(format!(
+                                    "Failed to query generic probe item {unique_id}: {err}"
+                                )));
+                            }
+                        };
+
+                        Self::apply_pending_generic_probe_base(collector, cluster, provider_id, &mut item);
+
+                        update_properties(
+                            &mut item.additional_properties,
+                            *item_type,
+                            &item.name,
+                            item.virtual_id,
+                            metadata.raw_video,
+                            metadata.raw_audio,
+                            metadata.stats,
+                        );
+
+                        match item.additional_properties {
+                            Some(StreamProperties::Live(props)) => collector.add_live(provider_id.into(), *props),
+                            Some(StreamProperties::Video(props)) => collector.add_vod(provider_id.into(), *props),
+                            _ => {}
                         }
-                        Err(err) => {
-                            return Err(shared::error::TuliproxError::Config(format!(
-                                "Failed to query generic probe item {unique_id}: {err}"
-                            )));
-                        }
-                    };
 
-                    Self::apply_pending_generic_probe_base(collector, cluster, provider_id, &mut item);
-
-                    update_properties(
-                        &mut item.additional_properties,
-                        *item_type,
-                        &item.name,
-                        item.virtual_id,
-                        metadata.raw_video,
-                        metadata.raw_audio,
-                        metadata.stats,
-                    );
-
-                    match item.additional_properties {
-                        Some(StreamProperties::Live(props)) => collector.add_live(provider_id.into(), *props),
-                        Some(StreamProperties::Video(props)) => collector.add_vod(provider_id.into(), *props),
-                        _ => {}
+                        return Ok((false, false));
                     }
-
-                    return Ok((false, false));
                 }
 
                 // Non-Xtream generic probe still writes directly and can target
