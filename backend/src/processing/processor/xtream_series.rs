@@ -990,7 +990,7 @@ pub async fn update_series_metadata(
                                 .ok()
                                 .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
                             let probe_result = if is_remote_probe {
-                                FfmpegExecutor::new().probe_remote_url_with_cancel(
+                                FfmpegExecutor::new().probe_remote_seekable_url_with_cancel(
                                     client,
                                     probe_url.as_ref(),
                                     user_agent.as_deref(),

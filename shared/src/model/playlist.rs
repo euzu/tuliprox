@@ -674,6 +674,7 @@ pub struct XtreamMappingOptions {
     pub flags: XtreamMappingFlagsSet,
     pub force_redirect: Option<ClusterFlags>,
     pub reverse_item_types: PlaylistItemTypeSet,
+    pub resource_proxy_item_types: PlaylistItemTypeSet,
     pub username: String,
     pub password: String,
     pub base_url: String,
@@ -696,8 +697,8 @@ impl XtreamMappingOptions {
         item_type: PlaylistItemType,
         virtual_id: VirtualId,
     ) -> Option<String> {
-        let is_reverse = self.is_reverse(item_type);
-        if is_reverse && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
+        let proxy_resource = self.resource_proxy_item_types.is_set(item_type);
+        if proxy_resource && self.flags.contains(XtreamMappingFlags::RewriteResourceUrl) {
             Some(format!(
                 "{}/resource/{}/{}/{}/{}",
                 self.base_url,
@@ -1338,6 +1339,7 @@ mod tests {
             password: "pass".to_string(),
             force_redirect: None,
             reverse_item_types: PlaylistItemTypeSet::from_item(PlaylistItemType::Live),
+            resource_proxy_item_types: PlaylistItemTypeSet::from_item(PlaylistItemType::Live),
             web_ui_request: true,
             flags: XtreamMappingFlags::RewriteResourceUrl.into(),
             encrypt_secret: [3u8; 16],
@@ -1383,6 +1385,7 @@ mod tests {
         options.web_ui_request = false;
         options.base_url = "http://proxy.example/base".to_string();
         options.reverse_item_types = PlaylistItemTypeSet::empty();
+        options.resource_proxy_item_types = PlaylistItemTypeSet::empty();
 
         assert_eq!(
             options.get_resource_url(
@@ -1402,6 +1405,7 @@ mod tests {
         options.web_ui_request = false;
         options.base_url = "http://proxy.example/base".to_string();
         options.reverse_item_types = PlaylistItemTypeSet::empty();
+        options.resource_proxy_item_types = PlaylistItemTypeSet::empty();
 
         assert_eq!(
             options.get_bd_path_resource_url(
@@ -1424,6 +1428,26 @@ mod tests {
         assert_eq!(
             options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
             concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+        );
+    }
+
+    #[test]
+    fn get_resource_url_rewrites_redirect_resources_for_xtream_clients() {
+        let mut options = sample_options();
+        options.web_ui_request = false;
+        options.base_url = "http://proxy.example/iptv".to_string();
+        options.reverse_item_types = PlaylistItemTypeSet::empty();
+        options.resource_proxy_item_types = PlaylistItemTypeSet::from_item(PlaylistItemType::Live);
+
+        assert_eq!(
+            options.get_resource_url(
+                XtreamCluster::Live,
+                PlaylistItemType::Live,
+                2017,
+                "https://provider.example/logo.png",
+                "logo",
+            ),
+            "http://proxy.example/iptv/resource/live/user/pass/2017/logo",
         );
     }
 

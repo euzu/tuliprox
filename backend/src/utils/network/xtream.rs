@@ -565,9 +565,8 @@ async fn check_alias_user_state(app_config: &Arc<AppConfig>, client: &reqwest::C
     // });
 }
 
-pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredentials, pli: &XtreamPlaylistItem) -> String {
+pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
     let category_id = pli.category_id;
-    let stream_id = if user.proxy.is_redirect(pli.item_type) || target.is_force_redirect(pli.item_type) { pli.provider_id } else { pli.virtual_id };
     let added = pli.additional_properties.as_ref().and_then(StreamProperties::get_last_modified).unwrap_or(0);
     let name = &pli.name;
     let extension: String = pli
@@ -579,7 +578,7 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
 
     let mut doc = XtreamVideoInfoDoc::default();
     doc.info.name.clone_from(name);
-    doc.movie_data.stream_id = stream_id;
+    doc.movie_data.stream_id = pli.virtual_id;
     doc.movie_data.name.clone_from(name);
     doc.movie_data.added = added.intern();
     doc.movie_data.category_id = category_id.intern();
@@ -592,9 +591,12 @@ pub fn create_vod_info_from_item(target: &ConfigTarget, user: &ProxyUserCredenti
 
 #[cfg(test)]
 mod tests {
-    use super::partition_clusters_by_source;
-    use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, StagedInput};
-    use shared::model::{ClusterSource, InputType, XtreamCluster};
+    use super::{create_vod_info_from_item, partition_clusters_by_source};
+    use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials, StagedInput};
+    use serde_json::Value;
+    use shared::model::{
+        ClusterSource, InputType, PlaylistItemType, ProxyType, XtreamCluster, XtreamPlaylistItem,
+    };
     use shared::utils::Internable;
 
     fn test_input_with_staged(staged: StagedInput) -> ConfigInput {
@@ -672,5 +674,50 @@ mod tests {
 
         assert_eq!(staged_clusters, vec![XtreamCluster::Live]);
         assert_eq!(main_clusters, vec![XtreamCluster::Video]);
+    }
+
+    fn test_vod_item() -> XtreamPlaylistItem {
+        XtreamPlaylistItem {
+            virtual_id: 176_141,
+            provider_id: 813_563,
+            name: "Movie".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "".intern(),
+            title: "Movie".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://provider.example/movie/u/p/813563.mp4".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Video,
+            additional_properties: None,
+            item_type: PlaylistItemType::Video,
+            category_id: 7,
+            input_name: "provider".intern(),
+            channel_no: 1,
+            source_ordinal: 1,
+        }
+    }
+
+    fn assert_vod_info_keeps_tuliprox_virtual_stream_id(proxy: ProxyType) {
+        let mut user = ProxyUserCredentials::default();
+        user.proxy = proxy;
+        assert_eq!(user.proxy, proxy);
+        let pli = test_vod_item();
+
+        let content = create_vod_info_from_item(&pli);
+        let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
+
+        assert_eq!(doc["movie_data"]["stream_id"], 176_141);
+    }
+
+    #[test]
+    fn create_vod_info_keeps_tuliprox_virtual_stream_id_for_redirect_users() {
+        assert_vod_info_keeps_tuliprox_virtual_stream_id(ProxyType::Redirect);
+    }
+
+    #[test]
+    fn create_vod_info_keeps_tuliprox_virtual_stream_id_for_reverse_users() {
+        assert_vod_info_keeps_tuliprox_virtual_stream_id(ProxyType::Reverse(None));
     }
 }
