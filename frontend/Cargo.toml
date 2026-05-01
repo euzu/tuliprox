@@ -43,7 +43,7 @@ features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImag
     "DomRect", "HtmlDialogElement", "CssStyleDeclaration",
     "Event", "MutationObserver", "MutationObserverInit",
     "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation",
-    "HtmlCanvasElement"]
+    "HtmlCanvasElement", "HtmlSelectElement"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.64"

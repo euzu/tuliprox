@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,8 +16,9 @@ use crate::utils::stream_history_viewer::{
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
-use shared::model::StreamHistoryEventType;
+use shared::model::{PageRequestDto, PagedResponseDto, SearchMode, StreamHistoryEventType, StreamHistoryRecordDto};
 
 #[derive(Deserialize)]
 pub(crate) struct HistoryQueryParams {
@@ -25,6 +27,97 @@ pub(crate) struct HistoryQueryParams {
     #[serde(default)]
     #[serde(flatten)]
     pub filter: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct HistoryPageParams {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    #[serde(default = "default_page")]
+    pub page: u32,
+    #[serde(default = "default_page_size")]
+    pub page_size: u16,
+    pub search: Option<String>,
+    pub search_mode: Option<String>,
+    #[serde(rename = "search_field")]
+    pub search_fields: Option<Vec<String>>,
+}
+
+fn default_page() -> u32 { 1 }
+
+fn default_page_size() -> u16 { 50 }
+
+// TODO make shared Search fields
+
+#[derive(Clone, Copy)]
+enum SearchField {
+    EventTsUtc,
+    EventType,
+    Title,
+    Group,
+    ApiUsername,
+    ProviderName,
+    ProviderId,
+    BytesSent,
+    FirstByteLatencyMs,
+    UserAgent,
+    ItemType,
+    Container,
+    DisconnectReason,
+    SourceAddr,
+    Country,
+    Cluster,
+}
+
+impl SearchField {
+    const ALL: [Self; 16] = [
+        Self::EventTsUtc,
+        Self::EventType,
+        Self::Title,
+        Self::Group,
+        Self::ApiUsername,
+        Self::ProviderName,
+        Self::ProviderId,
+        Self::BytesSent,
+        Self::FirstByteLatencyMs,
+        Self::UserAgent,
+        Self::ItemType,
+        Self::Container,
+        Self::DisconnectReason,
+        Self::SourceAddr,
+        Self::Country,
+        Self::Cluster,
+    ];
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "event_ts_utc" => Some(Self::EventTsUtc),
+            "event_type" => Some(Self::EventType),
+            "title" => Some(Self::Title),
+            "group" => Some(Self::Group),
+            "api_username" => Some(Self::ApiUsername),
+            "provider_name" => Some(Self::ProviderName),
+            "provider_id" => Some(Self::ProviderId),
+            "bytes_sent" => Some(Self::BytesSent),
+            "first_byte_latency_ms" => Some(Self::FirstByteLatencyMs),
+            "user_agent" => Some(Self::UserAgent),
+            "item_type" => Some(Self::ItemType),
+            "container" => Some(Self::Container),
+            "disconnect_reason" => Some(Self::DisconnectReason),
+            "source_addr" => Some(Self::SourceAddr),
+            "country" => Some(Self::Country),
+            "cluster" => Some(Self::Cluster),
+            _ => None,
+        }
+    }
+}
+
+fn compile_search_fields(fields: Option<Vec<String>>) -> Result<Vec<SearchField>, String> {
+    fields
+        .unwrap_or_default()
+        .into_iter()
+        .map(|field| SearchField::parse(&field).ok_or_else(|| format!("Unknown search_field: {field}")))
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -78,19 +171,418 @@ fn get_qos_storage_directory_from_config(config: &crate::model::Config) -> Optio
         .map(|_| config.storage_dir.clone())
 }
 
-pub(crate) async fn stream_history_query(
+// pub(crate) async fn stream_history_query(
+//     State(app_state): State<Arc<AppState>>,
+//     Query(params): Query<HistoryQueryParams>,
+// ) -> Response {
+//     let Some(history_dir) = get_history_directory(&app_state) else {
+//         return error_response(StatusCode::SERVICE_UNAVAILABLE, "Stream history is not enabled");
+//     };
+//
+//     let query = StreamHistoryQuery {
+//         from: params.from,
+//         to: params.to,
+//         path: None,
+//         filter: if params.filter.is_empty() { None } else { Some(params.filter) },
+//     };
+//
+//     let time_range = match resolve_time_range(&query) {
+//         Ok(tr) => tr,
+//         Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
+//     };
+//
+//     let filters = match query.filter.as_ref() {
+//         Some(raw) => match CompiledFilter::compile(raw) {
+//             Ok(f) => f,
+//             Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
+//         },
+//         None => match CompiledFilter::compile(&HashMap::new()) {
+//             Ok(filter) => filter,
+//             Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err),
+//         },
+//     };
+//
+//     // Collect file records and batch records on blocking thread, then combine.
+//     // batch_records must be fetched on a real OS thread (not the async thread),
+//     // so we include it inside spawn_blocking where blocking_recv() is safe.
+//     let app_state_clone = Arc::clone(&app_state);
+//     let mut file_records = collect_records(&history_dir, &time_range, &filters).await.unwrap_or_default();
+//     let batch_records = if let Some(hw) = app_state_clone
+//         .connection_manager
+//         .history_writer()
+//         .load()
+//         .as_ref()
+//     {
+//         hw.get_current_batch().await.unwrap_or_else(|_| Vec::new())
+//     } else {
+//         Vec::new()
+//     };
+//
+//     let mut all_records = batch_records;
+//     all_records.append(&mut file_records);
+//     axum::Json(all_records).into_response()
+// }
+
+fn compile_search_matcher(search: Option<&str>, mode: SearchMode) -> Result<Option<Regex>, String> {
+    let Some(search) = search.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    match mode {
+        SearchMode::Text => RegexBuilder::new(&regex::escape(search))
+            .case_insensitive(true)
+            .build()
+            .map(Some)
+            .map_err(|_| String::from("Invalid text search pattern")),
+        SearchMode::Regex => Regex::new(search).map(Some).map_err(|_| String::from("Invalid regex pattern")),
+    }
+}
+
+fn record_field_matches(record: &StreamHistoryRecord, field: SearchField, matcher: &Regex) -> bool {
+    match field {
+        SearchField::EventTsUtc => matcher.is_match(&record.event_ts_utc.to_string()),
+        SearchField::EventType => matcher.is_match(&record.event_type.to_string()),
+        SearchField::Title => record.title.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::Group => record.group.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::ApiUsername => record.api_username.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::ProviderName => record.provider_name.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::ProviderId => record.provider_id.is_some_and(|value| matcher.is_match(&value.to_string())),
+        SearchField::BytesSent => record.bytes_sent.is_some_and(|value| matcher.is_match(&value.to_string())),
+        SearchField::FirstByteLatencyMs => record
+            .first_byte_latency_ms
+            .is_some_and(|value| matcher.is_match(&value.to_string())),
+        SearchField::UserAgent => record.user_agent.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::ItemType => record.item_type.as_ref().is_some_and(|value| matcher.is_match(&value.to_string())),
+        SearchField::Container => record.container.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::DisconnectReason => record
+            .disconnect_reason
+            .as_ref()
+            .is_some_and(|value| matcher.is_match(&value.to_string())),
+        SearchField::SourceAddr => record.source_addr.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::Country => record.country.as_deref().is_some_and(|value| matcher.is_match(value)),
+        SearchField::Cluster => record.cluster.as_deref().is_some_and(|value| matcher.is_match(value)),
+    }
+}
+
+fn record_matches_search(record: &StreamHistoryRecord, matcher: Option<&Regex>, fields: &[SearchField]) -> bool {
+    let Some(matcher) = matcher else {
+        return true;
+    };
+
+    if fields.is_empty() {
+        return SearchField::ALL.into_iter().any(|field| record_field_matches(record, field, matcher));
+    }
+
+    fields.iter().copied().any(|field| record_field_matches(record, field, matcher))
+}
+
+/// HLS session key for aggregation.
+type HlsKey = (Option<String>, u64, Option<String>, Option<u32>, Option<String>);
+
+#[derive(Default)]
+struct HlsSessionAccumulator {
+    first_connect: Option<StreamHistoryRecord>,
+    last_disconnect: Option<StreamHistoryRecord>,
+    total_bytes: u64,
+    disconnect_count: usize,
+}
+
+impl HlsSessionAccumulator {
+    fn observe(&mut self, record: StreamHistoryRecord) {
+        self.total_bytes = self.total_bytes.saturating_add(record.bytes_sent.unwrap_or(0));
+        match record.event_type {
+            StreamHistoryEventType::Connect => {
+                let should_replace = self
+                    .first_connect
+                    .as_ref()
+                    .is_none_or(|current| record.event_ts_utc < current.event_ts_utc);
+                if should_replace {
+                    self.first_connect = Some(record);
+                }
+            }
+            StreamHistoryEventType::Disconnect => {
+                self.disconnect_count = self.disconnect_count.saturating_add(1);
+                let should_replace = self
+                    .last_disconnect
+                    .as_ref()
+                    .is_none_or(|current| record.event_ts_utc >= current.event_ts_utc);
+                if should_replace {
+                    self.last_disconnect = Some(record);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> Vec<StreamHistoryRecord> {
+        let mut results = Vec::with_capacity(3);
+        let Some(first_connect) = self.first_connect else {
+            return results;
+        };
+
+        let session_duration = self.last_disconnect.as_ref().and_then(|last_disconnect| {
+            if last_disconnect.event_ts_utc > first_connect.event_ts_utc {
+                Some(last_disconnect.event_ts_utc - first_connect.event_ts_utc)
+            } else {
+                None
+            }
+        });
+
+        let mut connect_row = first_connect;
+        connect_row.session_duration = session_duration;
+        connect_row.bytes_sent = Some(self.total_bytes);
+        if let Some(last_disconnect) = self.last_disconnect.as_ref() {
+            connect_row.disconnect_reason = last_disconnect.disconnect_reason;
+        }
+
+        if self.disconnect_count > 1 {
+            let mut failure_row = connect_row.clone();
+            failure_row.event_type = StreamHistoryEventType::Failure;
+            failure_row.event_ts_utc = failure_row.event_ts_utc.saturating_add(1);
+            failure_row.session_duration = None;
+            failure_row.disconnect_reason =
+                Some(shared::model::DisconnectReason::IntermediateFailures(self.disconnect_count - 1));
+            results.push(failure_row);
+        }
+
+        results.push(connect_row);
+
+        if let Some(mut disconnect_row) = self.last_disconnect {
+            disconnect_row.bytes_sent = Some(self.total_bytes);
+            results.push(disconnect_row);
+        }
+
+        results
+    }
+}
+
+fn event_type_sort_rank(event_type: StreamHistoryEventType) -> u8 {
+    match event_type {
+        StreamHistoryEventType::Connect => 0,
+        StreamHistoryEventType::Disconnect => 1,
+        StreamHistoryEventType::Failure => 2,
+        StreamHistoryEventType::ConnectFailed => 3,
+    }
+}
+
+fn compare_history_records(left: &StreamHistoryRecord, right: &StreamHistoryRecord) -> std::cmp::Ordering {
+    left.event_ts_utc
+        .cmp(&right.event_ts_utc)
+        .then_with(|| left.session_id.cmp(&right.session_id))
+        .then_with(|| event_type_sort_rank(left.event_type).cmp(&event_type_sort_rank(right.event_type)))
+        .then_with(|| left.provider_id.cmp(&right.provider_id))
+        .then_with(|| left.virtual_id.cmp(&right.virtual_id))
+        .then_with(|| left.source_addr.cmp(&right.source_addr))
+        .then_with(|| left.api_username.cmp(&right.api_username))
+        .then_with(|| left.title.cmp(&right.title))
+        .then_with(|| left.group.cmp(&right.group))
+        .then_with(|| left.container.cmp(&right.container))
+        .then_with(|| left.country.cmp(&right.country))
+        .then_with(|| left.cluster.cmp(&right.cluster))
+        .then_with(|| left.input_name.as_deref().cmp(&right.input_name.as_deref()))
+        .then_with(|| left.provider_name.as_deref().cmp(&right.provider_name.as_deref()))
+}
+
+struct RankedHistoryRecord {
+    record: StreamHistoryRecord,
+}
+
+impl PartialEq for RankedHistoryRecord {
+    fn eq(&self, other: &Self) -> bool { compare_history_records(&self.record, &other.record).is_eq() }
+}
+
+impl Eq for RankedHistoryRecord {}
+
+impl PartialOrd for RankedHistoryRecord {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+
+impl Ord for RankedHistoryRecord {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { compare_history_records(&self.record, &other.record) }
+}
+
+struct TopHistoryPageCollector {
+    capacity: usize,
+    start: usize,
+    limit: usize,
+    total_items: u64,
+    heap: BinaryHeap<Reverse<RankedHistoryRecord>>,
+}
+
+impl TopHistoryPageCollector {
+    fn new(page: u32, page_size: u16) -> Self {
+        let start = usize::try_from(u64::from(page.saturating_sub(1)) * u64::from(page_size)).unwrap_or(usize::MAX);
+        let limit = usize::from(page_size);
+        let capacity = start.saturating_add(limit);
+        Self {
+            capacity,
+            start,
+            limit,
+            total_items: 0,
+            heap: BinaryHeap::with_capacity(capacity),
+        }
+    }
+
+    fn push(&mut self, record: StreamHistoryRecord, matcher: Option<&Regex>, fields: &[SearchField]) {
+        if !record_matches_search(&record, matcher, fields) {
+            return;
+        }
+
+        self.total_items = self.total_items.saturating_add(1);
+        if self.capacity == 0 {
+            return;
+        }
+
+        let ranked = RankedHistoryRecord {
+            record,
+        };
+
+        if self.heap.len() < self.capacity {
+            self.heap.push(Reverse(ranked));
+            return;
+        }
+
+        if let Some(mut smallest_kept) = self.heap.peek_mut() {
+            if ranked > smallest_kept.0 {
+                *smallest_kept = Reverse(ranked);
+            }
+        }
+    }
+
+    fn finish(self, page: u32, page_size: u16) -> PagedResponseDto<StreamHistoryRecordDto> {
+        let mut ranked_records: Vec<_> = self.heap.into_iter().map(|reverse| reverse.0).collect();
+        ranked_records.sort_unstable_by(|left, right| compare_history_records(&right.record, &left.record));
+        let items = ranked_records
+            .into_iter()
+            .skip(self.start)
+            .take(self.limit)
+            .map(|ranked| StreamHistoryRecordDto::from(&ranked.record))
+            .collect();
+        PagedResponseDto::new(items, page, page_size, self.total_items)
+    }
+}
+
+fn push_hls_or_non_hls(
+    record: StreamHistoryRecord,
+    hls_sessions: &mut HashMap<HlsKey, HlsSessionAccumulator>,
+    collector: &mut TopHistoryPageCollector,
+    matcher: Option<&Regex>,
+    fields: &[SearchField],
+) {
+    let is_hls = matches!(record.container.as_deref(), Some("mpegts" | "fmp4" | "hls"));
+    let is_hls_session_event = matches!(
+        record.event_type,
+        StreamHistoryEventType::Connect | StreamHistoryEventType::Disconnect
+    );
+    if is_hls && is_hls_session_event {
+        let key: HlsKey = (
+            record.source_addr.clone(),
+            record.session_id,
+            record.provider_name.as_ref().map(ToString::to_string),
+            record.virtual_id,
+            record.input_name.as_ref().map(ToString::to_string),
+        );
+        hls_sessions.entry(key).or_default().observe(record);
+    } else {
+        collector.push(record, matcher, fields);
+    }
+}
+
+fn paginate_stream_history_records<I>(
+    records: I,
+    batch_records: Vec<StreamHistoryRecord>,
+    matcher: Option<&Regex>,
+    fields: &[SearchField],
+    page: u32,
+    page_size: u16,
+) -> PagedResponseDto<StreamHistoryRecordDto>
+where
+    I: Iterator<Item = StreamHistoryRecord>,
+{
+    let mut collector = TopHistoryPageCollector::new(page, page_size);
+    let mut hls_sessions: HashMap<HlsKey, HlsSessionAccumulator> = HashMap::new();
+
+    for record in records {
+        push_hls_or_non_hls(record, &mut hls_sessions, &mut collector, matcher, fields);
+    }
+
+    for record in batch_records {
+        push_hls_or_non_hls(record, &mut hls_sessions, &mut collector, matcher, fields);
+    }
+
+    for session in hls_sessions.into_values() {
+        for record in session.finish() {
+            collector.push(record, matcher, fields);
+        }
+    }
+
+    collector.finish(page, page_size)
+}
+
+#[cfg(test)]
+/// Aggregate HLS records (same logic as frontend `aggregate_hls_records`).
+fn aggregate_hls_session(records: &[&StreamHistoryRecord]) -> Vec<StreamHistoryRecord> {
+    let mut accumulator = HlsSessionAccumulator::default();
+    for record in records {
+        accumulator.observe((*record).clone());
+    }
+    accumulator.finish()
+}
+
+#[cfg(test)]
+fn paginate_aggregated_records(
+    aggregated: Vec<StreamHistoryRecord>,
+    matcher: Option<&Regex>,
+    fields: &[SearchField],
+    page: u32,
+    page_size: u16,
+) -> PagedResponseDto<StreamHistoryRecordDto> {
+    let mut filtered = Vec::new();
+    for record in aggregated {
+        if record_matches_search(&record, matcher, fields) {
+            filtered.push(record);
+        }
+    }
+    filtered.sort_unstable_by_key(|record| Reverse(record.event_ts_utc));
+
+    let mut collector = TopHistoryPageCollector::new(page, page_size);
+    for record in filtered {
+        collector.push(record, None, &[]);
+    }
+    collector.finish(page, page_size)
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn stream_history_page_query(
     State(app_state): State<Arc<AppState>>,
-    Query(params): Query<HistoryQueryParams>,
+    Query(params): Query<HistoryPageParams>,
 ) -> Response {
     let Some(history_dir) = get_history_directory(&app_state) else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "Stream history is not enabled");
     };
 
+    // Normalize pagination
+    let mut page_req = PageRequestDto::normalized(params.page, params.page_size);
+    page_req.normalize_page();
+    page_req.normalize_page_size();
+
+    let search_mode = match params.search_mode.as_deref() {
+        Some("regex") => SearchMode::Regex,
+        Some("text") | None => SearchMode::Text,
+        Some(other) => return error_response(StatusCode::BAD_REQUEST, format!("Unknown search_mode: {other}")),
+    };
+
+    let search_matcher = match compile_search_matcher(params.search.as_deref(), search_mode) {
+        Ok(matcher) => matcher,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+    };
+
+    // Build time range
     let query = StreamHistoryQuery {
-        from: params.from,
-        to: params.to,
+        from: params.from.clone(),
+        to: params.to.clone(),
         path: None,
-        filter: if params.filter.is_empty() { None } else { Some(params.filter) },
+        filter: None,
     };
 
     let time_range = match resolve_time_range(&query) {
@@ -98,20 +590,13 @@ pub(crate) async fn stream_history_query(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
     };
 
-    let filters = match query.filter.as_ref() {
-        Some(raw) => match CompiledFilter::compile(raw) {
-            Ok(f) => f,
-            Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
-        },
-        None => CompiledFilter::compile(&HashMap::new()).unwrap_or_else(|_| unreachable!()),
+    let search_fields = match compile_search_fields(params.search_fields) {
+        Ok(fields) => fields,
+        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
     };
-
-    // Collect file records and batch records on blocking thread, then combine.
-    // batch_records must be fetched on a real OS thread (not the async thread),
-    // so we include it inside spawn_blocking where blocking_recv() is safe.
-    let app_state_clone = Arc::clone(&app_state);
-    let mut file_records = collect_records(&history_dir, &time_range, &filters).await.unwrap_or_default();
-    let batch_records = if let Some(hw) = app_state_clone
+    let page = page_req.page;
+    let page_size = page_req.page_size;
+    let batch_records = if let Some(hw) = app_state
         .connection_manager
         .history_writer()
         .load()
@@ -122,9 +607,30 @@ pub(crate) async fn stream_history_query(
         Vec::new()
     };
 
-    let mut all_records = batch_records;
-    all_records.append(&mut file_records);
-    axum::Json(all_records).into_response()
+    let result = tokio::task::spawn_blocking(move || {
+        let empty_filter = match CompiledFilter::compile(&HashMap::new()) {
+            Ok(filter) => Arc::new(filter),
+            Err(err) => {
+                log::error!("Failed to compile empty stream history filter: {err}");
+                return PagedResponseDto::new(Vec::new(), page, page_size, 0);
+            }
+        };
+
+        let file_iter = match futures::executor::block_on(collect_records_iter(&history_dir, time_range, empty_filter)) {
+            Ok(iter) => iter,
+            Err(e) => {
+                log::error!("Failed to open stream history files: {e}");
+                return PagedResponseDto::new(Vec::new(), page, page_size, 0);
+            }
+        };
+
+        paginate_stream_history_records(file_iter, batch_records, search_matcher.as_ref(), &search_fields, page, page_size)
+    }).await;
+
+    match result {
+        Ok(response) => axum::Json(response).into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {e}")),
+    }
 }
 
 pub(crate) async fn stream_history_summary_query(
@@ -153,7 +659,10 @@ pub(crate) async fn stream_history_summary_query(
             Ok(f) => f,
             Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
         },
-        None => CompiledFilter::compile(&HashMap::new()).unwrap_or_else(|_| unreachable!()),
+        None => match CompiledFilter::compile(&HashMap::new()) {
+            Ok(filter) => filter,
+            Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err),
+        },
     };
 
     // Chain batch records (in-memory) with file records iterator.
@@ -317,41 +826,41 @@ impl Iterator for RecordFileIter {
     }
 }
 
-/// Returns a Vec of filtered records from history files.
-/// Used by `stream_history_query` to collect all records before responding.
-async fn collect_records(
-    dir: &str,
-    time_range: &TimeRange,
-    filters: &CompiledFilter,
-) -> io::Result<Vec<StreamHistoryRecord>> {
-    let files = discover_files(Path::new(dir), time_range).await?;
-    let (range_start, range_end) = *time_range;
-
-    let mut records = Vec::new();
-
-    for file in &files {
-        let iter: Box<dyn Iterator<Item=io::Result<StreamHistoryRecord>>> = if file.is_archive {
-            let (reader, _) = StreamHistoryFileReader::from_archive(&file.path, Some(*time_range))?;
-            Box::new(reader)
-        } else {
-            let (reader, _) = StreamHistoryFileReader::from_pending(&file.path, Some(*time_range))?;
-            Box::new(reader)
-        };
-
-        for result in iter {
-            let record = result?;
-            if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
-                continue;
-            }
-            if !filters.matches(&record) {
-                continue;
-            }
-            records.push(record);
-        }
-    }
-
-    Ok(records)
-}
+// /// Returns a Vec of filtered records from history files.
+// /// Used by `stream_history_query` to collect all records before responding.
+// async fn collect_records(
+//     dir: &str,
+//     time_range: &TimeRange,
+//     filters: &CompiledFilter,
+// ) -> io::Result<Vec<StreamHistoryRecord>> {
+//     let files = discover_files(Path::new(dir), time_range).await?;
+//     let (range_start, range_end) = *time_range;
+//
+//     let mut records = Vec::new();
+//
+//     for file in &files {
+//         let iter: Box<dyn Iterator<Item=io::Result<StreamHistoryRecord>>> = if file.is_archive {
+//             let (reader, _) = StreamHistoryFileReader::from_archive(&file.path, Some(*time_range))?;
+//             Box::new(reader)
+//         } else {
+//             let (reader, _) = StreamHistoryFileReader::from_pending(&file.path, Some(*time_range))?;
+//             Box::new(reader)
+//         };
+//
+//         for result in iter {
+//             let record = result?;
+//             if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
+//                 continue;
+//             }
+//             if !filters.matches(&record) {
+//                 continue;
+//             }
+//             records.push(record);
+//         }
+//     }
+//
+//     Ok(records)
+// }
 
 /// Returns a lazy iterator over filtered records from history files.
 async fn collect_records_iter(
@@ -362,7 +871,9 @@ async fn collect_records_iter(
     RecordFileIter::new(dir, time_range, filters).await
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
+// Test-only baseline implementation used to validate the iterator-based summary
+// path against a simpler whole-slice aggregation.
 pub(crate) fn aggregate_provider_summaries(
     records: &[StreamHistoryRecord],
 ) -> Vec<ProviderSummary> {
@@ -604,6 +1115,109 @@ mod tests {
         assert_eq!(summaries[0].avg_session_duration_secs, Some(15));
         assert_eq!(summaries[0].avg_first_byte_latency_ms, Some(100));
         assert_eq!(summaries[0].disconnect_count, 2);
+    }
+
+    #[test]
+    fn paged_stream_history_returns_only_requested_slice() {
+        let mut first = make_record("acme", Some(10), Some(100), Some(50), Some(DisconnectReason::ClientClosed));
+        first.event_ts_utc = 30;
+        let mut second = make_record("beta", Some(20), Some(200), Some(40), Some(DisconnectReason::ClientClosed));
+        second.event_ts_utc = 20;
+        let mut third = make_record("gamma", Some(30), Some(300), Some(30), Some(DisconnectReason::ClientClosed));
+        third.event_ts_utc = 10;
+
+        let response = paginate_aggregated_records(vec![first, second, third], None, &[], 2, 1);
+
+        assert_eq!(response.total_items, 3);
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].event_ts_utc, 20);
+        assert_eq!(response.page, 2);
+        assert!(response.has_prev);
+        assert!(response.has_next);
+    }
+
+    #[test]
+    fn record_search_respects_selected_fields() {
+        let mut record = make_record("acme", Some(10), Some(100), Some(50), Some(DisconnectReason::ClientClosed));
+        record.title = Some(String::from("Alpha"));
+        record.group = Some(String::from("Beta"));
+
+        let matcher = compile_search_matcher(Some("beta"), SearchMode::Text)
+            .expect("text matcher should compile")
+            .expect("text matcher should exist");
+
+        assert!(record_matches_search(&record, Some(&matcher), &[]));
+        assert!(record_matches_search(&record, Some(&matcher), &[SearchField::Group]));
+        assert!(!record_matches_search(&record, Some(&matcher), &[SearchField::Title]));
+    }
+
+    #[test]
+    fn aggregate_hls_session_preserves_connect_failure_disconnect_rows() {
+        let mut connect = make_record("acme", Some(10), Some(0), Some(50), Some(DisconnectReason::ClientClosed));
+        connect.event_type = StreamHistoryEventType::Connect;
+        connect.event_ts_utc = 100;
+        connect.bytes_sent = None;
+
+        let mut first_disconnect = make_record("acme", Some(10), Some(120), Some(50), Some(DisconnectReason::ProviderError));
+        first_disconnect.event_ts_utc = 110;
+
+        let mut final_disconnect = make_record("acme", Some(10), Some(80), Some(50), Some(DisconnectReason::ClientClosed));
+        final_disconnect.event_ts_utc = 120;
+
+        let rows = aggregate_hls_session(&[&connect, &first_disconnect, &final_disconnect]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].event_type, StreamHistoryEventType::Failure);
+        assert_eq!(rows[0].disconnect_reason, Some(DisconnectReason::IntermediateFailures(1)));
+        assert_eq!(rows[1].event_type, StreamHistoryEventType::Connect);
+        assert_eq!(rows[1].bytes_sent, Some(200));
+        assert_eq!(rows[1].disconnect_reason, Some(DisconnectReason::ClientClosed));
+        assert_eq!(rows[2].event_type, StreamHistoryEventType::Disconnect);
+        assert_eq!(rows[2].bytes_sent, Some(200));
+    }
+
+    #[test]
+    fn paged_stream_history_keeps_hls_connect_failed_rows() {
+        let mut failed = make_record("acme", None, Some(0), None, None);
+        failed.event_type = StreamHistoryEventType::ConnectFailed;
+        failed.event_ts_utc = 77;
+        failed.container = Some(String::from("hls"));
+
+        let response = paginate_stream_history_records(vec![failed].into_iter(), Vec::new(), None, &[], 1, 50);
+        assert_eq!(response.total_items, 1);
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].event_type, StreamHistoryEventType::ConnectFailed);
+    }
+
+    #[test]
+    fn paged_stream_history_uses_deterministic_tie_breakers_for_equal_timestamps() {
+        let mut left = make_record("acme", Some(10), Some(100), Some(50), Some(DisconnectReason::ClientClosed));
+        left.event_ts_utc = 100;
+        left.session_id = 10;
+
+        let mut right = make_record("acme", Some(10), Some(200), Some(50), Some(DisconnectReason::ProviderError));
+        right.event_ts_utc = 100;
+        right.session_id = 20;
+
+        let first = paginate_stream_history_records(
+            vec![left.clone(), right.clone()].into_iter(),
+            Vec::new(),
+            None,
+            &[],
+            1,
+            1,
+        );
+        let second = paginate_stream_history_records(
+            vec![right, left].into_iter(),
+            Vec::new(),
+            None,
+            &[],
+            1,
+            1,
+        );
+
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(first.items[0].session_id, second.items[0].session_id);
     }
 
     fn make_qos_snapshot(

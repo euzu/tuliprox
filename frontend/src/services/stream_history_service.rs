@@ -1,6 +1,12 @@
-use crate::services::{get_base_href, request_get, Encoding};
+use crate::{
+    services::{get_base_href, request_get, Encoding},
+    utils::encoding_for_query,
+};
 use serde::Deserialize;
-use shared::{model::StreamHistoryRecordDto, utils::concat_path_leading_slash};
+use shared::{
+    model::{PagedResponseDto, StreamHistoryRecordDto},
+    utils::concat_path_leading_slash,
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct StreamHistoryProviderSummary {
@@ -97,5 +103,53 @@ impl StreamHistoryService {
     ) -> Result<Option<StreamHistoryQosSnapshot>, crate::error::Error> {
         let path = format!("{}/{}", self.qos_path, stream_identity_key);
         request_get::<StreamHistoryQosSnapshot>(&path, None, Some(Encoding::Cbor)).await
+    }
+
+    pub async fn get_history_page(
+        &self,
+        time_range: Option<(&str, &str)>,
+        page: u32,
+        page_size: u16,
+        search: Option<&str>,
+        search_mode: Option<&str>,
+        search_fields: Option<&[String]>,
+    ) -> Result<Option<PagedResponseDto<StreamHistoryRecordDto>>, crate::error::Error> {
+        let page_path = &self.path;
+        let mut params: Vec<(String, String)> = Vec::new();
+
+        // Base parameters
+        if let Some((f, t)) = time_range {
+            params.push(("from".to_string(), f.to_string()));
+            params.push(("to".to_string(), t.to_string()));
+        }
+        params.push(("page".to_string(), page.to_string()));
+        params.push(("page_size".to_string(), page_size.to_string()));
+
+        // Search parameters
+        if let Some(s) = search {
+            params.push(("search".to_string(), s.to_string()));
+        }
+        if let Some(mode) = search_mode {
+            params.push(("search_mode".to_string(), mode.to_string()));
+        }
+        if let Some(fields) = search_fields {
+            for field in fields {
+                params.push(("search_field".to_string(), field.clone()));
+            }
+        }
+
+        // Build URL with proper encoding
+        let mut url = format!("{page_path}?");
+        for (i, (key, value)) in params.iter().enumerate() {
+            // Encode key and value manually
+            let enc_key = encoding_for_query(key);
+            let enc_value = encoding_for_query(value);
+            if i > 0 {
+                url.push('&');
+            }
+            url.push_str(&format!("{enc_key}={enc_value}"));
+        }
+
+        request_get::<PagedResponseDto<StreamHistoryRecordDto>>(&url, None, Some(Encoding::Cbor)).await
     }
 }

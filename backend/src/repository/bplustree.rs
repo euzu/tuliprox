@@ -28,6 +28,7 @@ use std::{
     marker::PhantomData,
     mem::size_of,
     num::NonZeroUsize,
+    ops::Bound,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -3527,6 +3528,77 @@ where
     /// Provides a disk-backed iterator that traverses the entire tree in order.
     pub fn iter(&mut self) -> BPlusTreeDiskIterator<'_, K, V> { BPlusTreeDiskIterator::new(self) }
 
+    /// Iterates over key-value pairs within a given range using `right_sibling` pointers.
+    ///
+    /// This is more efficient than iterating the full tree and filtering when you only
+    /// need a subset of keys.
+    ///
+    /// Tombstones are skipped automatically.
+    pub fn range_iter(
+        &mut self,
+        start: Bound<&K>,
+        end: Bound<&K>,
+    ) -> impl Iterator<Item = Result<(K, V), BPlusTreeError>> + '_ {
+        let start_cloned = match start {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end_cloned = match end {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        RangeLeafIterator::new(self, start_cloned, end_cloned)
+    }
+
+    /// Returns a page of key-value pairs within a given range using offset/limit.
+    ///
+    /// More efficient than `range_iter` when you only need a subset, as it stops
+    /// scanning once `limit` items have been collected.
+    ///
+    /// Returns `(items, has_more)` where `has_more` indicates whether additional
+    /// items exist beyond the returned page.
+    pub fn range_page(
+        &mut self,
+        start: Bound<&K>,
+        end: Bound<&K>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<(K, V)>, bool), BPlusTreeError> {
+        let start_cloned = match start {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end_cloned = match end {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let mut iter = RangeLeafIterator::new(self, start_cloned, end_cloned);
+        iter.skip_items(offset)?;
+
+        let mut collected: Vec<(K, V)> = Vec::with_capacity(limit);
+        let mut has_more = false;
+
+        while collected.len() < limit {
+            match iter.next() {
+                Some(Ok(item)) => collected.push(item),
+                Some(Err(err)) => return Err(err),
+                None => return Ok((collected, false)),
+            }
+        }
+
+        match iter.next() {
+            Some(Ok(_)) => has_more = true,
+            Some(Err(err)) => return Err(err),
+            None => {}
+        }
+
+        Ok((collected, has_more))
+    }
+
     pub(crate) fn into_sorted_parts(self) -> (PathBuf, Option<BufReader<File>>, Option<Mmap>) {
         (self.filepath, self.file, self.mmap)
     }
@@ -3694,6 +3766,517 @@ where
 
     /// Provides an owned disk-backed iterator.
     pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> { BPlusTreeDiskIteratorOwned::new(self) }
+}
+
+/// Range scan iterator that seeks into the tree and then walks in-order
+/// without scanning from the root for every entry.
+struct RangeLeafIterator<'a, K, V> {
+    tree: &'a mut BPlusTreeQuery<K, V>,
+    start_bound: Bound<K>,
+    end_bound: Bound<K>,
+    stack: TraversalStack,
+    current_leaf: Option<BPlusTreeNode<K, V>>,
+    leaf_idx: usize,
+    initialized: bool,
+    exhausted: bool,
+}
+
+impl<'a, K, V> RangeLeafIterator<'a, K, V>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    fn new(tree: &'a mut BPlusTreeQuery<K, V>, start: Bound<K>, end: Bound<K>) -> Self {
+        if let Some(mmap) = &tree.mmap {
+            advise_mmap(mmap, Advice::Sequential, "range leaf iterator");
+        }
+        Self {
+            tree,
+            start_bound: start,
+            end_bound: end,
+            stack: smallvec![],
+            current_leaf: None,
+            leaf_idx: 0,
+            initialized: false,
+            exhausted: false,
+        }
+    }
+
+    fn load_leaf_from_node(&mut self, node: BPlusTreeNode<K, V>, start_idx: usize) {
+        self.current_leaf = Some(node);
+        self.leaf_idx = 0;
+        self.leaf_idx = start_idx;
+    }
+
+    fn descend_to_leaf(&mut self, mut offset: u64, mut start_key: Option<&K>) -> io::Result<()> {
+        loop {
+            let (node, pointers) = if let Some(mmap) = &self.tree.mmap {
+                let mut cursor = io::Cursor::new(mmap.as_ref());
+                BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, &mut cursor, offset, false)?
+            } else if let Some(file) = &mut self.tree.file {
+                BPlusTreeNode::<K, V>::deserialize_from_block(file, &mut self.tree.buffer, offset, false)?
+            } else {
+                return Err(io::Error::other("No data source available"));
+            };
+
+            if node.is_leaf {
+                let start_idx = if let Some(key) = start_key {
+                    match self.start_bound {
+                        Bound::Included(_) => node.keys.partition_point(|candidate| candidate < key),
+                        Bound::Excluded(_) => node.keys.partition_point(|candidate| candidate <= key),
+                        Bound::Unbounded => 0,
+                    }
+                } else {
+                    0
+                };
+                self.load_leaf_from_node(node, start_idx);
+                return Ok(());
+            }
+
+            let child_idx = if let Some(key) = start_key {
+                get_entry_index_upper_bound(&node.keys, key)
+            } else {
+                0
+            };
+
+            let Some(ptrs) = pointers else {
+                self.exhausted = true;
+                return Ok(());
+            };
+            let Some(&next_offset) = ptrs.get(child_idx) else {
+                self.exhausted = true;
+                return Ok(());
+            };
+            self.stack.push((offset, child_idx.saturating_add(1)));
+            offset = next_offset;
+            start_key = None.or(start_key);
+        }
+    }
+
+    fn skip_items(&mut self, mut remaining: usize) -> Result<(), BPlusTreeError> {
+        if remaining == 0 || self.exhausted {
+            return Ok(());
+        }
+        if !self.initialized {
+            self.initialize().map_err(BPlusTreeError::Io)?;
+        }
+
+        while remaining > 0 && !self.exhausted {
+            let Some(node) = self.current_leaf.as_ref() else {
+                self.advance_leaf().map_err(BPlusTreeError::Io)?;
+                continue;
+            };
+
+            while self.leaf_idx < node.keys.len() && remaining > 0 {
+                let idx = self.leaf_idx;
+                self.leaf_idx += 1;
+                let key = &node.keys[idx];
+                if self.key_past_end(key) {
+                    self.current_leaf = None;
+                    self.exhausted = true;
+                    return Ok(());
+                }
+                if self.tree.has_tombstones && node.value_info[idx].is_tombstone() {
+                    continue;
+                }
+                remaining -= 1;
+            }
+
+            if self.leaf_idx >= node.keys.len() {
+                self.current_leaf = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn initialize(&mut self) -> io::Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
+        self.initialized = true;
+        let start_key = match self.start_bound.clone() {
+            Bound::Included(key) | Bound::Excluded(key) => Some(key),
+            Bound::Unbounded => None,
+        };
+        self.descend_to_leaf(self.tree.root_offset, start_key.as_ref())
+    }
+
+    fn advance_leaf(&mut self) -> io::Result<()> {
+        while let Some((offset, child_idx)) = self.stack.pop() {
+            let (_node, pointers) = if let Some(mmap) = &self.tree.mmap {
+                let mut cursor = io::Cursor::new(mmap.as_ref());
+                BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, &mut cursor, offset, false)?
+            } else if let Some(file) = &mut self.tree.file {
+                BPlusTreeNode::<K, V>::deserialize_from_block(file, &mut self.tree.buffer, offset, false)?
+            } else {
+                return Err(io::Error::other("No data source available"));
+            };
+
+            let Some(ptrs) = pointers else {
+                continue;
+            };
+            let Some(&next_offset) = ptrs.get(child_idx) else {
+                continue;
+            };
+            if child_idx + 1 < ptrs.len() {
+                self.stack.push((offset, child_idx + 1));
+            }
+            self.descend_to_leaf(next_offset, None)?;
+            return Ok(());
+        }
+
+        self.exhausted = true;
+        Ok(())
+    }
+
+    fn key_past_end(&self, key: &K) -> bool {
+        match &self.end_bound {
+            Bound::Included(end) => key > end,
+            Bound::Excluded(end) => key >= end,
+            Bound::Unbounded => false,
+        }
+    }
+}
+
+impl<K, V> Iterator for RangeLeafIterator<'_, K, V>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    type Item = Result<(K, V), BPlusTreeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted {
+            return None;
+        }
+
+        // Lazy initialization
+        if !self.initialized {
+            if let Err(e) = self.initialize() {
+                self.exhausted = true;
+                return Some(Err(BPlusTreeError::Io(e)));
+            }
+        }
+
+        loop {
+            let Some(node) = self.current_leaf.as_ref() else {
+                if self.exhausted {
+                    return None;
+                }
+                if let Err(e) = self.advance_leaf() {
+                    self.exhausted = true;
+                    return Some(Err(BPlusTreeError::Io(e)));
+                }
+                if self.exhausted {
+                    return None;
+                }
+                continue;
+            };
+
+            if self.leaf_idx >= node.keys.len() {
+                self.current_leaf = None;
+                if self.exhausted {
+                    return None;
+                }
+                if let Err(e) = self.advance_leaf() {
+                    self.exhausted = true;
+                    return Some(Err(BPlusTreeError::Io(e)));
+                }
+                if self.exhausted {
+                    return None;
+                }
+                continue;
+            }
+
+            let idx = self.leaf_idx;
+            self.leaf_idx += 1;
+            let key = node.keys[idx].clone();
+
+            if self.key_past_end(&key) {
+                self.current_leaf = None;
+                self.exhausted = true;
+                return None;
+            }
+
+            let info = node.value_info[idx].clone();
+            if self.tree.has_tombstones && info.is_tombstone() {
+                continue;
+            }
+
+            let value = if let Some(mmap) = &self.tree.mmap {
+                let mut cursor = io::Cursor::new(mmap.as_ref());
+                match BPlusTreeNode::<K, V>::load_value_from_info(&mut cursor, &info) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.exhausted = true;
+                        return Some(Err(BPlusTreeError::Io(err)));
+                    }
+                }
+            } else if let Some(file) = &mut self.tree.file {
+                match BPlusTreeNode::<K, V>::load_value_from_info(file, &info) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.exhausted = true;
+                        return Some(Err(BPlusTreeError::Io(err)));
+                    }
+                }
+            } else {
+                self.exhausted = true;
+                return Some(Err(BPlusTreeError::InvalidStructure("No data source available".into())));
+            };
+
+            return Some(Ok((key, value)));
+        }
+    }
+}
+
+impl<K, V> Drop for RangeLeafIterator<'_, K, V> {
+    fn drop(&mut self) {
+        if let Some(mmap) = &self.tree.mmap {
+            advise_mmap(mmap, Advice::Random, "range leaf iterator drop");
+        }
+    }
+}
+
+/// Range scan iterator for `BPlusTreeUpdate` (mutable update handle).
+struct RangeLeafIteratorUpdate<'a, K, V> {
+    tree: &'a mut BPlusTreeUpdate<K, V>,
+    start_bound: Bound<K>,
+    end_bound: Bound<K>,
+    stack: TraversalStack,
+    current_leaf: Option<BPlusTreeNode<K, V>>,
+    leaf_idx: usize,
+    initialized: bool,
+    exhausted: bool,
+}
+
+impl<'a, K, V> RangeLeafIteratorUpdate<'a, K, V>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    fn new(tree: &'a mut BPlusTreeUpdate<K, V>, start: Bound<K>, end: Bound<K>) -> Self {
+        Self {
+            tree,
+            start_bound: start,
+            end_bound: end,
+            stack: smallvec![],
+            current_leaf: None,
+            leaf_idx: 0,
+            initialized: false,
+            exhausted: false,
+        }
+    }
+
+    fn load_leaf_from_node(&mut self, node: BPlusTreeNode<K, V>, start_idx: usize) {
+        self.current_leaf = Some(node);
+        self.leaf_idx = 0;
+        self.leaf_idx = start_idx;
+    }
+
+    fn descend_to_leaf(&mut self, mut offset: u64, mut start_key: Option<&K>) -> io::Result<()> {
+        loop {
+            let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_block(
+                &mut self.tree.file,
+                &mut self.tree.read_buffer,
+                offset,
+                false,
+            )?;
+
+            if node.is_leaf {
+                let start_idx = if let Some(key) = start_key {
+                    match self.start_bound {
+                        Bound::Included(_) => node.keys.partition_point(|candidate| candidate < key),
+                        Bound::Excluded(_) => node.keys.partition_point(|candidate| candidate <= key),
+                        Bound::Unbounded => 0,
+                    }
+                } else {
+                    0
+                };
+                self.load_leaf_from_node(node, start_idx);
+                return Ok(());
+            }
+
+            let child_idx = if let Some(key) = start_key {
+                get_entry_index_upper_bound(&node.keys, key)
+            } else {
+                0
+            };
+
+            let Some(ptrs) = pointers else {
+                self.exhausted = true;
+                return Ok(());
+            };
+            let Some(&next_offset) = ptrs.get(child_idx) else {
+                self.exhausted = true;
+                return Ok(());
+            };
+            self.stack.push((offset, child_idx.saturating_add(1)));
+            offset = next_offset;
+            start_key = None.or(start_key);
+        }
+    }
+
+    fn skip_items(&mut self, mut remaining: usize) -> Result<(), BPlusTreeError> {
+        if remaining == 0 || self.exhausted {
+            return Ok(());
+        }
+        if !self.initialized {
+            self.initialize().map_err(BPlusTreeError::Io)?;
+        }
+
+        while remaining > 0 && !self.exhausted {
+            let Some(node) = self.current_leaf.as_ref() else {
+                self.advance_leaf().map_err(BPlusTreeError::Io)?;
+                continue;
+            };
+
+            while self.leaf_idx < node.keys.len() && remaining > 0 {
+                let idx = self.leaf_idx;
+                self.leaf_idx += 1;
+                let key = &node.keys[idx];
+                if self.key_past_end(key) {
+                    self.current_leaf = None;
+                    self.exhausted = true;
+                    return Ok(());
+                }
+                if self.tree.has_tombstones && node.value_info[idx].is_tombstone() {
+                    continue;
+                }
+                remaining -= 1;
+            }
+
+            if self.leaf_idx >= node.keys.len() {
+                self.current_leaf = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn initialize(&mut self) -> io::Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
+        self.initialized = true;
+        let start_key = match self.start_bound.clone() {
+            Bound::Included(key) | Bound::Excluded(key) => Some(key),
+            Bound::Unbounded => None,
+        };
+        self.descend_to_leaf(self.tree.root_offset, start_key.as_ref())
+    }
+
+    fn advance_leaf(&mut self) -> io::Result<()> {
+        while let Some((offset, child_idx)) = self.stack.pop() {
+            let (_node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_block(
+                &mut self.tree.file,
+                &mut self.tree.read_buffer,
+                offset,
+                false,
+            )?;
+
+            let Some(ptrs) = pointers else {
+                continue;
+            };
+            let Some(&next_offset) = ptrs.get(child_idx) else {
+                continue;
+            };
+            if child_idx + 1 < ptrs.len() {
+                self.stack.push((offset, child_idx + 1));
+            }
+            self.descend_to_leaf(next_offset, None)?;
+            return Ok(());
+        }
+
+        self.exhausted = true;
+        Ok(())
+    }
+
+    fn key_past_end(&self, key: &K) -> bool {
+        match &self.end_bound {
+            Bound::Included(end) => key > end,
+            Bound::Excluded(end) => key >= end,
+            Bound::Unbounded => false,
+        }
+    }
+}
+
+impl<K, V> Iterator for RangeLeafIteratorUpdate<'_, K, V>
+where
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+    V: Serialize + for<'de> Deserialize<'de> + Clone,
+{
+    type Item = Result<(K, V), BPlusTreeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted {
+            return None;
+        }
+
+        if !self.initialized {
+            if let Err(e) = self.initialize() {
+                self.exhausted = true;
+                return Some(Err(BPlusTreeError::Io(e)));
+            }
+        }
+
+        loop {
+            let Some(node) = self.current_leaf.as_ref() else {
+                if self.exhausted {
+                    return None;
+                }
+                if let Err(e) = self.advance_leaf() {
+                    self.exhausted = true;
+                    return Some(Err(BPlusTreeError::Io(e)));
+                }
+                if self.exhausted {
+                    return None;
+                }
+                continue;
+            };
+
+            if self.leaf_idx >= node.keys.len() {
+                self.current_leaf = None;
+                if self.exhausted {
+                    return None;
+                }
+                if let Err(e) = self.advance_leaf() {
+                    self.exhausted = true;
+                    return Some(Err(BPlusTreeError::Io(e)));
+                }
+                if self.exhausted {
+                    return None;
+                }
+                continue;
+            }
+
+            let idx = self.leaf_idx;
+            self.leaf_idx += 1;
+            let key = node.keys[idx].clone();
+
+            if self.key_past_end(&key) {
+                self.current_leaf = None;
+                self.exhausted = true;
+                return None;
+            }
+
+            let info = node.value_info[idx].clone();
+            if self.tree.has_tombstones && info.is_tombstone() {
+                continue;
+            }
+
+            let value = match BPlusTreeNode::<K, V>::load_value_from_info(&mut self.tree.file, &info) {
+                Ok(value) => value,
+                Err(err) => {
+                    self.exhausted = true;
+                    return Some(Err(BPlusTreeError::Io(err)));
+                }
+            };
+
+            return Some(Ok((key, value)));
+        }
+    }
 }
 
 pub struct BPlusTreeDiskIteratorOwned<K, V> {
@@ -4332,6 +4915,79 @@ where
 
     pub fn query_le(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
         query_tree_le(&mut self.file, &mut self.read_buffer, &mut self.cache, key, self.root_offset)
+    }
+
+    /// Iterates over key-value pairs within a given range using `right_sibling` pointers.
+    ///
+    /// This is more efficient than iterating the full tree and filtering when you only
+    /// need a subset of keys.
+    ///
+    /// Tombstones are skipped automatically.
+    pub fn range_iter(
+        &mut self,
+        start: Bound<&K>,
+        end: Bound<&K>,
+    ) -> impl Iterator<Item = Result<(K, V), BPlusTreeError>> + '_ {
+        // We need to clone the bounds because the returned iterator has a different lifetime
+        let start_cloned = match start {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end_cloned = match end {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        // Create a temporary BPlusTreeQuery-like struct to use RangeLeafIterator
+        RangeLeafIteratorUpdate::new(self, start_cloned, end_cloned)
+    }
+
+    /// Returns a page of key-value pairs within a given range using offset/limit.
+    ///
+    /// More efficient than `range_iter` when you only need a subset, as it stops
+    /// scanning once `limit` items have been collected.
+    ///
+    /// Returns `(items, has_more)` where `has_more` indicates whether additional
+    /// items exist beyond the returned page.
+    pub fn range_page(
+        &mut self,
+        start: Bound<&K>,
+        end: Bound<&K>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<(K, V)>, bool), BPlusTreeError> {
+        let start_cloned = match start {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end_cloned = match end {
+            Bound::Included(k) => Bound::Included(k.clone()),
+            Bound::Excluded(k) => Bound::Excluded(k.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let mut iter = RangeLeafIteratorUpdate::new(self, start_cloned, end_cloned);
+        iter.skip_items(offset)?;
+
+        let mut collected: Vec<(K, V)> = Vec::with_capacity(limit);
+        let mut has_more = false;
+
+        while collected.len() < limit {
+            match iter.next() {
+                Some(Ok(item)) => collected.push(item),
+                Some(Err(err)) => return Err(err),
+                None => return Ok((collected, false)),
+            }
+        }
+
+        match iter.next() {
+            Some(Ok(_)) => has_more = true,
+            Some(Err(err)) => return Err(err),
+            None => {}
+        }
+
+        Ok((collected, has_more))
     }
 
     pub fn update(&mut self, key: &K, value: V) -> Result<u64, BPlusTreeError> {
@@ -5496,7 +6152,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[cfg(unix)]
-    #[allow(dead_code)]
     fn process_is_alive(pid: u32) -> bool {
         if pid == 0 {
             return false;
@@ -7525,6 +8180,73 @@ mod tests {
 
         // After all
         assert_eq!(query.query_le(&1000).unwrap().unwrap(), "val_90");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_page_reports_has_more_and_returns_exact_slice() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("range_page_test.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        for i in 0..10u32 {
+            tree.insert(i, format!("val_{i}"));
+        }
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        let (page, has_more) = query
+            .range_page(Bound::Included(&0), Bound::Included(&9), 3, 3)
+            .map_err(BPlusTreeError::to_io)?;
+
+        assert_eq!(
+            page,
+            vec![
+                (3, String::from("val_3")),
+                (4, String::from("val_4")),
+                (5, String::from("val_5")),
+            ]
+        );
+        assert!(has_more);
+
+        let (tail, tail_has_more) = query
+            .range_page(Bound::Included(&0), Bound::Included(&9), 9, 3)
+            .map_err(BPlusTreeError::to_io)?;
+        assert_eq!(tail, vec![(9, String::from("val_9"))]);
+        assert!(!tail_has_more);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_iter_seeks_into_following_leaf_when_start_key_is_past_first_leaf() -> io::Result<()> {
+        let tempdir = tempdir()?;
+        let filepath = tempdir.path().join("range_iter_seek_test.bin");
+
+        let mut tree = BPlusTree::<u32, String>::new();
+        for i in 0..512u32 {
+            tree.insert(i, format!("val_{i}"));
+        }
+        tree.store(&filepath)?;
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&filepath)?;
+        let rows: Vec<(u32, String)> = query
+            .range_iter(Bound::Included(&255), Bound::Included(&260))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BPlusTreeError::to_io)?;
+
+        assert_eq!(
+            rows,
+            vec![
+                (255, String::from("val_255")),
+                (256, String::from("val_256")),
+                (257, String::from("val_257")),
+                (258, String::from("val_258")),
+                (259, String::from("val_259")),
+                (260, String::from("val_260")),
+            ]
+        );
 
         Ok(())
     }

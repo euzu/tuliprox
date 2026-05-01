@@ -112,15 +112,85 @@ pub fn Search(props: &SearchProps) -> Html {
 
     let handle_options_click = {
         let search_fields = search_fields.clone();
+        let on_search = props.onsearch.clone();
+        let input = input_ref.clone();
+        let regex = regex_active.clone();
+        let min_length = props.min_length;
+        let invalid_search = invalid_search.clone();
         Callback::from(move |(_name, selections)| match selections {
             DropDownSelection::Empty => {
                 search_fields.set(None);
+                if let Some(cb_search) = on_search.as_ref() {
+                    if let Some(input) = input.cast::<HtmlInputElement>() {
+                        let text = input.value();
+                        if text.len() >= min_length {
+                            if !matches!(*regex, RegexState::Inactive) {
+                                if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
+                                    regex.set(RegexState::Active);
+                                    cb_search.emit(SearchRequest::Regexp(text, None));
+                                } else {
+                                    regex.set(RegexState::Invalid);
+                                }
+                            } else {
+                                cb_search.emit(SearchRequest::Text(text, None));
+                            }
+                        } else if text.is_empty() {
+                            cb_search.emit(SearchRequest::Clear);
+                        } else {
+                            invalid_search.set(true);
+                        }
+                    }
+                }
             }
             DropDownSelection::Multi(options) => {
-                search_fields.set(Some(Rc::new(options)));
+                let selected = Rc::new(options);
+                search_fields.set(Some(selected.clone()));
+                if let Some(cb_search) = on_search.as_ref() {
+                    if let Some(input) = input.cast::<HtmlInputElement>() {
+                        let text = input.value();
+                        if text.len() >= min_length {
+                            if !matches!(*regex, RegexState::Inactive) {
+                                if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
+                                    regex.set(RegexState::Active);
+                                    cb_search.emit(SearchRequest::Regexp(text, Some(selected)));
+                                } else {
+                                    regex.set(RegexState::Invalid);
+                                }
+                            } else {
+                                cb_search.emit(SearchRequest::Text(text, Some(selected)));
+                            }
+                        } else if text.is_empty() {
+                            cb_search.emit(SearchRequest::Clear);
+                        } else {
+                            invalid_search.set(true);
+                        }
+                    }
+                }
             }
             DropDownSelection::Single(option) => {
-                search_fields.set(Some(Rc::new(vec![option])));
+                let selected = Rc::new(vec![option]);
+                search_fields.set(Some(selected.clone()));
+                if let Some(cb_search) = on_search.as_ref() {
+                    if let Some(input) = input.cast::<HtmlInputElement>() {
+                        let text = input.value();
+                        if text.len() >= min_length {
+                            if !matches!(*regex, RegexState::Inactive) {
+                                if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
+                                    regex.set(RegexState::Active);
+                                    cb_search.emit(SearchRequest::Regexp(text, Some(selected)));
+                                } else {
+                                    regex.set(RegexState::Invalid);
+                                }
+                            } else {
+                                cb_search.emit(SearchRequest::Text(text, Some(selected)));
+                            }
+                        } else if text.is_empty() {
+                            cb_search.emit(SearchRequest::Clear);
+                        } else {
+                            invalid_search.set(true);
+                        }
+                    }
+                }
             }
         })
     };

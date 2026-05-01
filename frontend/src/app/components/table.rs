@@ -1,10 +1,11 @@
 use crate::app::components::{AppIcon, NoContent};
 use shared::model::SortOrder;
 use std::rc::Rc;
+use wasm_bindgen::JsCast;
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
-pub struct TableDefinition<T: PartialEq + Clone> {
+pub struct TableDefinition<T: PartialEq + Clone + 'static> {
     pub items: Option<Rc<Vec<Rc<T>>>>,
     pub num_cols: usize,
     // Return true if a given column is sortable
@@ -16,12 +17,12 @@ pub struct TableDefinition<T: PartialEq + Clone> {
 }
 
 #[derive(Properties, Clone, PartialEq)]
-pub struct TableProps<T: PartialEq + Clone> {
+pub struct TableProps<T: PartialEq + Clone + 'static> {
     pub definition: Rc<TableDefinition<T>>,
 }
 
 #[component]
-pub fn Table<T: PartialEq + Clone>(props: &TableProps<T>) -> Html {
+pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
     let TableDefinition { items, num_cols, is_sortable, on_sort, render_header_cell, render_data_cell } =
         &*props.definition;
 
@@ -135,6 +136,152 @@ pub fn Table<T: PartialEq + Clone>(props: &TableProps<T>) -> Html {
             </tbody>
         </table>
         </div>
+        </div>
+    }
+}
+
+/// Page size options for paged tables.
+pub const PAGE_SIZES: &[u16] = &[25, 50, 100, 200];
+
+#[derive(Properties, Clone, PartialEq)]
+pub struct PagedTableProps<T: PartialEq + Clone + 'static> {
+    pub definition: Rc<TableDefinition<T>>,
+    /// Current page number (1-indexed)
+    pub page: u32,
+    /// Current page size
+    pub page_size: u16,
+    /// Total number of items across all pages
+    pub total_items: u64,
+    /// Total number of pages
+    pub total_pages: u32,
+    /// Whether there is a previous page
+    pub has_prev: bool,
+    /// Whether there is a next page
+    pub has_next: bool,
+    /// Callback when page changes
+    pub on_page_change: Callback<u32>,
+    /// Callback when page size changes
+    pub on_page_size_change: Callback<u16>,
+}
+
+#[component]
+pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) -> Html {
+    let PagedTableProps {
+        definition,
+        page,
+        page_size,
+        total_items,
+        total_pages,
+        has_prev,
+        has_next,
+        on_page_change,
+        on_page_size_change,
+    } = props.clone();
+
+    let range_start = if total_items == 0 { 0 } else { ((page - 1) * page_size as u32) as u64 + 1 };
+    let range_end = (page as u64) * page_size as u64;
+    let range_end = range_end.min(total_items);
+
+    let handle_first = {
+        let on_page_change = on_page_change.clone();
+        Callback::from(move |_: MouseEvent| on_page_change.emit(1))
+    };
+
+    let handle_prev = {
+        let on_page_change = on_page_change.clone();
+        Callback::from(move |_: MouseEvent| on_page_change.emit(page.saturating_sub(1)))
+    };
+
+    let handle_next = {
+        let on_page_change = on_page_change.clone();
+        Callback::from(move |_: MouseEvent| on_page_change.emit(page + 1))
+    };
+
+    let handle_last = {
+        let on_page_change = on_page_change.clone();
+        Callback::from(move |_: MouseEvent| on_page_change.emit(total_pages))
+    };
+
+    let handle_page_size_change = {
+        let on_page_size_change = on_page_size_change.clone();
+        Callback::from(move |e: Event| {
+            let target = e.target_unchecked_into::<web_sys::HtmlElement>();
+            if let Some(select) = target.dyn_ref::<web_sys::HtmlSelectElement>() {
+                if let Ok(size) = select.value().parse::<u16>() {
+                    on_page_size_change.emit(size);
+                }
+            }
+        })
+    };
+
+    html! {
+        <div class="tp__paged-table">
+            <Table<T> {definition} />
+            if total_items > 0 {
+                <div class="tp__paged-table__controls">
+                    <span class="tp__paged-table__info">
+                        {format!("{}-{} of {}", range_start, range_end, total_items)}
+                    </span>
+                    <div class="tp__paged-table__buttons">
+                        <button
+                            type="button"
+                            class="tp__paged-table__btn"
+                            disabled={!has_prev}
+                            onclick={handle_first}
+                            title="First page"
+                        >
+                            <AppIcon name="ChevronDoubleLeft" />
+                        </button>
+                        <button
+                            type="button"
+                            class="tp__paged-table__btn"
+                            disabled={!has_prev}
+                            onclick={handle_prev}
+                            title="Previous page"
+                        >
+                            <AppIcon name="ChevronLeft" />
+                        </button>
+                        <span class="tp__paged-table__page-info">
+                            {format!("Page {} of {}", page, total_pages)}
+                        </span>
+                        <button
+                            type="button"
+                            class="tp__paged-table__btn"
+                            disabled={!has_next}
+                            onclick={handle_next}
+                            title="Next page"
+                        >
+                            <AppIcon name="ChevronRight" />
+                        </button>
+                        <button
+                            type="button"
+                            class="tp__paged-table__btn"
+                            disabled={!has_next}
+                            onclick={handle_last}
+                            title="Last page"
+                        >
+                            <AppIcon name="ChevronDoubleRight" />
+                        </button>
+                    </div>
+                    <div class="tp__paged-table__size">
+                        <label for="page-size-select">{ "Rows:" }</label>
+                        <select
+                            id="page-size-select"
+                            class="tp__paged-table__select"
+                            value={page_size.to_string()}
+                            onchange={handle_page_size_change}
+                        >
+                            { for PAGE_SIZES.iter().map(|&size| {
+                                html! {
+                                    <option value={size.to_string()} selected={size == page_size}>
+                                        {size.to_string()}
+                                    </option>
+                                }
+                            }) }
+                        </select>
+                    </div>
+                </div>
+            }
         </div>
     }
 }

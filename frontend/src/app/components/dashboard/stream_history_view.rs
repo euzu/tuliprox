@@ -1,13 +1,18 @@
 use crate::{
-    app::components::{Country, DateInput, NoContent, RevealContent, Search, Table, TableDefinition, TextButton},
+    app::components::{
+        Country, DateInput, DropDownOption, NoContent, PagedTable, RevealContent, Search, Table, TableDefinition,
+        TextButton,
+    },
     hooks::use_service_context,
     i18n::use_translation,
     services::{StreamHistoryProviderSummary, StreamHistoryQosSnapshot},
     utils::{format_bytes, format_duration, format_ts},
 };
 use futures::join;
-use shared::model::{DisconnectReason, SearchRequest, StreamHistoryEventType, StreamHistoryRecordDto};
-use std::{borrow::Cow, rc::Rc};
+use shared::model::{
+    DisconnectReason, PagedResponseDto, SearchRequest, StreamHistoryEventType, StreamHistoryRecordDto,
+};
+use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
@@ -16,6 +21,9 @@ const SUMMARY_NUM_COLS: usize = 6;
 const QOS_SUMMARY_NUM_COLS: usize = 8;
 const QOS_DETAIL_NUM_COLS: usize = 8;
 
+#[allow(dead_code)]
+// Kept as documentation of the former client-side HLS aggregation key while
+// stream-history folding now happens on the backend.
 type HlsSessionKey<'a> = (Option<&'a str>, u64, Option<&'a str>, Option<u32>, Option<&'a str>);
 
 #[derive(Clone, PartialEq)]
@@ -58,7 +66,26 @@ fn ts_to_date_str(ts: i64) -> String {
 fn optional_record_text_str(value: Option<&str>) -> &str { value.unwrap_or("-") }
 fn optional_record_text(value: Option<String>) -> String { value.unwrap_or_else(|| String::from("-")) }
 
+fn search_request_parts(request: &SearchRequest) -> (Option<String>, Option<String>, Option<Vec<String>>) {
+    match request {
+        SearchRequest::Clear => (None, None, None),
+        SearchRequest::Text(text, fields) => (
+            Some(text.clone()),
+            Some(String::from("text")),
+            fields.as_ref().map(|selected| selected.iter().cloned().collect()),
+        ),
+        SearchRequest::Regexp(pattern, fields) => (
+            Some(pattern.clone()),
+            Some(String::from("regex")),
+            fields.as_ref().map(|selected| selected.iter().cloned().collect()),
+        ),
+    }
+}
+
 /// Returns true if the container indicates an HLS stream (HTTP-based segmented streaming).
+#[allow(dead_code)]
+// Retained with the old frontend aggregation helpers as reference logic for
+// backend parity checks and possible future client-only diagnostics.
 fn is_hls_container(container: Option<&str>) -> bool {
     matches!(container, Some("mpegts") | Some("fmp4") | Some("hls"))
 }
@@ -68,6 +95,9 @@ fn is_hls_container(container: Option<&str>) -> bool {
 /// into logical sessions, showing first connect, last disconnect, and summed bytes.
 ///
 /// For non-HLS records, they are passed through unchanged.
+#[allow(dead_code)]
+// Preserved as reference implementation of the previous frontend-side HLS
+// folding semantics; production pagination now uses backend aggregation.
 fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<StreamHistoryRecordDto>> {
     use std::collections::HashMap;
 
@@ -175,52 +205,52 @@ fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<Strea
     aggregated.sort_by_key(|b| std::cmp::Reverse(b.event_ts_utc));
     aggregated
 }
-
-fn record_matches(record: &StreamHistoryRecordDto, filter: &SearchRequest) -> bool {
-    if matches!(filter, SearchRequest::Clear) {
-        return true;
-    }
-    let fields = [
-        // Cow::Owned(record.partition_day_utc.to_string()),
-        // Cow::Owned(record.virtual_id.as_ref().map_or_else(String::new, ToString::to_string)),
-        // Cow::Borrowed(record.input_name.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.video_codec.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.audio_codec.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.resolution.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.target_name.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.session_duration.as_deref().unwrap_or("")),
-        Cow::Owned(record.event_ts_utc.to_string()),
-        Cow::Owned(record.event_type.to_string()),
-        Cow::Borrowed(record.title.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.group.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.api_username.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.provider_name.as_deref().unwrap_or("")),
-        Cow::Owned(record.provider_id.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Owned(record.bytes_sent.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Owned(record.first_byte_latency_ms.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Borrowed(record.user_agent.as_deref().unwrap_or("")),
-        Cow::Owned(record.item_type.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Borrowed(record.container.as_deref().unwrap_or("")),
-        Cow::Owned(record.disconnect_reason.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Borrowed(record.source_addr.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.country.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.cluster.as_deref().unwrap_or("")),
-    ];
-    match filter {
-        SearchRequest::Clear => true,
-        SearchRequest::Text(text, _) => {
-            let text_lower = text.to_lowercase();
-            fields.iter().any(|f| f.to_lowercase().contains(&text_lower))
-        }
-        SearchRequest::Regexp(pattern, _) => {
-            if let Ok(re) = shared::model::REGEX_CACHE.get_or_compile(pattern) {
-                fields.iter().any(|f| re.is_match(f))
-            } else {
-                false
-            }
-        }
-    }
-}
+//
+// fn record_matches(record: &StreamHistoryRecordDto, filter: &SearchRequest) -> bool {
+//     if matches!(filter, SearchRequest::Clear) {
+//         return true;
+//     }
+//     let fields = [
+//         // Cow::Owned(record.partition_day_utc.to_string()),
+//         // Cow::Owned(record.virtual_id.as_ref().map_or_else(String::new, ToString::to_string)),
+//         // Cow::Borrowed(record.input_name.as_deref().unwrap_or("")),
+//         // Cow::Borrowed(record.video_codec.as_deref().unwrap_or("")),
+//         // Cow::Borrowed(record.audio_codec.as_deref().unwrap_or("")),
+//         // Cow::Borrowed(record.resolution.as_deref().unwrap_or("")),
+//         // Cow::Borrowed(record.target_name.as_deref().unwrap_or("")),
+//         // Cow::Borrowed(record.session_duration.as_deref().unwrap_or("")),
+//         Cow::Owned(record.event_ts_utc.to_string()),
+//         Cow::Owned(record.event_type.to_string()),
+//         Cow::Borrowed(record.title.as_deref().unwrap_or("")),
+//         Cow::Borrowed(record.group.as_deref().unwrap_or("")),
+//         Cow::Borrowed(record.api_username.as_deref().unwrap_or("")),
+//         Cow::Borrowed(record.provider_name.as_deref().unwrap_or("")),
+//         Cow::Owned(record.provider_id.as_ref().map_or_else(String::new, ToString::to_string)),
+//         Cow::Owned(record.bytes_sent.as_ref().map_or_else(String::new, ToString::to_string)),
+//         Cow::Owned(record.first_byte_latency_ms.as_ref().map_or_else(String::new, ToString::to_string)),
+//         Cow::Borrowed(record.user_agent.as_deref().unwrap_or("")),
+//         Cow::Owned(record.item_type.as_ref().map_or_else(String::new, ToString::to_string)),
+//         Cow::Borrowed(record.container.as_deref().unwrap_or("")),
+//         Cow::Owned(record.disconnect_reason.as_ref().map_or_else(String::new, ToString::to_string)),
+//         Cow::Borrowed(record.source_addr.as_deref().unwrap_or("")),
+//         Cow::Borrowed(record.country.as_deref().unwrap_or("")),
+//         Cow::Borrowed(record.cluster.as_deref().unwrap_or("")),
+//     ];
+//     match filter {
+//         SearchRequest::Clear => true,
+//         SearchRequest::Text(text, _) => {
+//             let text_lower = text.to_lowercase();
+//             fields.iter().any(|f| f.to_lowercase().contains(&text_lower))
+//         }
+//         SearchRequest::Regexp(pattern, _) => {
+//             if let Ok(re) = shared::model::REGEX_CACHE.get_or_compile(pattern) {
+//                 fields.iter().any(|f| re.is_match(f))
+//             } else {
+//                 false
+//             }
+//         }
+//     }
+// }
 
 fn qos_snapshot_matches(snapshot: &StreamHistoryQosSnapshot, filter: &SearchRequest) -> bool {
     match filter {
@@ -333,12 +363,42 @@ pub fn StreamHistoryView() -> Html {
     let translate = use_translation();
     let from_date = use_state(|| Some(today_start_ts()));
     let to_date = use_state(|| Some(today_start_ts()));
-    let all_records = use_state(Vec::<Rc<StreamHistoryRecordDto>>::new);
+    let paged_response = use_state(|| None::<PagedResponseDto<StreamHistoryRecordDto>>);
+    let page = use_state(|| 1u32);
+    let page_size = use_state(|| 50u16);
     let summaries = use_state(Vec::<StreamHistoryProviderSummary>::new);
     let qos_snapshots = use_state(Vec::<StreamHistoryQosSnapshot>::new);
     let selected_qos_snapshot = use_state(|| None::<StreamHistoryQosSnapshot>);
     let search_filter = use_state(|| SearchRequest::Clear);
     let loading = use_state(|| false);
+    let request_id = use_state(|| 0u64);
+    let search_options: Rc<Vec<DropDownOption>> = {
+        let translate = translate.clone();
+        use_memo(translate, move |translate| {
+            vec![
+                DropDownOption::new("event_ts_utc", html! { translate.t("LABEL.STREAM_HISTORY_TIME") }, false),
+                DropDownOption::new("event_type", html! { translate.t("LABEL.STREAM_HISTORY_EVENT") }, false),
+                DropDownOption::new("title", html! { translate.t("LABEL.TITLE") }, false),
+                DropDownOption::new("group", html! { translate.t("LABEL.GROUP") }, false),
+                DropDownOption::new("api_username", html! { translate.t("LABEL.USERNAME") }, false),
+                DropDownOption::new("provider_name", html! { translate.t("LABEL.PROVIDER") }, false),
+                DropDownOption::new("provider_id", html! { translate.t("LABEL.PROVIDER") }, false),
+                DropDownOption::new("bytes_sent", html! { translate.t("LABEL.STREAM_HISTORY_BYTES") }, false),
+                DropDownOption::new(
+                    "first_byte_latency_ms",
+                    html! { translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE") },
+                    false,
+                ),
+                DropDownOption::new("user_agent", html! { translate.t("LABEL.USER_AGENT") }, false),
+                DropDownOption::new("item_type", html! { translate.t("LABEL.TYPE") }, false),
+                DropDownOption::new("container", html! { translate.t("LABEL.CONTAINER") }, false),
+                DropDownOption::new("disconnect_reason", html! { translate.t("LABEL.STREAM_HISTORY_REASON") }, false),
+                DropDownOption::new("source_addr", html! { translate.t("LABEL.STREAM_HISTORY_IP") }, false),
+                DropDownOption::new("country", html! { translate.t("LABEL.COUNTRY") }, false),
+                DropDownOption::new("cluster", html! { translate.t("LABEL.TYPE") }, false),
+            ]
+        })
+    };
 
     let handle_from_change = {
         let from_date = from_date.clone();
@@ -350,50 +410,113 @@ pub fn StreamHistoryView() -> Html {
         Callback::from(move |ts: Option<i64>| to_date.set(ts))
     };
 
+    let fetch_history_page: Rc<dyn Fn(u32, u16, SearchRequest)> = {
+        let services = services.clone();
+        let from_date = from_date.clone();
+        let to_date = to_date.clone();
+        let paged_response = paged_response.clone();
+        let loading = loading.clone();
+        let request_id = request_id.clone();
+        Rc::new(move |requested_page: u32, requested_page_size: u16, request: SearchRequest| {
+            let services = services.clone();
+            let paged_response = paged_response.clone();
+            let loading = loading.clone();
+            let request_id = request_id.clone();
+            let from_str = (*from_date).map(ts_to_date_str);
+            let to_str = (*to_date).map(ts_to_date_str);
+            let (search_text, search_mode, search_fields) = search_request_parts(&request);
+            let next_request_id = (*request_id).saturating_add(1);
+            request_id.set(next_request_id);
+            loading.set(true);
+            spawn_local(async move {
+                let time_range = from_str.as_ref().zip(to_str.as_ref()).map(|(from, to)| (from.as_str(), to.as_str()));
+                let result = services
+                    .stream_history
+                    .get_history_page(
+                        time_range,
+                        requested_page,
+                        requested_page_size,
+                        search_text.as_deref(),
+                        search_mode.as_deref(),
+                        search_fields.as_deref(),
+                    )
+                    .await;
+                if next_request_id == *request_id {
+                    match result {
+                        Ok(Some(response)) => paged_response.set(Some(response)),
+                        Ok(None) | Err(_) => paged_response.set(None),
+                    }
+                    loading.set(false);
+                }
+            });
+        })
+    };
+
     let handle_load = {
         let services = services.clone();
         let from_date = from_date.clone();
         let to_date = to_date.clone();
-        let all_records = all_records.clone();
+        let paged_response = paged_response.clone();
         let summaries = summaries.clone();
         let qos_snapshots = qos_snapshots.clone();
         let selected_qos_snapshot = selected_qos_snapshot.clone();
         let loading = loading.clone();
+        let request_id = request_id.clone();
+        let page = page.clone();
+        let page_size = page_size.clone();
+        let search_filter = search_filter.clone();
         Callback::from(move |_: String| {
             let services = services.clone();
-            let all_records = all_records.clone();
+            let paged_response = paged_response.clone();
             let summaries = summaries.clone();
             let qos_snapshots = qos_snapshots.clone();
             let selected_qos_snapshot = selected_qos_snapshot.clone();
             let loading = loading.clone();
+            let request_id = request_id.clone();
             let from_str = (*from_date).map(ts_to_date_str);
             let to_str = (*to_date).map(ts_to_date_str);
+            let next_request_id = (*request_id).saturating_add(1);
+            let requested_page_size = *page_size;
+            let active_search = (*search_filter).clone();
+            let (search_text, search_mode, search_fields) = search_request_parts(&active_search);
+            request_id.set(next_request_id);
+            page.set(1);
             loading.set(true);
             spawn_local(async move {
+                let time_range = from_str.as_ref().zip(to_str.as_ref()).map(|(f, t)| (f.as_str(), t.as_str()));
                 let (history_result, summary_result, qos_result) = join!(
-                    services.stream_history.get_history(from_str.as_deref(), to_str.as_deref()),
+                    services.stream_history.get_history_page(
+                        time_range,
+                        1,
+                        requested_page_size,
+                        search_text.as_deref(),
+                        search_mode.as_deref(),
+                        search_fields.as_deref(),
+                    ),
                     services.stream_history.get_summary(from_str.as_deref(), to_str.as_deref()),
                     services.stream_history.get_qos_snapshots()
                 );
-                match history_result {
-                    Ok(Some(records)) => all_records.set(records.into_iter().map(Rc::new).collect()),
-                    Ok(None) | Err(_) => all_records.set(Vec::new()),
-                }
-                match summary_result {
-                    Ok(Some(items)) => summaries.set(items),
-                    Ok(None) | Err(_) => summaries.set(Vec::new()),
-                }
-                match qos_result {
-                    Ok(Some(items)) => {
-                        selected_qos_snapshot.set(None);
-                        qos_snapshots.set(items);
+                if next_request_id == *request_id {
+                    match history_result {
+                        Ok(Some(resp)) => paged_response.set(Some(resp)),
+                        Ok(None) | Err(_) => paged_response.set(None),
                     }
-                    Ok(None) | Err(_) => {
-                        selected_qos_snapshot.set(None);
-                        qos_snapshots.set(Vec::new());
+                    match summary_result {
+                        Ok(Some(items)) => summaries.set(items),
+                        Ok(None) | Err(_) => summaries.set(Vec::new()),
                     }
+                    match qos_result {
+                        Ok(Some(items)) => {
+                            selected_qos_snapshot.set(None);
+                            qos_snapshots.set(items);
+                        }
+                        Ok(None) | Err(_) => {
+                            selected_qos_snapshot.set(None);
+                            qos_snapshots.set(Vec::new());
+                        }
+                    }
+                    loading.set(false);
                 }
-                loading.set(false);
             });
         })
     };
@@ -407,20 +530,45 @@ pub fn StreamHistoryView() -> Html {
         });
     }
 
-    let handle_search = {
+    let handle_page_change = {
+        let page = page.clone();
+        let page_size = page_size.clone();
         let search_filter = search_filter.clone();
-        Callback::from(move |req: SearchRequest| search_filter.set(req))
+        let fetch_history_page = fetch_history_page.clone();
+        Callback::from(move |new_page: u32| {
+            page.set(new_page);
+            fetch_history_page(new_page, *page_size, (*search_filter).clone());
+        })
     };
 
-    let filtered: Rc<Vec<Rc<StreamHistoryRecordDto>>> =
-        use_memo(((*all_records).clone(), (*search_filter).clone()), |(records, filter)| {
-            let mut sorted: Vec<Rc<StreamHistoryRecordDto>> = records.to_vec();
-            sorted.sort_by_key(|r| r.event_ts_utc);
-            // Aggregate HLS records first on the full dataset so connect/disconnect pairs are complete
-            let aggregated = aggregate_hls_records(&sorted);
-            aggregated.into_iter().filter(|r| record_matches(r, filter)).collect()
-        });
-    let has_any_content = has_any_stream_history_content(&all_records, &summaries, &qos_snapshots);
+    let handle_page_size_change = {
+        let page = page.clone();
+        let page_size = page_size.clone();
+        let search_filter = search_filter.clone();
+        let fetch_history_page = fetch_history_page.clone();
+        Callback::from(move |new_size: u16| {
+            page.set(1);
+            page_size.set(new_size);
+            fetch_history_page(1, new_size, (*search_filter).clone());
+        })
+    };
+
+    let handle_search = {
+        let search_filter = search_filter.clone();
+        let page = page.clone();
+        let page_size = page_size.clone();
+        let fetch_history_page = fetch_history_page.clone();
+        Callback::from(move |req: SearchRequest| {
+            search_filter.set(req.clone());
+            page.set(1);
+            fetch_history_page(1, *page_size, req);
+        })
+    };
+
+    let table_items: Rc<Vec<Rc<StreamHistoryRecordDto>>> = use_memo(paged_response.clone(), |resp| {
+        resp.as_ref().map_or_else(Vec::new, |r| r.items.iter().cloned().map(Rc::new).collect())
+    });
+    let has_any_content = has_any_stream_history_content(&table_items, &summaries, &qos_snapshots);
 
     let visible_qos_snapshots: Rc<Vec<StreamHistoryQosSnapshot>> =
         use_memo(((*qos_snapshots).clone(), (*search_filter).clone()), |(snapshots, filter)| {
@@ -450,10 +598,10 @@ pub fn StreamHistoryView() -> Html {
     };
 
     let translate_for_table = translate.clone();
-    let table_def: Rc<TableDefinition<StreamHistoryRecordDto>> = use_memo(filtered.clone(), move |filtered| {
+    let table_def: Rc<TableDefinition<StreamHistoryRecordDto>> = use_memo(table_items.clone(), move |items| {
         let translate = translate_for_table.clone();
         TableDefinition {
-            items: Some(filtered.clone()),
+            items: Some(items.clone()),
             num_cols: NUM_COLS,
             is_sortable: Callback::from(|_| false),
             on_sort: Callback::noop(),
@@ -715,7 +863,7 @@ pub fn StreamHistoryView() -> Html {
                         onclick={handle_load}
                     />
                 </div>
-                <Search onsearch={Some(handle_search)} min_length={1} />
+                <Search onsearch={Some(handle_search)} min_length={1} options={Some(search_options)} />
             </div>
             <div class="tp__stream-history__body">
                 if *loading {
@@ -741,7 +889,21 @@ pub fn StreamHistoryView() -> Html {
                     }
                     <div class="tp__stream-history__summary">
                         <h2>{translate.t("LABEL.STREAM_HISTORY")}</h2>
-                        <Table::<StreamHistoryRecordDto> definition={table_def} />
+                        if let Some(ref resp) = *paged_response {
+                            <PagedTable::<StreamHistoryRecordDto>
+                                definition={table_def}
+                                page={resp.page}
+                                page_size={resp.page_size}
+                                total_items={resp.total_items}
+                                total_pages={resp.total_pages}
+                                has_prev={resp.has_prev}
+                                has_next={resp.has_next}
+                                on_page_change={handle_page_change.clone()}
+                                on_page_size_change={handle_page_size_change.clone()}
+                            />
+                        } else {
+                            <Table::<StreamHistoryRecordDto> definition={table_def} />
+                        }
                     </div>
                 }
             </div>
