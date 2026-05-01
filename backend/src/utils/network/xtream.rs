@@ -565,7 +565,7 @@ async fn check_alias_user_state(app_config: &Arc<AppConfig>, client: &reqwest::C
     // });
 }
 
-pub fn create_vod_info_from_item(_target: &ConfigTarget, _user: &ProxyUserCredentials, pli: &XtreamPlaylistItem) -> String {
+pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
     let category_id = pli.category_id;
     let added = pli.additional_properties.as_ref().and_then(StreamProperties::get_last_modified).unwrap_or(0);
     let name = &pli.name;
@@ -592,18 +592,12 @@ pub fn create_vod_info_from_item(_target: &ConfigTarget, _user: &ProxyUserCreden
 #[cfg(test)]
 mod tests {
     use super::{create_vod_info_from_item, partition_clusters_by_source};
-    use crate::model::{
-        ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ConfigTarget,
-        ProxyUserCredentials, StagedInput, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
-    };
-    use arc_swap::ArcSwapOption;
+    use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials, StagedInput};
     use serde_json::Value;
-    use shared::foundation::Filter;
     use shared::model::{
-        ClusterSource, InputType, PlaylistItemType, ProcessingOrder, ProxyType, XtreamCluster, XtreamPlaylistItem,
+        ClusterSource, InputType, PlaylistItemType, ProxyType, XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
-    use std::sync::Arc;
 
     fn test_input_with_staged(staged: StagedInput) -> ConfigInput {
         ConfigInput {
@@ -620,29 +614,6 @@ mod tests {
             set.set(*flag);
         }
         ConfigInputOptions { flags: set, ..ConfigInputOptions::defaults().clone() }
-    }
-
-    fn test_target() -> ConfigTarget {
-        ConfigTarget {
-            id: 1,
-            enabled: true,
-            name: "target".to_string(),
-            options: None,
-            sort: None,
-            filter: Filter::default(),
-            output: vec![TargetOutput::Xtream(XtreamTargetOutput {
-                flags: XtreamTargetFlagsSet::default(),
-                trakt: None,
-                filter: None,
-            })],
-            rename: None,
-            mapping_ids: None,
-            mapping: Arc::new(ArcSwapOption::default()),
-            favourites: None,
-            processing_order: ProcessingOrder::Frm,
-            watch: None,
-            use_memory_cache: false,
-        }
     }
 
     #[test]
@@ -705,12 +676,8 @@ mod tests {
         assert_eq!(main_clusters, vec![XtreamCluster::Video]);
     }
 
-    #[test]
-    fn create_vod_info_keeps_tuliprox_virtual_stream_id_for_redirect_users() {
-        let target = test_target();
-        let mut user = ProxyUserCredentials::default();
-        user.proxy = ProxyType::Redirect;
-        let pli = XtreamPlaylistItem {
+    fn test_vod_item() -> XtreamPlaylistItem {
+        XtreamPlaylistItem {
             virtual_id: 176_141,
             provider_id: 813_563,
             name: "Movie".intern(),
@@ -729,11 +696,28 @@ mod tests {
             input_name: "provider".intern(),
             channel_no: 1,
             source_ordinal: 1,
-        };
+        }
+    }
 
-        let content = create_vod_info_from_item(&target, &user, &pli);
+    fn assert_vod_info_keeps_tuliprox_virtual_stream_id(proxy: ProxyType) {
+        let mut user = ProxyUserCredentials::default();
+        user.proxy = proxy;
+        assert_eq!(user.proxy, proxy);
+        let pli = test_vod_item();
+
+        let content = create_vod_info_from_item(&pli);
         let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
 
         assert_eq!(doc["movie_data"]["stream_id"], 176_141);
+    }
+
+    #[test]
+    fn create_vod_info_keeps_tuliprox_virtual_stream_id_for_redirect_users() {
+        assert_vod_info_keeps_tuliprox_virtual_stream_id(ProxyType::Redirect);
+    }
+
+    #[test]
+    fn create_vod_info_keeps_tuliprox_virtual_stream_id_for_reverse_users() {
+        assert_vod_info_keeps_tuliprox_virtual_stream_id(ProxyType::Reverse(None));
     }
 }

@@ -250,6 +250,7 @@ fn decode_storage_json_field(value: &mut Value) {
     };
 
     *value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+    humanize_dump_value(value);
 }
 
 fn exit_app(code: i32) {
@@ -262,12 +263,18 @@ fn exit_app(code: i32) {
 mod tests {
     use super::{dump_qos_snapshot_db, to_human_readable_json_value};
     use crate::repository::{BPlusTree, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow};
-    use serde_json::Value;
+    use base64::{engine::general_purpose, Engine as _};
+    use lz4_flex::compress_prepend_size;
+    use serde_json::{json, Value};
     use shared::{
         model::{LiveStreamProperties, PlaylistItemType, StreamProperties, XtreamCluster, XtreamPlaylistItem},
         utils::Internable,
     };
     use tempfile::tempdir;
+
+    fn encode_storage_json(text: &str) -> String {
+        general_purpose::STANDARD_NO_PAD.encode(compress_prepend_size(text.as_bytes()))
+    }
 
     #[test]
     fn dump_qos_snapshot_db_reads_bplustree_records() {
@@ -342,5 +349,17 @@ mod tests {
         assert_eq!(value.get("group").and_then(Value::as_str), Some("Movies"));
         assert_eq!(props.get("video").and_then(|value| value.get("codec_name")).and_then(Value::as_str), Some("h264"));
         assert_eq!(props.get("audio").and_then(|value| value.get("codec_name")).and_then(Value::as_str), Some("aac"));
+    }
+
+    #[test]
+    fn human_readable_dump_recurses_after_decoding_storage_json_fields() {
+        let nested_audio = encode_storage_json(r#"{"codec_name":"aac","channels":2}"#);
+        let video = encode_storage_json(&format!(r#"{{"codec_name":"h264","audio":"{nested_audio}"}}"#));
+        let value = json!({ "video": video });
+
+        let value = to_human_readable_json_value(&value).expect("dump value should serialize");
+
+        assert_eq!(value["video"]["codec_name"], "h264");
+        assert_eq!(value["video"]["audio"]["codec_name"], "aac");
     }
 }

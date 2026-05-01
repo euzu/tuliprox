@@ -1005,7 +1005,7 @@ pub async fn xtream_get_stream_info_response(
 
         return match cluster {
             XtreamCluster::Video => {
-                let content = create_vod_info_from_item(target, user, &pli);
+                let content = create_vod_info_from_item(&pli);
                 try_unwrap_body!(axum::response::Response::builder()
                     .status(axum::http::StatusCode::OK)
                     .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
