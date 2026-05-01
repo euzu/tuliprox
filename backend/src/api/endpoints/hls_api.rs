@@ -55,6 +55,35 @@ fn hls_response(hls_content: String) -> impl IntoResponse + Send {
         .body(hls_content))
 }
 
+async fn release_prepared_hls_manifest_session(
+    app_state: &Arc<AppState>,
+    username: &str,
+    session_token: &str,
+    addr: &std::net::SocketAddr,
+) {
+    let _transition_guard = app_state
+        .active_users
+        .acquire_playback_transition(username, session_token)
+        .await;
+    app_state
+        .active_users
+        .release_unbound_session_reservation(username, session_token, None, false)
+        .await;
+    app_state
+        .active_users
+        .clear_unbound_session_addr(username, session_token, addr)
+        .await;
+}
+
+async fn terminate_failed_hls_manifest_session(app_state: &Arc<AppState>, username: &str, session_token: &str) {
+    let _transition_guard = app_state
+        .active_users
+        .acquire_playback_transition(username, session_token)
+        .await;
+    app_state.active_users.terminate_session(username, session_token).await;
+    app_state.active_provider.clear_provider_reservation(session_token).await;
+}
+
 fn normalize_xtream_live_hls_url(hls_url: &str, input: &ConfigInput) -> String {
     if !input.input_type.is_xtream() || !input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix) {
         return hls_url.to_string();
@@ -272,36 +301,14 @@ pub(in crate::api) async fn handle_hls_stream_request(
             };
             let hls_content = rewrite_hls(user, &rewrite_hls_props);
             if let Some(session_token) = session_token.as_deref() {
-                let _transition_guard = app_state
-                    .active_users
-                    .acquire_playback_transition(&user.username, session_token)
-                    .await;
-                app_state
-                    .active_users
-                    .release_unbound_session_reservation(&user.username, session_token, None, false)
-                    .await;
-                app_state
-                    .active_users
-                    .clear_unbound_session_addr(&user.username, session_token, &fingerprint.addr)
-                    .await;
+                release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr).await;
             }
             hls_response(hls_content).into_response()
         }
         Err(err) => {
             error!("Failed to download m3u8 {}", sanitize_sensitive_info(err.to_string().as_str()));
             if let Some(session_token) = session_token.as_deref() {
-                let _transition_guard = app_state
-                    .active_users
-                    .acquire_playback_transition(&user.username, session_token)
-                    .await;
-                app_state
-                    .active_users
-                    .release_unbound_session_reservation(&user.username, session_token, None, false)
-                    .await;
-                app_state
-                    .active_users
-                    .clear_unbound_session_addr(&user.username, session_token, &fingerprint.addr)
-                    .await;
+                terminate_failed_hls_manifest_session(app_state, &user.username, session_token).await;
             }
 
             let custom_stream_response = app_state.app_config.custom_stream_response.load();

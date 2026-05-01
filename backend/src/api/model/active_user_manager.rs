@@ -2261,41 +2261,35 @@ impl ActiveUserManager {
                 return;
             };
 
-            // Collect all addresses associated with this session.
-            let mut addrs = Vec::new();
-            let session = &connection_data.sessions[session_index];
-            if !session.addr.ip().is_unspecified() {
-                addrs.push(session.addr);
-            }
-            for addr in &session.active_addrs {
-                if *addr != session.addr && !addrs.contains(addr) {
-                    addrs.push(*addr);
-                }
-            }
-
-            // Release all streams for these addresses.
+            let counted_kind = connection_data.sessions[session_index]
+                .lifecycle
+                .is_counted()
+                .then(|| {
+                    connection_data.sessions[session_index]
+                        .connection_kind
+                        .unwrap_or(ConnectionKind::Normal)
+                });
             let mut removed_count = 0;
-            for addr in &addrs {
-                if let Some(stream_idx) = connection_data
-                    .streams
-                    .iter()
-                    .position(|stream| stream.addr == *addr && !stream.preserved)
-                {
-                    if let Some(kind) = connection_data.stream_kinds.remove(&connection_data.streams[stream_idx].uid) {
+            let mut connection_changed = false;
+            let mut released_stream_kind = false;
+            let mut stream_idx = 0;
+            while stream_idx < connection_data.streams.len() {
+                if connection_data.streams[stream_idx].session_token.as_deref() == Some(session_token) {
+                    let uid = connection_data.streams[stream_idx].uid;
+                    if let Some(kind) = connection_data.stream_kinds.remove(&uid) {
                         connection_data.decrement_kind(kind);
+                        released_stream_kind = true;
+                        connection_changed = true;
                     }
-                    connection_data.stream_normal_priorities.remove(&connection_data.streams[stream_idx].uid);
+                    connection_data.stream_normal_priorities.remove(&uid);
                     connection_data.streams.swap_remove(stream_idx);
                     removed_count += 1;
+                } else {
+                    stream_idx += 1;
                 }
             }
 
-            // Release counted lease if held.
-            let mut connection_changed = false;
-            if connection_data.sessions[session_index].lifecycle.is_counted() {
-                let kind = connection_data.sessions[session_index]
-                    .connection_kind
-                    .unwrap_or(ConnectionKind::Normal);
+            if let Some(kind) = counted_kind.filter(|_| !released_stream_kind) {
                 connection_data.decrement_kind(kind);
                 connection_changed = true;
             }
@@ -2361,34 +2355,36 @@ impl ActiveUserManager {
                     continue;
                 };
 
-                // Release counted lease if held.
-                if connection_data.sessions[session_index].lifecycle.is_counted() {
-                    let kind = connection_data.sessions[session_index]
-                        .connection_kind
-                        .unwrap_or(ConnectionKind::Normal);
-                    connection_data.decrement_kind(kind);
-                    connection_changed = true;
-                }
+                let counted_kind = connection_data.sessions[session_index]
+                    .lifecycle
+                    .is_counted()
+                    .then(|| {
+                        connection_data.sessions[session_index]
+                            .connection_kind
+                            .unwrap_or(ConnectionKind::Normal)
+                    });
 
-                // Release stream kinds for all streams belonging to this session.
-                let session_streams: Vec<_> = connection_data
-                    .streams
-                    .iter()
-                    .filter(|stream| stream.session_token.as_deref() == Some(token))
-                    .map(|stream| stream.uid)
-                    .collect();
-                for uid in session_streams {
+                let mut released_stream_kind = false;
+                let mut stream_idx = 0;
+                while stream_idx < connection_data.streams.len() {
+                    if connection_data.streams[stream_idx].session_token.as_deref() != Some(token) {
+                        stream_idx += 1;
+                        continue;
+                    }
+
+                    let uid = connection_data.streams[stream_idx].uid;
                     if let Some(kind) = connection_data.stream_kinds.remove(&uid) {
                         connection_data.decrement_kind(kind);
+                        released_stream_kind = true;
                         connection_changed = true;
                     }
                     connection_data.stream_normal_priorities.remove(&uid);
-                    // Remove non-preserved streams.
-                    if let Some(idx) =
-                        connection_data.streams.iter().position(|s| s.uid == uid && !s.preserved)
-                    {
-                        connection_data.streams.swap_remove(idx);
-                    }
+                    connection_data.streams.swap_remove(stream_idx);
+                }
+
+                if let Some(kind) = counted_kind.filter(|_| !released_stream_kind) {
+                    connection_data.decrement_kind(kind);
+                    connection_changed = true;
                 }
 
                 // Expire and remove the session.
@@ -3447,6 +3443,71 @@ mod tests {
             .get_and_update_user_session(&user.username, &token)
             .await;
         assert!(after.is_none(), "session should be removed after terminate");
+    }
+
+    #[tokio::test]
+    async fn terminate_session_removes_preserved_adaptive_stream() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55412".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-terminate-preserved".to_string(), "127.0.0.1".to_string(), addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-terminate-preserved".to_string();
+        user.max_connections = 1;
+
+        let token = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-terminate-preserved",
+                virtual_id: 8003,
+                provider: "provider-terminate-preserved",
+                stream_url: "http://localhost/test.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        manager.add_connection(&addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 8003,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-terminate-preserved".intern(),
+                stream_channel: &test_adaptive_channel(8003),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some(&token),
+            })
+            .await
+            .expect("adaptive stream should be registered");
+
+        let released = manager.release_connection(&addr).await;
+        assert!(released.addr_removed);
+        assert!(released.removed_streams.is_empty(), "adaptive stream should be preserved first");
+
+        manager.terminate_session(&user.username, &token).await;
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections
+            .by_key
+            .get(&user.username)
+            .expect("user data should remain inspectable");
+        assert!(
+            connection_data.streams.is_empty(),
+            "terminating a session must remove its preserved adaptive stream"
+        );
+        assert!(connection_data.sessions.iter().all(|session| session.token != token));
     }
 
     #[tokio::test]
