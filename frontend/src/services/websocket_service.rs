@@ -10,6 +10,7 @@ use shared::{
 };
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     rc::Rc,
 };
 use wasm_bindgen::{closure::Closure, JsCast};
@@ -40,6 +41,7 @@ pub struct WebSocketService {
     connected: Rc<Cell<bool>>,
     attempt_counter: Rc<Cell<u16>>,
     ws: Rc<RefCell<Option<WebSocket>>>,
+    pending_messages: Rc<RefCell<VecDeque<Vec<u8>>>>,
     status_service: Rc<StatusService>,
     event_service: Rc<EventService>,
     ws_path: String,
@@ -58,6 +60,7 @@ impl WebSocketService {
             connected: Rc::new(Cell::new(false)),
             attempt_counter: Rc::new(Cell::new(0)),
             ws: Rc::new(RefCell::new(None)),
+            pending_messages: Rc::new(RefCell::new(VecDeque::new())),
             status_service,
             event_service,
             ws_path: concat_path_leading_slash(&base_href, "ws"),
@@ -74,6 +77,7 @@ impl WebSocketService {
             connected: self.connected.clone(),
             attempt_counter: self.attempt_counter.clone(),
             ws: self.ws.clone(),
+            pending_messages: self.pending_messages.clone(),
             status_service: self.status_service.clone(),
             event_service: self.event_service.clone(),
             ws_path: self.ws_path.clone(),
@@ -85,7 +89,7 @@ impl WebSocketService {
     }
 
     pub fn connect_ws_with_backoff(&self) {
-        if self.connected.get() {
+        if self.ws.borrow().is_some() {
             return;
         }
         match WebSocket::new(&self.ws_path) {
@@ -101,12 +105,20 @@ impl WebSocketService {
                     let ws_onmessage_clone = ws_clone.clone();
                     let event_service = self.event_service.clone();
                     let attempt_counter = self.attempt_counter.clone();
+                    let connected = self.connected.clone();
+                    let pending_messages = self.pending_messages.clone();
                     let onmessage_callback =
                         Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(move |event: MessageEvent| {
                             trace!("WebSocket received message: {event:?}");
-                            if let Some(response) = handle_socket_protocol_msg(event, &event_service, &attempt_counter)
-                            {
-                                Self::try_send_message(ws_onmessage_clone.borrow().as_ref(), response);
+                            if let Some(response) = handle_socket_protocol_msg(
+                                event,
+                                &event_service,
+                                &attempt_counter,
+                                &connected,
+                                &pending_messages,
+                                &ws_onmessage_clone,
+                            ) {
+                                Self::try_send_message(ws_onmessage_clone.borrow().as_ref(), &response);
                             }
                         }));
                     socket.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
@@ -120,14 +132,13 @@ impl WebSocketService {
                     let ws_open_clone = ws_clone.clone();
                     let connected_clone = self.connected.clone();
                     let onopen_callback = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| {
-                        // on open is called on a connect attempt, it does not mean it is connected!
+                        // on open starts the protocol handshake; application messages wait until authorization.
                         trace!("WebSocket connection opened.");
-                        if Self::try_send_message(
+                        connected_clone.set(false);
+                        Self::try_send_message(
                             ws_open_clone.borrow().as_ref(),
-                            ProtocolMessage::Version(PROTOCOL_VERSION),
-                        ) {
-                            connected_clone.set(true);
-                        }
+                            &ProtocolMessage::Version(PROTOCOL_VERSION),
+                        );
                     }));
                     socket.set_onopen(Some(onopen_callback.as_ref().unchecked_ref()));
                     ws_onopen_ref.borrow_mut().replace(onopen_callback);
@@ -224,25 +235,47 @@ impl WebSocketService {
         );
     }
 
-    fn try_send_message(ws_opt: Option<&WebSocket>, msg: ProtocolMessage) -> bool {
+    fn try_send_message(ws_opt: Option<&WebSocket>, msg: &ProtocolMessage) -> bool {
+        match msg.to_bytes() {
+            Ok(bytes) => Self::try_send_bytes(ws_opt, bytes.as_ref()),
+            Err(err) => {
+                error!("Failed to create WebSocket protocol version message: {err}");
+                false
+            }
+        }
+    }
+
+    fn try_send_bytes(ws_opt: Option<&WebSocket>, bytes: &[u8]) -> bool {
         if let Some(ws) = ws_opt {
-            match msg.to_bytes() {
-                Ok(bytes) => {
-                    if let Err(err) = ws.send_with_u8_array(bytes.as_ref()) {
-                        error!("Failed to send a websocket message: {err:?}");
-                    } else {
-                        return true;
-                    }
-                }
-                Err(err) => {
-                    error!("Failed to create WebSocket protocol version message: {err}")
-                }
+            if ws.ready_state() != WebSocket::OPEN {
+                return false;
+            }
+            if let Err(err) = ws.send_with_u8_array(bytes) {
+                error!("Failed to send a websocket message: {err:?}");
+            } else {
+                return true;
             }
         }
         false
     }
 
-    pub fn send_message(&self, msg: ProtocolMessage) -> bool { Self::try_send_message(self.ws.borrow().as_ref(), msg) }
+    pub fn send_message(&self, msg: ProtocolMessage) -> bool {
+        if self.connected.get() && Self::try_send_message(self.ws.borrow().as_ref(), &msg) {
+            return true;
+        }
+
+        match msg.to_bytes() {
+            Ok(bytes) => {
+                self.pending_messages.borrow_mut().push_back(bytes.to_vec());
+                trace!("Queued websocket message until connection is ready.");
+                true
+            }
+            Err(err) => {
+                error!("Failed to create WebSocket message: {err}");
+                false
+            }
+        }
+    }
 
     pub async fn get_server_status(&self) {
         if self.connected.get() {
@@ -269,6 +302,9 @@ fn handle_socket_protocol_msg(
     event: MessageEvent,
     event_service: &Rc<EventService>,
     attempt_counter: &Rc<Cell<u16>>,
+    connected: &Rc<Cell<bool>>,
+    pending_messages: &Rc<RefCell<VecDeque<Vec<u8>>>>,
+    ws: &Rc<RefCell<Option<WebSocket>>>,
 ) -> Option<ProtocolMessage> {
     if let Ok(buf) = event.data().dyn_into::<ArrayBuffer>() {
         let array = Uint8Array::new(&buf);
@@ -277,12 +313,15 @@ fn handle_socket_protocol_msg(
             Ok(message) => {
                 match message {
                     ProtocolMessage::Unauthorized => {
+                        connected.set(false);
                         event_service.broadcast(EventMessage::Unauthorized);
                     }
                     ProtocolMessage::Error(err) => {
                         error!("{err}");
                     }
                     ProtocolMessage::Authorized => {
+                        connected.set(true);
+                        flush_pending_messages(pending_messages, ws);
                         event_service.broadcast(EventMessage::WebSocketStatus(true));
                     }
                     ProtocolMessage::ActiveUserResponse(event) => {
@@ -332,6 +371,8 @@ fn handle_socket_protocol_msg(
                         if let Some(token) = get_token() {
                             return Some(ProtocolMessage::Auth(token));
                         } else {
+                            connected.set(true);
+                            flush_pending_messages(pending_messages, ws);
                             event_service.broadcast(EventMessage::WebSocketStatus(true));
                         }
                     }
@@ -354,4 +395,27 @@ fn handle_socket_protocol_msg(
         }
     }
     None
+}
+
+fn flush_pending_messages(pending_messages: &Rc<RefCell<VecDeque<Vec<u8>>>>, ws: &Rc<RefCell<Option<WebSocket>>>) {
+    let mut pending = pending_messages.borrow_mut();
+    if pending.is_empty() {
+        return;
+    }
+
+    let ws_borrow = ws.borrow();
+    let Some(ws) = ws_borrow.as_ref() else {
+        return;
+    };
+
+    let mut remaining = VecDeque::new();
+    while let Some(bytes) = pending.pop_front() {
+        if !WebSocketService::try_send_bytes(Some(ws), bytes.as_slice()) {
+            remaining.push_back(bytes);
+            remaining.append(&mut pending);
+            break;
+        }
+    }
+
+    *pending = remaining;
 }
