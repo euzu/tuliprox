@@ -734,9 +734,11 @@ fn get_quality(strm_target_output: &StrmTargetOutput, pli: &PlaylistItem, separa
 /// Returns `true` if `s` contains a known TMDB path marker.
 fn strm_contains_tmdb_marker(s: &str) -> bool {
     s.contains(" {tmdb=")
+        || s.contains(" {tmdb-")
         || s.contains(" [tmdbid=")
         || s.contains(" [tmdbid-")
         || s.contains("_{tmdb=")
+        || s.contains("_{tmdb-")
         || s.contains("_[tmdbid=")
         || s.contains("_[tmdbid-")
 }
@@ -745,7 +747,9 @@ fn strm_contains_tmdb_marker(s: &str) -> bool {
 /// returning the equivalent no-tmdb path used for identity matching.
 fn strip_tmdb_markers(s: &str) -> String {
     let mut result = s.to_string();
-    for marker_prefix in &[" {tmdb=", " [tmdbid=", " [tmdbid-", "_{tmdb=", "_[tmdbid=", "_[tmdbid-"] {
+    for marker_prefix in
+        &[" {tmdb=", " {tmdb-", " [tmdbid=", " [tmdbid-", "_{tmdb=", "_{tmdb-", "_[tmdbid=", "_[tmdbid-"]
+    {
         while let Some(start) = result.find(marker_prefix) {
             let close_char = if marker_prefix.contains('{') { '}' } else { ']' };
             let search_from = start + marker_prefix.len();
@@ -1215,7 +1219,7 @@ async fn remove_empty_dirs(root_path: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_strm_source_url, StrmItemInfo};
+    use super::{resolve_strm_source_url, strip_tmdb_markers, strm_contains_tmdb_marker, StrmItemInfo};
     use crate::model::{ConfigInput, ConfigProvider};
     use shared::model::{ConfigProviderDto, InputType, PlaylistItemType, ProviderUrlSelectionPolicy};
     use std::{collections::HashMap, sync::Arc};
@@ -1255,6 +1259,14 @@ mod tests {
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn tmdb_marker_helpers_keep_legacy_dash_marker_compatibility() {
+        let path = "Movies/Movie Name (2020) {tmdb-12345}/Movie Name (2020).strm";
+
+        assert!(strm_contains_tmdb_marker(path));
+        assert_eq!(strip_tmdb_markers(path), "Movies/Movie Name (2020)/Movie Name (2020).strm");
     }
 
     #[test]

@@ -1122,6 +1122,10 @@ output:
 
 Generates local `.strm` files for Emby, Jellyfin, or Kodi-based library ingestion.
 
+> **Upgrade note:** `style: plex` is no longer supported. Existing STRM targets must switch to `kodi`,
+> `emby`, or `jellyfin`, for example `style: plex` -> `style: jellyfin`. For Plex use cases, use the
+> `hdhomerun` integration instead. Leaving `style: plex` in the configuration will fail validation.
+
 #### `strm` Parameters
 
 | Parameter                 | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                       |
