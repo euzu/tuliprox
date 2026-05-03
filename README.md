@@ -48,7 +48,7 @@ See [`LICENSE`](https://github.com/euzu/tuliprox/blob/develop/LICENSE).
 | **M3U/M3U8**         | For all IPTV players (VLC, Tivimate, iMPlayer, etc.)                      |
 | **Xtream Codes API** | Full Xtream API with Live, VOD, Series, Catchup, EPG                      |
 | **HDHomeRun**        | Emulation for Plex, Jellyfin, Emby — auto-discovery via SSDP              |
-| **STRM**             | Kodi/Plex/Jellyfin compatible with multi-version support and quality tags |
+| **STRM**             | Kodi/Jellyfin/Emby compatible with multi-version support and quality tags |
 
 Generate all four formats simultaneously from the same source — one setup, every platform covered.
 
@@ -265,7 +265,8 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - Merge multiple providers into one unified playlist
 - Filter, rename, sort channels — exactly the way you want
 - Automatic EPG assignment with fuzzy matching
-- Kodi/Plex/Jellyfin integration via STRM or HDHomeRun
+- Kodi/Jellyfin/Emby integration via STRM
+- Plex integration via HDHomeRun
 
 ### For Self-Hosted & Homelab Users
 

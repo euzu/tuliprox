@@ -484,65 +484,6 @@ fn format_for_kodi(
     }
 }
 
-/// Formats names according to the official Plex documentation.
-/// Movie: /Movie Name (Year) {tmdb-XXXXX}/Movie Name (Year).strm
-/// Series: /Show Name (Year) {tmdb-XXXXX}/Season 01/Show Name - s01e01.strm
-fn format_for_plex(
-    strm_item_info: &StrmItemInfo,
-    tmdb_id: u32,
-    separator: &str,
-    flat: bool,
-    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
-) -> (PathBuf, String) {
-    // Plex ID format: {tmdb-12345}
-    let parts = prepare_filename_parts(strm_item_info, tmdb_id, separator, &format!("{separator}{{tmdb-{{}}}}"));
-    let mut dir_path = PathBuf::new();
-
-    match strm_item_info.item_type {
-        PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
-            let folder_name = format!("{}{}", parts.base_name, parts.id_string);
-            let final_filename = parts.base_name;
-
-            if flat {
-                if tmdb_id > 0 {
-                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path.clone_from(path);
-                    } else {
-                        dir_path.push(&folder_name);
-                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
-                    }
-                } else {
-                    dir_path.push(format!("{folder_name}{separator}[{}]", parts.category));
-                }
-            } else {
-                dir_path.push(parts.category);
-                dir_path.push(folder_name);
-            }
-            (dir_path, final_filename)
-        }
-        PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
-            let series_folder_name = format!("{}{}", parts.base_name, parts.id_string);
-            let season_num = strm_item_info.season.unwrap_or(1);
-            let episode_num = strm_item_info.episode.unwrap_or(1);
-
-            // Plex standard: lowercase 's' and hyphens as separators.
-            let final_filename = format!("{} - s{season_num:02}e{episode_num:02}", parts.sanitized_name);
-            let season_folder = format!("Season{separator}{season_num:02}");
-
-            if flat {
-                dir_path.push(format!("{series_folder_name}{separator}[{}]", parts.category));
-                dir_path.push(season_folder);
-            } else {
-                dir_path.push(parts.category);
-                dir_path.push(series_folder_name);
-                dir_path.push(season_folder);
-            }
-            (dir_path, final_filename)
-        }
-        _ => (PathBuf::new(), sanitize_for_filename(&strm_item_info.title, separator == "_")),
-    }
-}
-
 /// Formats names according to the official Emby documentation.
 /// Movie: /Movie Name (Year)/Movie Name (Year) [tmdbid=XXXXX].strm
 /// Series: /Show Name (Year) [tmdbid=XXXXX]/Season 01/Show Name - S01E01.strm
@@ -680,7 +621,6 @@ fn style_based_rename(
     // Dispatch the call to the responsible function based on the style.
     match style {
         StrmExportStyle::Kodi => format_for_kodi(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
-        StrmExportStyle::Plex => format_for_plex(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
         StrmExportStyle::Emby => format_for_emby(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
         StrmExportStyle::Jellyfin => format_for_jellyfin(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
     }
@@ -794,11 +734,9 @@ fn get_quality(strm_target_output: &StrmTargetOutput, pli: &PlaylistItem, separa
 /// Returns `true` if `s` contains a known TMDB path marker.
 fn strm_contains_tmdb_marker(s: &str) -> bool {
     s.contains(" {tmdb=")
-        || s.contains(" {tmdb-")
         || s.contains(" [tmdbid=")
         || s.contains(" [tmdbid-")
         || s.contains("_{tmdb=")
-        || s.contains("_{tmdb-")
         || s.contains("_[tmdbid=")
         || s.contains("_[tmdbid-")
 }
@@ -807,9 +745,7 @@ fn strm_contains_tmdb_marker(s: &str) -> bool {
 /// returning the equivalent no-tmdb path used for identity matching.
 fn strip_tmdb_markers(s: &str) -> String {
     let mut result = s.to_string();
-    for marker_prefix in
-        &[" {tmdb=", " {tmdb-", " [tmdbid=", " [tmdbid-", "_{tmdb=", "_{tmdb-", "_[tmdbid=", "_[tmdbid-"]
-    {
+    for marker_prefix in &[" {tmdb=", " [tmdbid=", " [tmdbid-", "_{tmdb=", "_[tmdbid=", "_[tmdbid-"] {
         while let Some(start) = result.find(marker_prefix) {
             let close_char = if marker_prefix.contains('{') { '}' } else { ']' };
             let search_from = start + marker_prefix.len();
