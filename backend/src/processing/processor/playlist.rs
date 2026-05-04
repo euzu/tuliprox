@@ -1116,7 +1116,7 @@ async fn process_playlist_for_target(
 
     if new_playlist.is_empty() {
         step.stop("");
-        info!("Playlist is empty: {}", &target.name);
+        info!("Playlist is empty: {}", target.name);
         Ok(())
     } else {
         // Process Trakt categories

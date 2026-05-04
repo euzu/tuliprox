@@ -1417,7 +1417,7 @@ async fn xtream_player_api(fingerprint: &Fingerprint, api_req: UserApiRequest, a
             skip_series,
             xtream_load_rewrite_playlist(XtreamCluster::Series, app_state, &target, category_id, &user).await
         ),
-        _ => Some(Err(TuliproxError::ApiXtream(format!("Unknown api call: {action} for target: {}", &target.name)))),
+        _ => Some(Err(TuliproxError::ApiXtream(format!("Unknown api call: {action} for target: {}", target.name)))),
     };
 
     match result {
@@ -1432,7 +1432,7 @@ async fn xtream_player_api(fingerprint: &Fingerprint, api_req: UserApiRequest, a
                         .body(axum::body::Body::from_stream(content_stream)))
                 }
                 Err(err) => {
-                    error!("Failed response for xtream target: {} action: {} error: {}", &target.name, action, err);
+                    error!("Failed response for xtream target: {} action: {} error: {}", target.name, action, err);
                     get_user_info(&user, app_state).await.map_or_else(
                         || axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
                         |info| axum::response::Json(info).into_response(),

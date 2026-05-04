@@ -92,7 +92,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
     if let Ok(content) = get_xtream_stream_info_content(app_config, client, &input_source, false).await {
         if content.is_empty() {
             return Err(TuliproxError::ApiXtream(format!("Provider returned no response for stream with id: {}/{}/{}",
-                                                  target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())));
+                                                  target.name.replace(' ', "_").as_str(), cluster, pli.get_virtual_id())));
         }
         if let Some(provider_id) = pli.get_provider_id() {
             match cluster {
@@ -107,7 +107,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
 
                                 // persist input info
                                 if let Err(err) = persist_input_vod_info(&app_state.app_config, &storage_path, cluster, &input.name, provider_id, &video_stream_props).await {
-                                    error!("Failed to persist video stream for input {}: {err}", &input.name);
+                                    error!("Failed to persist video stream for input {}: {err}", input.name);
                                 }
 
                                 // update target playlist
@@ -143,7 +143,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                             if let Ok(storage_path) = get_input_storage_path(&input.name, storage_dir).await {
                                 // update input db
                                 if let Err(err) = persists_input_series_info(app_config, &storage_path, cluster, &input.name, provider_id, &series_stream_props).await {
-                                    error!("Failed to persist series info for input {}: {err}", &input.name);
+                                    error!("Failed to persist series info for input {}: {err}", input.name);
                                 }
                             }
 
@@ -164,7 +164,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                 let config = &app_state.app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {
-                                        error!("Failed to get target storage path {}. Can't save episodes", &target.name);
+                                        error!("Failed to get target storage path {}. Can't save episodes", target.name);
                                     }
                                     Some(target_path) => {
                                         let mut in_memory_updates = Vec::new();
@@ -243,7 +243,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
     }
 
     Err(TuliproxError::ApiXtream(format!("Can't find stream with id: {}/{}/{}",
-                                   target.name.replace(' ', "_").as_str(), &cluster, pli.get_virtual_id())))
+                                   target.name.replace(' ', "_").as_str(), cluster, pli.get_virtual_id())))
 }
 
 fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredentials,
@@ -273,7 +273,7 @@ pub(crate) fn get_skip_cluster(input: &ConfigInput) -> Vec<XtreamCluster> {
         skip_cluster.push(XtreamCluster::Series);
     }
     if skip_cluster.len() == 3 {
-        info!("You have skipped all sections from xtream input {}", &input.name);
+        info!("You have skipped all sections from xtream input {}", input.name);
     }
     skip_cluster
 }
@@ -288,7 +288,7 @@ pub async fn xtream_login(app_config: &Arc<AppConfig>, client: &reqwest::Client,
         content
     } else {
         let input_source_account_info =
-            input.with_url(format!("{}&action={}", &input.url, crate::model::XC_ACTION_GET_ACCOUNT_INFO));
+            input.with_url(format!("{}&action={}", input.url, crate::model::XC_ACTION_GET_ACCOUNT_INFO));
         match request::get_input_json_content(app_config, client, &input_source_account_info, None, false).await {
             Ok(content) => content,
             Err(err) => {

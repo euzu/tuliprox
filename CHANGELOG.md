@@ -193,6 +193,7 @@
 - **API User Category Selection**: Fixed API user category selection in the Web UI.
 - **Refactored Playlist And EPG Explorer**: Playlist Explorer and EPG Explorer have been refactored for improved reliability and UX.
 - HLS session info now reports accurate duration and total transferred data.
+- Removed open-ssl dependency
 
 ## ⚙️ New Settings
 

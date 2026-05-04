@@ -49,7 +49,7 @@ impl XtreamPlaylistIterator {
         if let Some(storage_path) = xtream_get_storage_path(&config, target.name.as_str()) {
             let xtream_path = xtream_get_file_path(&storage_path, cluster);
             if !xtream_path.exists() {
-                return Err(TuliproxError::Config(format!("No {cluster} entries found for target {}", &target.name)));
+                return Err(TuliproxError::Config(format!("No {cluster} entries found for target {}", target.name)));
             }
             // Hold iter_lock for the stream lifetime (LockedReceiverStream), and bg_lock for the background reader.
             let iter_lock = app_config.file_locks.read_lock(&xtream_path).await;
@@ -129,7 +129,7 @@ impl XtreamPlaylistIterator {
 
             Ok(Self { inner: LockedReceiverStream::new(rx, iter_lock) })
         } else {
-            Err(TuliproxError::Config(format!("Failed to find xtream storage for target {}", &target.name)))
+            Err(TuliproxError::Config(format!("Failed to find xtream storage for target {}", target.name)))
         }
     }
 

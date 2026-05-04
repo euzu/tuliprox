@@ -240,11 +240,11 @@ impl ConfigFile {
             Ok(Some(api_proxy)) => {
                 app_state.app_config.set_api_proxy(api_proxy)?;
                 let paths = app_state.app_config.paths.load();
-                info!("Loaded Api Proxy File: {:?}", &paths.api_proxy_file_path);
+                info!("Loaded Api Proxy File: {:?}", paths.api_proxy_file_path);
             }
             Ok(None) => {
                 let paths = app_state.app_config.paths.load();
-                info!("Could not load Api Proxy File: {:?}", &paths.api_proxy_file_path);
+                info!("Could not load Api Proxy File: {:?}", paths.api_proxy_file_path);
             }
             Err(err) => {
                 error!("Failed to load api-proxy file {err}");

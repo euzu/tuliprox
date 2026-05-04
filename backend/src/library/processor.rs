@@ -227,7 +227,7 @@ impl LibraryProcessor {
         can_extract_thumbnails: bool,
     ) -> Result<ProcessAction, String> {
         match group {
-            MediaGroup::Movie { file: _, .. } => {
+            MediaGroup::Movie { .. } => {
                 self.process_movie(group, existing_map, force_rescan, can_probe, can_extract_thumbnails).await
             }
             MediaGroup::Series { show_key: _, episodes: _ } => {
