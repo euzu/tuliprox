@@ -1109,7 +1109,7 @@ output:
   - type: strm
     directory: /media/strm
     username: local_user
-    style: plex
+    style: jellyfin
     flat: true
     cleanup: false
     underscore_whitespace: false
@@ -1120,7 +1120,11 @@ output:
     filter: 'Type = vod'
 ```
 
-Generates local `.strm` files for Plex, Emby, Jellyfin, or Kodi-based library ingestion.
+Generates local `.strm` files for Emby, Jellyfin, or Kodi-based library ingestion.
+
+> **Upgrade note:** `style: plex` is no longer supported. Existing STRM targets must switch to `kodi`,
+> `emby`, or `jellyfin`, for example `style: plex` -> `style: jellyfin`. For Plex use cases, use the
+> `hdhomerun` integration instead. Leaving `style: plex` in the configuration will fail validation.
 
 #### `strm` Parameters
 
@@ -1131,7 +1135,7 @@ Generates local `.strm` files for Plex, Emby, Jellyfin, or Kodi-based library in
 | `username`                | String |    No    |         | Optional username context used when generating stream references. This affects which user-specific URL or access context Tuliprox embeds into the exported `.strm` files.                                           |
 | `underscore_whitespace`   | Bool   |    No    | `false` | Replaces whitespace with `_` in paths and filenames. This improves compatibility with environments or scrapers that prefer filesystem-safe, normalized naming.                                                      |
 | `cleanup`                 | Bool   |    No    | `false` | If enabled, Tuliprox removes orphaned output files from the STRM directory. This keeps the export directory synchronized with the target, but can delete files if the directory points to an existing media folder. |
-| `style`                   | Enum   |   Yes    |         | Naming convention for the output structure. Supported values: `kodi`, `plex`, `emby`, `jellyfin`. This affects scraper compatibility and how downstream media servers identify titles.                              |
+| `style`                   | Enum   |   Yes    |         | Naming convention for the output structure. Supported values: `kodi`, `emby`, `jellyfin`. This affects scraper compatibility and how downstream media servers identify titles.                                      |
 | `flat`                    | Bool   |    No    | `false` | If enabled, Tuliprox creates a flatter directory structure. This changes how categories and group information are represented on disk and can simplify some media-server imports.                                   |
 | `strm_props`              | List   |    No    |         | Stream property lines inserted into `.strm` files, mainly for Kodi player behavior. This allows low-level playback hints to be embedded directly into generated files.                                              |
 | `add_quality_to_filename` | Bool   |    No    | `false` | Appends detected media quality tags such as `[1080p 4K HEVC HDR]` to the filename. This improves visibility in library UIs but depends on prior probing/enrichment data being available.                            |
@@ -1140,7 +1144,6 @@ Generates local `.strm` files for Plex, Emby, Jellyfin, or Kodi-based library in
 #### Supported `style` Conventions
 
 * **Kodi:** `Movie Name (Year) {tmdb=ID}/Movie Name (Year).strm`
-* **Plex:** `Movie Name (Year) {tmdb-ID}/Movie Name (Year).strm`
 * **Emby:** `Movie Name (Year) [tmdbid=ID]/Movie Name (Year).strm`
 * **Jellyfin:** `Movie Name (Year) [tmdbid-ID]/Movie Name (Year).strm`
 

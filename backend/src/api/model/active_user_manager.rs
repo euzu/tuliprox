@@ -3526,6 +3526,7 @@ mod tests {
         assert!(connection_data.sessions.iter().all(|session| session.token != token));
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn terminate_session_promotes_soft_stream_after_releasing_capacity() {
         let config = Config::default();
