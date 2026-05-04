@@ -507,7 +507,11 @@ async fn playlist_download_from_input(
                 let (p, e) = library::download_library_playlist(client, app_config, input).await;
                 (p, e, false, 0, 0)
             }
-            InputType::Emby | InputType::Jellyfin | InputType::Plex => (
+            InputType::Plex => {
+                let (p, e) = crate::media_server::download_plex_media_server_playlist(client, input).await;
+                (p, e, false, 0, 0)
+            }
+            InputType::Emby | InputType::Jellyfin => (
                 vec![],
                 vec![TuliproxError::Download(format!(
                     "media-server input '{}' is configured but catalog import is not implemented yet",

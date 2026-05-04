@@ -33,10 +33,11 @@ impl MediaServerCatalogCursor {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MediaServerCatalogRefreshPolicy {
     pub page_size: usize,
+    pub request_delay: std::time::Duration,
 }
 
 impl Default for MediaServerCatalogRefreshPolicy {
-    fn default() -> Self { Self { page_size: 100 } }
+    fn default() -> Self { Self { page_size: 100, request_delay: std::time::Duration::ZERO } }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -113,6 +114,7 @@ where
                     let next_request = page.next_request();
                     snapshot.movies.extend(page.items);
                     let Some(next) = next_request else { break };
+                    delay_next_catalog_request(policy.request_delay).await;
                     page_request = next;
                 }
             }
@@ -124,6 +126,7 @@ where
                     let next_request = page.next_request();
                     snapshot.episodes.extend(page.items);
                     let Some(next) = next_request else { break };
+                    delay_next_catalog_request(policy.request_delay).await;
                     page_request = next;
                 }
             }
@@ -132,6 +135,12 @@ where
     }
 
     Ok(snapshot)
+}
+
+async fn delay_next_catalog_request(delay: std::time::Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
 }
 
 fn validate_page_progress<T>(library: &MediaServerLibrary, page: &MediaServerPage<T>) -> Result<(), MediaServerError> {
@@ -270,7 +279,7 @@ mod tests {
         ]);
 
         let outcome = cache
-            .refresh_or_retain(&client, MediaServerCatalogRefreshPolicy { page_size: 1 })
+            .refresh_or_retain(&client, MediaServerCatalogRefreshPolicy { page_size: 1, ..MediaServerCatalogRefreshPolicy::default() })
             .await;
 
         assert!(matches!(outcome, MediaServerCatalogRefreshOutcome::Retained { retained: true, .. }));

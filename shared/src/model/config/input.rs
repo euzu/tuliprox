@@ -623,9 +623,9 @@ impl MediaServerInputConfigDto {
         is_non_blank_optional_string(&self.token) || is_non_blank_optional_string(&self.api_key)
     }
 
-    pub fn has_any_plex_token(&self) -> bool {
-        is_non_blank_optional_string(&self.account_token) || is_non_blank_optional_string(&self.token)
-    }
+    pub fn has_plex_pms_token(&self) -> bool { is_non_blank_optional_string(&self.token) }
+
+    pub fn has_plex_account_token(&self) -> bool { is_non_blank_optional_string(&self.account_token) }
 
     pub fn has_plex_server_selector(&self) -> bool {
         is_non_blank_optional_string(&self.server_id)
@@ -970,15 +970,22 @@ impl ConfigInputDto {
                 }
             }
             InputType::Plex => {
-                if !media_server.has_any_plex_token() {
+                if trimmed_url.is_empty() {
+                    if !media_server.has_plex_account_token() {
+                        return Err(TuliproxError::ConfigInput(format!(
+                            "media-server input type plex discovery requires media_server.account_token (input: {})",
+                            self.name
+                        )));
+                    }
+                    if !media_server.has_plex_server_selector() {
+                        return Err(TuliproxError::ConfigInput(format!(
+                            "media-server input type plex requires a server selector such as media_server.machine_id, media_server.server_id, or media_server.server_name when input.url is omitted (input: {})",
+                            self.name
+                        )));
+                    }
+                } else if !media_server.has_plex_pms_token() {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires media_server.account_token or media_server.token (input: {})",
-                        self.name
-                    )));
-                }
-                if trimmed_url.is_empty() && !media_server.has_plex_server_selector() {
-                    return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires a server selector such as media_server.machine_id, media_server.server_id, or media_server.server_name when input.url is omitted (input: {})",
+                        "media-server input type plex direct PMS URL requires media_server.token (input: {})",
                         self.name
                     )));
                 }
@@ -1477,8 +1484,8 @@ mod tests {
             }),
             ..ConfigInputDto::default()
         };
-        let err = prepare_dto(&mut plex).expect_err("blank plex token should be rejected");
-        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
+        let err = prepare_dto(&mut plex).expect_err("blank plex account token should be rejected");
+        assert!(err.to_string().contains("requires media_server.account_token"));
     }
 
     #[test]
@@ -1655,8 +1662,8 @@ mod tests {
             }),
             ..ConfigInputDto::default()
         };
-        let err = prepare_dto(&mut without_token).expect_err("plex token should be mandatory");
-        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
+        let err = prepare_dto(&mut without_token).expect_err("plex account token should be mandatory for discovery");
+        assert!(err.to_string().contains("requires media_server.account_token"));
 
         let mut without_selector = ConfigInputDto {
             name: "plex_media_server".intern(),
@@ -1703,6 +1710,23 @@ mod tests {
 
         prepare_dto(&mut dto).expect("direct Plex URL should not require MyPlex server selector");
         assert_eq!(dto.input_type, InputType::Plex);
+    }
+
+    #[test]
+    fn prepare_rejects_plex_direct_url_without_pms_token() {
+        let mut dto = ConfigInputDto {
+            name: "plex_media_server".intern(),
+            input_type: InputType::Plex,
+            url: "https://plex.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfigDto {
+                account_token: Some("account-token".to_string()),
+                ..media_server_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let err = prepare_dto(&mut dto).expect_err("direct Plex URL should require media_server.token");
+        assert!(err.to_string().contains("direct PMS URL requires media_server.token"));
     }
 
     #[test]

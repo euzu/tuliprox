@@ -4,12 +4,13 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
-            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
-            ProviderStreamFactoryOptions, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
-            StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, PendingProviderReason,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
+            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamManager, StreamDetails,
+            StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, PendingProviderReason,
         },
     },
     auth::Fingerprint,
+    media_server::{media_server_stream_response, parse_media_server_stream_ref, plex::PlexClient, MediaServerStreamRef},
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
@@ -1526,6 +1527,50 @@ fn should_defer_provider_open_for_grace_hold(
     !(!item_type.is_live() && item_type.requires_provider_affinity() && is_reopen)
 }
 
+fn is_media_server_stream_request(input: &ConfigInput, stream_url: &str) -> bool {
+    input.input_type.is_media_server() || stream_url.starts_with("media-server://")
+}
+
+async fn open_media_server_provider_stream(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    stream_url: &str,
+    req_headers: &HeaderMap,
+) -> Result<(BoxedProviderStream, ProviderStreamInfo), TuliproxError> {
+    let stream_ref = parse_media_server_stream_ref(&input.name, stream_url)
+        .map_err(|err| TuliproxError::Download(format!("media-server input '{}' playback ref failed: {err}", input.name)))?;
+    let range = req_headers.get(header::RANGE).and_then(|value| value.to_str().ok());
+    match stream_ref {
+        MediaServerStreamRef::Plex { .. } => {
+            let http_client = app_state.http_client.load().as_ref().clone();
+            let plex = PlexClient::from_input(http_client, input)
+                .await
+                .map_err(|err| TuliproxError::Download(format!("media-server input '{}' Plex playback discovery failed: {err}", input.name)))?;
+            let response = media_server_stream_response(&plex, &stream_ref, range)
+                .await
+                .map_err(|err| TuliproxError::Download(format!("media-server input '{}' Plex playback failed: {err}", input.name)))?;
+            let headers = provider_headers_from_header_map(&response.headers);
+            let status = response.status;
+            let stream = response
+                .body
+                .map(|chunk| chunk.map_err(|err| StreamError::Stream(err.to_string())))
+                .boxed();
+            Ok((stream, Some((headers, status, None, None))))
+        }
+        MediaServerStreamRef::Emby { .. } | MediaServerStreamRef::Jellyfin { .. } => Err(TuliproxError::Download(format!(
+            "media-server input '{}' playback is not implemented for this media-server kind yet",
+            input.name
+        ))),
+    }
+}
+
+fn provider_headers_from_header_map(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_string(), value.to_string())))
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn create_stream_response_details(
     app_state: &Arc<AppState>,
@@ -1647,6 +1692,15 @@ async fn create_stream_response_details(
                     sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
                 );
                 (None, None, None)
+            } else if is_media_server_stream_request(input, request_url.as_ref()) {
+                match open_media_server_provider_stream(app_state, input, request_url.as_ref(), req_headers).await {
+                    Ok((stream, stream_info)) => (Some(stream), stream_info, None),
+                    Err(err) => {
+                        let provider_handle = streaming_strategy.provider_handle.take();
+                        app_state.connection_manager.release_provider_handle(provider_handle).await;
+                        return Err(err);
+                    }
+                }
             } else {
                 let parsed_url = Url::parse(&request_url);
                 let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {

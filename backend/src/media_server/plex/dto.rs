@@ -2,6 +2,17 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename = "MediaContainer")]
+pub struct PlexIdentityDto {
+    #[serde(rename = "@machineIdentifier")]
+    pub machine_identifier: Option<String>,
+    #[serde(rename = "@friendlyName")]
+    pub friendly_name: Option<String>,
+    #[serde(rename = "@version")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename = "MediaContainer")]
 pub struct PlexResourcesDto {
     #[serde(rename = "Device", default)]
     pub devices: Vec<PlexResourceDto>,
@@ -67,6 +78,10 @@ pub struct PlexMediaContainerDto {
     pub videos: Vec<PlexVideoDto>,
     #[serde(rename = "Directory", default)]
     pub directories: Vec<PlexDirectoryDto>,
+}
+
+impl PlexMediaContainerDto {
+    pub fn upstream_item_count(&self) -> usize { self.size.unwrap_or_else(|| self.videos.len() + self.directories.len()) }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -164,7 +179,15 @@ pub struct PlexPartDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::test_fixtures::{PLEX_MOVIES_XML, PLEX_RESOURCES_XML, PLEX_SECTIONS_XML};
+    use crate::media_server::test_fixtures::{PLEX_IDENTITY_XML, PLEX_MOVIES_XML, PLEX_RESOURCES_XML, PLEX_SECTIONS_XML};
+
+    #[test]
+    fn parses_plex_identity() {
+        let identity: PlexIdentityDto = quick_xml::de::from_str(PLEX_IDENTITY_XML).expect("fixture parses");
+
+        assert_eq!(identity.machine_identifier.as_deref(), Some("machine-redacted"));
+        assert_eq!(identity.friendly_name.as_deref(), Some("Server Redacted"));
+    }
 
     #[test]
     fn parses_plex_resources_without_exposing_resource_token() {
@@ -190,6 +213,7 @@ mod tests {
         let part = &movie.media[0].parts[0];
 
         assert_eq!(container.total_size, Some(1));
+        assert_eq!(container.upstream_item_count(), 1);
         assert_eq!(movie.rating_key.as_deref(), Some("rating-redacted-1"));
         assert_eq!(part.key.as_deref(), Some("/library/parts/part-redacted/file.mkv"));
         assert!(part.file.as_deref().is_some_and(|file| file.contains("/redacted/")));
