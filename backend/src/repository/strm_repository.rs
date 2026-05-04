@@ -1207,7 +1207,7 @@ async fn delete_empty_dirs_from_tree(root_path: &Path, tree_nodes: HashMap<PathB
     for node in tree_stack.into_iter().rev() {
         if !node.has_files && !node.is_root {
             if let Err(err) = remove_dir(&node.path).await {
-                trace!("Could not delete empty dir: {}, {err}", &node.path.display());
+                trace!("Could not delete empty dir: {}, {err}", node.path.display());
             }
         }
     }

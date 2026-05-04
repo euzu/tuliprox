@@ -108,7 +108,7 @@ impl LRUResourceCache {
                 {  // insert_to_cache
                     let mut path = self.cache_dir.clone();
                     path.push(&file_name);
-                    trace!("Added file to cache: {}", &path.to_string_lossy());
+                    trace!("Added file to cache: {}", path.to_string_lossy());
                     let gen = self.next_generation;
                     self.next_generation = self.next_generation.wrapping_add(1);
                     self.cache.insert(key.clone(), (path.clone(), mime_type, file_size, gen));
@@ -144,7 +144,7 @@ impl LRUResourceCache {
 
     fn insert_to_cache(&mut self, key: String, mime_type: Option<String>, file_size: usize) -> PathBuf {
         let path = self.get_store_path(&key, mime_type.as_deref());
-        debug!("Added file to cache: {}", &path.to_string_lossy());
+        debug!("Added file to cache: {}", path.to_string_lossy());
         let gen = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
         self.cache.insert(key.clone(), (path.clone(), mime_type, file_size, gen));

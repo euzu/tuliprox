@@ -203,7 +203,7 @@ fn create_device(app_state: &Arc<HdHomerunAppState>) -> Option<Device> {
     } else {
         error!(
             "Failed to get credentials for username: {} for device: {} ",
-            &app_state.device.t_username, &app_state.device.name
+            app_state.device.t_username, app_state.device.name
         );
         None
     }

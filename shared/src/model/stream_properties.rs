@@ -816,7 +816,7 @@ impl SeriesStreamProperties {
         SeriesStreamProperties {
             name: info.info.name.clone(),
             category_id: info.info.category_id.parse::<u32>().unwrap_or_else(|_| {
-                warn!("Failed to parse category_id {}", &info.info.category_id);
+                warn!("Failed to parse category_id {}", info.info.category_id);
                 0
             }),
             series_id,
@@ -829,11 +829,11 @@ impl SeriesStreamProperties {
             last_modified: Some(info.info.last_modified.clone()),
             plot: Some(info.info.plot.clone()),
             rating: info.info.rating.parse::<f64>().unwrap_or_else(|_| {
-                warn!("Failed to parse rating {}", &info.info.rating);
+                warn!("Failed to parse rating {}", info.info.rating);
                 0.0
             }),
             rating_5based: info.info.rating_5based.parse::<f64>().unwrap_or_else(|_| {
-                warn!("Failed to parse rating_5based {}", &info.info.rating_5based);
+                warn!("Failed to parse rating_5based {}", info.info.rating_5based);
                 0.0
             }),
             release_date: Some(info.info.release_date.clone()),
@@ -849,7 +849,7 @@ impl SeriesStreamProperties {
                             name: s.name.clone(),
                             season_number: s.season_number,
                             episode_count: s.episode_count.parse::<u32>().unwrap_or_else(|_| {
-                                warn!("Failed to parse episode_count {}", &s.episode_count);
+                                warn!("Failed to parse episode_count {}", s.episode_count);
                                 0
                             }),
                             overview: s.overview.clone(),
@@ -870,7 +870,7 @@ impl SeriesStreamProperties {
                         .flat_map(|(_, list)| list.iter())
                         .map(|e| SeriesStreamDetailEpisodeProperties {
                             id: e.id.parse::<u32>().unwrap_or_else(|_| {
-                                warn!("Failed to parse episode id {}", &e.id);
+                                warn!("Failed to parse episode id {}", e.id);
                                 0
                             }),
                             episode_num: e.episode_num,

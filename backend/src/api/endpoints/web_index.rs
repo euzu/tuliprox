@@ -241,16 +241,6 @@ async fn index(
             }
             let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(rnd);
 
-            // let hash = sha256(&rnd);
-            // let nonce_b64 = general_purpose::STANDARD_NO_PAD.encode(hash);
-
-            // Insert calculated nonce
-            // let script_tag = r#"<script type="module">"#;
-            // if new_content.contains(script_tag) {
-            //     let new_tag = format!(r#"<script type="module" nonce="{nonce_b64}">"#);
-            //     new_content = new_content.replacen(script_tag, &new_tag, 1);
-            // }
-
             new_content = inject_nonce_with_parser(new_content, &nonce_b64);
 
             let mut builder = axum::response::Response::builder()

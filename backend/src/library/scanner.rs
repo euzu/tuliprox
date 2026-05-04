@@ -234,13 +234,13 @@ impl LibraryScanner {
         let path = Path::new(&scan_directory.path);
 
         if !fs::try_exists(path).await.unwrap_or(false) {
-            warn!("Directory does not exist or is not readable: {}", &scan_directory.path);
+            warn!("Directory does not exist or is not readable: {}", scan_directory.path);
             return Ok(Vec::new());
         }
 
         let dir_metadata = fs::metadata(path).await?;
         if !dir_metadata.is_dir() {
-            warn!("Path is not a directory: {}", &scan_directory.path);
+            warn!("Path is not a directory: {}", scan_directory.path);
             return Ok(Vec::new());
         }
 

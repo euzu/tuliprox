@@ -597,7 +597,7 @@ async fn download_file(
                     }
                     Err(err) => DownloadExecutionResult::Failed(format!(
                         "Error while creating directory for file: {} {}",
-                        &file_download.file_dir.to_str().unwrap_or("?"),
+                        file_download.file_dir.to_str().unwrap_or("?"),
                         err
                     )),
                 }
