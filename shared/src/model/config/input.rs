@@ -8,7 +8,8 @@ use crate::{
         arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
         default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
         deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
-        is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false, is_true,
+        is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false,
+        is_non_blank_optional_string, is_true,
         is_zero_i16, is_zero_u16, parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
         serialize_option_vec_flow_map_items, trim_last_slash, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
     },
@@ -345,10 +346,6 @@ pub const fn is_default_remote_catalog_concurrency(value: &u8) -> bool {
 }
 pub const fn is_default_remote_playback_max_streams(value: &u16) -> bool {
     *value == default_remote_playback_max_streams()
-}
-
-fn is_non_blank_optional_string(value: &Option<String>) -> bool {
-    value.as_ref().is_some_and(|value| !value.trim().is_empty())
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]

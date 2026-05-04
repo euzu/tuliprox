@@ -22,6 +22,10 @@ pub fn is_blank_optional_string(s: &Option<String>) -> bool {
     s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
 }
 
+pub fn is_non_blank_optional_string(s: &Option<String>) -> bool {
+    s.as_ref().is_some_and(|s| !s.chars().all(|c| c.is_whitespace()))
+}
+
 pub fn is_blank_optional_arc_str(s: &Option<Arc<str>>) -> bool {
     s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
 }

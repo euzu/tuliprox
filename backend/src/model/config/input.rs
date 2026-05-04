@@ -11,8 +11,8 @@ use shared::model::{
     RemoteMediaInputConfigDto, RemotePlaybackConfigDto, StagedInputDto, XtreamCluster,
 };
 use shared::utils::{
-    get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX,
-    PROVIDER_SCHEME_PREFIX,
+    get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info,
+    Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
 };
 use shared::{check_input_connections, write_if_some};
 use shared::{check_input_credentials, concat_string };
@@ -159,10 +159,6 @@ impl RemoteMediaInputConfig {
             || is_non_blank_optional_string(&self.machine_id)
             || is_non_blank_optional_string(&self.server_name)
     }
-}
-
-fn is_non_blank_optional_string(value: &Option<String>) -> bool {
-    value.as_ref().is_some_and(|value| !value.trim().is_empty())
 }
 
 pub struct InputUserInfo {
