@@ -226,18 +226,16 @@ impl MappingDto {
                 if !valid_property!(def.field.as_str(), COUNTER_FIELDS) {
                     return Err(TuliproxError::Config(format!("Invalid counter field {}", def.field)));
                 }
-                match get_filter(&def.filter, templates) {
-                    Ok(flt) => {
-                        counters.push(MappingCounter {
-                            filter: flt,
-                            field: def.field.clone(),
-                            concat: def.concat.clone(),
-                            modifier: def.modifier,
-                            value: Arc::new(AtomicU32::new(def.value)),
-                            padding: def.padding,
-                        });
-                    }
-                    Err(e) => return Err(e),
+                {
+                    let flt = get_filter(&def.filter, templates)?;
+                    counters.push(MappingCounter {
+                        filter: flt,
+                        field: def.field.clone(),
+                        concat: def.concat.clone(),
+                        modifier: def.modifier,
+                        value: Arc::new(AtomicU32::new(def.value)),
+                        padding: def.padding,
+                    });
                 }
             }
             self.t_counter = Some(counters);

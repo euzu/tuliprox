@@ -70,7 +70,7 @@ pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> 
 pub async fn ensure_m3u_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
     if let Some(path) = m3u_get_storage_path(cfg, target_name) {
         if tokio::fs::create_dir_all(&path).await.is_err() {
-            let msg = format!("Failed to save m3u data, can't create directory {}", &path.display());
+            let msg = format!("Failed to save m3u data, can't create directory {}", path.display());
             return Err(TuliproxError::RepositoryM3u(msg));
         }
         Ok(path)
@@ -337,7 +337,7 @@ pub async fn m3u_get_item_for_stream_id(
 
         let cfg: &AppConfig = &app_state.app_config;
         let target_path = get_target_storage_path(&cfg.config.load(), target.name.as_str())
-            .ok_or_else(|| string_to_io_error(format!("Could not find path for target {}", &target.name)))?;
+            .ok_or_else(|| string_to_io_error(format!("Could not find path for target {}", target.name)))?;
         let m3u_path = m3u_get_file_path_for_db(&target_path);
         let file_lock = cfg.file_locks.read_lock(&m3u_path).await;
         let m3u_path_clone = m3u_path.clone();

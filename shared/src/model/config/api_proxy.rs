@@ -110,7 +110,7 @@ impl ApiProxyConfigDto {
                 errors.push(err.to_string());
             }
             if name_set.contains(server.name.as_str()) {
-                errors.push(format!("Non-unique server info name found {}", &server.name));
+                errors.push(format!("Non-unique server info name found {}", server.name));
             } else {
                 name_set.insert(server.name.clone());
             }
@@ -126,7 +126,7 @@ impl ApiProxyConfigDto {
                     errors.push(err.to_string());
                 }
                 if usernames.contains(&user.username) {
-                    errors.push(format!("Non unique username found {}", &user.username));
+                    errors.push(format!("Non unique username found {}", user.username));
                 } else {
                     usernames.insert(user.username.to_string());
                 }
@@ -136,8 +136,8 @@ impl ApiProxyConfigDto {
                     } else if tokens.contains(token) {
                         errors.push(format!(
                             "Non unique user token found {} for user {}",
-                            &user.token.as_ref().map_or_else(String::new, ToString::to_string),
-                            &user.username
+                            user.token.as_ref().map_or_else(String::new, ToString::to_string),
+                            user.username
                         ));
                     } else {
                         tokens.insert(token.to_string());
@@ -148,7 +148,7 @@ impl ApiProxyConfigDto {
                     if !&self.server.iter().any(|server_info| server_info.name.eq(server_info_name)) {
                         errors.push(format!(
                             "No server info with name {} found for user {}",
-                            server_info_name, &user.username
+                            server_info_name, user.username
                         ));
                     }
                 }

@@ -20,7 +20,7 @@ ARG RUST_TARGET=x86_64-unknown-linux-musl
 
 # Install build dependencies for Debian (trixie)
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev musl-tools && \
+    pkg-config musl-tools && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -152,7 +152,7 @@ ENV TZ=${TZ}
 # 'build-base' contains gcc, make, etc.
 # 'gdb' is required for the debugger (lldb is often more complicated in Alpine repos)
 # 'ffmpeg' is required for the probe feature
-RUN apk add --no-cache bash build-base openssl-dev perl lldb gdb ffmpeg
+RUN apk add --no-cache bash build-base perl lldb gdb ffmpeg
 
 # Update Rust toolchain and add the necessary target
 RUN rustup update && rustup target add $RUST_TARGET

@@ -99,7 +99,7 @@ impl WebAuthConfig {
             PathBuf::from(&userfile_name)
         };
         if !utils::path_exists(&userfile_path) {
-            return Err(TuliproxError::Config(format!("Could not find userfile {}", &userfile_name)));
+            return Err(TuliproxError::Config(format!("Could not find userfile {userfile_name}")));
         }
 
         let Ok(file) = File::open(&userfile_path) else {

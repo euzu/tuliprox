@@ -128,9 +128,9 @@ impl Filter {
                 };
                 if log_enabled!(Level::Trace) {
                     if is_match {
-                        trace!("Match found: {rewc:?} {} => {field}='{value}'", &rewc.restr);
+                        trace!("Match found: {rewc:?} {} => {field}='{value}'", rewc.restr);
                     } else {
-                        trace!("Match failed: {self}: {rewc:?} {} => {field}='{value}'", &rewc.restr);
+                        trace!("Match failed: {self}: {rewc:?} {} => {field}='{value}'", rewc.restr);
                     }
                 }
                 is_match
@@ -337,14 +337,14 @@ fn get_parser_expression(
                     Err(err) => errors.push(err.to_string()),
                 }
             }
-            Rule::comparison | Rule::expr => match get_parser_expression(pair, templates, errors) {
-                Ok(expr) => handle_expr!(bop, uop, stmts, expr),
-                Err(err) => return Err(err),
-            },
-            Rule::expr_group => match get_parser_expression(pair.into_inner().next().unwrap(), templates, errors) {
-                Ok(expr) => handle_expr!(bop, uop, stmts, Filter::Group(Box::new(expr))),
-                Err(err) => return Err(err),
-            },
+            Rule::comparison | Rule::expr => {
+                let expr = get_parser_expression(pair, templates, errors)?;
+                handle_expr!(bop, uop, stmts, expr)
+            }
+            Rule::expr_group => {
+                let expr = get_parser_expression(pair.into_inner().next().unwrap(), templates, errors)?;
+                handle_expr!(bop, uop, stmts, Filter::Group(Box::new(expr)))
+            }
             Rule::not => {
                 uop = Some(UnaryOperator::Not);
             }
@@ -448,14 +448,12 @@ pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> R
             }
 
             if !errors.is_empty() {
-                errors.push(format!("Unable to parse filter: {}", &filter_text));
+                errors.push(format!("Unable to parse filter: {}", filter_text));
                 return Err(TuliproxError::FilterParse(errors.join("\n").to_string()));
             }
 
-            result.map_or_else(
-                || Err(TuliproxError::FilterParse(format!("Unable to parse filter: {}", &filter_text))),
-                Ok,
-            )
+            result
+                .map_or_else(|| Err(TuliproxError::FilterParse(format!("Unable to parse filter: {}", filter_text))), Ok)
         }
         Err(err) => Err(TuliproxError::FilterParse(format!("{err}"))),
     }

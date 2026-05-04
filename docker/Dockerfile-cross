@@ -22,7 +22,7 @@ FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main AS rust-build
 # Get target architecture
 ARG RUST_TARGET
 
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config musl-tools libssl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config musl-tools
 
 # Update Rust toolchain and add necessary target
 RUN rustup update && rustup target add $RUST_TARGET
@@ -156,9 +156,8 @@ ENV RUST_TARGET=${RUST_TARGET}
 ENV TZ=${TZ}
 
 # Install build dependencies and the lldb debugger for Alpine
-# Added 'perl' which is required to build the native OpenSSL library.
 # Added ffmpeg for probing
-RUN apk add --no-cache bash build-base openssl-dev lldb gdb perl ffmpeg
+RUN apk add --no-cache bash build-base lldb gdb perl ffmpeg
 
 # Update Rust toolchain and add the necessary target
 RUN rustup update && rustup target add $RUST_TARGET

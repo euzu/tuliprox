@@ -143,7 +143,7 @@ pub async fn backup_api_user_db_file(cfg: &AppConfig, path: &Path) {
         let copy_result = tokio::fs::copy(path, &backup_path).await;
         drop(lock);
         if let Err(err) = copy_result {
-            error!("Could not backup file {}:{}", &backup_path.to_str().unwrap_or("?"), err);
+            error!("Could not backup file {}:{}", backup_path.to_str().unwrap_or("?"), err);
         }
     }
 }

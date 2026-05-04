@@ -175,7 +175,7 @@ fn apply_logger_with_context(context: &LoggerContext, config_log_level: Option<&
     }
     log::set_max_level(effective_max_level);
     info!("Log timezone system localtime (TZ)");
-    info!("Log Level {}", &log_levels.join(", "));
+    info!("Log Level {}", log_levels.join(", "));
 }
 
 pub fn init_logger(user_log_level: Option<&str>, config_file: &str) {

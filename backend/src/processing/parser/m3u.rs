@@ -99,13 +99,11 @@ fn token_till(stack: &mut String, it: &mut std::str::Chars, stop_char: char, sta
 #[inline]
 fn skip_digit(it: &mut std::str::Chars) -> Option<char> {
     loop {
-        match it.next() {
-            Some(c) => {
-                if !(c == '-' || c == '+' || c.is_ascii_digit()) {
-                    return Some(c);
-                }
+        {
+            let c = it.next()?;
+            if !(c == '-' || c == '+' || c.is_ascii_digit()) {
+                return Some(c);
             }
-            None => return None,
         }
     }
 }

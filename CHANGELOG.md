@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- Removed the `plex` STRM export style. Existing STRM outputs configured with `style: plex` must switch to `kodi`,
+  `emby`, or `jellyfin`; Plex use cases should use the HDHomeRun integration instead. Existing generated TMDB marker
+  paths remain read-compatible, but `style: plex` is no longer accepted in configuration.
+
 ## 🌟 New Features
 
 - **Per-User Output Clusters**: API proxy users can now be restricted to specific clusters on their assigned target via
@@ -189,6 +193,7 @@
 - **API User Category Selection**: Fixed API user category selection in the Web UI.
 - **Refactored Playlist And EPG Explorer**: Playlist Explorer and EPG Explorer have been refactored for improved reliability and UX.
 - HLS session info now reports accurate duration and total transferred data.
+- Removed open-ssl dependency
 
 ## ⚙️ New Settings
 

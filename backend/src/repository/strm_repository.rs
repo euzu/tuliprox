@@ -484,65 +484,6 @@ fn format_for_kodi(
     }
 }
 
-/// Formats names according to the official Plex documentation.
-/// Movie: /Movie Name (Year) {tmdb-XXXXX}/Movie Name (Year).strm
-/// Series: /Show Name (Year) {tmdb-XXXXX}/Season 01/Show Name - s01e01.strm
-fn format_for_plex(
-    strm_item_info: &StrmItemInfo,
-    tmdb_id: u32,
-    separator: &str,
-    flat: bool,
-    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
-) -> (PathBuf, String) {
-    // Plex ID format: {tmdb-12345}
-    let parts = prepare_filename_parts(strm_item_info, tmdb_id, separator, &format!("{separator}{{tmdb-{{}}}}"));
-    let mut dir_path = PathBuf::new();
-
-    match strm_item_info.item_type {
-        PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
-            let folder_name = format!("{}{}", parts.base_name, parts.id_string);
-            let final_filename = parts.base_name;
-
-            if flat {
-                if tmdb_id > 0 {
-                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path.clone_from(path);
-                    } else {
-                        dir_path.push(&folder_name);
-                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
-                    }
-                } else {
-                    dir_path.push(format!("{folder_name}{separator}[{}]", parts.category));
-                }
-            } else {
-                dir_path.push(parts.category);
-                dir_path.push(folder_name);
-            }
-            (dir_path, final_filename)
-        }
-        PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
-            let series_folder_name = format!("{}{}", parts.base_name, parts.id_string);
-            let season_num = strm_item_info.season.unwrap_or(1);
-            let episode_num = strm_item_info.episode.unwrap_or(1);
-
-            // Plex standard: lowercase 's' and hyphens as separators.
-            let final_filename = format!("{} - s{season_num:02}e{episode_num:02}", parts.sanitized_name);
-            let season_folder = format!("Season{separator}{season_num:02}");
-
-            if flat {
-                dir_path.push(format!("{series_folder_name}{separator}[{}]", parts.category));
-                dir_path.push(season_folder);
-            } else {
-                dir_path.push(parts.category);
-                dir_path.push(series_folder_name);
-                dir_path.push(season_folder);
-            }
-            (dir_path, final_filename)
-        }
-        _ => (PathBuf::new(), sanitize_for_filename(&strm_item_info.title, separator == "_")),
-    }
-}
-
 /// Formats names according to the official Emby documentation.
 /// Movie: /Movie Name (Year)/Movie Name (Year) [tmdbid=XXXXX].strm
 /// Series: /Show Name (Year) [tmdbid=XXXXX]/Season 01/Show Name - S01E01.strm
@@ -680,7 +621,6 @@ fn style_based_rename(
     // Dispatch the call to the responsible function based on the style.
     match style {
         StrmExportStyle::Kodi => format_for_kodi(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
-        StrmExportStyle::Plex => format_for_plex(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
         StrmExportStyle::Emby => format_for_emby(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
         StrmExportStyle::Jellyfin => format_for_jellyfin(strm_item_info, tmdb_id, separator, flat, flat_dedup_paths),
     }
@@ -1267,7 +1207,7 @@ async fn delete_empty_dirs_from_tree(root_path: &Path, tree_nodes: HashMap<PathB
     for node in tree_stack.into_iter().rev() {
         if !node.has_files && !node.is_root {
             if let Err(err) = remove_dir(&node.path).await {
-                trace!("Could not delete empty dir: {}, {err}", &node.path.display());
+                trace!("Could not delete empty dir: {}, {err}", node.path.display());
             }
         }
     }
@@ -1279,7 +1219,7 @@ async fn remove_empty_dirs(root_path: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_strm_source_url, StrmItemInfo};
+    use super::{resolve_strm_source_url, strip_tmdb_markers, strm_contains_tmdb_marker, StrmItemInfo};
     use crate::model::{ConfigInput, ConfigProvider};
     use shared::model::{ConfigProviderDto, InputType, PlaylistItemType, ProviderUrlSelectionPolicy};
     use std::{collections::HashMap, sync::Arc};
@@ -1318,6 +1258,49 @@ mod tests {
             url: "http://input.example.com".to_string(),
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tmdb_marker_helpers_cover_supported_marker_variants() {
+        let cases = [
+            (
+                "Movies/Movie Name (2020) {tmdb-12345}/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie Name (2020) {tmdb=12345}/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie Name (2020) [tmdbid-12345]/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie Name (2020) [tmdbid=12345]/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_{tmdb-12345}/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_{tmdb=12345}/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_[tmdbid-12345]/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_[tmdbid=12345]/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+        ];
+
+        for (path, expected) in cases {
+            assert!(strm_contains_tmdb_marker(path));
+            assert_eq!(strip_tmdb_markers(path), expected);
         }
     }
 

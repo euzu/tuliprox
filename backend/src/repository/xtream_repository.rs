@@ -71,7 +71,7 @@ pub async fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Resu
         if tokio::fs::create_dir_all(&path).await.is_err() {
             let msg = format!(
                 "Failed to save xtream data, can't create directory {}",
-                &path.display()
+                path.display()
             );
             return Err(TuliproxError::RepositoryXtream(msg));
         }
@@ -578,8 +578,8 @@ pub async fn xtream_get_item_for_stream_id(
 
     let app_config: &AppConfig = &app_state.app_config;
     let config = app_config.config.load();
-    let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(|| string_to_io_error(format!("Could not find path for target {}", &target.name)))?;
-    let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(|| string_to_io_error(format!("Could not find path for target {} xtream output", &target.name)))?;
+    let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(|| string_to_io_error(format!("Could not find path for target {}", target.name)))?;
+    let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(|| string_to_io_error(format!("Could not find path for target {} xtream output", target.name)))?;
     {
         let result = if let Some(cluster) = xtream_cluster {
             xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, cluster).await

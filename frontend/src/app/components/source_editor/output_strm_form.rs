@@ -122,7 +122,7 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
 
     let export_styles = use_memo(output_form_state.form.style, |style| {
         let default_style = *style;
-        [StrmExportStyle::Kodi, StrmExportStyle::Plex, StrmExportStyle::Emby, StrmExportStyle::Jellyfin]
+        [StrmExportStyle::Kodi, StrmExportStyle::Emby, StrmExportStyle::Jellyfin]
             .iter()
             .map(|s| DropDownOption {
                 id: s.to_string(),
