@@ -1631,8 +1631,11 @@
     }
   },
   "SOURCE_EDITOR": {
+    "BRICK_InputEmby": "Emby",
+    "BRICK_InputJellyfin": "Jellyfin",
     "BRICK_InputLibrary": "Library",
     "BRICK_InputM3u": "M3u",
+    "BRICK_InputPlex": "Plex",
     "BRICK_InputXtream": "Xtream",
     "BRICK_OutputHdHomeRun": "HDHR",
     "BRICK_OutputM3u": "M3u",

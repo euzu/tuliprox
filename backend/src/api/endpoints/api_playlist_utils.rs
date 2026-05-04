@@ -148,6 +148,13 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                     )
                         .into_response();
                 }
+                InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": "Media-server inputs are not supported on this endpoint yet"})),
+                    )
+                        .into_response();
+                }
             };
             if result.is_empty() {
                 let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();

@@ -53,7 +53,7 @@ impl fmt::Debug for SetupWebUserCredentialDto {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SetupWebUserCredentialDto")
             .field("username", &self.username)
-            .field("password", &"<redacted>")
+            .field("password", &"***")
             .finish()
     }
 }

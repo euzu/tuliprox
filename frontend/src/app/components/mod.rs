@@ -53,15 +53,14 @@ mod userlist;
 mod websocket_status;
 
 mod cluster_flags_input;
+mod country;
 mod field_explanation;
 mod field_id;
 mod filter;
 mod particle_flow_background;
+mod setup;
 mod source_editor;
 mod title_card;
-
-mod country;
-mod setup;
 // pub use self::input::*;
 // pub use self::menu_item::*;
 // pub use self::popup_menu::*;

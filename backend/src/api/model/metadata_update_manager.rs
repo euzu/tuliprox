@@ -3343,8 +3343,10 @@ impl InputWorker {
     fn task_needs_provider_connection(task: &UpdateTask, input_type: InputType) -> bool {
         match task {
             UpdateTask::ProbeLive { .. } => true,
-            // Local library probing is fully local and must not depend on provider capacity.
-            UpdateTask::ProbeStream { .. } => !matches!(input_type, InputType::Library),
+            // Local library and media-server probing must not depend on IPTV provider capacity.
+            UpdateTask::ProbeStream { .. } => {
+                !(matches!(input_type, InputType::Library) || input_type.is_media_server())
+            },
             // Resolve tasks handle their own probe connection acquisition internally.
             // This avoids holding a provider connection for the entire duration of
             // info fetch + TMDB resolve + probe, reducing "provider exhausted" errors.
@@ -4255,6 +4257,23 @@ mod tests {
         };
 
         assert!(!InputWorker::task_needs_provider_connection(&task, InputType::Library));
+    }
+
+    #[test]
+    fn task_needs_provider_connection_skips_media_server_probe_stream() {
+        let task = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("input_remote"),
+            unique_id: "u1".to_string(),
+            url: "http://example.com/stream.mkv".to_string(),
+            item_type: PlaylistItemType::Video,
+            reason: ResolveReason::MissingDetails.into(),
+            delay: 0,
+        };
+
+        for input_type in [InputType::Emby, InputType::Jellyfin, InputType::Plex] {
+            assert!(!InputWorker::task_needs_provider_connection(&task, input_type));
+        }
+        assert!(InputWorker::task_needs_provider_connection(&task, InputType::M3u));
     }
 
     #[test]
