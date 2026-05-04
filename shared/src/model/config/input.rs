@@ -916,7 +916,8 @@ impl ConfigInputDto {
             return Ok(());
         }
 
-        if self.url.starts_with(BATCH_SCHEME_PREFIX) || self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        let trimmed_url = self.url.trim();
+        if trimmed_url.starts_with(BATCH_SCHEME_PREFIX) || trimmed_url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return Err(TuliproxError::ConfigInput(format!(
                 "remote media-server input does not support batch:// or provider:// URLs (input: {})",
                 self.name
@@ -975,7 +976,7 @@ impl ConfigInputDto {
 
         match self.input_type {
             InputType::Emby | InputType::Jellyfin => {
-                if self.url.trim().is_empty() {
+                if trimmed_url.is_empty() {
                     return Err(TuliproxError::ConfigInput(format!(
                         "url is mandatory for input type {} (input: {})",
                         self.input_type, self.name
@@ -997,9 +998,9 @@ impl ConfigInputDto {
                         self.name
                     )));
                 }
-                if !remote.has_plex_server_selector() {
+                if trimmed_url.is_empty() && !remote.has_plex_server_selector() {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "remote input type plex requires a server selector such as remote.machine_id, remote.server_id, or remote.server_name (input: {})",
+                        "remote input type plex requires a server selector such as remote.machine_id, remote.server_id, or remote.server_name when input.url is omitted (input: {})",
                         self.name
                     )));
                 }
@@ -1595,7 +1596,7 @@ mod tests {
         let mut dto = ConfigInputDto {
             name: "emby_remote".intern(),
             input_type: InputType::Emby,
-            url: "provider://media-server".to_string(),
+            url: " provider://media-server ".to_string(),
             remote: Some(RemoteMediaInputConfigDto {
                 token: Some("token-value".to_string()),
                 ..remote_config_with_library()
@@ -1666,6 +1667,23 @@ mod tests {
         };
 
         prepare_dto(&mut dto).expect("plex discovery config should not require input.url");
+        assert_eq!(dto.input_type, InputType::Plex);
+    }
+
+    #[test]
+    fn prepare_accepts_plex_remote_with_direct_url_without_selector() {
+        let mut dto = ConfigInputDto {
+            name: "plex_remote".intern(),
+            input_type: InputType::Plex,
+            url: "https://plex.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfigDto {
+                token: Some("token".to_string()),
+                ..remote_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        prepare_dto(&mut dto).expect("direct Plex URL should not require MyPlex server selector");
         assert_eq!(dto.input_type, InputType::Plex);
     }
 

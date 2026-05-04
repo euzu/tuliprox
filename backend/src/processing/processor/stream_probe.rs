@@ -534,6 +534,13 @@ mod tests {
     }
 
     #[test]
+    fn remote_media_probe_does_not_require_provider_connection() {
+        assert!(!requires_provider_connection_for_generic_probe(InputType::Emby));
+        assert!(!requires_provider_connection_for_generic_probe(InputType::Jellyfin));
+        assert!(!requires_provider_connection_for_generic_probe(InputType::Plex));
+    }
+
+    #[test]
     fn m3u_probe_requires_provider_connection() {
         assert!(requires_provider_connection_for_generic_probe(InputType::M3u));
         assert!(requires_provider_connection_for_generic_probe(

@@ -11,8 +11,8 @@ use shared::model::{
     RemoteMediaInputConfigDto, RemotePlaybackConfigDto, StagedInputDto, XtreamCluster,
 };
 use shared::utils::{
-    get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info,
-    Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+    get_credentials_from_url, get_trimmed_string, is_non_blank_optional_string, parse_provider_scheme_url_parts,
+    sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
 };
 use shared::{check_input_connections, write_if_some};
 use shared::{check_input_credentials, concat_string };
@@ -126,19 +126,20 @@ pub struct RemoteMediaInputConfig {
 
 impl From<&RemoteMediaInputConfigDto> for RemoteMediaInputConfig {
     fn from(dto: &RemoteMediaInputConfigDto) -> Self {
+        let trim = |value: &Option<String>| get_trimmed_string(value.as_deref());
         Self {
             libraries: dto.libraries.clone(),
             catalog: dto.catalog.clone(),
             playback: dto.playback.clone(),
             enrichment: dto.enrichment.clone(),
             image_policy: dto.image_policy,
-            token: dto.token.clone(),
-            api_key: dto.api_key.clone(),
-            user_id: dto.user_id.clone(),
-            account_token: dto.account_token.clone(),
-            server_id: dto.server_id.clone(),
-            machine_id: dto.machine_id.clone(),
-            server_name: dto.server_name.clone(),
+            token: trim(&dto.token),
+            api_key: trim(&dto.api_key),
+            user_id: trim(&dto.user_id),
+            account_token: trim(&dto.account_token),
+            server_id: trim(&dto.server_id),
+            machine_id: trim(&dto.machine_id),
+            server_name: trim(&dto.server_name),
             prefer_https: dto.prefer_https,
             allow_relay: dto.allow_relay,
         }
@@ -502,7 +503,8 @@ impl ConfigInput {
             return Ok(());
         }
 
-        if self.url.starts_with(BATCH_SCHEME_PREFIX) || self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        let trimmed_url = self.url.trim();
+        if trimmed_url.starts_with(BATCH_SCHEME_PREFIX) || trimmed_url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return Err(TuliproxError::ConfigInput(format!(
                 "remote media-server input does not support batch:// or provider:// URLs (input: {})",
                 self.name
@@ -566,7 +568,7 @@ impl ConfigInput {
 
         match self.input_type {
             InputType::Emby | InputType::Jellyfin => {
-                if self.url.trim().is_empty() {
+                if trimmed_url.is_empty() {
                     return Err(TuliproxError::ConfigInput(format!(
                         "url is mandatory for input type {} (input: {})",
                         self.input_type, self.name
@@ -588,9 +590,9 @@ impl ConfigInput {
                         self.name
                     )));
                 }
-                if !remote.has_plex_server_selector() {
+                if trimmed_url.is_empty() && !remote.has_plex_server_selector() {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "remote input type plex requires a server selector such as remote.machine_id, remote.server_id, or remote.server_name (input: {})",
+                        "remote input type plex requires a server selector such as remote.machine_id, remote.server_id, or remote.server_name when input.url is omitted (input: {})",
                         self.name
                     )));
                 }
@@ -942,7 +944,13 @@ mod tests {
             input_type: InputType::Emby,
             url: "https://media.example.invalid".to_string(),
             remote: Some(RemoteMediaInputConfigDto {
-                token: Some("token".to_string()),
+                token: Some(" token ".to_string()),
+                api_key: Some(" api-key ".to_string()),
+                user_id: Some(" user ".to_string()),
+                account_token: Some(" account-token ".to_string()),
+                server_id: Some(" server ".to_string()),
+                machine_id: Some(" machine ".to_string()),
+                server_name: Some(" server-name ".to_string()),
                 ..RemoteMediaInputConfigDto {
                     libraries: vec![RemoteLibrarySelectorDto::Name("Movies".to_string())],
                     ..RemoteMediaInputConfigDto::default()
@@ -960,6 +968,12 @@ mod tests {
         assert!(!remote.playback.allow_transcode);
         assert!(!remote.enrichment.ffprobe);
         assert_eq!(remote.token.as_deref(), Some("token"));
+        assert_eq!(remote.api_key.as_deref(), Some("api-key"));
+        assert_eq!(remote.user_id.as_deref(), Some("user"));
+        assert_eq!(remote.account_token.as_deref(), Some("account-token"));
+        assert_eq!(remote.server_id.as_deref(), Some("server"));
+        assert_eq!(remote.machine_id.as_deref(), Some("machine"));
+        assert_eq!(remote.server_name.as_deref(), Some("server-name"));
     }
 
     #[test]
@@ -977,6 +991,23 @@ mod tests {
         };
 
         input.prepare(&[]).expect("plex discovery config should prepare without input.url");
+    }
+
+    #[test]
+    fn prepare_accepts_plex_remote_with_direct_url_without_selector() {
+        let mut input = ConfigInput {
+            name: "plex_remote".into(),
+            input_type: InputType::Plex,
+            url: "https://plex.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfig {
+                token: Some("token".to_string()),
+                ..remote_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        input.prepare(&[]).expect("direct Plex URL should not require MyPlex server selector");
     }
 
     #[test]
@@ -1071,7 +1102,7 @@ mod tests {
         let mut input = ConfigInput {
             name: "emby_remote".into(),
             input_type: InputType::Emby,
-            url: "provider://media-server".to_string(),
+            url: " provider://media-server ".to_string(),
             remote: Some(RemoteMediaInputConfig {
                 token: Some("token".to_string()),
                 ..remote_config_with_library()

@@ -60,12 +60,25 @@ fn redact_query_like_tokens(value: &str) -> String {
             result.push(separator);
             result.push_str("<redacted>");
             i += key.len() + separator.len_utf8();
-            while i < value.len() {
-                let Some(ch) = value[i..].chars().next() else { break };
-                if matches!(ch, '&' | ' ' | '\n' | '\r' | '\t' | '"' | '\'') {
-                    break;
+
+            let quote = value[i..].chars().next().filter(|ch| matches!(ch, '"' | '\''));
+            if let Some(quote) = quote {
+                i += quote.len_utf8();
+                while i < value.len() {
+                    let Some(ch) = value[i..].chars().next() else { break };
+                    i += ch.len_utf8();
+                    if ch == quote {
+                        break;
+                    }
                 }
-                i += ch.len_utf8();
+            } else {
+                while i < value.len() {
+                    let Some(ch) = value[i..].chars().next() else { break };
+                    if matches!(ch, '&' | ' ' | '\n' | '\r' | '\t' | '"' | '\'') {
+                        break;
+                    }
+                    i += ch.len_utf8();
+                }
             }
         } else {
             let Some(ch) = value[i..].chars().next() else { break };
@@ -114,6 +127,19 @@ mod tests {
         assert!(redacted.contains("épisode"));
         assert!(redacted.contains("title=café"));
         assert!(redacted.contains("token=<redacted>"));
+    }
+
+    #[test]
+    fn redacts_quoted_query_like_tokens() {
+        let redacted = redact_remote_text(
+            "https://media.example.invalid/video?token=\"secret\"&api_key='another-secret'&safe=visible",
+        );
+
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("another-secret"));
+        assert!(redacted.contains("token=<redacted>"));
+        assert!(redacted.contains("api_key=<redacted>"));
+        assert!(redacted.contains("safe=visible"));
     }
 
     #[test]

@@ -96,6 +96,10 @@ pub fn parse_remote_stream_ref(input_name: &Arc<str>, item_url: &str) -> Result<
     }
 
     match parts[0].as_str() {
+        "unavailable" => Err(
+            RemoteMediaError::new(RemoteMediaErrorKind::NoDirectPlayableRemoteSource)
+                .detail("remote media item has no direct playable source"),
+        ),
         "emby" => Ok(RemoteStreamRef::Emby {
             input_name: input_name.clone(),
             server_id: Arc::<str>::from(parts[1].as_str()),
@@ -267,6 +271,10 @@ mod tests {
                 media_source_id: Some("media/source?one".into()),
             }
         );
+
+        let unavailable = parse_remote_stream_ref(&input_name, "remote://unavailable/server/library/item")
+            .expect_err("unavailable sentinel should map to a stable playback error");
+        assert_eq!(unavailable.kind, RemoteMediaErrorKind::NoDirectPlayableRemoteSource);
 
         let provider = classify_playback_origin(InputType::M3u, PlaylistItemType::Live, &input_name, "http://example.invalid/live")
             .expect("provider classifies");

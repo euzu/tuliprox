@@ -95,6 +95,11 @@ impl<T> RemotePage<T> {
         upstream_item_count: usize,
         items: Vec<T>,
     ) -> Self {
+        debug_assert!(
+            upstream_item_count >= items.len(),
+            "upstream_item_count must be greater than or equal to items.len()"
+        );
+        let upstream_item_count = upstream_item_count.max(items.len());
         Self { request, total, upstream_item_count, items }
     }
 
