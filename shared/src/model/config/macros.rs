@@ -87,8 +87,7 @@ macro_rules! check_input_connections {
     ($this:ident, $input_type:expr, $alias:expr) => {
         let input_name = $this.name.to_string();
         let input_name = input_name.trim().to_string();
-        let input_name_suffix =
-            if input_name.is_empty() { String::new() } else { format!(" (input: {input_name})") };
+        let input_name_suffix = if input_name.is_empty() { String::new() } else { format!(" (input: {input_name})") };
 
         match $input_type {
             InputType::M3u | InputType::Xtream => {}
