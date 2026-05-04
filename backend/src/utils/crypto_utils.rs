@@ -1,67 +1,85 @@
+use aes::Aes128;
 use base64::{engine::general_purpose, Engine as _};
-use openssl::symm::{Cipher, Crypter, Mode};
-use rand::{RngCore, rngs::OsRng, TryRngCore};
+use ctr::cipher::{KeyIvInit, StreamCipher};
+use rand::{rngs::OsRng, RngCore, TryRngCore};
 use shared::error::TuliproxError;
 use shared::utils::encode_base64_string;
+
+type Aes128Ctr = ctr::Ctr128BE<Aes128>;
 
 pub fn encode_base64_hash(text: &str) -> String {
     let hash = blake3::hash(text.as_bytes());
     encode_base64_string(hash.as_bytes())
 }
 
-pub fn obscure_text(secret: &[u8;16], url: &str) -> Result<String, TuliproxError> {
+fn apply_aes_128_ctr(secret: &[u8; 16], iv: &[u8], data: &mut [u8]) -> Result<(), TuliproxError> {
+    let mut cipher = Aes128Ctr::new_from_slices(secret, iv)
+        .map_err(|_| TuliproxError::Crypto("Can't create AES-CTR cipher".to_string()))?;
+    cipher.apply_keystream(data);
+    Ok(())
+}
+
+pub fn obscure_text(secret: &[u8; 16], url: &str) -> Result<String, TuliproxError> {
     let mut iv = [0u8; 16];
     if OsRng.try_fill_bytes(&mut iv).is_err() {
         rand::rng().fill_bytes(&mut iv);
     }
 
-    // AES-CTR
-    let cipher = Cipher::aes_128_ctr();
-    let mut crypter = Crypter::new(cipher, Mode::Encrypt, secret, Some(&iv)).map_err(|_| TuliproxError::Crypto("Can't create cipher".to_string()))?;
-    let mut buf = vec![0u8; url.len() + cipher.block_size()];
-    let mut count = crypter.update(url.as_bytes(), &mut buf).map_err(|_| TuliproxError::Crypto("Can't update encryption".to_string()))?;
-    count += crypter.finalize(&mut buf[count..]).map_err(|_| TuliproxError::Crypto("Can't finalize encryption".to_string()))?;
-    buf.truncate(count);
+    let mut ciphertext = url.as_bytes().to_vec();
+    apply_aes_128_ctr(secret, &iv, &mut ciphertext)?;
 
-    // IV + Ciphertext -> URL-safe Base64
-    let mut out = Vec::with_capacity(iv.len() + buf.len());
+    // IV + Ciphertext -> URL-safe Base64. Keep this format stable for existing resource links.
+    let mut out = Vec::with_capacity(iv.len() + ciphertext.len());
     out.extend_from_slice(&iv);
-    out.extend_from_slice(&buf);
+    out.extend_from_slice(&ciphertext);
     Ok(general_purpose::URL_SAFE_NO_PAD.encode(out))
 }
 
+pub fn deobscure_text(secret: &[u8; 16], encoded: &str) -> Result<String, TuliproxError> {
+    let data = general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| TuliproxError::Crypto("Can't decode base64".to_string()))?;
 
-pub fn deobscure_text(secret: &[u8;16], encoded: &str) -> Result<String, TuliproxError> {
-    let data = general_purpose::URL_SAFE_NO_PAD.decode(encoded).map_err(|_| TuliproxError::Crypto("Can't decode base64".to_string()))?;
-
-   if data.len() < 16 {
-       return Err(TuliproxError::Crypto("Token too short to contain IV".to_string()));
-   }
+    if data.len() < 16 {
+        return Err(TuliproxError::Crypto("Token too short to contain IV".to_string()));
+    }
 
     let (iv, ciphertext) = data.split_at(16);
+    let mut plaintext = ciphertext.to_vec();
+    apply_aes_128_ctr(secret, iv, &mut plaintext)?;
 
-    let cipher = Cipher::aes_128_ctr();
-    let mut crypter = Crypter::new(cipher, Mode::Decrypt, secret, Some(iv)).map_err(|_| TuliproxError::Crypto("Can't create decrypt cipher".to_string()))?;
-    let mut buf = vec![0u8; ciphertext.len() + cipher.block_size()];
-    let mut count = crypter.update(ciphertext, &mut buf).map_err(|_| TuliproxError::Crypto("Can't decrypt".to_string()))?;
-    count += crypter.finalize(&mut buf[count..]).map_err(|_| TuliproxError::Crypto("Can't finalize decrypt".to_string()))?;
-    buf.truncate(count);
-
-    String::from_utf8(buf).map_err(|_| TuliproxError::Crypto("Can't create utf8 string from decrypted".to_string()))
+    String::from_utf8(plaintext).map_err(|_| TuliproxError::Crypto("Can't create utf8 string from decrypted".to_string()))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::crypto_utils::{obscure_text, deobscure_text};
-    use rand::{Rng};
+    use crate::utils::crypto_utils::{apply_aes_128_ctr, deobscure_text, obscure_text};
+    use base64::{engine::general_purpose, Engine as _};
+    use rand::Rng;
 
     #[test]
     fn test_obscure() {
-        let secret: [u8; 16] = rand::rng().random(); // Random IV (AES-CBC 16 Bytes)
+        let secret: [u8; 16] = rand::rng().random();
         let plain = "hello world";
         let encrypted = obscure_text(&secret, plain).unwrap();
         let decrypted = deobscure_text(&secret, &encrypted).unwrap();
 
         assert_eq!(decrypted, plain);
+    }
+
+    #[test]
+    fn aes_ctr_format_matches_existing_openssl_tokens() {
+        let secret: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let iv: [u8; 16] = std::array::from_fn(|i| (i + 16) as u8);
+        let plain = "hello world";
+        let expected_token = "EBESExQVFhcYGRobHB0eH2-bgxiO9XQB4mKK";
+
+        let mut ciphertext = plain.as_bytes().to_vec();
+        apply_aes_128_ctr(&secret, &iv, &mut ciphertext).unwrap();
+        let mut token_bytes = iv.to_vec();
+        token_bytes.extend_from_slice(&ciphertext);
+
+        assert_eq!(general_purpose::URL_SAFE_NO_PAD.encode(token_bytes), expected_token);
+        assert_eq!(deobscure_text(&secret, expected_token).unwrap(), plain);
     }
 }

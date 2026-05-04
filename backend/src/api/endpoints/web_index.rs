@@ -10,8 +10,7 @@ use axum::{body::Body, http::Request, response::IntoResponse};
 use base64::Engine;
 use log::{debug, error};
 use lol_html::{element, RewriteStrSettings};
-//use base64::engine::general_purpose;
-use openssl::rand::rand_bytes;
+use rand::{rngs::OsRng, RngCore, TryRngCore};
 use serde_json::json;
 use shared::{
     model::{TokenResponse, UserCredential, TOKEN_NO_AUTH},
@@ -21,7 +20,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-//use openssl::sha::{sha256};
 use tower::{Service, ServiceExt};
 use tower_http::services::ServeFile;
 
@@ -238,12 +236,8 @@ async fn index(
 
             // ContentSecurityPolicy nonce
             let mut rnd = [0u8; 32];
-            if let Err(e) = rand_bytes(&mut rnd) {
-                error!("Failed to generate random bytes for nonce: {e}");
-                // Fallback: without further manipulation back
-                return try_unwrap_body!(axum::response::Response::builder()
-                    .header(axum::http::header::CONTENT_TYPE, mime::TEXT_HTML_UTF_8.as_ref())
-                    .body(new_content));
+            if OsRng.try_fill_bytes(&mut rnd).is_err() {
+                rand::rng().fill_bytes(&mut rnd);
             }
             let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(rnd);
 
