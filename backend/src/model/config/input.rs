@@ -146,13 +146,23 @@ impl From<&RemoteMediaInputConfigDto> for RemoteMediaInputConfig {
 }
 
 impl RemoteMediaInputConfig {
-    pub fn has_any_emby_jellyfin_auth(&self) -> bool { self.token.is_some() || self.api_key.is_some() }
+    pub fn has_any_emby_jellyfin_auth(&self) -> bool {
+        is_non_blank_optional_string(&self.token) || is_non_blank_optional_string(&self.api_key)
+    }
 
-    pub fn has_any_plex_token(&self) -> bool { self.account_token.is_some() || self.token.is_some() }
+    pub fn has_any_plex_token(&self) -> bool {
+        is_non_blank_optional_string(&self.account_token) || is_non_blank_optional_string(&self.token)
+    }
 
     pub fn has_plex_server_selector(&self) -> bool {
-        self.server_id.is_some() || self.machine_id.is_some() || self.server_name.is_some()
+        is_non_blank_optional_string(&self.server_id)
+            || is_non_blank_optional_string(&self.machine_id)
+            || is_non_blank_optional_string(&self.server_name)
     }
+}
+
+fn is_non_blank_optional_string(value: &Option<String>) -> bool {
+    value.as_ref().is_some_and(|value| !value.trim().is_empty())
 }
 
 pub struct InputUserInfo {
@@ -554,6 +564,12 @@ impl ConfigInput {
         if remote.catalog.concurrency == 0 {
             return Err(TuliproxError::ConfigInput(format!(
                 "remote catalog concurrency must be greater than zero (input: {})",
+                self.name
+            )));
+        }
+        if remote.playback.max_streams == 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote playback max_streams must be greater than zero (input: {})",
                 self.name
             )));
         }
@@ -971,6 +987,57 @@ mod tests {
         };
 
         input.prepare(&[]).expect("plex discovery config should prepare without input.url");
+    }
+
+    #[test]
+    fn prepare_rejects_blank_remote_credentials_and_selectors() {
+        let mut emby = ConfigInput {
+            name: "emby_remote".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfig {
+                token: Some("   ".to_string()),
+                api_key: Some("".to_string()),
+                ..remote_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+        let err = emby.prepare(&[]).expect_err("blank token/api_key should be rejected");
+        assert!(err.to_string().contains("requires remote token/api_key"));
+
+        let mut plex = ConfigInput {
+            name: "plex_remote".into(),
+            input_type: InputType::Plex,
+            remote: Some(RemoteMediaInputConfig {
+                account_token: Some("   ".to_string()),
+                server_id: Some("   ".to_string()),
+                ..remote_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+        let err = plex.prepare(&[]).expect_err("blank plex token should be rejected");
+        assert!(err.to_string().contains("requires remote.account_token or remote.token"));
+    }
+
+    #[test]
+    fn prepare_rejects_remote_playback_max_streams_zero() {
+        let mut input = ConfigInput {
+            name: "emby_remote".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfig {
+                token: Some("token".to_string()),
+                playback: RemotePlaybackConfigDto { max_streams: 0, ..RemotePlaybackConfigDto::default() },
+                ..remote_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("zero remote max_streams should be rejected");
+        assert!(err.to_string().contains("remote playback max_streams must be greater than zero"));
     }
 
     #[test]

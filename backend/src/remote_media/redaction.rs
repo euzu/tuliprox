@@ -53,39 +53,42 @@ pub fn redact_remote_text(value: &str) -> String {
 
 fn redact_query_like_tokens(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
     let mut i = 0;
 
-    while i < bytes.len() {
-        let matched = SENSITIVE_QUERY_KEYS.iter().find_map(|key| {
-            let remaining = &value[i..];
-            if remaining.len() < key.len() + 1 {
-                return None;
-            }
-            let candidate = &remaining[..key.len()];
-            let separator = remaining.as_bytes().get(key.len()).copied();
-            if candidate.eq_ignore_ascii_case(key) && matches!(separator, Some(b'=') | Some(b':')) {
-                Some((*key, separator.unwrap() as char))
-            } else {
-                None
-            }
-        });
+    while i < value.len() {
+        let matched = SENSITIVE_QUERY_KEYS.iter().find_map(|key| matched_sensitive_key(value, i, *key));
 
         if let Some((key, separator)) = matched {
             result.push_str(key);
             result.push(separator);
             result.push_str("<redacted>");
-            i += key.len() + 1;
-            while i < bytes.len() && !matches!(bytes[i], b'&' | b' ' | b'\n' | b'\r' | b'\t' | b'\"' | b'\'') {
-                i += 1;
+            i += key.len() + separator.len_utf8();
+            while i < value.len() {
+                let Some(ch) = value[i..].chars().next() else { break };
+                if matches!(ch, '&' | ' ' | '\n' | '\r' | '\t' | '"' | '\'') {
+                    break;
+                }
+                i += ch.len_utf8();
             }
         } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            let Some(ch) = value[i..].chars().next() else { break };
+            result.push(ch);
+            i += ch.len_utf8();
         }
     }
 
     result
+}
+
+fn matched_sensitive_key(value: &str, start: usize, key: &'static str) -> Option<(&'static str, char)> {
+    let remaining = value.get(start..)?;
+    let candidate = remaining.get(..key.len())?;
+    let separator = remaining.get(key.len()..)?.chars().next()?;
+    if candidate.eq_ignore_ascii_case(key) && matches!(separator, '=' | ':') {
+        Some((key, separator))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +107,16 @@ mod tests {
         assert!(redacted.contains("X-Plex-Token=<redacted>") || redacted.contains("x-plex-token=<redacted>"));
         assert!(redacted.contains("api_key=<redacted>"));
         assert!(redacted.contains("safe=value"));
+    }
+
+    #[test]
+    fn redacts_query_tokens_without_corrupting_non_ascii_text() {
+        let redacted = redact_remote_text("https://media.example.invalid/épisode?token=sëcret&title=café");
+
+        assert!(!redacted.contains("sëcret"));
+        assert!(redacted.contains("épisode"));
+        assert!(redacted.contains("title=café"));
+        assert!(redacted.contains("token=<redacted>"));
     }
 
     #[test]

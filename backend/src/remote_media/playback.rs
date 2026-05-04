@@ -89,31 +89,31 @@ pub fn parse_remote_stream_ref(input_name: &Arc<str>, item_url: &str) -> Result<
             .detail("playlist item is not a remote media URL"));
     };
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let parts: Vec<&str> = path.split('/').collect();
+    let parts: Vec<String> = path.split('/').map(unescape_internal_url_component).collect();
     if parts.len() < 3 {
         return Err(RemoteMediaError::new(RemoteMediaErrorKind::RemoteStreamOpenFailed)
             .detail("remote media URL is missing required path parts"));
     }
 
-    match parts[0] {
+    match parts[0].as_str() {
         "emby" => Ok(RemoteStreamRef::Emby {
             input_name: input_name.clone(),
-            server_id: parts[1].into(),
-            item_id: parts[2].into(),
-            media_source_id: query_value(query, "media_source_id").map(|v| unescape_internal_url_component(&v).into()),
+            server_id: Arc::<str>::from(parts[1].as_str()),
+            item_id: Arc::<str>::from(parts[2].as_str()),
+            media_source_id: query_value(query, "media_source_id").map(Arc::<str>::from),
         }),
         "jellyfin" => Ok(RemoteStreamRef::Jellyfin {
             input_name: input_name.clone(),
-            server_id: parts[1].into(),
-            item_id: parts[2].into(),
-            media_source_id: query_value(query, "media_source_id").map(|v| unescape_internal_url_component(&v).into()),
+            server_id: Arc::<str>::from(parts[1].as_str()),
+            item_id: Arc::<str>::from(parts[2].as_str()),
+            media_source_id: query_value(query, "media_source_id").map(Arc::<str>::from),
         }),
         "plex" => Ok(RemoteStreamRef::Plex {
             input_name: input_name.clone(),
-            server_id: parts[1].into(),
-            rating_key: parts[2].into(),
+            server_id: Arc::<str>::from(parts[1].as_str()),
+            rating_key: Arc::<str>::from(parts[2].as_str()),
             part_key: query_value(query, "part_key")
-                .map(|v| unescape_internal_url_component(&v).into())
+                .map(Arc::<str>::from)
                 .ok_or_else(|| {
                     RemoteMediaError::new(RemoteMediaErrorKind::NoDirectPlayableRemoteSource)
                         .detail("plex remote URL is missing part_key")
@@ -125,25 +125,39 @@ pub fn parse_remote_stream_ref(input_name: &Arc<str>, item_url: &str) -> Result<
 }
 
 fn query_value(query: &str, key: &str) -> Option<String> {
-    query.split('&').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        (name == key).then(|| value.to_string())
-    })
+    url::form_urlencoded::parse(query.as_bytes())
+        .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
 }
 
 fn unescape_internal_url_component(value: &str) -> String {
-    let mut result = value.to_string();
-    for (encoded, decoded) in [
-        ("%2F", "/"),
-        ("%3F", "?"),
-        ("%26", "&"),
-        ("%3D", "="),
-        ("%23", "#"),
-        ("%25", "%"),
-    ] {
-        result = result.replace(encoded, decoded).replace(&encoded.to_ascii_lowercase(), decoded);
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(byte) = decode_hex_byte(bytes[i + 1], bytes[i + 2]) {
+                decoded.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
     }
-    result
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
+    Some(hex_value(high)? << 4 | hex_value(low)?)
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +252,21 @@ mod tests {
         let local = classify_playback_origin(InputType::Library, PlaylistItemType::LocalVideo, &input_name, "file:///tmp/a.mkv")
             .expect("local classifies");
         assert_eq!(local, PlaybackOrigin::LocalLibrary);
+
+        let encoded = parse_remote_stream_ref(
+            &input_name,
+            "remote://emby/server%2Fone/item%3Fone?media_source_id=media%2Fsource%3Fone",
+        )
+        .expect("encoded remote ref parses");
+        assert_eq!(
+            encoded,
+            RemoteStreamRef::Emby {
+                input_name: input_name.clone(),
+                server_id: "server/one".into(),
+                item_id: "item?one".into(),
+                media_source_id: Some("media/source?one".into()),
+            }
+        );
 
         let provider = classify_playback_origin(InputType::M3u, PlaylistItemType::Live, &input_name, "http://example.invalid/live")
             .expect("provider classifies");

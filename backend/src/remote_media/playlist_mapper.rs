@@ -6,7 +6,7 @@ use shared::{
     },
     utils::{generate_provider_playlist_uuid, Internable},
 };
-use std::sync::Arc;
+use std::{fmt::Write as _, sync::Arc};
 
 pub fn remote_catalog_snapshot_to_playlist(snapshot: &RemoteCatalogSnapshot) -> Vec<PlaylistGroup> {
     let mut groups = Vec::new();
@@ -38,7 +38,14 @@ fn remote_movie_to_playlist_item(movie: &RemoteMovie) -> PlaylistItem {
         .stream_ref
         .as_ref()
         .map(remote_stream_ref_to_internal_url)
-        .unwrap_or_else(|| format!("remote://{}/{}/{}", movie.server_id, movie.library_id, movie.item_id));
+        .unwrap_or_else(|| {
+            format!(
+                "remote://unavailable/{}/{}/{}",
+                escape_internal_url_component(&movie.server_id),
+                escape_internal_url_component(&movie.library_id),
+                escape_internal_url_component(&movie.item_id)
+            )
+        });
     let uuid = generate_provider_playlist_uuid(&movie.input_name, &stable_id, PlaylistItemType::Video);
 
     PlaylistItem {
@@ -80,7 +87,14 @@ fn remote_episode_to_playlist_item(episode: &RemoteEpisode) -> PlaylistItem {
         .stream_ref
         .as_ref()
         .map(remote_stream_ref_to_internal_url)
-        .unwrap_or_else(|| format!("remote://{}/{}/{}", episode.server_id, episode.library_id, episode.item_id));
+        .unwrap_or_else(|| {
+            format!(
+                "remote://unavailable/{}/{}/{}",
+                escape_internal_url_component(&episode.server_id),
+                escape_internal_url_component(&episode.library_id),
+                escape_internal_url_component(&episode.item_id)
+            )
+        });
     let uuid = generate_provider_playlist_uuid(&episode.input_name, &stable_id, PlaylistItemType::Series);
     let title = if episode.title.is_empty() {
         episode.series_title.clone().unwrap_or_else(|| "Remote Episode".intern())
@@ -126,7 +140,9 @@ pub fn remote_stream_ref_to_internal_url(stream_ref: &RemoteStreamRef) -> String
     match stream_ref {
         RemoteStreamRef::Emby { server_id, item_id, media_source_id, .. } => {
             format!(
-                "remote://emby/{server_id}/{item_id}{}",
+                "remote://emby/{}/{}{}",
+                escape_internal_url_component(server_id),
+                escape_internal_url_component(item_id),
                 media_source_id
                     .as_ref()
                     .map(|id| format!("?media_source_id={}", escape_internal_url_component(id)))
@@ -135,7 +151,9 @@ pub fn remote_stream_ref_to_internal_url(stream_ref: &RemoteStreamRef) -> String
         }
         RemoteStreamRef::Jellyfin { server_id, item_id, media_source_id, .. } => {
             format!(
-                "remote://jellyfin/{server_id}/{item_id}{}",
+                "remote://jellyfin/{}/{}{}",
+                escape_internal_url_component(server_id),
+                escape_internal_url_component(item_id),
                 media_source_id
                     .as_ref()
                     .map(|id| format!("?media_source_id={}", escape_internal_url_component(id)))
@@ -143,20 +161,24 @@ pub fn remote_stream_ref_to_internal_url(stream_ref: &RemoteStreamRef) -> String
             )
         }
         RemoteStreamRef::Plex { server_id, rating_key, part_key, .. } => format!(
-            "remote://plex/{server_id}/{rating_key}?part_key={}",
+            "remote://plex/{}/{}?part_key={}",
+            escape_internal_url_component(server_id),
+            escape_internal_url_component(rating_key),
             escape_internal_url_component(part_key)
         ),
     }
 }
 
 fn escape_internal_url_component(value: &str) -> String {
-    value
-        .replace('%', "%25")
-        .replace('/', "%2F")
-        .replace('?', "%3F")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-        .replace('#', "%23")
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -167,17 +189,17 @@ mod tests {
     fn movie() -> RemoteMovie {
         RemoteMovie {
             input_name: "remote".into(),
-            server_id: "server".into(),
+            server_id: "server/one".into(),
             library_id: "movies".into(),
-            item_id: "item".into(),
+            item_id: "item?one plus+space".into(),
             title: "Movie".into(),
             year: Some(2024),
             source_version_hint: None,
             provider_hints: Vec::<RemoteProviderIdHint>::new(),
             stream_ref: Some(RemoteStreamRef::Emby {
                 input_name: "remote".into(),
-                server_id: "server".into(),
-                item_id: "item".into(),
+                server_id: "server/one".into(),
+                item_id: "item?one plus+space".into(),
                 media_source_id: Some("media/source".into()),
             }),
             image_ref: None,
@@ -219,7 +241,8 @@ mod tests {
         assert_eq!(groups[0].xtream_cluster, XtreamCluster::Video);
         assert_eq!(groups[0].channels[0].header.item_type, PlaylistItemType::Video);
         assert_eq!(groups[0].channels[0].header.virtual_id, 0);
-        assert!(groups[0].channels[0].header.id.starts_with("remote:server:movies:movie:item"));
+        assert!(groups[0].channels[0].header.id.starts_with("remote:server/one:movies:movie:item?one plus+space"));
+        assert!(groups[0].channels[0].header.url.contains("remote://emby/server%2Fone/item%3Fone%20plus%2Bspace"));
         assert_eq!(groups[1].channels[0].header.item_type, PlaylistItemType::Series);
         assert!(groups[1].channels[0].header.url.contains("part_key=%2Flibrary%2Fparts%2Fredacted%2Ffile.mkv"));
     }

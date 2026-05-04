@@ -347,6 +347,10 @@ pub const fn is_default_remote_playback_max_streams(value: &u16) -> bool {
     *value == default_remote_playback_max_streams()
 }
 
+fn is_non_blank_optional_string(value: &Option<String>) -> bool {
+    value.as_ref().is_some_and(|value| !value.trim().is_empty())
+}
+
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum RemoteCatalogRefreshModeDto {
     #[serde(rename = "manual")]
@@ -459,6 +463,15 @@ impl Default for RemotePlaybackConfigDto {
 
 impl RemotePlaybackConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    pub fn prepare(&self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
+        if self.max_streams == 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote playback max_streams must be greater than zero (input: {input_name})"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
@@ -612,6 +625,7 @@ impl RemoteMediaInputConfigDto {
         self.machine_id = get_trimmed_string(self.machine_id.as_deref());
         self.server_name = get_trimmed_string(self.server_name.as_deref());
         self.catalog.prepare(input_name)?;
+        self.playback.prepare(input_name)?;
 
         for library in &mut self.libraries {
             library.prepare();
@@ -625,13 +639,17 @@ impl RemoteMediaInputConfigDto {
     }
 
     pub fn has_any_emby_jellyfin_auth(&self) -> bool {
-        self.token.is_some() || self.api_key.is_some()
+        is_non_blank_optional_string(&self.token) || is_non_blank_optional_string(&self.api_key)
     }
 
-    pub fn has_any_plex_token(&self) -> bool { self.account_token.is_some() || self.token.is_some() }
+    pub fn has_any_plex_token(&self) -> bool {
+        is_non_blank_optional_string(&self.account_token) || is_non_blank_optional_string(&self.token)
+    }
 
     pub fn has_plex_server_selector(&self) -> bool {
-        self.server_id.is_some() || self.machine_id.is_some() || self.server_name.is_some()
+        is_non_blank_optional_string(&self.server_id)
+            || is_non_blank_optional_string(&self.machine_id)
+            || is_non_blank_optional_string(&self.server_name)
     }
 }
 
@@ -1209,7 +1227,6 @@ impl ConfigInputDto {
     pub fn prepare_type(&mut self) -> Result<(), TuliproxError> {
         self.url = self.url.trim().to_string();
         self.normalize_input_type_from_batch_url();
-        self.prepare_remote_media_input()?;
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
@@ -1452,6 +1469,54 @@ mod tests {
             libraries: vec![RemoteLibrarySelectorDto::Name("Movies".to_string())],
             ..RemoteMediaInputConfigDto::default()
         }
+    }
+
+    #[test]
+    fn prepare_rejects_blank_remote_credentials_and_selectors() {
+        let mut emby = ConfigInputDto {
+            name: "emby_remote".intern(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfigDto {
+                token: Some("   ".to_string()),
+                api_key: Some("".to_string()),
+                ..remote_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+        let err = prepare_dto(&mut emby).expect_err("blank token/api_key should be rejected");
+        assert!(err.to_string().contains("requires remote token/api_key"));
+
+        let mut plex = ConfigInputDto {
+            name: "plex_remote".intern(),
+            input_type: InputType::Plex,
+            remote: Some(RemoteMediaInputConfigDto {
+                account_token: Some("   ".to_string()),
+                server_id: Some("   ".to_string()),
+                ..remote_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+        let err = prepare_dto(&mut plex).expect_err("blank plex token should be rejected");
+        assert!(err.to_string().contains("requires remote.account_token or remote.token"));
+    }
+
+    #[test]
+    fn prepare_rejects_remote_playback_max_streams_zero() {
+        let mut dto = ConfigInputDto {
+            name: "emby_remote".intern(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfigDto {
+                token: Some("token-value".to_string()),
+                playback: RemotePlaybackConfigDto { max_streams: 0, ..RemotePlaybackConfigDto::default() },
+                ..remote_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let err = prepare_dto(&mut dto).expect_err("zero remote max_streams should be rejected");
+        assert!(err.to_string().contains("remote playback max_streams must be greater than zero"));
     }
 
     fn prepare_dto(dto: &mut ConfigInputDto) -> Result<u16, TuliproxError> {
@@ -1837,6 +1902,20 @@ mod tests {
         assert_eq!(dto.input_type, InputType::Xtream);
         dto.prepare(0, true, &HashSet::new(), None).expect("prepare should succeed for regular URL with aliases");
         assert_eq!(dto.input_type, InputType::Xtream);
+    }
+
+    #[test]
+    fn prepare_type_does_not_validate_remote_media_config() {
+        let mut dto = ConfigInputDto {
+            name: "emby_remote".intern(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            ..ConfigInputDto::default()
+        };
+
+        dto.prepare_type().expect("prepare_type only normalizes type/url");
+        let err = prepare_dto(&mut dto).expect_err("full prepare should validate missing remote block");
+        assert!(err.to_string().contains("remote configuration is mandatory"));
     }
 
     #[test]

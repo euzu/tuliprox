@@ -79,22 +79,39 @@ impl RemotePageRequest {
 pub struct RemotePage<T> {
     pub request: RemotePageRequest,
     pub total: Option<usize>,
+    pub upstream_item_count: usize,
     pub items: Vec<T>,
 }
 
 impl<T> RemotePage<T> {
+    pub fn new(request: RemotePageRequest, total: Option<usize>, items: Vec<T>) -> Self {
+        let upstream_item_count = items.len();
+        Self { request, total, upstream_item_count, items }
+    }
+
+    pub fn with_upstream_item_count(
+        request: RemotePageRequest,
+        total: Option<usize>,
+        upstream_item_count: usize,
+        items: Vec<T>,
+    ) -> Self {
+        Self { request, total, upstream_item_count, items }
+    }
+
     pub fn item_count(&self) -> usize { self.items.len() }
 
+    pub fn upstream_item_count(&self) -> usize { self.upstream_item_count }
+
     pub fn next_request(&self) -> Option<RemotePageRequest> {
-        let next_start = self.request.start.saturating_add(self.item_count());
-        if self.item_count() == 0 || self.total.is_some_and(|total| next_start >= total) {
+        let next_start = self.request.start.saturating_add(self.upstream_item_count());
+        if self.upstream_item_count() == 0 || self.total.is_some_and(|total| next_start >= total) {
             None
         } else {
             Some(RemotePageRequest::new(next_start, self.request.limit))
         }
     }
 
-    pub fn cursor_advanced(&self) -> bool { self.item_count() > 0 }
+    pub fn cursor_advanced(&self) -> bool { self.upstream_item_count() > 0 }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,31 +218,29 @@ mod tests {
 
     #[test]
     fn remote_page_next_request_advances_until_total() {
-        let page = RemotePage {
-            request: RemotePageRequest::new(0, 2),
-            total: Some(3),
-            items: vec![1, 2],
-        };
+        let page = RemotePage::new(RemotePageRequest::new(0, 2), Some(3), vec![1, 2]);
 
         assert_eq!(page.next_request(), Some(RemotePageRequest::new(2, 2)));
 
-        let last = RemotePage {
-            request: RemotePageRequest::new(2, 2),
-            total: Some(3),
-            items: vec![3],
-        };
+        let last = RemotePage::new(RemotePageRequest::new(2, 2), Some(3), vec![3]);
         assert_eq!(last.next_request(), None);
     }
 
     #[test]
     fn remote_page_empty_page_does_not_advance() {
-        let page = RemotePage::<u8> {
-            request: RemotePageRequest::new(10, 100),
-            total: Some(50),
-            items: vec![],
-        };
+        let page = RemotePage::<u8>::new(RemotePageRequest::new(10, 100), Some(50), vec![]);
 
         assert!(!page.cursor_advanced());
         assert_eq!(page.next_request(), None);
+    }
+
+    #[test]
+    fn remote_page_cursor_uses_upstream_count_when_items_are_filtered() {
+        let page = RemotePage::with_upstream_item_count(RemotePageRequest::new(0, 3), Some(5), 3, vec![1]);
+
+        assert_eq!(page.item_count(), 1);
+        assert_eq!(page.upstream_item_count(), 3);
+        assert!(page.cursor_advanced());
+        assert_eq!(page.next_request(), Some(RemotePageRequest::new(3, 3)));
     }
 }

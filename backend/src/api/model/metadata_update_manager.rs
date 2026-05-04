@@ -4260,6 +4260,23 @@ mod tests {
     }
 
     #[test]
+    fn task_needs_provider_connection_skips_remote_media_probe_stream() {
+        let task = UpdateTask::ProbeStream {
+            probe_scope: Arc::from("input_remote"),
+            unique_id: "u1".to_string(),
+            url: "http://example.com/stream.mkv".to_string(),
+            item_type: PlaylistItemType::Video,
+            reason: ResolveReason::MissingDetails.into(),
+            delay: 0,
+        };
+
+        for input_type in [InputType::Emby, InputType::Jellyfin, InputType::Plex] {
+            assert!(!InputWorker::task_needs_provider_connection(&task, input_type));
+        }
+        assert!(InputWorker::task_needs_provider_connection(&task, InputType::M3u));
+    }
+
+    #[test]
     fn task_needs_provider_connection_keeps_non_library_probe_stream() {
         let task = UpdateTask::ProbeStream {
             probe_scope: Arc::from("input_a"),

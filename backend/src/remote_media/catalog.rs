@@ -21,7 +21,7 @@ impl RemoteCatalogCursor {
             start: page.request.start,
             limit: page.request.limit,
             total: page.total,
-            fetched: page.item_count(),
+            fetched: page.upstream_item_count(),
         }
     }
 
@@ -257,11 +257,7 @@ mod tests {
 
         let client = MockRemoteCatalogClient::with_libraries(vec![movie_library()]);
         client.movie_pages.lock().expect("lock").extend([
-            Ok(RemotePage {
-                request: RemotePageRequest::new(0, 1),
-                total: Some(2),
-                items: vec![movie("new-1")],
-            }),
+            Ok(RemotePage::new(RemotePageRequest::new(0, 1), Some(2), vec![movie("new-1")])),
             Err(RemoteMediaError::new(RemoteMediaErrorKind::RemoteServerUnavailable)),
         ]);
 
@@ -276,11 +272,11 @@ mod tests {
     #[tokio::test]
     async fn stalled_page_returns_stable_failure() {
         let client = MockRemoteCatalogClient::with_libraries(vec![movie_library()]);
-        client.movie_pages.lock().expect("lock").push(Ok(RemotePage {
-            request: RemotePageRequest::new(0, 100),
-            total: Some(1),
-            items: vec![],
-        }));
+        client
+            .movie_pages
+            .lock()
+            .expect("lock")
+            .push(Ok(RemotePage::new(RemotePageRequest::new(0, 100), Some(1), vec![])));
 
         let error = refresh_remote_catalog_complete_before_publish(&client, RemoteCatalogRefreshPolicy::default())
             .await
