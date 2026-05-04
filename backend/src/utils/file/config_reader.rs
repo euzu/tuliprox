@@ -768,7 +768,7 @@ where
         match fs::copy(&path, &backup_path).await {
             Ok(_) => {}
             Err(err) => {
-                error!("Could not backup file {}:{err}", backup_path.to_str().unwrap_or("?"));
+                error!("Could not backup file {}: {err}", backup_path.to_str().unwrap_or("?"));
             }
         }
         info!("Saving file to {}", path.to_str().unwrap_or("?"));
