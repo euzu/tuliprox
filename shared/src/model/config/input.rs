@@ -463,15 +463,6 @@ impl Default for RemotePlaybackConfigDto {
 
 impl RemotePlaybackConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
-
-    pub fn prepare(&self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
-        if self.max_streams == 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "remote playback max_streams must be greater than zero (input: {input_name})"
-            )));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
@@ -625,7 +616,6 @@ impl RemoteMediaInputConfigDto {
         self.machine_id = get_trimmed_string(self.machine_id.as_deref());
         self.server_name = get_trimmed_string(self.server_name.as_deref());
         self.catalog.prepare(input_name)?;
-        self.playback.prepare(input_name)?;
 
         for library in &mut self.libraries {
             library.prepare();
@@ -1502,7 +1492,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_rejects_remote_playback_max_streams_zero() {
+    fn prepare_accepts_remote_playback_max_streams_zero_as_unlimited() {
         let mut dto = ConfigInputDto {
             name: "emby_remote".intern(),
             input_type: InputType::Emby,
@@ -1515,8 +1505,8 @@ mod tests {
             ..ConfigInputDto::default()
         };
 
-        let err = prepare_dto(&mut dto).expect_err("zero remote max_streams should be rejected");
-        assert!(err.to_string().contains("remote playback max_streams must be greater than zero"));
+        prepare_dto(&mut dto).expect("zero remote max_streams means unlimited");
+        assert_eq!(dto.remote.as_ref().expect("remote config").playback.max_streams, 0);
     }
 
     fn prepare_dto(dto: &mut ConfigInputDto) -> Result<u16, TuliproxError> {

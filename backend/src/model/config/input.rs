@@ -567,12 +567,6 @@ impl ConfigInput {
                 self.name
             )));
         }
-        if remote.playback.max_streams == 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "remote playback max_streams must be greater than zero (input: {})",
-                self.name
-            )));
-        }
 
         match self.input_type {
             InputType::Emby | InputType::Jellyfin => {
@@ -1022,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_rejects_remote_playback_max_streams_zero() {
+    fn prepare_accepts_remote_playback_max_streams_zero_as_unlimited() {
         let mut input = ConfigInput {
             name: "emby_remote".into(),
             input_type: InputType::Emby,
@@ -1036,8 +1030,8 @@ mod tests {
             ..Default::default()
         };
 
-        let err = input.prepare(&[]).expect_err("zero remote max_streams should be rejected");
-        assert!(err.to_string().contains("remote playback max_streams must be greater than zero"));
+        input.prepare(&[]).expect("zero remote max_streams means unlimited");
+        assert_eq!(input.remote.as_ref().expect("remote config").playback.max_streams, 0);
     }
 
     #[test]
