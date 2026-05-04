@@ -333,7 +333,7 @@ async fn load_target_id_mapping_as_tree(app_config: &AppConfig, target_path: &Pa
     })
         .await
         .map_err(|e| TuliproxError::Config(format!("Blocking task failed: {e}")))?
-        .map_err(|err| TuliproxError::Config(format!("Could not find path for target {} err:{err}", &target_name)))
+        .map_err(|err| TuliproxError::Config(format!("Could not find path for target {target_name} err:{err}")))
 }
 
 async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Path, cluster: XtreamCluster) -> BPlusTree<u32, XtreamPlaylistItem> {
@@ -353,7 +353,7 @@ async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Pat
 async fn load_id_mapping_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
     let config = app_config.config.load();
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(||
-        TuliproxError::Config(format!("Could not find path for target {}", &target.name)))?;
+        TuliproxError::Config(format!("Could not find path for target {}", target.name)))?;
 
     load_target_id_mapping_as_tree(app_config, &target_path, target).await
 }
@@ -362,7 +362,7 @@ async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarge
     let config = app_config.config.load();
 
     let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(||
-        TuliproxError::Config(format!("Could not find path for target {} xtream output", &target.name)))?;
+        TuliproxError::Config(format!("Could not find path for target {} xtream output", target.name)))?;
 
     let live_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Live).await;
     let vod_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Video).await;
@@ -378,7 +378,7 @@ async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarge
 async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistM3uStorage, TuliproxError> {
     let config = app_config.config.load();
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(||
-        TuliproxError::Config(format!("Could not find path for target {}", &target.name)))?;
+        TuliproxError::Config(format!("Could not find path for target {}", target.name)))?;
 
     let m3u_path = m3u_get_file_path_for_db(&target_path);
     let file_lock = app_config.file_locks.read_lock(&m3u_path).await;

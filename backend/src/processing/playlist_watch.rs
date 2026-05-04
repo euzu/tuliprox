@@ -35,7 +35,7 @@ pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::
                         handle_watch_notification(app_config, client, &added_difference, &removed_difference, target_name, &pl.title).await;
                     }
                 } else {
-                    error!("failed to load watch_file {}", &path.to_str().unwrap_or_default());
+                    error!("failed to load watch_file {}", path.to_str().unwrap_or_default());
                     changed = true;
                 }
             } else {
@@ -45,13 +45,13 @@ pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::
                 match save_watch_tree(save_path, &new_tree).await {
                     Ok(()) => {}
                     Err(err) => {
-                        error!("failed to write watch_file {}: {}", save_path.to_str().unwrap_or_default(), err);
+                        error!("failed to write watch_file {}: {err}", save_path.to_str().unwrap_or_default());
                     }
                 }
             }
         }
         None => {
-            error!("failed to write watch_file {}", &watch_filename);
+            error!("failed to write watch_file {watch_filename}");
         }
     }
 }

@@ -58,7 +58,7 @@ impl EventService {
     pub fn unsubscribe(&self, sub_id: usize) { self.subscribers.borrow_mut().remove(&sub_id); }
 
     pub fn broadcast(&self, msg: EventMessage) {
-        for (_, cb) in self.subscribers.borrow().iter() {
+        for cb in self.subscribers.borrow().values() {
             cb(msg.clone());
         }
     }

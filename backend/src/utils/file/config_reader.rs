@@ -768,13 +768,13 @@ where
         match fs::copy(&path, &backup_path).await {
             Ok(_) => {}
             Err(err) => {
-                error!("Could not backup file {}:{err}", &backup_path.to_str().unwrap_or("?"));
+                error!("Could not backup file {}: {err}", backup_path.to_str().unwrap_or("?"));
             }
         }
-        info!("Saving file to {}", &path.to_str().unwrap_or("?"));
+        info!("Saving file to {}", path.to_str().unwrap_or("?"));
     }
 
-    let parent_dir = path.parent().ok_or_else(|| { TuliproxError::Config(format!("Could not write file {}: missing parent directory", &path.to_str().unwrap_or("?")))})?;
+    let parent_dir = path.parent().ok_or_else(|| { TuliproxError::Config(format!("Could not write file {}: missing parent directory", path.to_str().unwrap_or("?")))})?;
 
     let dest_file_name = path
         .file_name()
@@ -784,7 +784,7 @@ where
     let mut tmp_path = parent_dir.to_path_buf();
     tmp_path.push(format!(".{dest_file_name}.tmp-{}-{}", std::process::id(), Local::now().timestamp_nanos_opt().unwrap_or_default()));
 
-    fs::write(&tmp_path, serialized).await.map_err(|err| { TuliproxError::Config(format!("Could not write temp file {}: {err}", &tmp_path.to_str().unwrap_or("?")))})?;
+    fs::write(&tmp_path, serialized).await.map_err(|err| { TuliproxError::Config(format!("Could not write temp file {}: {err}", tmp_path.to_str().unwrap_or("?")))})?;
 
     match fs::rename(&tmp_path, &path).await {
         Ok(()) => Ok(()),
@@ -803,8 +803,8 @@ where
             let _ = fs::remove_file(&tmp_path).await;
             Err(TuliproxError::Config(format!(
                 "Could not replace file {} with {}: {err}",
-                &path.to_str().unwrap_or("?"),
-                &tmp_path.to_str().unwrap_or("?")
+                path.to_str().unwrap_or("?"),
+                tmp_path.to_str().unwrap_or("?")
             )))
         }
     }

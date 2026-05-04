@@ -1222,7 +1222,7 @@ struct ProcessTaskOutcome {
 impl InputWorker {
     #[allow(clippy::too_many_lines)]
     async fn run(mut self) {
-        debug!("Metadata worker started for input {}", &self.input_name);
+        debug!("Metadata worker started for input {}", self.input_name);
 
         let mut processed_vod_count: usize = 0;
         let mut processed_series_count: usize = 0;

@@ -615,7 +615,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     }
 
     let web_ui_path = cfg.web_ui.as_ref().and_then(|c| c.path.as_ref()).cloned().unwrap_or_default();
-    infos.push(format!("Server running: http://{}:{}", &cfg.api.host, &cfg.api.port));
+    infos.push(format!("Server running: http://{}:{}", cfg.api.host, cfg.api.port));
     for info in &infos {
         info!("{info}");
     }

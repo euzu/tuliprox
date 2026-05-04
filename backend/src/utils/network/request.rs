@@ -826,12 +826,12 @@ pub async fn get_input_text_content(
             Err(e) => {
                 error!(
                     "Failed to download input '{}': {}",
-                    &input.name,
+                    input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
                 Err(TuliproxError::RepositoryNetwork(format!(
                     "Failed to download input '{}': {}",
-                    &input.name,
+                    input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 )))
             }
@@ -890,12 +890,12 @@ pub async fn get_input_text_content_as_stream(
             Err(e) => {
                 error!(
                     "Failed to download input '{}': {}",
-                    &input.name,
+                    input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 );
                 Err(TuliproxError::RepositoryNetwork(format!(
                     "Failed to download input '{}': {}",
-                    &input.name,
+                    input.name,
                     sanitize_sensitive_info(e.to_string().as_str())
                 )))
             }
@@ -1654,7 +1654,7 @@ pub fn create_client_with_redirect(cfg: &AppConfig, redirect_policy: Policy) -> 
                 }
             }
             Err(e) => {
-                error!("Invalid proxy URL '{}': {e}", &proxy_cfg.url);
+                error!("Invalid proxy URL '{}': {e}", proxy_cfg.url);
             }
         }
     }
