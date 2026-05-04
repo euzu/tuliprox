@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- Removed the `plex` STRM export style. Existing STRM outputs configured with `style: plex` must switch to `kodi`,
+  `emby`, or `jellyfin`; Plex use cases should use the HDHomeRun integration instead. Existing generated TMDB marker
+  paths remain read-compatible, but `style: plex` is no longer accepted in configuration.
+
 ## 🌟 New Features
 
 - **Per-User Output Clusters**: API proxy users can now be restricted to specific clusters on their assigned target via

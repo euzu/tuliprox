@@ -7,8 +7,6 @@ pub enum StrmExportStyle {
     #[serde(rename = "kodi")]
     #[default]
     Kodi,
-    #[serde(rename = "plex")]
-    Plex,
     #[serde(rename = "emby")]
     Emby,
     #[serde(rename = "jellyfin")]
@@ -17,7 +15,6 @@ pub enum StrmExportStyle {
 
 impl StrmExportStyle {
     const KODI: &'static str = "Kodi";
-    const PLEX: &'static str = "Plex";
     const EMBY: &'static str = "Emby";
     const JELLYFIN: &'static str = "Jellyfin";
 }
@@ -29,7 +26,6 @@ impl Display for StrmExportStyle {
             "{}",
             match *self {
                 Self::Kodi => Self::KODI,
-                Self::Plex => Self::PLEX,
                 Self::Emby => Self::EMBY,
                 Self::Jellyfin => Self::JELLYFIN,
             }
@@ -43,7 +39,6 @@ impl FromStr for StrmExportStyle {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             Self::KODI => Ok(Self::Kodi),
-            Self::PLEX => Ok(Self::Plex),
             Self::EMBY => Ok(Self::Emby),
             Self::JELLYFIN => Ok(Self::Jellyfin),
             _ => Err(TuliproxError::Config(format!("Unknown StrmExportStyle: {s}"))),
