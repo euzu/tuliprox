@@ -10,7 +10,10 @@ use crate::repository::{load_input_local_library_playlist, persist_input_library
 use crate::repository::{load_input_m3u_playlist, m3u_get_file_path_for_db, m3u_write_playlist, persist_input_m3u_playlist};
 use crate::repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
 use crate::repository::BPlusTree;
-use crate::repository::{LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource, XtreamDiskPlaylistSource};
+use crate::repository::{
+    LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource,
+    RemoteMediaDiskPlaylistSource, XtreamDiskPlaylistSource,
+};
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::utils;
 use log::{info, warn};
@@ -459,6 +462,14 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
             }
             (playlist, None)
         }
+        InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+            let file_path = get_input_remote_media_playlist_file_path(&storage_path, &input.name);
+            let (playlist, result) = persist_input_remote_media_playlist(app_config, &file_path, playlist).await;
+            if let Err(err) = result {
+                return (playlist, Some(err));
+            }
+            (playlist, None)
+        }
     }
 }
 
@@ -502,6 +513,15 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                 Ok(Box::new(MemoryPlaylistSource::new(groups)))
             }
         }
+        InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+            let file_path = get_input_remote_media_playlist_file_path(&storage_path, &input.name);
+            if disk_based_processing && file_path.exists() {
+                Ok(Box::new(RemoteMediaDiskPlaylistSource::new(app_config, &file_path).await))
+            } else {
+                let groups = load_input_remote_media_playlist(app_config, &file_path).await?;
+                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+            }
+        }
     }
 }
 
@@ -519,12 +539,34 @@ pub fn get_input_local_library_playlist_file_path(storage_path: &Path, input_nam
     storage_path.join(format!("lib_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
 }
 
+pub fn get_input_remote_media_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
+    let sanitized_input_name: String = input_name.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    storage_path.join(format!("remote_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
+}
+
+pub async fn persist_input_remote_media_playlist(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+    playlist: Vec<PlaylistGroup>,
+) -> (Vec<PlaylistGroup>, Result<(), TuliproxError>) {
+    persist_input_library_playlist(app_config, file_path, playlist).await
+}
+
+pub async fn load_input_remote_media_playlist(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+) -> Result<Vec<PlaylistGroup>, TuliproxError> {
+    load_input_local_library_playlist(app_config, file_path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        assign_local_series_info_episode_key, rewrite_local_series_info_episode_virtual_id,
-        rewrite_series_episode_parent_virtual_ids, rewrite_series_info_episode_virtual_id, LocalEpisodeKey,
-        ProviderEpisodeKey,
+        assign_local_series_info_episode_key, get_input_remote_media_playlist_file_path,
+        rewrite_local_series_info_episode_virtual_id, rewrite_series_episode_parent_virtual_ids,
+        rewrite_series_info_episode_virtual_id, LocalEpisodeKey, ProviderEpisodeKey,
     };
     use crate::repository::{BPlusTreeQuery, TargetIdMapping, VirtualIdRecord};
     use shared::model::{
@@ -534,6 +576,14 @@ mod tests {
     use shared::utils::Internable;
     use std::{collections::HashMap, sync::Arc};
     use tempfile::tempdir;
+
+    #[test]
+    fn remote_media_playlist_file_path_uses_separate_prefix() {
+        let dir = tempdir().expect("tempdir");
+        let path = get_input_remote_media_playlist_file_path(dir.path(), &"Remote Input".intern());
+
+        assert!(path.ends_with("remote_Remote_Input.db"));
+    }
 
     fn make_local_series_info(series_uuid: &str, episodes: Vec<(u32, &str, &str)>) -> PlaylistItem {
         let episode_props = episodes

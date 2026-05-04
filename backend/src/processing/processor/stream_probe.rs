@@ -58,7 +58,7 @@ pub enum GenericProbeMetadataOutcome {
 }
 
 fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool {
-    !matches!(input_type, InputType::Library)
+    !(matches!(input_type, InputType::Library) || input_type.is_remote_media_server())
 }
 
 fn uses_seekable_remote_probe(item_type: PlaylistItemType, is_remote_probe: bool) -> bool {
@@ -183,13 +183,14 @@ async fn prepare_generic_stream_metadata(
                 XtreamCluster::Series
             } else {
                 // Generic probing currently supports live/video/series payload shapes.
-            return Ok(PreparedGenericProbeOutcome::Noop);
+                return Ok(PreparedGenericProbeOutcome::Noop);
             };
             (
                 xtream_get_file_path(&storage_path, cluster),
                 ProbeStorageKind::Xtream,
             )
         }
+        InputType::Emby | InputType::Jellyfin | InputType::Plex => return Ok(PreparedGenericProbeOutcome::Noop),
     };
 
     if !db_path.exists() {

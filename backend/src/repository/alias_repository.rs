@@ -179,6 +179,7 @@ pub fn csv_read_inputs_from_reader(
         InputType::M3uBatch | InputType::M3u => InputType::M3uBatch,
         InputType::XtreamBatch | InputType::Xtream => InputType::XtreamBatch,
         InputType::Library => InputType::Library,
+        InputType::Emby | InputType::Jellyfin | InputType::Plex => batch_input_type,
     };
     let mut result = vec![];
     let mut default_columns = vec![];

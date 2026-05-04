@@ -5,8 +5,15 @@ use log::warn;
 use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
-use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto, XtreamCluster};
-use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
+use shared::model::{
+    ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType,
+    RemoteCatalogConfigDto, RemoteEnrichmentConfigDto, RemoteImagePolicyDto, RemoteLibrarySelectorDto,
+    RemoteMediaInputConfigDto, RemotePlaybackConfigDto, StagedInputDto, XtreamCluster,
+};
+use shared::utils::{
+    get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX,
+    PROVIDER_SCHEME_PREFIX,
+};
 use shared::{check_input_connections, write_if_some};
 use shared::{check_input_credentials, concat_string };
 use std::borrow::Cow;
@@ -98,6 +105,55 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
 
 static DEFAULT_CONFIG_INPUT_OPTIONS: LazyLock<ConfigInputOptions> =
     LazyLock::new(|| ConfigInputOptions::from(&ConfigInputOptionsDto::default()));
+
+#[derive(Debug, Clone)]
+pub struct RemoteMediaInputConfig {
+    pub libraries: Vec<RemoteLibrarySelectorDto>,
+    pub catalog: RemoteCatalogConfigDto,
+    pub playback: RemotePlaybackConfigDto,
+    pub enrichment: RemoteEnrichmentConfigDto,
+    pub image_policy: RemoteImagePolicyDto,
+    pub token: Option<String>,
+    pub api_key: Option<String>,
+    pub user_id: Option<String>,
+    pub account_token: Option<String>,
+    pub server_id: Option<String>,
+    pub machine_id: Option<String>,
+    pub server_name: Option<String>,
+    pub prefer_https: bool,
+    pub allow_relay: bool,
+}
+
+impl From<&RemoteMediaInputConfigDto> for RemoteMediaInputConfig {
+    fn from(dto: &RemoteMediaInputConfigDto) -> Self {
+        Self {
+            libraries: dto.libraries.clone(),
+            catalog: dto.catalog.clone(),
+            playback: dto.playback.clone(),
+            enrichment: dto.enrichment.clone(),
+            image_policy: dto.image_policy,
+            token: dto.token.clone(),
+            api_key: dto.api_key.clone(),
+            user_id: dto.user_id.clone(),
+            account_token: dto.account_token.clone(),
+            server_id: dto.server_id.clone(),
+            machine_id: dto.machine_id.clone(),
+            server_name: dto.server_name.clone(),
+            prefer_https: dto.prefer_https,
+            allow_relay: dto.allow_relay,
+        }
+    }
+}
+
+impl RemoteMediaInputConfig {
+    pub fn has_any_emby_jellyfin_auth(&self) -> bool { self.token.is_some() || self.api_key.is_some() }
+
+    pub fn has_any_plex_token(&self) -> bool { self.account_token.is_some() || self.token.is_some() }
+
+    pub fn has_plex_server_selector(&self) -> bool {
+        self.server_id.is_some() || self.machine_id.is_some() || self.server_name.is_some()
+    }
+}
 
 pub struct InputUserInfo {
     pub base_url: String,
@@ -254,6 +310,7 @@ pub struct ConfigInput {
     pub persist: Option<String>,
     pub enabled: bool,
     pub options: Option<ConfigInputOptions>,
+    pub remote: Option<RemoteMediaInputConfig>,
     pub aliases: Option<Vec<ConfigInputAlias>>,
     pub priority: i16,
     pub max_connections: u16,
@@ -434,6 +491,110 @@ impl ConfigInput {
         self.options.as_ref().map_or(default, |o| o.has_all_flags(flags))
     }
 
+    fn prepare_remote_media_input(&self) -> Result<(), TuliproxError> {
+        if !self.input_type.is_remote_media_server() {
+            return Ok(());
+        }
+
+        if self.url.starts_with(BATCH_SCHEME_PREFIX) || self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote media-server input does not support batch:// or provider:// URLs (input: {})",
+                self.name
+            )));
+        }
+        if self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty()) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote media-server input does not support aliases (input: {})",
+                self.name
+            )));
+        }
+        if self.staged.as_ref().is_some_and(|staged| staged.enabled) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote media-server input does not support staged inputs (input: {})",
+                self.name
+            )));
+        }
+        if self.epg.is_some() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote media-server input does not support EPG configuration (input: {})",
+                self.name
+            )));
+        }
+        if self.panel_api.is_some() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote media-server input does not support panel_api configuration (input: {})",
+                self.name
+            )));
+        }
+        if self.max_connections > 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote media-server input uses remote.playback.max_streams instead of max_connections (input: {})",
+                self.name
+            )));
+        }
+
+        let Some(remote) = self.remote.as_ref() else {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote configuration is mandatory for input type {} (input: {})",
+                self.input_type, self.name
+            )));
+        };
+        if remote.libraries.is_empty() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote media-server input requires at least one selected library (input: {})",
+                self.name
+            )));
+        }
+        if remote.catalog.page_size == 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote catalog page_size must be greater than zero (input: {})",
+                self.name
+            )));
+        }
+        if remote.catalog.concurrency == 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "remote catalog concurrency must be greater than zero (input: {})",
+                self.name
+            )));
+        }
+
+        match self.input_type {
+            InputType::Emby | InputType::Jellyfin => {
+                if self.url.trim().is_empty() {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "url is mandatory for input type {} (input: {})",
+                        self.input_type, self.name
+                    )));
+                }
+                let has_login = self.username.as_ref().is_some_and(|u| !u.trim().is_empty())
+                    && self.password.as_ref().is_some_and(|p| !p.trim().is_empty());
+                if !remote.has_any_emby_jellyfin_auth() && !has_login {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "remote input type {} requires remote token/api_key or username/password bootstrap credentials (input: {})",
+                        self.input_type, self.name
+                    )));
+                }
+            }
+            InputType::Plex => {
+                if !remote.has_any_plex_token() {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "remote input type plex requires remote.account_token or remote.token (input: {})",
+                        self.name
+                    )));
+                }
+                if !remote.has_plex_server_selector() {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "remote input type plex requires a server selector such as remote.machine_id, remote.server_id, or remote.server_name (input: {})",
+                        self.name
+                    )));
+                }
+            }
+            InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {}
+        }
+
+        Ok(())
+    }
+
     pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
         // Defensive fallback: From<&ConfigInputDto> for ConfigInput sets options, but ConfigInput can
         // still be built via Default::default(), batch/internal/test paths, so prepare() normalizes
@@ -451,6 +612,10 @@ impl ConfigInput {
         let mut used_provider_configs: Vec<Arc<ConfigProvider>> = vec![];
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
+
+        if self.enabled {
+            self.prepare_remote_media_input()?;
+        }
 
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
             let provider_cfg = Self::resolve_provider_config(&self.url, provider_configs)?;
@@ -557,6 +722,7 @@ impl ConfigInput {
             persist: self.persist.clone(),
             enabled: self.enabled,
             options: self.options.clone(),
+            remote: self.remote.clone(),
             aliases: None,
             priority: alias.priority,
             max_connections: alias.max_connections,
@@ -644,6 +810,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             persist: dto.persist.clone(),
             enabled: dto.enabled,
             options: Some(options),
+            remote: dto.remote.as_ref().map(RemoteMediaInputConfig::from),
             aliases: dto.aliases.as_ref().map(|list| list.iter().map(ConfigInputAlias::from).collect()),
             priority: dto.priority,
             max_connections: dto.max_connections,
@@ -754,6 +921,94 @@ mod tests {
     use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
     use std::borrow::Cow;
     use std::sync::Arc;
+
+    fn remote_config_with_library() -> RemoteMediaInputConfig {
+        RemoteMediaInputConfig::from(&RemoteMediaInputConfigDto {
+            libraries: vec![RemoteLibrarySelectorDto::Name("Movies".to_string())],
+            ..RemoteMediaInputConfigDto::default()
+        })
+    }
+
+    #[test]
+    fn remote_media_runtime_mapping_preserves_safe_defaults() {
+        let dto = ConfigInputDto {
+            name: "emby_remote".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfigDto {
+                token: Some("token".to_string()),
+                ..RemoteMediaInputConfigDto {
+                    libraries: vec![RemoteLibrarySelectorDto::Name("Movies".to_string())],
+                    ..RemoteMediaInputConfigDto::default()
+                }
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let input = ConfigInput::from(&dto);
+        let remote = input.remote.expect("remote config should map to runtime");
+
+        assert_eq!(remote.catalog.page_size, 100);
+        assert_eq!(remote.catalog.concurrency, 1);
+        assert!(remote.playback.direct_play_only);
+        assert!(!remote.playback.allow_transcode);
+        assert!(!remote.enrichment.ffprobe);
+        assert_eq!(remote.token.as_deref(), Some("token"));
+    }
+
+    #[test]
+    fn prepare_accepts_plex_remote_without_input_url() {
+        let mut input = ConfigInput {
+            name: "plex_remote".into(),
+            input_type: InputType::Plex,
+            remote: Some(RemoteMediaInputConfig {
+                account_token: Some("token".to_string()),
+                machine_id: Some("machine".to_string()),
+                ..remote_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        input.prepare(&[]).expect("plex discovery config should prepare without input.url");
+    }
+
+    #[test]
+    fn prepare_rejects_remote_max_connections() {
+        let mut input = ConfigInput {
+            name: "emby_remote".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            remote: Some(RemoteMediaInputConfig {
+                token: Some("token".to_string()),
+                ..remote_config_with_library()
+            }),
+            max_connections: 1,
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("remote max_connections should be rejected");
+        assert!(err.to_string().contains("remote.playback.max_streams"));
+    }
+
+    #[test]
+    fn prepare_rejects_remote_provider_url() {
+        let mut input = ConfigInput {
+            name: "emby_remote".into(),
+            input_type: InputType::Emby,
+            url: "provider://media-server".to_string(),
+            remote: Some(RemoteMediaInputConfig {
+                token: Some("token".to_string()),
+                ..remote_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("remote provider URLs should be rejected");
+        assert!(err.to_string().contains("does not support batch:// or provider://"));
+    }
 
     #[test]
     fn test_resolve_url_normal() {

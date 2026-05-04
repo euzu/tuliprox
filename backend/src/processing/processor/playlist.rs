@@ -507,6 +507,16 @@ async fn playlist_download_from_input(
                 let (p, e) = library::download_library_playlist(client, app_config, input).await;
                 (p, e, false, 0, 0)
             }
+            InputType::Emby | InputType::Jellyfin | InputType::Plex => (
+                vec![],
+                vec![TuliproxError::Download(format!(
+                    "remote media-server input '{}' is configured but catalog import is not implemented yet",
+                    input.name
+                ))],
+                false,
+                0,
+                0,
+            ),
         }
     };
 

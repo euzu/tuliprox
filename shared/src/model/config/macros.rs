@@ -8,7 +8,7 @@ macro_rules! check_input_credentials {
 
         if !matches!($input_type, InputType::Library) {
             $this.url = $this.url.trim().to_string();
-            if $this.url.is_empty() {
+            if !matches!($input_type, InputType::Plex) && $this.url.is_empty() {
                 return Err($crate::error::TuliproxError::ConfigInput(format!("url for input is mandatory{}", __tp_input_name_suffix)));
             }
 
@@ -76,8 +76,9 @@ macro_rules! check_input_credentials {
                     }
                 }
             }
-            InputType::Library => {
-                // nothing to do
+            InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+                // Remote media-server credentials live in the dedicated remote block; detailed
+                // validation happens in ConfigInputDto/ConfigInput prepare methods.
             }
         }
     };
@@ -125,7 +126,7 @@ macro_rules! check_input_connections {
                     }
                 }
             }
-            InputType::Library => {}
+            InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex => {}
         }
     };
 }

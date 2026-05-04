@@ -436,6 +436,7 @@ macro_rules! impl_single_file_disk_source {
 impl_single_file_disk_source!(M3u, Arc<str>, M3uPlaylistItem);
 
 impl_single_file_disk_source!(LocalLibrary, UUIDType, XtreamPlaylistItem);
+impl_single_file_disk_source!(RemoteMedia, UUIDType, XtreamPlaylistItem);
 
 pub struct MemoryPlaylistSource {
     playlist: Arc<Vec<PlaylistGroup>>,

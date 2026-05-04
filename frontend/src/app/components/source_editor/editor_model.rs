@@ -68,6 +68,7 @@ impl From<InputType> for BlockType {
             InputType::M3uBatch | InputType::M3u => BlockType::InputM3u,
             InputType::XtreamBatch | InputType::Xtream => BlockType::InputXtream,
             InputType::Library => BlockType::InputLibrary,
+            InputType::Emby | InputType::Jellyfin | InputType::Plex => BlockType::InputXtream,
         }
     }
 }

@@ -11,6 +11,7 @@ macro_rules! include_modules {
         pub mod model;
         pub mod processing;
         pub mod ptt;
+        pub mod remote_media;
         pub mod repository;
         pub mod runtime_config_report;
         pub mod utils;

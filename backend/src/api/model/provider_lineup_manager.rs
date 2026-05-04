@@ -1039,6 +1039,7 @@ mod tests {
             input_type: InputType::Xtream, // You can use a default value here
             max_connections,
             priority,
+            remote: None,
             aliases: None,
             headers: HashMap::default(),
             options: None,

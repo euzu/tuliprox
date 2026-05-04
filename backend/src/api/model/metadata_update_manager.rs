@@ -3343,8 +3343,10 @@ impl InputWorker {
     fn task_needs_provider_connection(task: &UpdateTask, input_type: InputType) -> bool {
         match task {
             UpdateTask::ProbeLive { .. } => true,
-            // Local library probing is fully local and must not depend on provider capacity.
-            UpdateTask::ProbeStream { .. } => !matches!(input_type, InputType::Library),
+            // Local library and remote media-server probing must not depend on IPTV provider capacity.
+            UpdateTask::ProbeStream { .. } => {
+                !(matches!(input_type, InputType::Library) || input_type.is_remote_media_server())
+            },
             // Resolve tasks handle their own probe connection acquisition internally.
             // This avoids holding a provider connection for the entire duration of
             // info fetch + TMDB resolve + probe, reducing "provider exhausted" errors.
