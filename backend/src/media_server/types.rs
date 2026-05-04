@@ -1,7 +1,9 @@
+use crate::media_server::MediaServerError;
 use bytes::Bytes;
+use futures::stream::BoxStream;
 use reqwest::{header::HeaderMap, StatusCode};
 use shared::model::InputType;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum MediaServerKind {
@@ -215,7 +217,23 @@ pub struct MediaServerResourceResponse {
     pub body: Bytes,
 }
 
-pub type MediaServerStreamResponse = MediaServerResourceResponse;
+pub type BoxedMediaServerStream = BoxStream<'static, Result<Bytes, MediaServerError>>;
+
+pub struct MediaServerStreamResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: BoxedMediaServerStream,
+}
+
+impl fmt::Debug for MediaServerStreamResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MediaServerStreamResponse")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .field("body", &"<stream>")
+            .finish()
+    }
+}
 
 #[cfg(test)]
 mod tests {

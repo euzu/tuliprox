@@ -29,8 +29,8 @@ impl fmt::Debug for XtreamLoginRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("XtreamLoginRequest")
             .field("url", &self.url)
-            .field("username", &"<redacted>")
-            .field("password", &"<redacted>")
+            .field("username", &"***")
+            .field("password", &"***")
             .finish()
     }
 }

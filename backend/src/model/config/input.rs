@@ -1035,7 +1035,7 @@ mod tests {
             url: "https://media.example.invalid".to_string(),
             media_server: Some(MediaServerInputConfig {
                 token: Some("   ".to_string()),
-                api_key: Some("".to_string()),
+                api_key: Some(String::new()),
                 ..media_server_config_with_library()
             }),
             enabled: true,

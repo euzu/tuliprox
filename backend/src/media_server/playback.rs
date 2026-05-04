@@ -1,7 +1,9 @@
 use crate::media_server::{
-    MediaServerImageRef, MediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerResourceResponse, MediaServerStreamRef,
+    BoxedMediaServerStream, MediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerImageRef,
+    MediaServerResourceResponse, MediaServerStreamRef, MediaServerStreamResponse,
 };
 use bytes::Bytes;
+use futures::{stream, StreamExt};
 use reqwest::{
     header::{
         HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED,
@@ -9,7 +11,7 @@ use reqwest::{
     StatusCode,
 };
 use shared::model::{InputType, PlaylistItemType};
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaybackOrigin {
@@ -18,11 +20,20 @@ pub enum PlaybackOrigin {
     MediaServer(MediaServerStreamRef),
 }
 
-#[derive(Debug, Clone)]
 pub struct MediaServerProxyResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
-    pub body: Bytes,
+    pub body: BoxedMediaServerStream,
+}
+
+impl fmt::Debug for MediaServerProxyResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MediaServerProxyResponse")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .field("body", &"<stream>")
+            .finish()
+    }
 }
 
 pub fn classify_playback_origin(
@@ -51,7 +62,7 @@ where
     C: MediaServerCatalogClient,
 {
     let response = client.open_stream(stream_ref, range).await?;
-    Ok(media_server_resource_to_proxy_response(response))
+    Ok(media_server_stream_to_proxy_response(response))
 }
 
 pub async fn media_server_image_response<C>(
@@ -69,8 +80,20 @@ fn media_server_resource_to_proxy_response(response: MediaServerResourceResponse
     MediaServerProxyResponse {
         status: response.status,
         headers: safe_media_server_response_headers(&response.headers),
+        body: single_chunk_stream(response.body),
+    }
+}
+
+fn media_server_stream_to_proxy_response(response: MediaServerStreamResponse) -> MediaServerProxyResponse {
+    MediaServerProxyResponse {
+        status: response.status,
+        headers: safe_media_server_response_headers(&response.headers),
         body: response.body,
     }
+}
+
+fn single_chunk_stream(body: Bytes) -> BoxedMediaServerStream {
+    stream::once(async move { Ok::<Bytes, MediaServerError>(body) }).boxed()
 }
 
 pub fn safe_media_server_response_headers(headers: &HeaderMap) -> HeaderMap {
@@ -171,6 +194,7 @@ mod tests {
         MediaServerEpisode, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest,
         MediaServerStatus,
     };
+    use futures::{stream, StreamExt};
     use reqwest::header::{HeaderValue, AUTHORIZATION};
     use std::sync::{Mutex, Arc as StdArc};
 
@@ -213,7 +237,11 @@ mod tests {
             headers.insert(CONTENT_LENGTH, HeaderValue::from_static("1024"));
             headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
             headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer should-not-leak"));
-            Ok(MediaServerResourceResponse { status: StatusCode::PARTIAL_CONTENT, headers, body: Bytes::from_static(b"data") })
+            Ok(MediaServerStreamResponse {
+                status: StatusCode::PARTIAL_CONTENT,
+                headers,
+                body: stream::once(async { Ok::<Bytes, MediaServerError>(Bytes::from_static(b"data")) }).boxed(),
+            })
         }
 
         async fn open_image(&self, _image_ref: &MediaServerImageRef) -> Result<MediaServerResourceResponse, MediaServerError> {
@@ -239,6 +267,10 @@ mod tests {
         assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers.get(CONTENT_RANGE).and_then(|v| v.to_str().ok()), Some("bytes 0-1023/2048"));
         assert!(response.headers.get(AUTHORIZATION).is_none());
+
+        let chunks = response.body.collect::<Vec<_>>().await;
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].as_ref().map(Bytes::as_ref), Ok(b"data".as_slice()));
     }
 
     #[test]

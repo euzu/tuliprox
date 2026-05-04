@@ -149,10 +149,11 @@ fn validate_page_progress<T>(library: &MediaServerLibrary, page: &MediaServerPag
 mod tests {
     use super::*;
     use crate::media_server::{
-        MediaServerImageRef, MediaServerLibraryRef, MediaServerKind, MediaServerProviderIdHint, MediaServerResourceResponse,
-        MediaServerStatus, MediaServerStreamRef,
+        MediaServerImageRef, MediaServerLibraryRef, MediaServerKind, MediaServerProviderIdHint,
+        MediaServerResourceResponse, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
     };
     use bytes::Bytes;
+    use futures::{stream, StreamExt};
     use reqwest::{header::HeaderMap, StatusCode};
     use std::sync::{Arc, Mutex};
 
@@ -203,7 +204,7 @@ mod tests {
             _stream_ref: &MediaServerStreamRef,
             _range: Option<&str>,
         ) -> Result<crate::media_server::MediaServerStreamResponse, MediaServerError> {
-            Ok(empty_response())
+            Ok(empty_stream_response())
         }
 
         async fn open_image(
@@ -216,6 +217,14 @@ mod tests {
 
     fn empty_response() -> MediaServerResourceResponse {
         MediaServerResourceResponse { status: StatusCode::OK, headers: HeaderMap::new(), body: Bytes::new() }
+    }
+
+    fn empty_stream_response() -> MediaServerStreamResponse {
+        MediaServerStreamResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: stream::once(async { Ok::<Bytes, MediaServerError>(Bytes::new()) }).boxed(),
+        }
     }
 
     fn movie_library() -> MediaServerLibrary {
