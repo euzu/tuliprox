@@ -38,7 +38,7 @@ pub fn Home() -> Html {
     let system_info = use_state(|| None::<Rc<SystemInfo>>);
     let view_visible = use_state(|| if setup_mode { Some(ViewType::Config) } else { None });
     let theme = use_state(Theme::get_current_theme);
-    let flags_loaded = use_state(|| services.flags.is_loaded());
+    let force_update = use_force_update();
 
     let handle_theme_select = {
         let set_theme = theme.clone();
@@ -156,7 +156,7 @@ pub fn Home() -> Html {
 
     {
         let flags_service = services.flags.clone();
-        let flags_loaded = flags_loaded.clone();
+        let flags_loaded = force_update.clone();
         use_effect_with(geoip_enabled, move |geoip_enabled| {
             let cancelled = Rc::new(Cell::new(false));
             if *geoip_enabled {
@@ -167,7 +167,7 @@ pub fn Home() -> Html {
                     while !cancelled.get() && !flags_service.is_loaded() {
                         match flags_service.ensure_loaded_from_assets().await {
                             Ok(FlagsLoadState::Loaded) => {
-                                flags_loaded.set(true);
+                                flags_loaded.force_update();
                                 break;
                             }
                             Ok(FlagsLoadState::InProgress) => {
@@ -180,11 +180,11 @@ pub fn Home() -> Html {
                         }
                     }
                     if flags_service.is_loaded() && !cancelled.get() {
-                        flags_loaded.set(true);
+                        flags_loaded.force_update();
                     }
                 });
             } else {
-                flags_loaded.set(flags_service.is_loaded());
+                flags_loaded.force_update();
             }
             move || cancelled.set(true)
         });

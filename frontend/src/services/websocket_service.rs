@@ -89,9 +89,19 @@ impl WebSocketService {
     }
 
     pub fn connect_ws_with_backoff(&self) {
-        if self.ws.borrow().is_some() {
+        let has_active_socket = self
+            .ws
+            .borrow()
+            .as_ref()
+            .map(|ws| {
+                let state = ws.ready_state();
+                state == WebSocket::CONNECTING || state == WebSocket::OPEN
+            })
+            .unwrap_or(false);
+        if has_active_socket {
             return;
         }
+        *self.ws.borrow_mut() = None;
         match WebSocket::new(&self.ws_path) {
             Err(err) => error!("Failed to open websocket connection: {err:?}"),
             Ok(socket) => {
@@ -314,6 +324,7 @@ fn handle_socket_protocol_msg(
                 match message {
                     ProtocolMessage::Unauthorized => {
                         connected.set(false);
+                        pending_messages.borrow_mut().clear();
                         event_service.broadcast(EventMessage::Unauthorized);
                     }
                     ProtocolMessage::Error(err) => {
