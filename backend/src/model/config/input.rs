@@ -534,13 +534,6 @@ impl ConfigInput {
                 self.name
             )));
         }
-        if self.max_connections > 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media-server input uses media_server.playback.max_streams instead of max_connections (input: {})",
-                self.name
-            )));
-        }
-
         let Some(media_server) = self.media_server.as_ref() else {
             return Err(TuliproxError::ConfigInput(format!(
                 "media_server configuration is mandatory for input type {} (input: {})",
@@ -559,13 +552,6 @@ impl ConfigInput {
                 self.name
             )));
         }
-        if media_server.catalog.concurrency == 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media server catalog concurrency must be greater than zero (input: {})",
-                self.name
-            )));
-        }
-
         match self.input_type {
             InputType::Emby | InputType::Jellyfin => {
                 if trimmed_url.is_empty() {
@@ -963,7 +949,6 @@ mod tests {
         let media_server = input.media_server.expect("media_server config should map to runtime");
 
         assert_eq!(media_server.catalog.page_size, 100);
-        assert_eq!(media_server.catalog.concurrency, 1);
         assert!(media_server.playback.direct_play_only);
         assert!(!media_server.playback.allow_transcode);
         assert!(!media_server.enrichment.ffprobe);
@@ -1060,26 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_accepts_media_server_playback_max_streams_zero_as_unlimited() {
-        let mut input = ConfigInput {
-            name: "emby_media_server".into(),
-            input_type: InputType::Emby,
-            url: "https://media.example.invalid".to_string(),
-            media_server: Some(MediaServerInputConfig {
-                token: Some("token".to_string()),
-                playback: MediaServerPlaybackConfigDto { max_streams: 0, ..MediaServerPlaybackConfigDto::default() },
-                ..media_server_config_with_library()
-            }),
-            enabled: true,
-            ..Default::default()
-        };
-
-        input.prepare(&[]).expect("zero media_server max_streams means unlimited");
-        assert_eq!(input.media_server.as_ref().expect("media_server config").playback.max_streams, 0);
-    }
-
-    #[test]
-    fn prepare_rejects_media_server_max_connections() {
+    fn prepare_accepts_media_server_max_connections_as_stream_limit() {
         let mut input = ConfigInput {
             name: "emby_media_server".into(),
             input_type: InputType::Emby,
@@ -1093,8 +1059,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = input.prepare(&[]).expect_err("media_server max_connections should be rejected");
-        assert!(err.to_string().contains("media_server.playback.max_streams"));
+        input.prepare(&[]).expect("media_server inputs reuse max_connections stream-limit semantics");
     }
 
     #[test]

@@ -338,19 +338,11 @@ impl ConfigInputOptionsDto {
 
 pub const fn default_media_server_catalog_page_size() -> u16 { 100 }
 pub const fn default_media_server_catalog_request_delay_ms() -> u64 { 250 }
-pub const fn default_media_server_catalog_concurrency() -> u8 { 1 }
-pub const fn default_media_server_playback_max_streams() -> u16 { 1 }
 pub const fn is_default_media_server_catalog_page_size(value: &u16) -> bool {
     *value == default_media_server_catalog_page_size()
 }
 pub const fn is_default_media_server_catalog_request_delay_ms(value: &u64) -> bool {
     *value == default_media_server_catalog_request_delay_ms()
-}
-pub const fn is_default_media_server_catalog_concurrency(value: &u8) -> bool {
-    *value == default_media_server_catalog_concurrency()
-}
-pub const fn is_default_media_server_playback_max_streams(value: &u16) -> bool {
-    *value == default_media_server_playback_max_streams()
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
@@ -383,11 +375,6 @@ pub struct MediaServerCatalogConfigDto {
         skip_serializing_if = "is_default_media_server_catalog_request_delay_ms"
     )]
     pub request_delay_ms: u64,
-    #[serde(
-        default = "default_media_server_catalog_concurrency",
-        skip_serializing_if = "is_default_media_server_catalog_concurrency"
-    )]
-    pub concurrency: u8,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub include_media_sources: bool,
     #[serde(default, alias = "include_file_paths", skip_serializing_if = "is_false")]
@@ -403,7 +390,6 @@ impl Default for MediaServerCatalogConfigDto {
             refresh_on_startup: false,
             page_size: default_media_server_catalog_page_size(),
             request_delay_ms: default_media_server_catalog_request_delay_ms(),
-            concurrency: default_media_server_catalog_concurrency(),
             include_media_sources: default_as_true(),
             include_paths: false,
             include_user_state: false,
@@ -418,11 +404,6 @@ impl MediaServerCatalogConfigDto {
         if self.page_size == 0 {
             return Err(TuliproxError::ConfigInput(format!(
                 "media server catalog page_size must be greater than zero (input: {input_name})"
-            )));
-        }
-        if self.concurrency == 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media server catalog concurrency must be greater than zero (input: {input_name})"
             )));
         }
         Ok(())
@@ -453,11 +434,6 @@ pub struct MediaServerPlaybackConfigDto {
     pub direct_play_only: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_transcode: bool,
-    #[serde(
-        default = "default_media_server_playback_max_streams",
-        skip_serializing_if = "is_default_media_server_playback_max_streams"
-    )]
-    pub max_streams: u16,
 }
 
 impl Default for MediaServerPlaybackConfigDto {
@@ -467,7 +443,6 @@ impl Default for MediaServerPlaybackConfigDto {
             preflight_streams: false,
             direct_play_only: default_as_true(),
             allow_transcode: false,
-            max_streams: default_media_server_playback_max_streams(),
         }
     }
 }
@@ -963,13 +938,6 @@ impl ConfigInputDto {
                 self.name
             )));
         }
-        if self.max_connections > 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media-server input uses media_server.playback.max_streams instead of max_connections (input: {})",
-                self.name
-            )));
-        }
-
         let Some(media_server) = self.media_server.as_mut() else {
             return Err(TuliproxError::ConfigInput(format!(
                 "media_server configuration is mandatory for input type {} (input: {})",
@@ -1514,21 +1482,20 @@ mod tests {
     }
 
     #[test]
-    fn prepare_accepts_media_server_playback_max_streams_zero_as_unlimited() {
+    fn prepare_accepts_media_server_max_connections_as_stream_limit() {
         let mut dto = ConfigInputDto {
             name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: "https://media.example.invalid".to_string(),
+            max_connections: 1,
             media_server: Some(MediaServerInputConfigDto {
                 token: Some("token-value".to_string()),
-                playback: MediaServerPlaybackConfigDto { max_streams: 0, ..MediaServerPlaybackConfigDto::default() },
                 ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
 
-        prepare_dto(&mut dto).expect("zero media_server max_streams means unlimited");
-        assert_eq!(dto.media_server.as_ref().expect("media_server config").playback.max_streams, 0);
+        prepare_dto(&mut dto).expect("media_server inputs reuse max_connections stream-limit semantics");
     }
 
     fn prepare_dto(dto: &mut ConfigInputDto) -> Result<u16, TuliproxError> {
@@ -1541,7 +1508,6 @@ mod tests {
 
         assert_eq!(media_server.catalog.page_size, 100);
         assert_eq!(media_server.catalog.request_delay_ms, 250);
-        assert_eq!(media_server.catalog.concurrency, 1);
         assert!(media_server.catalog.include_media_sources);
         assert!(!media_server.catalog.include_paths);
         assert!(!media_server.catalog.include_user_state);
@@ -1549,7 +1515,6 @@ mod tests {
         assert!(media_server.playback.direct_play_only);
         assert!(!media_server.playback.allow_transcode);
         assert!(!media_server.playback.preflight_streams);
-        assert_eq!(media_server.playback.max_streams, 1);
         assert!(!media_server.enrichment.ffprobe);
         assert!(!media_server.enrichment.tmdb_lookup);
         assert!(!media_server.enrichment.fetch_images);
