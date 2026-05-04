@@ -1,7 +1,7 @@
 use crate::media_server::{
-    redaction::redact_media_server_text, MediaServerEpisode, MediaServerImageRef, MediaServerLibrary, MediaServerLibraryRef, MediaServerError,
-    MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerResourceResponse, MediaServerStatus, MediaServerStreamRef,
-    MediaServerStreamResponse,
+    redaction::redact_media_server_text, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerImageRef,
+    MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest,
+    MediaServerResourceResponse, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -49,6 +49,8 @@ impl MediaServerHttpClient {
         MediaServerHttpRequestBuilder {
             safe_url: redact_media_server_text(url),
             builder: self.client.request(method, url),
+            not_found_kind: MediaServerErrorKind::MediaServerItemNotFound,
+            fallback_kind: MediaServerErrorKind::MediaServerStreamOpenFailed,
         }
     }
 }
@@ -56,6 +58,8 @@ impl MediaServerHttpClient {
 pub struct MediaServerHttpRequestBuilder {
     safe_url: String,
     builder: RequestBuilder,
+    not_found_kind: MediaServerErrorKind,
+    fallback_kind: MediaServerErrorKind,
 }
 
 impl MediaServerHttpRequestBuilder {
@@ -71,11 +75,32 @@ impl MediaServerHttpRequestBuilder {
         self
     }
 
+    pub fn error_kinds(mut self, not_found_kind: MediaServerErrorKind, fallback_kind: MediaServerErrorKind) -> Self {
+        self.not_found_kind = not_found_kind;
+        self.fallback_kind = fallback_kind;
+        self
+    }
+
+    pub fn discovery_errors(self) -> Self {
+        self.error_kinds(MediaServerErrorKind::MediaServerUnavailable, MediaServerErrorKind::MediaServerDiscoveryFailed)
+    }
+
+    pub fn catalog_errors(self) -> Self {
+        self.error_kinds(
+            MediaServerErrorKind::MediaServerLibraryUnavailable,
+            MediaServerErrorKind::MediaServerCatalogDecodeFailed,
+        )
+    }
+
+    pub fn playback_errors(self) -> Self {
+        self.error_kinds(MediaServerErrorKind::MediaServerItemNotFound, MediaServerErrorKind::MediaServerStreamOpenFailed)
+    }
+
     pub async fn send(self) -> Result<reqwest::Response, MediaServerError> {
-        self.builder
-            .send()
-            .await
-            .map_err(|err| MediaServerError::from_reqwest_error(&err).detail(format!("request {} failed", self.safe_url)))
+        self.builder.send().await.map_err(|err| {
+            MediaServerError::from_reqwest_error_with_fallback(&err, self.not_found_kind, self.fallback_kind)
+                .detail(format!("request {} failed", self.safe_url))
+        })
     }
 }
 
@@ -90,5 +115,14 @@ mod tests {
 
         assert!(!request.safe_url().contains("secret"));
         assert!(request.safe_url().contains("api_key=<redacted>"));
+    }
+
+    #[test]
+    fn media_server_http_request_builder_can_select_catalog_error_context() {
+        let client = MediaServerHttpClient::new(reqwest::Client::new());
+        let request = client.request(Method::GET, "https://media.example.invalid/libraries").catalog_errors();
+
+        assert_eq!(request.not_found_kind, MediaServerErrorKind::MediaServerLibraryUnavailable);
+        assert_eq!(request.fallback_kind, MediaServerErrorKind::MediaServerCatalogDecodeFailed);
     }
 }

@@ -7,6 +7,7 @@ const SENSITIVE_QUERY_KEYS: &[&str] = &[
     "x-plex-token",
     "x_emby_token",
     "x-emby-token",
+    "x-mediabrowser-token",
     "api_key",
     "apikey",
     "password",
@@ -139,6 +140,17 @@ mod tests {
         assert!(!redacted.contains("another-secret"));
         assert!(redacted.contains("token=<redacted>"));
         assert!(redacted.contains("api_key=<redacted>"));
+        assert!(redacted.contains("safe=visible"));
+    }
+
+    #[test]
+    fn redacts_media_browser_query_token() {
+        let redacted = redact_media_server_text(
+            "https://media.example.invalid/video?X-MediaBrowser-Token=secret-token&safe=visible",
+        );
+
+        assert!(!redacted.contains("secret-token"));
+        assert!(redacted.contains("X-MediaBrowser-Token=<redacted>") || redacted.contains("x-mediabrowser-token=<redacted>"));
         assert!(redacted.contains("safe=visible"));
     }
 

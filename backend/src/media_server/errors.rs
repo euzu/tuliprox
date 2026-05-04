@@ -57,27 +57,51 @@ impl MediaServerError {
     pub fn detail_text(&self) -> Option<&str> { self.detail.as_deref() }
 
     pub fn from_http_status(status: StatusCode) -> Self {
+        Self::from_http_status_with_fallback(
+            status,
+            MediaServerErrorKind::MediaServerItemNotFound,
+            MediaServerErrorKind::MediaServerStreamOpenFailed,
+        )
+    }
+
+    pub fn from_http_status_with_fallback(
+        status: StatusCode,
+        not_found_kind: MediaServerErrorKind,
+        fallback_kind: MediaServerErrorKind,
+    ) -> Self {
         let kind = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             MediaServerErrorKind::MediaServerAuthDenied
         } else if status == StatusCode::TOO_MANY_REQUESTS {
             MediaServerErrorKind::MediaServerRateLimited
         } else if status == StatusCode::NOT_FOUND {
-            MediaServerErrorKind::MediaServerItemNotFound
+            not_found_kind
         } else {
-            MediaServerErrorKind::MediaServerStreamOpenFailed
+            fallback_kind
         };
         Self::new(kind).status(status)
     }
 
     pub fn from_reqwest_error(err: &reqwest::Error) -> Self {
+        Self::from_reqwest_error_with_fallback(
+            err,
+            MediaServerErrorKind::MediaServerItemNotFound,
+            MediaServerErrorKind::MediaServerStreamOpenFailed,
+        )
+    }
+
+    pub fn from_reqwest_error_with_fallback(
+        err: &reqwest::Error,
+        not_found_kind: MediaServerErrorKind,
+        fallback_kind: MediaServerErrorKind,
+    ) -> Self {
         let kind = if err.is_timeout() || err.is_connect() {
             MediaServerErrorKind::MediaServerUnavailable
         } else if err.is_decode() {
-            MediaServerErrorKind::MediaServerCatalogDecodeFailed
+            fallback_kind
         } else if let Some(status) = err.status() {
-            return Self::from_http_status(status).detail(err.to_string());
+            return Self::from_http_status_with_fallback(status, not_found_kind, fallback_kind).detail(err.to_string());
         } else {
-            MediaServerErrorKind::MediaServerStreamOpenFailed
+            fallback_kind
         };
         Self::new(kind).detail(err.to_string())
     }
@@ -118,6 +142,37 @@ mod tests {
         assert_eq!(
             MediaServerError::from_http_status(StatusCode::NOT_FOUND).kind,
             MediaServerErrorKind::MediaServerItemNotFound
+        );
+    }
+
+    #[test]
+    fn http_status_mapping_accepts_operation_specific_fallbacks() {
+        assert_eq!(
+            MediaServerError::from_http_status_with_fallback(
+                StatusCode::NOT_FOUND,
+                MediaServerErrorKind::MediaServerLibraryUnavailable,
+                MediaServerErrorKind::MediaServerCatalogDecodeFailed,
+            )
+            .kind,
+            MediaServerErrorKind::MediaServerLibraryUnavailable
+        );
+        assert_eq!(
+            MediaServerError::from_http_status_with_fallback(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                MediaServerErrorKind::MediaServerLibraryUnavailable,
+                MediaServerErrorKind::MediaServerCatalogDecodeFailed,
+            )
+            .kind,
+            MediaServerErrorKind::MediaServerCatalogDecodeFailed
+        );
+        assert_eq!(
+            MediaServerError::from_http_status_with_fallback(
+                StatusCode::FORBIDDEN,
+                MediaServerErrorKind::MediaServerLibraryUnavailable,
+                MediaServerErrorKind::MediaServerCatalogDecodeFailed,
+            )
+            .kind,
+            MediaServerErrorKind::MediaServerAuthDenied
         );
     }
 
