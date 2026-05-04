@@ -1,33 +1,33 @@
-use crate::remote_media::redaction::redact_remote_text;
+use crate::media_server::redaction::redact_media_server_text;
 use reqwest::StatusCode;
 use std::{error::Error, fmt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteMediaErrorKind {
-    RemoteAuthDenied,
-    RemoteServerUnavailable,
-    RemoteLibraryUnavailable,
-    RemoteLibraryTypeUnsupported,
-    RemoteCatalogDecodeFailed,
-    RemoteCatalogPageStalled,
-    RemoteCatalogIncomplete,
-    RemoteItemNotFound,
-    NoDirectPlayableRemoteSource,
-    RemoteStreamOpenFailed,
-    RemoteRateLimited,
-    ResourceDiscoveryFailed,
+pub enum MediaServerErrorKind {
+    MediaServerAuthDenied,
+    MediaServerUnavailable,
+    MediaServerLibraryUnavailable,
+    MediaServerLibraryTypeUnsupported,
+    MediaServerCatalogDecodeFailed,
+    MediaServerCatalogPageStalled,
+    MediaServerCatalogIncomplete,
+    MediaServerItemNotFound,
+    NoDirectPlayableMediaServerSource,
+    MediaServerStreamOpenFailed,
+    MediaServerRateLimited,
+    MediaServerDiscoveryFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteMediaError {
-    pub kind: RemoteMediaErrorKind,
+pub struct MediaServerError {
+    pub kind: MediaServerErrorKind,
     pub provider: Option<&'static str>,
     pub status: Option<StatusCode>,
     detail: Option<String>,
 }
 
-impl RemoteMediaError {
-    pub fn new(kind: RemoteMediaErrorKind) -> Self {
+impl MediaServerError {
+    pub fn new(kind: MediaServerErrorKind) -> Self {
         Self {
             kind,
             provider: None,
@@ -47,7 +47,7 @@ impl RemoteMediaError {
     }
 
     pub fn detail(mut self, detail: impl AsRef<str>) -> Self {
-        let redacted = redact_remote_text(detail.as_ref());
+        let redacted = redact_media_server_text(detail.as_ref());
         if !redacted.trim().is_empty() {
             self.detail = Some(redacted);
         }
@@ -58,32 +58,32 @@ impl RemoteMediaError {
 
     pub fn from_http_status(status: StatusCode) -> Self {
         let kind = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-            RemoteMediaErrorKind::RemoteAuthDenied
+            MediaServerErrorKind::MediaServerAuthDenied
         } else if status == StatusCode::TOO_MANY_REQUESTS {
-            RemoteMediaErrorKind::RemoteRateLimited
+            MediaServerErrorKind::MediaServerRateLimited
         } else if status == StatusCode::NOT_FOUND {
-            RemoteMediaErrorKind::RemoteItemNotFound
+            MediaServerErrorKind::MediaServerItemNotFound
         } else {
-            RemoteMediaErrorKind::RemoteStreamOpenFailed
+            MediaServerErrorKind::MediaServerStreamOpenFailed
         };
         Self::new(kind).status(status)
     }
 
     pub fn from_reqwest_error(err: &reqwest::Error) -> Self {
         let kind = if err.is_timeout() || err.is_connect() {
-            RemoteMediaErrorKind::RemoteServerUnavailable
+            MediaServerErrorKind::MediaServerUnavailable
         } else if err.is_decode() {
-            RemoteMediaErrorKind::RemoteCatalogDecodeFailed
+            MediaServerErrorKind::MediaServerCatalogDecodeFailed
         } else if let Some(status) = err.status() {
             return Self::from_http_status(status).detail(err.to_string());
         } else {
-            RemoteMediaErrorKind::RemoteStreamOpenFailed
+            MediaServerErrorKind::MediaServerStreamOpenFailed
         };
         Self::new(kind).detail(err.to_string())
     }
 }
 
-impl fmt::Display for RemoteMediaError {
+impl fmt::Display for MediaServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.kind)?;
         if let Some(provider) = self.provider {
@@ -99,7 +99,7 @@ impl fmt::Display for RemoteMediaError {
     }
 }
 
-impl Error for RemoteMediaError {}
+impl Error for MediaServerError {}
 
 #[cfg(test)]
 mod tests {
@@ -108,22 +108,22 @@ mod tests {
     #[test]
     fn http_status_maps_to_stable_failure_kinds() {
         assert_eq!(
-            RemoteMediaError::from_http_status(StatusCode::UNAUTHORIZED).kind,
-            RemoteMediaErrorKind::RemoteAuthDenied
+            MediaServerError::from_http_status(StatusCode::UNAUTHORIZED).kind,
+            MediaServerErrorKind::MediaServerAuthDenied
         );
         assert_eq!(
-            RemoteMediaError::from_http_status(StatusCode::TOO_MANY_REQUESTS).kind,
-            RemoteMediaErrorKind::RemoteRateLimited
+            MediaServerError::from_http_status(StatusCode::TOO_MANY_REQUESTS).kind,
+            MediaServerErrorKind::MediaServerRateLimited
         );
         assert_eq!(
-            RemoteMediaError::from_http_status(StatusCode::NOT_FOUND).kind,
-            RemoteMediaErrorKind::RemoteItemNotFound
+            MediaServerError::from_http_status(StatusCode::NOT_FOUND).kind,
+            MediaServerErrorKind::MediaServerItemNotFound
         );
     }
 
     #[test]
     fn detail_is_redacted_before_display() {
-        let err = RemoteMediaError::new(RemoteMediaErrorKind::RemoteStreamOpenFailed)
+        let err = MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
             .provider("plex")
             .detail("https://media.example.invalid/stream?X-Plex-Token=secret-token&api_key=secret-key");
         let rendered = err.to_string();

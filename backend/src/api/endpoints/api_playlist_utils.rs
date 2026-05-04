@@ -151,7 +151,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                 InputType::Emby | InputType::Jellyfin | InputType::Plex => {
                     return (
                         axum::http::StatusCode::BAD_REQUEST,
-                        axum::Json(json!({ "error": "Remote media-server inputs are not supported on this endpoint yet"})),
+                        axum::Json(json!({ "error": "Media-server inputs are not supported on this endpoint yet"})),
                     )
                         .into_response();
                 }

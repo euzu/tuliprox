@@ -1,4 +1,4 @@
-//! Remote media-server anti-corruption layer.
+//! Media-server anti-corruption layer.
 //!
 //! This module keeps Emby/Jellyfin/Plex wire DTOs and transport concerns at the
 //! Source Acquisition boundary. Playlist Curation and Stream Brokerage should

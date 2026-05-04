@@ -164,7 +164,7 @@ pub struct PlexPartDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote_media::test_fixtures::{PLEX_MOVIES_XML, PLEX_RESOURCES_XML, PLEX_SECTIONS_XML};
+    use crate::media_server::test_fixtures::{PLEX_MOVIES_XML, PLEX_RESOURCES_XML, PLEX_SECTIONS_XML};
 
     #[test]
     fn parses_plex_resources_without_exposing_resource_token() {

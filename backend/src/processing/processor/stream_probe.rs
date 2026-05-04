@@ -58,7 +58,7 @@ pub enum GenericProbeMetadataOutcome {
 }
 
 fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool {
-    !(matches!(input_type, InputType::Library) || input_type.is_remote_media_server())
+    !(matches!(input_type, InputType::Library) || input_type.is_media_server())
 }
 
 fn uses_seekable_remote_probe(item_type: PlaylistItemType, is_remote_probe: bool) -> bool {
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_media_probe_does_not_require_provider_connection() {
+    fn media_server_probe_does_not_require_provider_connection() {
         assert!(!requires_provider_connection_for_generic_probe(InputType::Emby));
         assert!(!requires_provider_connection_for_generic_probe(InputType::Jellyfin));
         assert!(!requires_provider_connection_for_generic_probe(InputType::Plex));

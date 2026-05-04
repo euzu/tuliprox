@@ -119,7 +119,7 @@ impl InputType {
     }
 
     pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
-    pub fn is_remote_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
+    pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
 }
 
 impl Display for InputType {
@@ -336,23 +336,25 @@ impl ConfigInputOptionsDto {
     }
 }
 
-pub const fn default_remote_catalog_page_size() -> u16 { 100 }
-pub const fn default_remote_catalog_request_delay_ms() -> u64 { 250 }
-pub const fn default_remote_catalog_concurrency() -> u8 { 1 }
-pub const fn default_remote_playback_max_streams() -> u16 { 1 }
-pub const fn is_default_remote_catalog_page_size(value: &u16) -> bool { *value == default_remote_catalog_page_size() }
-pub const fn is_default_remote_catalog_request_delay_ms(value: &u64) -> bool {
-    *value == default_remote_catalog_request_delay_ms()
+pub const fn default_media_server_catalog_page_size() -> u16 { 100 }
+pub const fn default_media_server_catalog_request_delay_ms() -> u64 { 250 }
+pub const fn default_media_server_catalog_concurrency() -> u8 { 1 }
+pub const fn default_media_server_playback_max_streams() -> u16 { 1 }
+pub const fn is_default_media_server_catalog_page_size(value: &u16) -> bool {
+    *value == default_media_server_catalog_page_size()
 }
-pub const fn is_default_remote_catalog_concurrency(value: &u8) -> bool {
-    *value == default_remote_catalog_concurrency()
+pub const fn is_default_media_server_catalog_request_delay_ms(value: &u64) -> bool {
+    *value == default_media_server_catalog_request_delay_ms()
 }
-pub const fn is_default_remote_playback_max_streams(value: &u16) -> bool {
-    *value == default_remote_playback_max_streams()
+pub const fn is_default_media_server_catalog_concurrency(value: &u8) -> bool {
+    *value == default_media_server_catalog_concurrency()
+}
+pub const fn is_default_media_server_playback_max_streams(value: &u16) -> bool {
+    *value == default_media_server_playback_max_streams()
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
-pub enum RemoteCatalogRefreshModeDto {
+pub enum MediaServerCatalogRefreshModeDto {
     #[serde(rename = "manual")]
     #[default]
     Manual,
@@ -360,27 +362,30 @@ pub enum RemoteCatalogRefreshModeDto {
     Scheduled,
 }
 
-pub fn is_default_remote_catalog_refresh_mode(value: &RemoteCatalogRefreshModeDto) -> bool {
-    *value == RemoteCatalogRefreshModeDto::default()
+pub fn is_default_media_server_catalog_refresh_mode(value: &MediaServerCatalogRefreshModeDto) -> bool {
+    *value == MediaServerCatalogRefreshModeDto::default()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RemoteCatalogConfigDto {
-    #[serde(default, skip_serializing_if = "is_default_remote_catalog_refresh_mode")]
-    pub refresh_mode: RemoteCatalogRefreshModeDto,
+pub struct MediaServerCatalogConfigDto {
+    #[serde(default, skip_serializing_if = "is_default_media_server_catalog_refresh_mode")]
+    pub refresh_mode: MediaServerCatalogRefreshModeDto,
     #[serde(default, skip_serializing_if = "is_false")]
     pub refresh_on_startup: bool,
-    #[serde(default = "default_remote_catalog_page_size", skip_serializing_if = "is_default_remote_catalog_page_size")]
+    #[serde(
+        default = "default_media_server_catalog_page_size",
+        skip_serializing_if = "is_default_media_server_catalog_page_size"
+    )]
     pub page_size: u16,
     #[serde(
-        default = "default_remote_catalog_request_delay_ms",
-        skip_serializing_if = "is_default_remote_catalog_request_delay_ms"
+        default = "default_media_server_catalog_request_delay_ms",
+        skip_serializing_if = "is_default_media_server_catalog_request_delay_ms"
     )]
     pub request_delay_ms: u64,
     #[serde(
-        default = "default_remote_catalog_concurrency",
-        skip_serializing_if = "is_default_remote_catalog_concurrency"
+        default = "default_media_server_catalog_concurrency",
+        skip_serializing_if = "is_default_media_server_catalog_concurrency"
     )]
     pub concurrency: u8,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
@@ -391,14 +396,14 @@ pub struct RemoteCatalogConfigDto {
     pub include_user_state: bool,
 }
 
-impl Default for RemoteCatalogConfigDto {
+impl Default for MediaServerCatalogConfigDto {
     fn default() -> Self {
         Self {
-            refresh_mode: RemoteCatalogRefreshModeDto::default(),
+            refresh_mode: MediaServerCatalogRefreshModeDto::default(),
             refresh_on_startup: false,
-            page_size: default_remote_catalog_page_size(),
-            request_delay_ms: default_remote_catalog_request_delay_ms(),
-            concurrency: default_remote_catalog_concurrency(),
+            page_size: default_media_server_catalog_page_size(),
+            request_delay_ms: default_media_server_catalog_request_delay_ms(),
+            concurrency: default_media_server_catalog_concurrency(),
             include_media_sources: default_as_true(),
             include_paths: false,
             include_user_state: false,
@@ -406,18 +411,18 @@ impl Default for RemoteCatalogConfigDto {
     }
 }
 
-impl RemoteCatalogConfigDto {
+impl MediaServerCatalogConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 
     pub fn prepare(&self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
         if self.page_size == 0 {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote catalog page_size must be greater than zero (input: {input_name})"
+                "media server catalog page_size must be greater than zero (input: {input_name})"
             )));
         }
         if self.concurrency == 0 {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote catalog concurrency must be greater than zero (input: {input_name})"
+                "media server catalog concurrency must be greater than zero (input: {input_name})"
             )));
         }
         Ok(())
@@ -425,7 +430,7 @@ impl RemoteCatalogConfigDto {
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
-pub enum RemotePlaybackInfoPolicyDto {
+pub enum MediaServerPlaybackInfoPolicyDto {
     #[serde(rename = "on_demand")]
     #[default]
     OnDemand,
@@ -433,15 +438,15 @@ pub enum RemotePlaybackInfoPolicyDto {
     Disabled,
 }
 
-pub fn is_default_remote_playback_info_policy(value: &RemotePlaybackInfoPolicyDto) -> bool {
-    *value == RemotePlaybackInfoPolicyDto::default()
+pub fn is_default_media_server_playback_info_policy(value: &MediaServerPlaybackInfoPolicyDto) -> bool {
+    *value == MediaServerPlaybackInfoPolicyDto::default()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RemotePlaybackConfigDto {
-    #[serde(default, skip_serializing_if = "is_default_remote_playback_info_policy")]
-    pub playback_info_policy: RemotePlaybackInfoPolicyDto,
+pub struct MediaServerPlaybackConfigDto {
+    #[serde(default, skip_serializing_if = "is_default_media_server_playback_info_policy")]
+    pub playback_info_policy: MediaServerPlaybackInfoPolicyDto,
     #[serde(default, skip_serializing_if = "is_false")]
     pub preflight_streams: bool,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
@@ -449,31 +454,31 @@ pub struct RemotePlaybackConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_transcode: bool,
     #[serde(
-        default = "default_remote_playback_max_streams",
-        skip_serializing_if = "is_default_remote_playback_max_streams"
+        default = "default_media_server_playback_max_streams",
+        skip_serializing_if = "is_default_media_server_playback_max_streams"
     )]
     pub max_streams: u16,
 }
 
-impl Default for RemotePlaybackConfigDto {
+impl Default for MediaServerPlaybackConfigDto {
     fn default() -> Self {
         Self {
-            playback_info_policy: RemotePlaybackInfoPolicyDto::default(),
+            playback_info_policy: MediaServerPlaybackInfoPolicyDto::default(),
             preflight_streams: false,
             direct_play_only: default_as_true(),
             allow_transcode: false,
-            max_streams: default_remote_playback_max_streams(),
+            max_streams: default_media_server_playback_max_streams(),
         }
     }
 }
 
-impl RemotePlaybackConfigDto {
+impl MediaServerPlaybackConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RemoteEnrichmentConfigDto {
+pub struct MediaServerEnrichmentConfigDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ffprobe: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -482,12 +487,12 @@ pub struct RemoteEnrichmentConfigDto {
     pub fetch_images: bool,
 }
 
-impl RemoteEnrichmentConfigDto {
+impl MediaServerEnrichmentConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
-pub enum RemoteImagePolicyDto {
+pub enum MediaServerImagePolicyDto {
     #[serde(rename = "proxy_on_demand")]
     #[default]
     ProxyOnDemand,
@@ -495,12 +500,12 @@ pub enum RemoteImagePolicyDto {
     Disabled,
 }
 
-pub fn is_default_remote_image_policy(value: &RemoteImagePolicyDto) -> bool {
-    *value == RemoteImagePolicyDto::default()
+pub fn is_default_media_server_image_policy(value: &MediaServerImagePolicyDto) -> bool {
+    *value == MediaServerImagePolicyDto::default()
 }
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq)]
-pub enum RemoteLibraryKindDto {
+pub enum MediaServerLibraryKindDto {
     #[serde(rename = "movies")]
     Movies,
     #[serde(rename = "tvshows", alias = "shows", alias = "series")]
@@ -509,7 +514,7 @@ pub enum RemoteLibraryKindDto {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RemoteLibrarySelectorDetailsDto {
+pub struct MediaServerLibrarySelectorDetailsDto {
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -517,10 +522,10 @@ pub struct RemoteLibrarySelectorDetailsDto {
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<RemoteLibraryKindDto>,
+    pub kind: Option<MediaServerLibraryKindDto>,
 }
 
-impl RemoteLibrarySelectorDetailsDto {
+impl MediaServerLibrarySelectorDetailsDto {
     fn prepare(&mut self) {
         self.id = get_trimmed_string(self.id.as_deref());
         self.key = get_trimmed_string(self.key.as_deref());
@@ -537,12 +542,12 @@ impl RemoteLibrarySelectorDetailsDto {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub enum RemoteLibrarySelectorDto {
+pub enum MediaServerLibrarySelectorDto {
     Name(String),
-    Detailed(RemoteLibrarySelectorDetailsDto),
+    Detailed(MediaServerLibrarySelectorDetailsDto),
 }
 
-impl RemoteLibrarySelectorDto {
+impl MediaServerLibrarySelectorDto {
     fn prepare(&mut self) {
         match self {
             Self::Name(name) => *name = name.trim().to_string(),
@@ -560,17 +565,17 @@ impl RemoteLibrarySelectorDto {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct RemoteMediaInputConfigDto {
+pub struct MediaServerInputConfigDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub libraries: Vec<RemoteLibrarySelectorDto>,
-    #[serde(default, skip_serializing_if = "RemoteCatalogConfigDto::is_default")]
-    pub catalog: RemoteCatalogConfigDto,
-    #[serde(default, skip_serializing_if = "RemotePlaybackConfigDto::is_default")]
-    pub playback: RemotePlaybackConfigDto,
-    #[serde(default, skip_serializing_if = "RemoteEnrichmentConfigDto::is_default")]
-    pub enrichment: RemoteEnrichmentConfigDto,
-    #[serde(default, skip_serializing_if = "is_default_remote_image_policy")]
-    pub image_policy: RemoteImagePolicyDto,
+    pub libraries: Vec<MediaServerLibrarySelectorDto>,
+    #[serde(default, skip_serializing_if = "MediaServerCatalogConfigDto::is_default")]
+    pub catalog: MediaServerCatalogConfigDto,
+    #[serde(default, skip_serializing_if = "MediaServerPlaybackConfigDto::is_default")]
+    pub playback: MediaServerPlaybackConfigDto,
+    #[serde(default, skip_serializing_if = "MediaServerEnrichmentConfigDto::is_default")]
+    pub enrichment: MediaServerEnrichmentConfigDto,
+    #[serde(default, skip_serializing_if = "is_default_media_server_image_policy")]
+    pub image_policy: MediaServerImagePolicyDto,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -591,14 +596,14 @@ pub struct RemoteMediaInputConfigDto {
     pub allow_relay: bool,
 }
 
-impl Default for RemoteMediaInputConfigDto {
+impl Default for MediaServerInputConfigDto {
     fn default() -> Self {
         Self {
             libraries: Vec::new(),
-            catalog: RemoteCatalogConfigDto::default(),
-            playback: RemotePlaybackConfigDto::default(),
-            enrichment: RemoteEnrichmentConfigDto::default(),
-            image_policy: RemoteImagePolicyDto::default(),
+            catalog: MediaServerCatalogConfigDto::default(),
+            playback: MediaServerPlaybackConfigDto::default(),
+            enrichment: MediaServerEnrichmentConfigDto::default(),
+            image_policy: MediaServerImagePolicyDto::default(),
             token: None,
             api_key: None,
             user_id: None,
@@ -612,7 +617,7 @@ impl Default for RemoteMediaInputConfigDto {
     }
 }
 
-impl RemoteMediaInputConfigDto {
+impl MediaServerInputConfigDto {
     pub fn prepare(&mut self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
         self.token = get_trimmed_string(self.token.as_deref());
         self.api_key = get_trimmed_string(self.api_key.as_deref());
@@ -626,9 +631,9 @@ impl RemoteMediaInputConfigDto {
         for library in &mut self.libraries {
             library.prepare();
         }
-        if self.libraries.iter().any(RemoteLibrarySelectorDto::is_empty) {
+        if self.libraries.iter().any(MediaServerLibrarySelectorDto::is_empty) {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote library selectors must not be empty (input: {input_name})"
+                "media_server library selectors must not be empty (input: {input_name})"
             )));
         }
         Ok(())
@@ -832,7 +837,7 @@ pub struct ConfigInputDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<ConfigInputOptionsDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote: Option<RemoteMediaInputConfigDto>,
+    pub media_server: Option<MediaServerInputConfigDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub cache_duration: Option<String>,
     #[serde(skip)]
@@ -869,7 +874,7 @@ impl Default for ConfigInputDto {
             persist: None,
             enabled: default_as_true(),
             options: None,
-            remote: None,
+            media_server: None,
             cache_duration: None,
             cache_duration_seconds: 0,
             aliases: None,
@@ -911,65 +916,65 @@ impl ConfigInputDto {
         };
     }
 
-    fn prepare_remote_media_input(&mut self) -> Result<(), TuliproxError> {
-        if !self.input_type.is_remote_media_server() {
+    fn prepare_media_server_input(&mut self) -> Result<(), TuliproxError> {
+        if !self.input_type.is_media_server() {
             return Ok(());
         }
 
         let trimmed_url = self.url.trim();
         if trimmed_url.starts_with(BATCH_SCHEME_PREFIX) || trimmed_url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input does not support batch:// or provider:// URLs (input: {})",
+                "media-server input does not support batch:// or provider:// URLs (input: {})",
                 self.name
             )));
         }
         if self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty()) {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input does not support aliases (input: {})",
+                "media-server input does not support aliases (input: {})",
                 self.name
             )));
         }
         if self.staged.as_ref().is_some_and(|staged| staged.enabled) {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input does not support staged inputs (input: {})",
+                "media-server input does not support staged inputs (input: {})",
                 self.name
             )));
         }
         if self.epg.is_some() {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input does not support EPG configuration (input: {})",
+                "media-server input does not support EPG configuration (input: {})",
                 self.name
             )));
         }
         if self.panel_api.is_some() {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input does not support panel_api configuration (input: {})",
+                "media-server input does not support panel_api configuration (input: {})",
                 self.name
             )));
         }
         if self.provider.as_ref().is_some_and(|provider| !provider.is_empty()) {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input does not support provider failover definitions (input: {})",
+                "media-server input does not support provider failover definitions (input: {})",
                 self.name
             )));
         }
         if self.max_connections > 0 {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input uses remote.playback.max_streams instead of max_connections (input: {})",
+                "media-server input uses media_server.playback.max_streams instead of max_connections (input: {})",
                 self.name
             )));
         }
 
-        let Some(remote) = self.remote.as_mut() else {
+        let Some(media_server) = self.media_server.as_mut() else {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote configuration is mandatory for input type {} (input: {})",
+                "media_server configuration is mandatory for input type {} (input: {})",
                 self.input_type, self.name
             )));
         };
-        remote.prepare(&self.name)?;
-        if remote.libraries.is_empty() {
+        media_server.prepare(&self.name)?;
+        if media_server.libraries.is_empty() {
             return Err(TuliproxError::ConfigInput(format!(
-                "remote media-server input requires at least one selected library (input: {})",
+                "media-server input requires at least one selected library (input: {})",
                 self.name
             )));
         }
@@ -984,23 +989,23 @@ impl ConfigInputDto {
                 }
                 let has_login = self.username.as_ref().is_some_and(|u| !u.trim().is_empty())
                     && self.password.as_ref().is_some_and(|p| !p.trim().is_empty());
-                if !remote.has_any_emby_jellyfin_auth() && !has_login {
+                if !media_server.has_any_emby_jellyfin_auth() && !has_login {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "remote input type {} requires remote token/api_key or username/password bootstrap credentials (input: {})",
+                        "media-server input type {} requires media_server token/api_key or username/password bootstrap credentials (input: {})",
                         self.input_type, self.name
                     )));
                 }
             }
             InputType::Plex => {
-                if !remote.has_any_plex_token() {
+                if !media_server.has_any_plex_token() {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "remote input type plex requires remote.account_token or remote.token (input: {})",
+                        "media-server input type plex requires media_server.account_token or media_server.token (input: {})",
                         self.name
                     )));
                 }
-                if trimmed_url.is_empty() && !remote.has_plex_server_selector() {
+                if trimmed_url.is_empty() && !media_server.has_plex_server_selector() {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "remote input type plex requires a server selector such as remote.machine_id, remote.server_id, or remote.server_name when input.url is omitted (input: {})",
+                        "media-server input type plex requires a server selector such as media_server.machine_id, media_server.server_id, or media_server.server_name when input.url is omitted (input: {})",
                         self.name
                     )));
                 }
@@ -1032,7 +1037,7 @@ impl ConfigInputDto {
 
         self.url = self.url.trim().to_string();
         self.normalize_input_type_from_batch_url();
-        self.prepare_remote_media_input()?;
+        self.prepare_media_server_input()?;
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
@@ -1461,59 +1466,59 @@ mod tests {
         ConfigInputDto { name: "test_input".intern(), ..ConfigInputDto::default() }
     }
 
-    fn remote_config_with_library() -> RemoteMediaInputConfigDto {
-        RemoteMediaInputConfigDto {
-            libraries: vec![RemoteLibrarySelectorDto::Name("Movies".to_string())],
-            ..RemoteMediaInputConfigDto::default()
+    fn media_server_config_with_library() -> MediaServerInputConfigDto {
+        MediaServerInputConfigDto {
+            libraries: vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())],
+            ..MediaServerInputConfigDto::default()
         }
     }
 
     #[test]
-    fn prepare_rejects_blank_remote_credentials_and_selectors() {
+    fn prepare_rejects_blank_media_server_credentials_and_selectors() {
         let mut emby = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: "https://media.example.invalid".to_string(),
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 token: Some("   ".to_string()),
                 api_key: Some("".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
         let err = prepare_dto(&mut emby).expect_err("blank token/api_key should be rejected");
-        assert!(err.to_string().contains("requires remote token/api_key"));
+        assert!(err.to_string().contains("requires media_server token/api_key"));
 
         let mut plex = ConfigInputDto {
-            name: "plex_remote".intern(),
+            name: "plex_media_server".intern(),
             input_type: InputType::Plex,
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 account_token: Some("   ".to_string()),
                 server_id: Some("   ".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
         let err = prepare_dto(&mut plex).expect_err("blank plex token should be rejected");
-        assert!(err.to_string().contains("requires remote.account_token or remote.token"));
+        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
     }
 
     #[test]
-    fn prepare_accepts_remote_playback_max_streams_zero_as_unlimited() {
+    fn prepare_accepts_media_server_playback_max_streams_zero_as_unlimited() {
         let mut dto = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: "https://media.example.invalid".to_string(),
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 token: Some("token-value".to_string()),
-                playback: RemotePlaybackConfigDto { max_streams: 0, ..RemotePlaybackConfigDto::default() },
-                ..remote_config_with_library()
+                playback: MediaServerPlaybackConfigDto { max_streams: 0, ..MediaServerPlaybackConfigDto::default() },
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
 
-        prepare_dto(&mut dto).expect("zero remote max_streams means unlimited");
-        assert_eq!(dto.remote.as_ref().expect("remote config").playback.max_streams, 0);
+        prepare_dto(&mut dto).expect("zero media_server max_streams means unlimited");
+        assert_eq!(dto.media_server.as_ref().expect("media_server config").playback.max_streams, 0);
     }
 
     fn prepare_dto(dto: &mut ConfigInputDto) -> Result<u16, TuliproxError> {
@@ -1521,131 +1526,134 @@ mod tests {
     }
 
     #[test]
-    fn remote_media_defaults_are_conservative() {
-        let remote = RemoteMediaInputConfigDto::default();
+    fn media_server_defaults_are_conservative() {
+        let media_server = MediaServerInputConfigDto::default();
 
-        assert_eq!(remote.catalog.page_size, 100);
-        assert_eq!(remote.catalog.request_delay_ms, 250);
-        assert_eq!(remote.catalog.concurrency, 1);
-        assert!(remote.catalog.include_media_sources);
-        assert!(!remote.catalog.include_paths);
-        assert!(!remote.catalog.include_user_state);
-        assert!(!remote.catalog.refresh_on_startup);
-        assert!(remote.playback.direct_play_only);
-        assert!(!remote.playback.allow_transcode);
-        assert!(!remote.playback.preflight_streams);
-        assert_eq!(remote.playback.max_streams, 1);
-        assert!(!remote.enrichment.ffprobe);
-        assert!(!remote.enrichment.tmdb_lookup);
-        assert!(!remote.enrichment.fetch_images);
-        assert_eq!(remote.image_policy, RemoteImagePolicyDto::ProxyOnDemand);
-        assert!(!remote.allow_relay);
+        assert_eq!(media_server.catalog.page_size, 100);
+        assert_eq!(media_server.catalog.request_delay_ms, 250);
+        assert_eq!(media_server.catalog.concurrency, 1);
+        assert!(media_server.catalog.include_media_sources);
+        assert!(!media_server.catalog.include_paths);
+        assert!(!media_server.catalog.include_user_state);
+        assert!(!media_server.catalog.refresh_on_startup);
+        assert!(media_server.playback.direct_play_only);
+        assert!(!media_server.playback.allow_transcode);
+        assert!(!media_server.playback.preflight_streams);
+        assert_eq!(media_server.playback.max_streams, 1);
+        assert!(!media_server.enrichment.ffprobe);
+        assert!(!media_server.enrichment.tmdb_lookup);
+        assert!(!media_server.enrichment.fetch_images);
+        assert_eq!(media_server.image_policy, MediaServerImagePolicyDto::ProxyOnDemand);
+        assert!(!media_server.allow_relay);
     }
 
     #[test]
-    fn prepare_accepts_emby_remote_with_token_and_library() {
+    fn prepare_accepts_emby_media_server_with_token_and_library() {
         let mut dto = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: " https://media.example.invalid/ ".to_string(),
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 token: Some(" token-value ".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
 
-        prepare_dto(&mut dto).expect("emby remote config should prepare");
+        prepare_dto(&mut dto).expect("emby media_server config should prepare");
 
         assert_eq!(dto.url, "https://media.example.invalid/");
-        assert!(dto.input_type.is_remote_media_server());
-        assert_eq!(dto.remote.as_ref().and_then(|remote| remote.token.as_deref()), Some("token-value"));
+        assert!(dto.input_type.is_media_server());
+        assert_eq!(
+            dto.media_server.as_ref().and_then(|media_server| media_server.token.as_deref()),
+            Some("token-value")
+        );
     }
 
     #[test]
-    fn prepare_rejects_remote_without_remote_block() {
+    fn prepare_rejects_media_server_without_media_server_block() {
         let mut dto = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: "https://media.example.invalid".to_string(),
             ..ConfigInputDto::default()
         };
 
-        let err = prepare_dto(&mut dto).expect_err("remote block should be mandatory");
-        assert!(err.to_string().contains("remote configuration is mandatory"));
+        let err = prepare_dto(&mut dto).expect_err("media_server block should be mandatory");
+        assert!(err.to_string().contains("media_server configuration is mandatory"));
     }
 
     #[test]
-    fn prepare_rejects_emby_remote_without_input_url() {
+    fn prepare_rejects_emby_media_server_without_input_url() {
         let mut dto = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 token: Some("token-value".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
 
-        let err = prepare_dto(&mut dto).expect_err("emby remote should require a direct server URL");
+        let err = prepare_dto(&mut dto).expect_err("emby media_server input should require a direct server URL");
         assert!(err.to_string().contains("url is mandatory for input type emby"));
     }
 
     #[test]
-    fn prepare_rejects_remote_provider_scheme_url() {
+    fn prepare_rejects_media_server_provider_scheme_url() {
         let mut dto = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: " provider://media-server ".to_string(),
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 token: Some("token-value".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
 
-        let err = prepare_dto(&mut dto).expect_err("remote input must not use provider URLs");
+        let err = prepare_dto(&mut dto).expect_err("media_server input must not use provider URLs");
         assert!(err.to_string().contains("does not support batch:// or provider://"));
     }
 
     #[test]
-    fn prepare_rejects_remote_staged_input() {
+    fn prepare_rejects_media_server_staged_input() {
         let mut dto = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: "https://media.example.invalid".to_string(),
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 token: Some("token-value".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             staged: Some(StagedInputDto { enabled: true, name: "staged".intern(), ..StagedInputDto::default() }),
             ..ConfigInputDto::default()
         };
 
-        let err = prepare_dto(&mut dto).expect_err("remote input must reject staged config");
+        let err = prepare_dto(&mut dto).expect_err("media_server input must reject staged config");
         assert!(err.to_string().contains("does not support staged inputs"));
     }
 
     #[test]
     fn prepare_rejects_plex_without_token_or_server_selector() {
         let mut without_token = ConfigInputDto {
-            name: "plex_remote".intern(),
+            name: "plex_media_server".intern(),
             input_type: InputType::Plex,
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 machine_id: Some("machine".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
         let err = prepare_dto(&mut without_token).expect_err("plex token should be mandatory");
-        assert!(err.to_string().contains("requires remote.account_token or remote.token"));
+        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
 
         let mut without_selector = ConfigInputDto {
-            name: "plex_remote".intern(),
+            name: "plex_media_server".intern(),
             input_type: InputType::Plex,
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 account_token: Some("token".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
@@ -1656,12 +1664,12 @@ mod tests {
     #[test]
     fn prepare_accepts_plex_without_input_url_when_discovery_is_configured() {
         let mut dto = ConfigInputDto {
-            name: "plex_remote".intern(),
+            name: "plex_media_server".intern(),
             input_type: InputType::Plex,
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 account_token: Some("token".to_string()),
                 machine_id: Some("machine".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
@@ -1671,14 +1679,14 @@ mod tests {
     }
 
     #[test]
-    fn prepare_accepts_plex_remote_with_direct_url_without_selector() {
+    fn prepare_accepts_plex_media_server_with_direct_url_without_selector() {
         let mut dto = ConfigInputDto {
-            name: "plex_remote".intern(),
+            name: "plex_media_server".intern(),
             input_type: InputType::Plex,
             url: "https://plex.example.invalid".to_string(),
-            remote: Some(RemoteMediaInputConfigDto {
+            media_server: Some(MediaServerInputConfigDto {
                 token: Some("token".to_string()),
-                ..remote_config_with_library()
+                ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
         };
@@ -1935,17 +1943,17 @@ mod tests {
     }
 
     #[test]
-    fn prepare_type_does_not_validate_remote_media_config() {
+    fn prepare_type_does_not_validate_media_server_config() {
         let mut dto = ConfigInputDto {
-            name: "emby_remote".intern(),
+            name: "emby_media_server".intern(),
             input_type: InputType::Emby,
             url: "https://media.example.invalid".to_string(),
             ..ConfigInputDto::default()
         };
 
         dto.prepare_type().expect("prepare_type only normalizes type/url");
-        let err = prepare_dto(&mut dto).expect_err("full prepare should validate missing remote block");
-        assert!(err.to_string().contains("remote configuration is mandatory"));
+        let err = prepare_dto(&mut dto).expect_err("full prepare should validate missing media_server block");
+        assert!(err.to_string().contains("media_server configuration is mandatory"));
     }
 
     #[test]

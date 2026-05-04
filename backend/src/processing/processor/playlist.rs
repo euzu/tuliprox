@@ -510,7 +510,7 @@ async fn playlist_download_from_input(
             InputType::Emby | InputType::Jellyfin | InputType::Plex => (
                 vec![],
                 vec![TuliproxError::Download(format!(
-                    "remote media-server input '{}' is configured but catalog import is not implemented yet",
+                    "media-server input '{}' is configured but catalog import is not implemented yet",
                     input.name
                 ))],
                 false,

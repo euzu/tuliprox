@@ -73,7 +73,7 @@ pub struct EmbyPlaybackInfoDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote_media::test_fixtures::EMBY_ITEMS_PAGE_JSON;
+    use crate::media_server::test_fixtures::EMBY_ITEMS_PAGE_JSON;
 
     #[test]
     fn parses_emby_item_page_and_keeps_edge_only_fields_at_boundary() {

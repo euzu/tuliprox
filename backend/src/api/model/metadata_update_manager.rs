@@ -3343,9 +3343,9 @@ impl InputWorker {
     fn task_needs_provider_connection(task: &UpdateTask, input_type: InputType) -> bool {
         match task {
             UpdateTask::ProbeLive { .. } => true,
-            // Local library and remote media-server probing must not depend on IPTV provider capacity.
+            // Local library and media-server probing must not depend on IPTV provider capacity.
             UpdateTask::ProbeStream { .. } => {
-                !(matches!(input_type, InputType::Library) || input_type.is_remote_media_server())
+                !(matches!(input_type, InputType::Library) || input_type.is_media_server())
             },
             // Resolve tasks handle their own probe connection acquisition internally.
             // This avoids holding a provider connection for the entire duration of
@@ -4260,7 +4260,7 @@ mod tests {
     }
 
     #[test]
-    fn task_needs_provider_connection_skips_remote_media_probe_stream() {
+    fn task_needs_provider_connection_skips_media_server_probe_stream() {
         let task = UpdateTask::ProbeStream {
             probe_scope: Arc::from("input_remote"),
             unique_id: "u1".to_string(),

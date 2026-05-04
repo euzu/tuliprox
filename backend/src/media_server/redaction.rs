@@ -24,26 +24,26 @@ const SENSITIVE_HEADER_NAMES: &[&str] = &[
     "set-cookie",
 ];
 
-pub fn is_sensitive_remote_header(name: &HeaderName) -> bool {
+pub fn is_sensitive_media_server_header(name: &HeaderName) -> bool {
     let value = name.as_str().to_ascii_lowercase();
     SENSITIVE_HEADER_NAMES.iter().any(|sensitive| value == *sensitive)
 }
 
-pub fn redact_remote_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+pub fn redact_media_server_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .map(|(name, value)| {
-            let rendered = if is_sensitive_remote_header(name) {
+            let rendered = if is_sensitive_media_server_header(name) {
                 "<redacted>".to_string()
             } else {
-                value.to_str().map_or_else(|_| "<non-utf8>".to_string(), redact_remote_text)
+                value.to_str().map_or_else(|_| "<non-utf8>".to_string(), redact_media_server_text)
             };
             (name.as_str().to_string(), rendered)
         })
         .collect()
 }
 
-pub fn redact_remote_text(value: &str) -> String {
+pub fn redact_media_server_text(value: &str) -> String {
     let sanitized = sanitize_sensitive_info(value);
     redact_query_like_tokens(&sanitized)
 }
@@ -107,8 +107,8 @@ mod tests {
     use reqwest::header::{HeaderValue, AUTHORIZATION};
 
     #[test]
-    fn redacts_remote_query_tokens_case_insensitively() {
-        let redacted = redact_remote_text(
+    fn redacts_media_server_query_tokens_case_insensitively() {
+        let redacted = redact_media_server_text(
             "https://media.example.invalid/video?X-Plex-Token=secret-token&api_key=secret-key&safe=value",
         );
 
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn redacts_query_tokens_without_corrupting_non_ascii_text() {
-        let redacted = redact_remote_text("https://media.example.invalid/épisode?token=sëcret&title=café");
+        let redacted = redact_media_server_text("https://media.example.invalid/épisode?token=sëcret&title=café");
 
         assert!(!redacted.contains("sëcret"));
         assert!(redacted.contains("épisode"));
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn redacts_quoted_query_like_tokens() {
-        let redacted = redact_remote_text(
+        let redacted = redact_media_server_text(
             "https://media.example.invalid/video?token=\"secret\"&api_key='another-secret'&safe=visible",
         );
 
@@ -148,7 +148,7 @@ mod tests {
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
         headers.insert("content-type", HeaderValue::from_static("video/mp4"));
 
-        let rendered = redact_remote_headers(&headers);
+        let rendered = redact_media_server_headers(&headers);
 
         assert!(rendered.iter().any(|(name, value)| name == "authorization" && value == "<redacted>"));
         assert!(rendered.iter().any(|(name, value)| name == "content-type" && value == "video/mp4"));
