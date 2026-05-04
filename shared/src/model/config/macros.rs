@@ -8,7 +8,9 @@ macro_rules! check_input_credentials {
 
         if !matches!($input_type, InputType::Library) {
             $this.url = $this.url.trim().to_string();
-            if !matches!($input_type, InputType::Plex) && $this.url.is_empty() {
+            // This generic check only applies to classic URL-backed playlist inputs. Remote media-server
+            // inputs have provider-specific URL/discovery validation in their prepare path.
+            if $input_type.uses_standard_input_url() && $this.url.is_empty() {
                 return Err($crate::error::TuliproxError::ConfigInput(format!("url for input is mandatory{}", __tp_input_name_suffix)));
             }
 

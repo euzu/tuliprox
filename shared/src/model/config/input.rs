@@ -9,9 +9,9 @@ use crate::{
         default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
         deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
         is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false,
-        is_non_blank_optional_string, is_true,
-        is_zero_i16, is_zero_u16, parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
-        serialize_option_vec_flow_map_items, trim_last_slash, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+        is_non_blank_optional_string, is_true, is_zero_i16, is_zero_u16, parse_duration_seconds,
+        parse_provider_scheme_url_parts, sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash,
+        Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
     },
 };
 use enum_iterator::Sequence;
@@ -114,6 +114,9 @@ impl InputType {
     const PLEX: &'static str = "plex";
     pub fn is_xtream(&self) -> bool { matches!(self, Self::Xtream | Self::XtreamBatch) }
     pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
+    pub fn uses_standard_input_url(&self) -> bool {
+        matches!(self, Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch)
+    }
 
     pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
     pub fn is_remote_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
@@ -375,7 +378,10 @@ pub struct RemoteCatalogConfigDto {
         skip_serializing_if = "is_default_remote_catalog_request_delay_ms"
     )]
     pub request_delay_ms: u64,
-    #[serde(default = "default_remote_catalog_concurrency", skip_serializing_if = "is_default_remote_catalog_concurrency")]
+    #[serde(
+        default = "default_remote_catalog_concurrency",
+        skip_serializing_if = "is_default_remote_catalog_concurrency"
+    )]
     pub concurrency: u8,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub include_media_sources: bool,
@@ -442,7 +448,10 @@ pub struct RemotePlaybackConfigDto {
     pub direct_play_only: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_transcode: bool,
-    #[serde(default = "default_remote_playback_max_streams", skip_serializing_if = "is_default_remote_playback_max_streams")]
+    #[serde(
+        default = "default_remote_playback_max_streams",
+        skip_serializing_if = "is_default_remote_playback_max_streams"
+    )]
     pub max_streams: u16,
 }
 
@@ -1563,6 +1572,22 @@ mod tests {
 
         let err = prepare_dto(&mut dto).expect_err("remote block should be mandatory");
         assert!(err.to_string().contains("remote configuration is mandatory"));
+    }
+
+    #[test]
+    fn prepare_rejects_emby_remote_without_input_url() {
+        let mut dto = ConfigInputDto {
+            name: "emby_remote".intern(),
+            input_type: InputType::Emby,
+            remote: Some(RemoteMediaInputConfigDto {
+                token: Some("token-value".to_string()),
+                ..remote_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let err = prepare_dto(&mut dto).expect_err("emby remote should require a direct server URL");
+        assert!(err.to_string().contains("url is mandatory for input type emby"));
     }
 
     #[test]

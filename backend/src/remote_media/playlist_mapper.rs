@@ -22,7 +22,7 @@ pub fn remote_catalog_snapshot_to_playlist(snapshot: &RemoteCatalogSnapshot) -> 
 
     if !snapshot.episodes.is_empty() {
         groups.push(PlaylistGroup {
-            id: groups.len() as u32 + 1,
+            id: next_group_id(groups.len()),
             title: "Remote Series".intern(),
             channels: snapshot.episodes.iter().map(remote_episode_to_playlist_item).collect(),
             xtream_cluster: XtreamCluster::Series,
@@ -32,20 +32,21 @@ pub fn remote_catalog_snapshot_to_playlist(snapshot: &RemoteCatalogSnapshot) -> 
     groups
 }
 
+fn next_group_id(group_count: usize) -> u32 { u32::try_from(group_count.saturating_add(1)).unwrap_or(u32::MAX) }
+
 fn remote_movie_to_playlist_item(movie: &RemoteMovie) -> PlaylistItem {
     let stable_id = stable_remote_item_id(&movie.server_id, &movie.library_id, &movie.item_id, "movie");
-    let url = movie
-        .stream_ref
-        .as_ref()
-        .map(remote_stream_ref_to_internal_url)
-        .unwrap_or_else(|| {
+    let url = movie.stream_ref.as_ref().map_or_else(
+        || {
             format!(
                 "remote://unavailable/{}/{}/{}",
                 escape_internal_url_component(&movie.server_id),
                 escape_internal_url_component(&movie.library_id),
                 escape_internal_url_component(&movie.item_id)
             )
-        });
+        },
+        remote_stream_ref_to_internal_url,
+    );
     let uuid = generate_provider_playlist_uuid(&movie.input_name, &stable_id, PlaylistItemType::Video);
 
     PlaylistItem {
@@ -83,18 +84,17 @@ fn remote_movie_to_playlist_item(movie: &RemoteMovie) -> PlaylistItem {
 
 fn remote_episode_to_playlist_item(episode: &RemoteEpisode) -> PlaylistItem {
     let stable_id = stable_remote_item_id(&episode.server_id, &episode.library_id, &episode.item_id, "episode");
-    let url = episode
-        .stream_ref
-        .as_ref()
-        .map(remote_stream_ref_to_internal_url)
-        .unwrap_or_else(|| {
+    let url = episode.stream_ref.as_ref().map_or_else(
+        || {
             format!(
                 "remote://unavailable/{}/{}/{}",
                 escape_internal_url_component(&episode.server_id),
                 escape_internal_url_component(&episode.library_id),
                 escape_internal_url_component(&episode.item_id)
             )
-        });
+        },
+        remote_stream_ref_to_internal_url,
+    );
     let uuid = generate_provider_playlist_uuid(&episode.input_name, &stable_id, PlaylistItemType::Series);
     let title = if episode.title.is_empty() {
         episode.series_title.clone().unwrap_or_else(|| "Remote Episode".intern())

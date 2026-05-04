@@ -36,10 +36,7 @@ pub fn redact_remote_headers(headers: &HeaderMap) -> Vec<(String, String)> {
             let rendered = if is_sensitive_remote_header(name) {
                 "<redacted>".to_string()
             } else {
-                value
-                    .to_str()
-                    .map(redact_remote_text)
-                    .unwrap_or_else(|_| "<non-utf8>".to_string())
+                value.to_str().map_or_else(|_| "<non-utf8>".to_string(), redact_remote_text)
             };
             (name.as_str().to_string(), rendered)
         })
@@ -56,7 +53,7 @@ fn redact_query_like_tokens(value: &str) -> String {
     let mut i = 0;
 
     while i < value.len() {
-        let matched = SENSITIVE_QUERY_KEYS.iter().find_map(|key| matched_sensitive_key(value, i, *key));
+        let matched = SENSITIVE_QUERY_KEYS.iter().find_map(|key| matched_sensitive_key(value, i, key));
 
         if let Some((key, separator)) = matched {
             result.push_str(key);

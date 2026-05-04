@@ -980,6 +980,23 @@ mod tests {
     }
 
     #[test]
+    fn prepare_rejects_emby_remote_without_input_url() {
+        let mut input = ConfigInput {
+            name: "emby_remote".into(),
+            input_type: InputType::Emby,
+            remote: Some(RemoteMediaInputConfig {
+                token: Some("token".to_string()),
+                ..remote_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("emby remote should require a direct server URL");
+        assert!(err.to_string().contains("url is mandatory for input type emby"));
+    }
+
+    #[test]
     fn prepare_rejects_blank_remote_credentials_and_selectors() {
         let mut emby = ConfigInput {
             name: "emby_remote".into(),

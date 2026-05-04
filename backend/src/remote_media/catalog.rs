@@ -60,8 +60,7 @@ impl RemoteCatalogCache {
     pub fn trusted(&self) -> Option<&RemoteCatalogSnapshot> { self.trusted.as_ref() }
 
     pub fn publish(&mut self, snapshot: RemoteCatalogSnapshot) -> &RemoteCatalogSnapshot {
-        self.trusted = Some(snapshot);
-        self.trusted.as_ref().expect("snapshot was just published")
+        self.trusted.insert(snapshot)
     }
 
     pub async fn refresh_or_retain<C>(
