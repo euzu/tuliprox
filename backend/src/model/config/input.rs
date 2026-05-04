@@ -11,8 +11,8 @@ use shared::model::{
     MediaServerInputConfigDto, MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster,
 };
 use shared::utils::{
-    get_credentials_from_url, get_trimmed_string, is_non_blank_optional_string, parse_provider_scheme_url_parts,
-    sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+    get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
+    BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
 };
 use shared::{check_input_connections, write_if_some};
 use shared::{check_input_credentials, concat_string };
@@ -126,22 +126,23 @@ pub struct MediaServerInputConfig {
 
 impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
     fn from(dto: &MediaServerInputConfigDto) -> Self {
-        let trim = |value: &Option<String>| get_trimmed_string(value.as_deref());
+        let mut normalized = dto.clone();
+        normalized.normalize();
         Self {
-            libraries: dto.libraries.clone(),
-            catalog: dto.catalog.clone(),
-            playback: dto.playback.clone(),
-            enrichment: dto.enrichment.clone(),
-            image_policy: dto.image_policy,
-            token: trim(&dto.token),
-            api_key: trim(&dto.api_key),
-            user_id: trim(&dto.user_id),
-            account_token: trim(&dto.account_token),
-            server_id: trim(&dto.server_id),
-            machine_id: trim(&dto.machine_id),
-            server_name: trim(&dto.server_name),
-            prefer_https: dto.prefer_https,
-            allow_relay: dto.allow_relay,
+            libraries: normalized.libraries,
+            catalog: normalized.catalog,
+            playback: normalized.playback,
+            enrichment: normalized.enrichment,
+            image_policy: normalized.image_policy,
+            token: normalized.token,
+            api_key: normalized.api_key,
+            user_id: normalized.user_id,
+            account_token: normalized.account_token,
+            server_id: normalized.server_id,
+            machine_id: normalized.machine_id,
+            server_name: normalized.server_name,
+            prefer_https: normalized.prefer_https,
+            allow_relay: normalized.allow_relay,
         }
     }
 }
@@ -546,6 +547,12 @@ impl ConfigInput {
                 self.name
             )));
         }
+        if media_server.libraries.iter().any(MediaServerLibrarySelectorDto::is_empty) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media_server library selectors must not be empty (input: {})",
+                self.name
+            )));
+        }
         if media_server.catalog.page_size == 0 {
             return Err(TuliproxError::ConfigInput(format!(
                 "media server catalog page_size must be greater than zero (input: {})",
@@ -938,7 +945,7 @@ mod tests {
                 machine_id: Some(" machine ".to_string()),
                 server_name: Some(" server-name ".to_string()),
                 ..MediaServerInputConfigDto {
-                    libraries: vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())],
+                    libraries: vec![MediaServerLibrarySelectorDto::Name(" Movies ".to_string())],
                     ..MediaServerInputConfigDto::default()
                 }
             }),
@@ -948,6 +955,7 @@ mod tests {
         let input = ConfigInput::from(&dto);
         let media_server = input.media_server.expect("media_server config should map to runtime");
 
+        assert_eq!(media_server.libraries, vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())]);
         assert_eq!(media_server.catalog.page_size, 100);
         assert!(media_server.playback.direct_play_only);
         assert!(!media_server.playback.allow_transcode);
@@ -1042,6 +1050,25 @@ mod tests {
         };
         let err = plex.prepare(&[]).expect_err("blank plex token should be rejected");
         assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
+    }
+
+    #[test]
+    fn prepare_rejects_blank_media_server_library_selector() {
+        let mut input = ConfigInput {
+            name: "emby_media_server".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfig {
+                token: Some("token".to_string()),
+                libraries: vec![MediaServerLibrarySelectorDto::Name("   ".to_string())],
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("blank library selector should be rejected");
+        assert!(err.to_string().contains("media_server library selectors must not be empty"));
     }
 
     #[test]

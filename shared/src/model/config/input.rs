@@ -530,7 +530,7 @@ impl MediaServerLibrarySelectorDto {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         match self {
             Self::Name(name) => name.trim().is_empty(),
             Self::Detailed(details) => details.is_empty(),
