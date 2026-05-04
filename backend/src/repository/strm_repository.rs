@@ -1262,11 +1262,46 @@ mod tests {
     }
 
     #[test]
-    fn tmdb_marker_helpers_keep_legacy_dash_marker_compatibility() {
-        let path = "Movies/Movie Name (2020) {tmdb-12345}/Movie Name (2020).strm";
+    fn tmdb_marker_helpers_cover_supported_marker_variants() {
+        let cases = [
+            (
+                "Movies/Movie Name (2020) {tmdb-12345}/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie Name (2020) {tmdb=12345}/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie Name (2020) [tmdbid-12345]/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie Name (2020) [tmdbid=12345]/Movie Name (2020).strm",
+                "Movies/Movie Name (2020)/Movie Name (2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_{tmdb-12345}/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_{tmdb=12345}/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_[tmdbid-12345]/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+            (
+                "Movies/Movie_Name_(2020)_[tmdbid=12345]/Movie_Name_(2020).strm",
+                "Movies/Movie_Name_(2020)/Movie_Name_(2020).strm",
+            ),
+        ];
 
-        assert!(strm_contains_tmdb_marker(path));
-        assert_eq!(strip_tmdb_markers(path), "Movies/Movie Name (2020)/Movie Name (2020).strm");
+        for (path, expected) in cases {
+            assert!(strm_contains_tmdb_marker(path));
+            assert_eq!(strip_tmdb_markers(path), expected);
+        }
     }
 
     #[test]
