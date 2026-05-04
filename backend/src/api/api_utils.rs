@@ -3177,7 +3177,7 @@ pub fn separate_number_and_remainder(input: &str) -> (&str, Option<&str>) {
     input.rfind('.').map_or_else(
         || (input, None),
         |dot_index| {
-            let number_part = &input[..dot_index];
+            let number_part = input[..dot_index].trim_end_matches('.');
             let rest = &input[dot_index..];
             (number_part, if rest.len() < 2 { None } else { Some(rest) })
         },
@@ -3516,6 +3516,14 @@ mod tests {
     };
     use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
     use tokio::sync::mpsc;
+
+    #[test]
+    fn separate_number_and_remainder_accepts_xtream_double_dot_extensions() {
+        assert_eq!(separate_number_and_remainder("5142.mkv"), ("5142", Some(".mkv")));
+        assert_eq!(separate_number_and_remainder("5142..mkv"), ("5142", Some(".mkv")));
+        assert_eq!(separate_number_and_remainder("5142."), ("5142", None));
+        assert_eq!(separate_number_and_remainder("5142"), ("5142", None));
+    }
 
     #[tokio::test]
     async fn test_is_seek_request() {

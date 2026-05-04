@@ -574,6 +574,7 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
         .filter(|ce| !ce.is_empty())
         .map(|s| s.to_string())
         .or_else(|| extract_extension_from_url(&pli.url))
+        .map(|extension| normalize_xtream_container_extension(&extension))
         .unwrap_or_default();
 
     let mut doc = XtreamVideoInfoDoc::default();
@@ -589,9 +590,11 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
     serde_json::to_string(&doc).unwrap_or(String::new())
 }
 
+fn normalize_xtream_container_extension(extension: &str) -> String { extension.trim_start_matches('.').to_string() }
+
 #[cfg(test)]
 mod tests {
-    use super::{create_vod_info_from_item, partition_clusters_by_source};
+    use super::{create_vod_info_from_item, normalize_xtream_container_extension, partition_clusters_by_source};
     use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials, StagedInput};
     use serde_json::Value;
     use shared::model::{
@@ -719,5 +722,22 @@ mod tests {
     #[test]
     fn create_vod_info_keeps_tuliprox_virtual_stream_id_for_reverse_users() {
         assert_vod_info_keeps_tuliprox_virtual_stream_id(ProxyType::Reverse(None));
+    }
+
+    #[test]
+    fn create_vod_info_uses_xtream_container_extension_without_leading_dot() {
+        let pli = test_vod_item();
+
+        let content = create_vod_info_from_item(&pli);
+        let doc: Value = serde_json::from_str(&content).expect("valid VOD info JSON");
+
+        assert_eq!(doc["movie_data"]["container_extension"], "mp4");
+    }
+
+    #[test]
+    fn xtream_container_extension_normalization_strips_leading_dots() {
+        assert_eq!(normalize_xtream_container_extension("mkv"), "mkv");
+        assert_eq!(normalize_xtream_container_extension(".mkv"), "mkv");
+        assert_eq!(normalize_xtream_container_extension("..mkv"), "mkv");
     }
 }
