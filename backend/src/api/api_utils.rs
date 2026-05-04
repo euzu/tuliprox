@@ -22,7 +22,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use axum::{
     body::Body,
-    http::{header, Extensions, HeaderMap, HeaderValue, Response, StatusCode},
+    http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
     response::IntoResponse,
 };
 use bytes::Bytes;
@@ -1565,10 +1565,40 @@ async fn open_media_server_provider_stream(
 }
 
 fn provider_headers_from_header_map(headers: &HeaderMap) -> Vec<(String, String)> {
+    let connection_headers = connection_header_names(headers);
     headers
         .iter()
+        .filter(|(name, _)| !is_hop_by_hop_header(name) && !connection_headers.contains(*name))
         .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_string(), value.to_string())))
         .collect()
+}
+
+fn connection_header_names(headers: &HeaderMap) -> std::collections::HashSet<HeaderName> {
+    headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| HeaderName::from_bytes(name.as_bytes()).ok()).flatten()
+        })
+        .collect()
+}
+
+fn is_hop_by_hop_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
@@ -3509,6 +3539,26 @@ mod tests {
         // Live cluster should always return false
         headers.insert("range", "bytes=100-".parse().unwrap());
         assert!(!is_seek_request(XtreamCluster::Live, &headers).await);
+    }
+
+    #[test]
+    fn provider_headers_from_header_map_filters_hop_by_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+        headers.insert(header::CONNECTION, "keep-alive, X-Upstream-Hop".parse().unwrap());
+        headers.insert(HeaderName::from_static("keep-alive"), "timeout=5".parse().unwrap());
+        headers.insert(header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+        headers.insert(HeaderName::from_static("x-upstream-hop"), "remove-me".parse().unwrap());
+        headers.insert(HeaderName::from_static("x-safe-provider-header"), "keep-me".parse().unwrap());
+
+        let filtered = provider_headers_from_header_map(&headers);
+
+        assert!(filtered.contains(&(header::CONTENT_TYPE.as_str().to_string(), "video/mp4".to_string())));
+        assert!(filtered.contains(&("x-safe-provider-header".to_string(), "keep-me".to_string())));
+        assert!(!filtered.iter().any(|(name, _)| matches!(
+            name.as_str(),
+            "connection" | "keep-alive" | "transfer-encoding" | "x-upstream-hop"
+        )));
     }
 
     #[test]

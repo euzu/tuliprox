@@ -334,12 +334,11 @@ impl MediaServerCatalogClient for PlexClient {
     }
 
     async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
-        let status = self.discover().await?;
         let sections: PlexSectionsDto = self.get_catalog_xml("/library/sections").await?;
         let libraries: Vec<_> = sections
             .directories
             .iter()
-            .filter_map(|section| map_plex_section(&self.input_name, &status.server_id, section))
+            .filter_map(|section| map_plex_section(&self.input_name, &self.server_id, section))
             .collect();
         self.selected_libraries(&libraries)
     }
