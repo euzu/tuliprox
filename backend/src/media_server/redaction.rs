@@ -1,6 +1,8 @@
 use reqwest::header::{HeaderMap, HeaderName};
 use shared::utils::sanitize_sensitive_info;
 
+const REDACTED_VALUE: &str = "***";
+
 const SENSITIVE_QUERY_KEYS: &[&str] = &[
     "token",
     "access_token",
@@ -35,7 +37,7 @@ pub fn redact_media_server_headers(headers: &HeaderMap) -> Vec<(String, String)>
         .iter()
         .map(|(name, value)| {
             let rendered = if is_sensitive_media_server_header(name) {
-                "<redacted>".to_string()
+                REDACTED_VALUE.to_string()
             } else {
                 value.to_str().map_or_else(|_| "<non-utf8>".to_string(), redact_media_server_text)
             };
@@ -59,7 +61,7 @@ fn redact_query_like_tokens(value: &str) -> String {
         if let Some((key, separator)) = matched {
             result.push_str(key);
             result.push(separator);
-            result.push_str("<redacted>");
+            result.push_str(REDACTED_VALUE);
             i += key.len() + separator.len_utf8();
 
             let quote = value[i..].chars().next().filter(|ch| matches!(ch, '"' | '\''));
@@ -115,8 +117,8 @@ mod tests {
 
         assert!(!redacted.contains("secret-token"));
         assert!(!redacted.contains("secret-key"));
-        assert!(redacted.contains("X-Plex-Token=<redacted>") || redacted.contains("x-plex-token=<redacted>"));
-        assert!(redacted.contains("api_key=<redacted>"));
+        assert!(redacted.contains("X-Plex-Token=***") || redacted.contains("x-plex-token=***"));
+        assert!(redacted.contains("api_key=***"));
         assert!(redacted.contains("safe=value"));
     }
 
@@ -127,7 +129,7 @@ mod tests {
         assert!(!redacted.contains("sëcret"));
         assert!(redacted.contains("épisode"));
         assert!(redacted.contains("title=café"));
-        assert!(redacted.contains("token=<redacted>"));
+        assert!(redacted.contains("token=***"));
     }
 
     #[test]
@@ -138,8 +140,8 @@ mod tests {
 
         assert!(!redacted.contains("secret"));
         assert!(!redacted.contains("another-secret"));
-        assert!(redacted.contains("token=<redacted>"));
-        assert!(redacted.contains("api_key=<redacted>"));
+        assert!(redacted.contains("token=***"));
+        assert!(redacted.contains("api_key=***"));
         assert!(redacted.contains("safe=visible"));
     }
 
@@ -150,7 +152,7 @@ mod tests {
         );
 
         assert!(!redacted.contains("secret-token"));
-        assert!(redacted.contains("X-MediaBrowser-Token=<redacted>") || redacted.contains("x-mediabrowser-token=<redacted>"));
+        assert!(redacted.contains("X-MediaBrowser-Token=***") || redacted.contains("x-mediabrowser-token=***"));
         assert!(redacted.contains("safe=visible"));
     }
 
@@ -162,7 +164,7 @@ mod tests {
 
         let rendered = redact_media_server_headers(&headers);
 
-        assert!(rendered.iter().any(|(name, value)| name == "authorization" && value == "<redacted>"));
+        assert!(rendered.iter().any(|(name, value)| name == "authorization" && value == "***"));
         assert!(rendered.iter().any(|(name, value)| name == "content-type" && value == "video/mp4"));
     }
 }

@@ -618,7 +618,7 @@ impl Default for MediaServerInputConfigDto {
 }
 
 impl MediaServerInputConfigDto {
-    pub fn prepare(&mut self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
+    pub fn normalize(&mut self) {
         self.token = get_trimmed_string(self.token.as_deref());
         self.api_key = get_trimmed_string(self.api_key.as_deref());
         self.user_id = get_trimmed_string(self.user_id.as_deref());
@@ -626,11 +626,16 @@ impl MediaServerInputConfigDto {
         self.server_id = get_trimmed_string(self.server_id.as_deref());
         self.machine_id = get_trimmed_string(self.machine_id.as_deref());
         self.server_name = get_trimmed_string(self.server_name.as_deref());
-        self.catalog.prepare(input_name)?;
 
         for library in &mut self.libraries {
             library.prepare();
         }
+    }
+
+    pub fn prepare(&mut self, input_name: &Arc<str>) -> Result<(), TuliproxError> {
+        self.normalize();
+        self.catalog.prepare(input_name)?;
+
         if self.libraries.iter().any(MediaServerLibrarySelectorDto::is_empty) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media_server library selectors must not be empty (input: {input_name})"
@@ -1037,7 +1042,12 @@ impl ConfigInputDto {
 
         self.url = self.url.trim().to_string();
         self.normalize_input_type_from_batch_url();
-        self.prepare_media_server_input()?;
+        if let Some(media_server) = self.media_server.as_mut() {
+            media_server.normalize();
+        }
+        if self.enabled {
+            self.prepare_media_server_input()?;
+        }
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
             && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
         {
@@ -1581,6 +1591,41 @@ mod tests {
 
         let err = prepare_dto(&mut dto).expect_err("media_server block should be mandatory");
         assert!(err.to_string().contains("media_server configuration is mandatory"));
+    }
+
+    #[test]
+    fn prepare_allows_disabled_media_server_input_with_incomplete_config() {
+        let mut dto = ConfigInputDto {
+            name: "disabled_plex".intern(),
+            input_type: InputType::Plex,
+            enabled: false,
+            ..ConfigInputDto::default()
+        };
+
+        prepare_dto(&mut dto).expect("disabled media_server input should not require active playback/catalog config");
+        assert_eq!(dto.input_type, InputType::Plex);
+        assert!(!dto.enabled);
+    }
+
+    #[test]
+    fn prepare_normalizes_disabled_media_server_config_without_enforcing_invariants() {
+        let mut dto = ConfigInputDto {
+            name: "disabled_emby".intern(),
+            input_type: InputType::Emby,
+            enabled: false,
+            media_server: Some(MediaServerInputConfigDto {
+                token: Some(" token-value ".to_string()),
+                libraries: vec![MediaServerLibrarySelectorDto::Name("   ".to_string())],
+                catalog: MediaServerCatalogConfigDto { page_size: 0, ..MediaServerCatalogConfigDto::default() },
+                ..MediaServerInputConfigDto::default()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        prepare_dto(&mut dto).expect("disabled media_server input can preserve incomplete config for later repair");
+        let media_server = dto.media_server.as_ref().expect("media_server config should be preserved");
+        assert_eq!(media_server.token.as_deref(), Some("token-value"));
+        assert!(media_server.libraries[0].is_empty());
     }
 
     #[test]

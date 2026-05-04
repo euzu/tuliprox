@@ -22,7 +22,13 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
 
     match &*source_editor_ctx.edit_mode {
         EditMode::Active(block_instance) => match block_instance.block_type {
-            BlockType::InputXtream | BlockType::InputM3u | BlockType::InputLibrary | BlockType::Target => html! {},
+            BlockType::InputXtream
+            | BlockType::InputM3u
+            | BlockType::InputLibrary
+            | BlockType::InputEmby
+            | BlockType::InputJellyfin
+            | BlockType::InputPlex
+            | BlockType::Target => html! {},
             BlockType::OutputM3u => {
                 let output = props.output.as_ref().and_then(|to| {
                     if let TargetOutputDto::M3u(m3u) = &**to {

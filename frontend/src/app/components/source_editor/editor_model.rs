@@ -14,6 +14,9 @@ pub enum BlockType {
     InputXtream,
     InputM3u,
     InputLibrary,
+    InputEmby,
+    InputJellyfin,
+    InputPlex,
     Target,
     OutputM3u,
     OutputXtream,
@@ -26,13 +29,26 @@ impl BlockType {
     pub const INPUT_XTREAM: &'static str = "InputXtream";
     pub const INPUT_M3U: &'static str = "InputM3u";
     pub const INPUT_LIBRARY: &'static str = "InputLibrary";
+    pub const INPUT_EMBY: &'static str = "InputEmby";
+    pub const INPUT_JELLYFIN: &'static str = "InputJellyfin";
+    pub const INPUT_PLEX: &'static str = "InputPlex";
     pub const TARGET: &'static str = "Target";
     pub const OUTPUT_M3U: &'static str = "OutputM3u";
     pub const OUTPUT_XTREAM: &'static str = "OutputXtream";
     pub const OUTPUT_HDHOMERUN: &'static str = "OutputHdHomeRun";
     pub const OUTPUT_STRM: &'static str = "OutputStrm";
 
-    pub fn is_input(&self) -> bool { matches!(self, Self::InputXtream | Self::InputM3u | Self::InputLibrary) }
+    pub fn is_input(&self) -> bool {
+        matches!(
+            self,
+            Self::InputXtream
+                | Self::InputM3u
+                | Self::InputLibrary
+                | Self::InputEmby
+                | Self::InputJellyfin
+                | Self::InputPlex
+        )
+    }
 
     pub fn is_target(&self) -> bool { matches!(self, Self::Target) }
 
@@ -48,6 +64,9 @@ impl From<&str> for BlockType {
             BlockType::INPUT_XTREAM => BlockType::InputXtream,
             BlockType::INPUT_M3U => BlockType::InputM3u,
             BlockType::INPUT_LIBRARY => BlockType::InputLibrary,
+            BlockType::INPUT_EMBY => BlockType::InputEmby,
+            BlockType::INPUT_JELLYFIN => BlockType::InputJellyfin,
+            BlockType::INPUT_PLEX => BlockType::InputPlex,
             BlockType::TARGET => BlockType::Target,
             BlockType::OUTPUT_M3U => BlockType::OutputM3u,
             BlockType::OUTPUT_XTREAM => BlockType::OutputXtream,
@@ -68,7 +87,9 @@ impl From<InputType> for BlockType {
             InputType::M3uBatch | InputType::M3u => BlockType::InputM3u,
             InputType::XtreamBatch | InputType::Xtream => BlockType::InputXtream,
             InputType::Library => BlockType::InputLibrary,
-            InputType::Emby | InputType::Jellyfin | InputType::Plex => BlockType::InputXtream,
+            InputType::Emby => BlockType::InputEmby,
+            InputType::Jellyfin => BlockType::InputJellyfin,
+            InputType::Plex => BlockType::InputPlex,
         }
     }
 }
@@ -80,6 +101,9 @@ impl fmt::Display for BlockType {
             BlockType::InputXtream => Self::INPUT_XTREAM,
             BlockType::InputM3u => Self::INPUT_M3U,
             BlockType::InputLibrary => Self::INPUT_LIBRARY,
+            BlockType::InputEmby => Self::INPUT_EMBY,
+            BlockType::InputJellyfin => Self::INPUT_JELLYFIN,
+            BlockType::InputPlex => Self::INPUT_PLEX,
             BlockType::Target => Self::TARGET,
             BlockType::OutputM3u => Self::OUTPUT_M3U,
             BlockType::OutputXtream => Self::OUTPUT_XTREAM,
@@ -90,6 +114,25 @@ impl fmt::Display for BlockType {
     }
 }
 pub(crate) type BlockId = u16;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_server_input_types_keep_distinct_source_editor_blocks() {
+        assert_eq!(BlockType::from(InputType::Emby), BlockType::InputEmby);
+        assert_eq!(BlockType::from(InputType::Jellyfin), BlockType::InputJellyfin);
+        assert_eq!(BlockType::from(InputType::Plex), BlockType::InputPlex);
+    }
+
+    #[test]
+    fn media_server_source_editor_blocks_are_inputs() {
+        assert!(BlockType::InputEmby.is_input());
+        assert!(BlockType::InputJellyfin.is_input());
+        assert!(BlockType::InputPlex.is_input());
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Block {

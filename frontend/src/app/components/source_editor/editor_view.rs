@@ -268,6 +268,9 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputXtream => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Xtream))),
         BlockType::InputM3u => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::M3u))),
         BlockType::InputLibrary => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Library))),
+        BlockType::InputEmby => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Emby))),
+        BlockType::InputJellyfin => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Jellyfin))),
+        BlockType::InputPlex => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Plex))),
         BlockType::Target => {
             let dto = ConfigTargetDto {
                 name: String::new(),
@@ -319,6 +322,15 @@ fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType
         }
         BlockType::InputLibrary => {
             input.input_type = InputType::Library;
+        }
+        BlockType::InputEmby => {
+            input.input_type = InputType::Emby;
+        }
+        BlockType::InputJellyfin => {
+            input.input_type = InputType::Jellyfin;
+        }
+        BlockType::InputPlex => {
+            input.input_type = InputType::Plex;
         }
         _ => {}
     }
@@ -2084,4 +2096,46 @@ fn update_pending_line(line: &Element, from: Position, to: Position) -> Result<(
     line.set_attribute("y1", &from.1.to_string())?;
     line.set_attribute("x2", &to.0.to_string())?;
     line.set_attribute("y2", &to.1.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_server_blocks_create_matching_input_types() {
+        let cases = [
+            (BlockType::InputEmby, InputType::Emby),
+            (BlockType::InputJellyfin, InputType::Jellyfin),
+            (BlockType::InputPlex, InputType::Plex),
+        ];
+
+        for (block_type, expected_input_type) in cases {
+            let BlockInstance::Input(input) = create_instance(block_type) else {
+                panic!("media_server block should create an input instance");
+            };
+            assert_eq!(input.input_type, expected_input_type);
+        }
+    }
+
+    #[test]
+    fn media_server_block_normalization_preserves_input_type() {
+        let cases = [
+            (BlockType::InputEmby, InputType::Emby),
+            (BlockType::InputJellyfin, InputType::Jellyfin),
+            (BlockType::InputPlex, InputType::Plex),
+        ];
+
+        for (block_type, expected_input_type) in cases {
+            let mut input = ConfigInputDto {
+                input_type: InputType::Xtream,
+                url: "batch://should-not-convert-media-server".to_string(),
+                ..ConfigInputDto::default()
+            };
+
+            normalize_input_type_by_url(&mut input, block_type);
+
+            assert_eq!(input.input_type, expected_input_type);
+        }
+    }
 }

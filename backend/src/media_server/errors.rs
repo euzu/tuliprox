@@ -185,6 +185,6 @@ mod tests {
 
         assert!(!rendered.contains("secret-token"));
         assert!(!rendered.contains("secret-key"));
-        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("***"));
     }
 }

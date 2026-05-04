@@ -114,7 +114,7 @@ mod tests {
         let request = client.request(Method::GET, "https://media.example.invalid/video?api_key=secret");
 
         assert!(!request.safe_url().contains("secret"));
-        assert!(request.safe_url().contains("api_key=<redacted>"));
+        assert!(request.safe_url().contains("api_key=***"));
     }
 
     #[test]
