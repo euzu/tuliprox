@@ -159,17 +159,26 @@ impl PlexClient {
             client,
             connection.uri,
             input.name.clone(),
-            resource.machine_id.to_string(),
+            resource
+                .expected_machine_id
+                .clone()
+                .unwrap_or_else(|| resource.resource_id.clone())
+                .to_string(),
             resource.access_token.to_string(),
             media_server.libraries.clone(),
         );
         plex.owned = resource.owned;
         let status = plex.discover().await?;
-        if status.server_id.as_ref() != resource.machine_id.as_ref() {
+        if resource
+            .expected_machine_id
+            .as_ref()
+            .is_some_and(|machine_id| status.server_id.as_ref() != machine_id.as_ref())
+        {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
                 .provider(PLEX_PROVIDER_NAME)
                 .detail("selected Plex resource identity did not match PMS identity"));
         }
+        plex.server_id = status.server_id;
         Ok(plex)
     }
 
@@ -419,7 +428,8 @@ struct PlexConnectionCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelectedPlexResource {
-    machine_id: Arc<str>,
+    resource_id: Arc<str>,
+    expected_machine_id: Option<Arc<str>>,
     access_token: Arc<str>,
     connections: Vec<PlexConnectionCandidate>,
     owned: Option<bool>,
@@ -448,11 +458,17 @@ fn select_resource(
     }
 
     let resource = matches.swap_remove(0);
-    let machine_id = resource.machine_identifier.as_deref().and_then(non_blank).ok_or_else(|| {
-        MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
-            .provider(PLEX_PROVIDER_NAME)
-            .detail("selected Plex resource did not expose a machine identifier")
-    })?;
+    let expected_machine_id = resource.machine_identifier.as_deref().and_then(non_blank).map(Arc::<str>::from);
+    let resource_id = resource
+        .client_identifier
+        .as_deref()
+        .and_then(non_blank)
+        .or(resource.machine_identifier.as_deref().and_then(non_blank))
+        .ok_or_else(|| {
+            MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
+                .provider(PLEX_PROVIDER_NAME)
+                .detail("selected Plex resource did not expose a stable resource identifier")
+        })?;
     let access_token = resource.access_token.as_deref().and_then(non_blank).ok_or_else(|| {
         MediaServerError::new(MediaServerErrorKind::MediaServerAuthDenied)
             .provider(PLEX_PROVIDER_NAME)
@@ -465,7 +481,8 @@ fn select_resource(
         .filter_map(|(ordinal, connection)| connection_candidate(connection, ordinal))
         .collect();
     Ok(SelectedPlexResource {
-        machine_id: Arc::<str>::from(machine_id),
+        resource_id: Arc::<str>::from(resource_id),
+        expected_machine_id,
         access_token: Arc::<str>::from(access_token),
         connections,
         owned: resource.owned.map(|owned| owned != 0),
@@ -722,7 +739,29 @@ mod tests {
 
         let selected = select_resource(&config, &resources).expect("resource selected");
 
-        assert_eq!(selected.machine_id.as_ref(), "machine-redacted");
+        assert_eq!(selected.resource_id.as_ref(), "client-redacted");
+        assert_eq!(selected.expected_machine_id.as_deref(), Some("machine-redacted"));
+        assert_eq!(selected.access_token.as_ref(), "resource-token-redacted");
+    }
+
+    #[test]
+    fn myplex_resource_selection_accepts_client_identifier_without_machine_identifier() {
+        let resources: PlexResourcesDto = quick_xml::de::from_str(
+            r#"<MediaContainer size="1">
+                <Device name="Server Redacted" product="Plex Media Server" clientIdentifier="client-only-redacted" accessToken="resource-token-redacted">
+                  <Connection protocol="https" uri="https://pms.example.invalid" local="0" relay="0" />
+                </Device>
+              </MediaContainer>"#,
+        )
+        .expect("resources parse");
+        let mut config = media_config_with_selector();
+        config.machine_id = None;
+        config.server_id = Some("client-only-redacted".to_string());
+
+        let selected = select_resource(&config, &resources).expect("resource selected by client identifier");
+
+        assert_eq!(selected.resource_id.as_ref(), "client-only-redacted");
+        assert_eq!(selected.expected_machine_id, None);
         assert_eq!(selected.access_token.as_ref(), "resource-token-redacted");
     }
 
