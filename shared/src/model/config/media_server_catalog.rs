@@ -1,7 +1,7 @@
 use crate::{
     error::TuliproxError,
     utils::{
-        default_as_true, default_media_server_catalog_page_size, default_media_server_catalog_request_delay_ms,
+        default_as_true, default_media_server_catalog_page_size, default_media_server_catalog_request_delay_ms, deserialize_as_option_string,
         get_trimmed_string, is_blank_optional_string, is_default_media_server_catalog_page_size,
         is_default_media_server_catalog_request_delay_ms, is_false, is_non_blank_optional_string, is_true,
     },
@@ -139,9 +139,17 @@ pub enum MediaServerLibraryKindDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MediaServerLibrarySelectorDetailsDto {
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_as_option_string",
+        skip_serializing_if = "is_blank_optional_string"
+    )]
     pub id: Option<String>,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_as_option_string",
+        skip_serializing_if = "is_blank_optional_string"
+    )]
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub name: Option<String>,
@@ -373,6 +381,22 @@ mod tests {
         assert!(!media_server.playback.preflight_streams);
         assert_eq!(media_server.image_policy, MediaServerImagePolicyDto::ProxyOnDemand);
         assert!(!media_server.allow_relay);
+    }
+
+    #[test]
+    fn media_server_library_key_selector_accepts_numeric_yaml_scalars() {
+        let media_server =
+            serde_json::from_str::<MediaServerInputConfigDto>(r#"{"libraries":[{"key":10,"kind":"movies"}]}"#)
+                .expect("numeric YAML-like key selectors should deserialize as strings");
+
+        assert_eq!(
+            media_server.libraries,
+            vec![MediaServerLibrarySelectorDto::Detailed(MediaServerLibrarySelectorDetailsDto {
+                key: Some("10".to_string()),
+                kind: Some(MediaServerLibraryKindDto::Movies),
+                ..MediaServerLibrarySelectorDetailsDto::default()
+            })]
+        );
     }
 
     #[test]
