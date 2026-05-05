@@ -451,21 +451,6 @@ impl MediaServerPlaybackConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MediaServerEnrichmentConfigDto {
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub ffprobe: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub tmdb_lookup: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub fetch_images: bool,
-}
-
-impl MediaServerEnrichmentConfigDto {
-    pub fn is_default(&self) -> bool { self == &Self::default() }
-}
-
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum MediaServerImagePolicyDto {
     #[serde(rename = "proxy_on_demand")]
@@ -547,8 +532,6 @@ pub struct MediaServerInputConfigDto {
     pub catalog: MediaServerCatalogConfigDto,
     #[serde(default, skip_serializing_if = "MediaServerPlaybackConfigDto::is_default")]
     pub playback: MediaServerPlaybackConfigDto,
-    #[serde(default, skip_serializing_if = "MediaServerEnrichmentConfigDto::is_default")]
-    pub enrichment: MediaServerEnrichmentConfigDto,
     #[serde(default, skip_serializing_if = "is_default_media_server_image_policy")]
     pub image_policy: MediaServerImagePolicyDto,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -577,7 +560,6 @@ impl Default for MediaServerInputConfigDto {
             libraries: Vec::new(),
             catalog: MediaServerCatalogConfigDto::default(),
             playback: MediaServerPlaybackConfigDto::default(),
-            enrichment: MediaServerEnrichmentConfigDto::default(),
             image_policy: MediaServerImagePolicyDto::default(),
             token: None,
             api_key: None,
@@ -1515,11 +1497,18 @@ mod tests {
         assert!(media_server.playback.direct_play_only);
         assert!(!media_server.playback.allow_transcode);
         assert!(!media_server.playback.preflight_streams);
-        assert!(!media_server.enrichment.ffprobe);
-        assert!(!media_server.enrichment.tmdb_lookup);
-        assert!(!media_server.enrichment.fetch_images);
         assert_eq!(media_server.image_policy, MediaServerImagePolicyDto::ProxyOnDemand);
         assert!(!media_server.allow_relay);
+    }
+
+    #[test]
+    fn media_server_enrichment_block_is_not_part_of_schema() {
+        let err = serde_json::from_str::<MediaServerInputConfigDto>(
+            r#"{"libraries":["Movies"],"enrichment":{"ffprobe":true,"tmdb_lookup":true,"fetch_images":true}}"#,
+        )
+        .expect_err("media_server.enrichment must not be accepted");
+
+        assert!(err.to_string().contains("unknown field `enrichment`"));
     }
 
     #[test]

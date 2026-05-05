@@ -7,8 +7,8 @@ use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
 use shared::model::{
     ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType,
-    MediaServerCatalogConfigDto, MediaServerEnrichmentConfigDto, MediaServerImagePolicyDto, MediaServerLibrarySelectorDto,
-    MediaServerInputConfigDto, MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster,
+    MediaServerCatalogConfigDto, MediaServerImagePolicyDto, MediaServerLibrarySelectorDto, MediaServerInputConfigDto,
+    MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster,
 };
 use shared::utils::{
     get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
@@ -111,7 +111,6 @@ pub struct MediaServerInputConfig {
     pub libraries: Vec<MediaServerLibrarySelectorDto>,
     pub catalog: MediaServerCatalogConfigDto,
     pub playback: MediaServerPlaybackConfigDto,
-    pub enrichment: MediaServerEnrichmentConfigDto,
     pub image_policy: MediaServerImagePolicyDto,
     pub token: Option<String>,
     pub api_key: Option<String>,
@@ -132,7 +131,6 @@ impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
             libraries: normalized.libraries,
             catalog: normalized.catalog,
             playback: normalized.playback,
-            enrichment: normalized.enrichment,
             image_policy: normalized.image_policy,
             token: normalized.token,
             api_key: normalized.api_key,
@@ -959,7 +957,6 @@ mod tests {
         assert_eq!(media_server.catalog.page_size, 100);
         assert!(media_server.playback.direct_play_only);
         assert!(!media_server.playback.allow_transcode);
-        assert!(!media_server.enrichment.ffprobe);
         assert_eq!(media_server.token.as_deref(), Some("token"));
         assert_eq!(media_server.api_key.as_deref(), Some("api-key"));
         assert_eq!(media_server.user_id.as_deref(), Some("user"));

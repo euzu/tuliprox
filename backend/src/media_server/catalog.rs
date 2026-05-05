@@ -251,8 +251,10 @@ mod tests {
             item_id: Arc::<str>::from(id),
             title: Arc::<str>::from("Movie Redacted"),
             year: None,
+            release_date: None,
             source_version_hint: None,
             provider_hints: Vec::<MediaServerProviderIdHint>::new(),
+            technical_facts: None,
             stream_ref: None,
             image_ref: None,
         }
