@@ -5,8 +5,15 @@ use log::warn;
 use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
-use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, StagedInputDto, XtreamCluster};
-use shared::utils::{get_credentials_from_url, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
+use shared::model::{
+    ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType,
+    MediaServerCatalogConfigDto, MediaServerEnrichmentConfigDto, MediaServerImagePolicyDto, MediaServerLibrarySelectorDto,
+    MediaServerInputConfigDto, MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster,
+};
+use shared::utils::{
+    get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
+    BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+};
 use shared::{check_input_connections, write_if_some};
 use shared::{check_input_credentials, concat_string };
 use std::borrow::Cow;
@@ -98,6 +105,63 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
 
 static DEFAULT_CONFIG_INPUT_OPTIONS: LazyLock<ConfigInputOptions> =
     LazyLock::new(|| ConfigInputOptions::from(&ConfigInputOptionsDto::default()));
+
+#[derive(Debug, Clone)]
+pub struct MediaServerInputConfig {
+    pub libraries: Vec<MediaServerLibrarySelectorDto>,
+    pub catalog: MediaServerCatalogConfigDto,
+    pub playback: MediaServerPlaybackConfigDto,
+    pub enrichment: MediaServerEnrichmentConfigDto,
+    pub image_policy: MediaServerImagePolicyDto,
+    pub token: Option<String>,
+    pub api_key: Option<String>,
+    pub user_id: Option<String>,
+    pub account_token: Option<String>,
+    pub server_id: Option<String>,
+    pub machine_id: Option<String>,
+    pub server_name: Option<String>,
+    pub prefer_https: bool,
+    pub allow_relay: bool,
+}
+
+impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
+    fn from(dto: &MediaServerInputConfigDto) -> Self {
+        let mut normalized = dto.clone();
+        normalized.normalize();
+        Self {
+            libraries: normalized.libraries,
+            catalog: normalized.catalog,
+            playback: normalized.playback,
+            enrichment: normalized.enrichment,
+            image_policy: normalized.image_policy,
+            token: normalized.token,
+            api_key: normalized.api_key,
+            user_id: normalized.user_id,
+            account_token: normalized.account_token,
+            server_id: normalized.server_id,
+            machine_id: normalized.machine_id,
+            server_name: normalized.server_name,
+            prefer_https: normalized.prefer_https,
+            allow_relay: normalized.allow_relay,
+        }
+    }
+}
+
+impl MediaServerInputConfig {
+    pub fn has_any_emby_jellyfin_auth(&self) -> bool {
+        is_non_blank_optional_string(&self.token) || is_non_blank_optional_string(&self.api_key)
+    }
+
+    pub fn has_any_plex_token(&self) -> bool {
+        is_non_blank_optional_string(&self.account_token) || is_non_blank_optional_string(&self.token)
+    }
+
+    pub fn has_plex_server_selector(&self) -> bool {
+        is_non_blank_optional_string(&self.server_id)
+            || is_non_blank_optional_string(&self.machine_id)
+            || is_non_blank_optional_string(&self.server_name)
+    }
+}
 
 pub struct InputUserInfo {
     pub base_url: String,
@@ -254,6 +318,7 @@ pub struct ConfigInput {
     pub persist: Option<String>,
     pub enabled: bool,
     pub options: Option<ConfigInputOptions>,
+    pub media_server: Option<MediaServerInputConfig>,
     pub aliases: Option<Vec<ConfigInputAlias>>,
     pub priority: i16,
     pub max_connections: u16,
@@ -434,6 +499,103 @@ impl ConfigInput {
         self.options.as_ref().map_or(default, |o| o.has_all_flags(flags))
     }
 
+    fn prepare_media_server_input(&self) -> Result<(), TuliproxError> {
+        if !self.input_type.is_media_server() {
+            return Ok(());
+        }
+
+        let trimmed_url = self.url.trim();
+        if trimmed_url.starts_with(BATCH_SCHEME_PREFIX) || trimmed_url.starts_with(PROVIDER_SCHEME_PREFIX) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input does not support batch:// or provider:// URLs (input: {})",
+                self.name
+            )));
+        }
+        if self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty()) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input does not support aliases (input: {})",
+                self.name
+            )));
+        }
+        if self.staged.as_ref().is_some_and(|staged| staged.enabled) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input does not support staged inputs (input: {})",
+                self.name
+            )));
+        }
+        if self.epg.is_some() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input does not support EPG configuration (input: {})",
+                self.name
+            )));
+        }
+        if self.panel_api.is_some() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input does not support panel_api configuration (input: {})",
+                self.name
+            )));
+        }
+        let Some(media_server) = self.media_server.as_ref() else {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media_server configuration is mandatory for input type {} (input: {})",
+                self.input_type, self.name
+            )));
+        };
+        if media_server.libraries.is_empty() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input requires at least one selected library (input: {})",
+                self.name
+            )));
+        }
+        if media_server.libraries.iter().any(MediaServerLibrarySelectorDto::is_empty) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media_server library selectors must not be empty (input: {})",
+                self.name
+            )));
+        }
+        if media_server.catalog.page_size == 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media server catalog page_size must be greater than zero (input: {})",
+                self.name
+            )));
+        }
+        match self.input_type {
+            InputType::Emby | InputType::Jellyfin => {
+                if trimmed_url.is_empty() {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "url is mandatory for input type {} (input: {})",
+                        self.input_type, self.name
+                    )));
+                }
+                let has_login = self.username.as_ref().is_some_and(|u| !u.trim().is_empty())
+                    && self.password.as_ref().is_some_and(|p| !p.trim().is_empty());
+                if !media_server.has_any_emby_jellyfin_auth() && !has_login {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "media-server input type {} requires media_server token/api_key or username/password bootstrap credentials (input: {})",
+                        self.input_type, self.name
+                    )));
+                }
+            }
+            InputType::Plex => {
+                if !media_server.has_any_plex_token() {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "media-server input type plex requires media_server.account_token or media_server.token (input: {})",
+                        self.name
+                    )));
+                }
+                if trimmed_url.is_empty() && !media_server.has_plex_server_selector() {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "media-server input type plex requires a server selector such as media_server.machine_id, media_server.server_id, or media_server.server_name when input.url is omitted (input: {})",
+                        self.name
+                    )));
+                }
+            }
+            InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {}
+        }
+
+        Ok(())
+    }
+
     pub fn prepare(&mut self, provider_configs: &[Arc<ConfigProvider>]) -> Result<Option<PathBuf>, TuliproxError> {
         // Defensive fallback: From<&ConfigInputDto> for ConfigInput sets options, but ConfigInput can
         // still be built via Default::default(), batch/internal/test paths, so prepare() normalizes
@@ -451,6 +613,10 @@ impl ConfigInput {
         let mut used_provider_configs: Vec<Arc<ConfigProvider>> = vec![];
         let batch_file_path = self.prepare_batch();
         self.name = self.name.trim().intern();
+
+        if self.enabled {
+            self.prepare_media_server_input()?;
+        }
 
         if self.url.starts_with(PROVIDER_SCHEME_PREFIX) {
             let provider_cfg = Self::resolve_provider_config(&self.url, provider_configs)?;
@@ -557,6 +723,7 @@ impl ConfigInput {
             persist: self.persist.clone(),
             enabled: self.enabled,
             options: self.options.clone(),
+            media_server: self.media_server.clone(),
             aliases: None,
             priority: alias.priority,
             max_connections: alias.max_connections,
@@ -644,6 +811,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             persist: dto.persist.clone(),
             enabled: dto.enabled,
             options: Some(options),
+            media_server: dto.media_server.as_ref().map(MediaServerInputConfig::from),
             aliases: dto.aliases.as_ref().map(|list| list.iter().map(ConfigInputAlias::from).collect()),
             priority: dto.priority,
             max_connections: dto.max_connections,
@@ -754,6 +922,190 @@ mod tests {
     use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
     use std::borrow::Cow;
     use std::sync::Arc;
+
+    fn media_server_config_with_library() -> MediaServerInputConfig {
+        MediaServerInputConfig::from(&MediaServerInputConfigDto {
+            libraries: vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())],
+            ..MediaServerInputConfigDto::default()
+        })
+    }
+
+    #[test]
+    fn media_server_runtime_mapping_preserves_safe_defaults() {
+        let dto = ConfigInputDto {
+            name: "emby_media_server".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfigDto {
+                token: Some(" token ".to_string()),
+                api_key: Some(" api-key ".to_string()),
+                user_id: Some(" user ".to_string()),
+                account_token: Some(" account-token ".to_string()),
+                server_id: Some(" server ".to_string()),
+                machine_id: Some(" machine ".to_string()),
+                server_name: Some(" server-name ".to_string()),
+                ..MediaServerInputConfigDto {
+                    libraries: vec![MediaServerLibrarySelectorDto::Name(" Movies ".to_string())],
+                    ..MediaServerInputConfigDto::default()
+                }
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let input = ConfigInput::from(&dto);
+        let media_server = input.media_server.expect("media_server config should map to runtime");
+
+        assert_eq!(media_server.libraries, vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())]);
+        assert_eq!(media_server.catalog.page_size, 100);
+        assert!(media_server.playback.direct_play_only);
+        assert!(!media_server.playback.allow_transcode);
+        assert!(!media_server.enrichment.ffprobe);
+        assert_eq!(media_server.token.as_deref(), Some("token"));
+        assert_eq!(media_server.api_key.as_deref(), Some("api-key"));
+        assert_eq!(media_server.user_id.as_deref(), Some("user"));
+        assert_eq!(media_server.account_token.as_deref(), Some("account-token"));
+        assert_eq!(media_server.server_id.as_deref(), Some("server"));
+        assert_eq!(media_server.machine_id.as_deref(), Some("machine"));
+        assert_eq!(media_server.server_name.as_deref(), Some("server-name"));
+    }
+
+    #[test]
+    fn prepare_accepts_plex_media_server_without_input_url() {
+        let mut input = ConfigInput {
+            name: "plex_media_server".into(),
+            input_type: InputType::Plex,
+            media_server: Some(MediaServerInputConfig {
+                account_token: Some("token".to_string()),
+                machine_id: Some("machine".to_string()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        input.prepare(&[]).expect("plex discovery config should prepare without input.url");
+    }
+
+    #[test]
+    fn prepare_accepts_plex_media_server_with_direct_url_without_selector() {
+        let mut input = ConfigInput {
+            name: "plex_media_server".into(),
+            input_type: InputType::Plex,
+            url: "https://plex.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfig {
+                token: Some("token".to_string()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        input.prepare(&[]).expect("direct Plex URL should not require MyPlex server selector");
+    }
+
+    #[test]
+    fn prepare_rejects_emby_media_server_without_input_url() {
+        let mut input = ConfigInput {
+            name: "emby_media_server".into(),
+            input_type: InputType::Emby,
+            media_server: Some(MediaServerInputConfig {
+                token: Some("token".to_string()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("emby media_server input should require a direct server URL");
+        assert!(err.to_string().contains("url is mandatory for input type emby"));
+    }
+
+    #[test]
+    fn prepare_rejects_blank_media_server_credentials_and_selectors() {
+        let mut emby = ConfigInput {
+            name: "emby_media_server".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfig {
+                token: Some("   ".to_string()),
+                api_key: Some(String::new()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+        let err = emby.prepare(&[]).expect_err("blank token/api_key should be rejected");
+        assert!(err.to_string().contains("requires media_server token/api_key"));
+
+        let mut plex = ConfigInput {
+            name: "plex_media_server".into(),
+            input_type: InputType::Plex,
+            media_server: Some(MediaServerInputConfig {
+                account_token: Some("   ".to_string()),
+                server_id: Some("   ".to_string()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+        let err = plex.prepare(&[]).expect_err("blank plex token should be rejected");
+        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
+    }
+
+    #[test]
+    fn prepare_rejects_blank_media_server_library_selector() {
+        let mut input = ConfigInput {
+            name: "emby_media_server".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfig {
+                token: Some("token".to_string()),
+                libraries: vec![MediaServerLibrarySelectorDto::Name("   ".to_string())],
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("blank library selector should be rejected");
+        assert!(err.to_string().contains("media_server library selectors must not be empty"));
+    }
+
+    #[test]
+    fn prepare_accepts_media_server_max_connections_as_stream_limit() {
+        let mut input = ConfigInput {
+            name: "emby_media_server".into(),
+            input_type: InputType::Emby,
+            url: "https://media.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfig {
+                token: Some("token".to_string()),
+                ..media_server_config_with_library()
+            }),
+            max_connections: 1,
+            enabled: true,
+            ..Default::default()
+        };
+
+        input.prepare(&[]).expect("media_server inputs reuse max_connections stream-limit semantics");
+    }
+
+    #[test]
+    fn prepare_rejects_media_server_provider_url() {
+        let mut input = ConfigInput {
+            name: "emby_media_server".into(),
+            input_type: InputType::Emby,
+            url: " provider://media-server ".to_string(),
+            media_server: Some(MediaServerInputConfig {
+                token: Some("token".to_string()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("media_server provider URLs should be rejected");
+        assert!(err.to_string().contains("does not support batch:// or provider://"));
+    }
 
     #[test]
     fn test_resolve_url_normal() {
