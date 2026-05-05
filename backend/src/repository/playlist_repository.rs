@@ -19,7 +19,7 @@ use crate::utils;
 use log::{info, warn};
 use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,6 +52,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
 
     let mut local_library_series = HashMap::<Arc<str>, Vec<LocalEpisodeKey>>::new();
     let mut provider_series = HashMap::<Arc<str>, Vec<ProviderEpisodeKey>>::new();
+    let mut media_server_series = HashMap::<Arc<str>, Vec<SeriesStreamDetailEpisodeProperties>>::new();
 
     let mut source_ordinal: u32 = 0;
     // Virtual IDs assignment
@@ -94,15 +95,19 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
             let item_type = header.item_type;
             if item_type == PlaylistItemType::LocalSeries {
                 assign_local_series_info_episode_key(&mut local_library_series, header, item_type);
+            } else if is_media_server_series_episode_header(header) {
+                assign_media_server_series_info_episode(&mut media_server_series, header);
             } else if item_type == PlaylistItemType::Series {
                 assign_provider_series_info_episode_key(&mut provider_series, header, item_type);
             }
         }
     }
 
+    materialize_media_server_series_info_episodes(playlist, &media_server_series);
     rewrite_series_info_episode_virtual_id(playlist, &local_library_series, &provider_series);
     drop(local_library_series);
     drop(provider_series);
+    drop(media_server_series);
 
     for output in &target.output {
         let mut filtered: Option<Vec<PlaylistGroup>> = match output {
@@ -196,6 +201,96 @@ fn assign_provider_series_info_episode_key(provider_series: &mut HashMap<Arc<str
                 provider_id: header.get_provider_id().unwrap_or_default(),
                 virtual_id: header.virtual_id,
             });
+    }
+}
+
+fn is_media_server_item_header(header: &PlaylistItemHeader) -> bool {
+    header.id.starts_with("media-server:") || header.url.starts_with("media-server://")
+}
+
+fn is_media_server_series_info_header(header: &PlaylistItemHeader) -> bool {
+    header.item_type == PlaylistItemType::SeriesInfo && is_media_server_item_header(header)
+}
+
+fn is_media_server_series_episode_header(header: &PlaylistItemHeader) -> bool {
+    header.item_type == PlaylistItemType::Series
+        && !header.parent_code.is_empty()
+        && is_media_server_item_header(header)
+}
+
+fn assign_media_server_series_info_episode(
+    media_server_series: &mut HashMap<Arc<str>, Vec<SeriesStreamDetailEpisodeProperties>>,
+    header: &PlaylistItemHeader,
+) {
+    if let Some(episode) = media_server_series_episode_detail(header) {
+        media_server_series.entry(header.parent_code.clone()).or_default().push(episode);
+    }
+}
+
+fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<SeriesStreamDetailEpisodeProperties> {
+    if !is_media_server_series_episode_header(header) {
+        return None;
+    }
+
+    let episode = match header.additional_properties.as_ref() {
+        Some(StreamProperties::Episode(episode)) => Some(episode.as_ref()),
+        _ => None,
+    };
+
+    Some(SeriesStreamDetailEpisodeProperties {
+        id: header.virtual_id,
+        episode_num: episode.map_or(0, |ep| ep.episode),
+        season: episode.map_or(0, |ep| ep.season),
+        title: non_blank_arc(&header.title).unwrap_or_else(|| non_blank_arc(&header.name).unwrap_or_else(|| "Episode".intern())),
+        container_extension: episode.map_or_else(|| "".intern(), |ep| ep.container_extension.clone()),
+        custom_sid: None,
+        added: episode.and_then(|ep| ep.added.clone()).unwrap_or_else(|| "".intern()),
+        direct_source: "".intern(),
+        tmdb: episode.and_then(|ep| ep.tmdb),
+        release_date: episode.and_then(|ep| ep.release_date.clone()).unwrap_or_else(|| "".intern()),
+        series_release_date: episode.and_then(|ep| ep.series_release_date.clone()),
+        plot: None,
+        crew: None,
+        duration_secs: 0,
+        duration: "".intern(),
+        movie_image: "".intern(),
+        bitrate: 0,
+        rating: None,
+        video: episode.and_then(|ep| ep.video.clone()),
+        audio: episode.and_then(|ep| ep.audio.clone()),
+    })
+}
+
+fn non_blank_arc(value: &Arc<str>) -> Option<Arc<str>> {
+    (!value.trim().is_empty()).then(|| Arc::clone(value))
+}
+
+#[allow(clippy::implicit_hasher)]
+fn materialize_media_server_series_info_episodes(
+    playlist: &mut [PlaylistGroup],
+    media_server_series: &HashMap<Arc<str>, Vec<SeriesStreamDetailEpisodeProperties>>,
+) {
+    if media_server_series.is_empty() {
+        return;
+    }
+
+    for group in playlist.iter_mut() {
+        for channel in &mut group.channels {
+            let header = &mut channel.header;
+            if !is_media_server_series_info_header(header) {
+                continue;
+            }
+            let Some(episodes) = media_server_series.get(&header.get_uuid().intern()) else { continue };
+            let Some(StreamProperties::Series(series)) = header.additional_properties.as_mut() else { continue };
+            let details = series.details.get_or_insert(SeriesStreamDetailProperties {
+                year: None,
+                seasons: None,
+                episodes: None,
+            });
+            let mut episodes = episodes.clone();
+            episodes.sort_by_key(|episode| (episode.season, episode.episode_num, episode.id));
+            details.episodes = Some(episodes);
+        }
     }
 }
 
@@ -564,14 +659,16 @@ pub async fn load_input_media_server_playlist(
 #[cfg(test)]
 mod tests {
     use super::{
-        assign_local_series_info_episode_key, get_input_media_server_playlist_file_path,
+        assign_local_series_info_episode_key, assign_media_server_series_info_episode,
+        get_input_media_server_playlist_file_path, materialize_media_server_series_info_episodes,
         rewrite_local_series_info_episode_virtual_id, rewrite_series_episode_parent_virtual_ids,
         rewrite_series_info_episode_virtual_id, LocalEpisodeKey, ProviderEpisodeKey,
     };
     use crate::repository::{BPlusTreeQuery, TargetIdMapping, VirtualIdRecord};
     use shared::model::{
-        PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
-        SeriesStreamDetailProperties, SeriesStreamProperties, StreamProperties, UUIDType, XtreamCluster, XtreamPlaylistItem,
+        EpisodeStreamProperties, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties,
+        SeriesStreamProperties, StreamProperties, UUIDType, XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
     use std::{collections::HashMap, sync::Arc};
@@ -640,6 +737,120 @@ mod tests {
             virtual_id,
             ..PlaylistItemHeader::default()
         }
+    }
+
+    fn make_media_server_episode(series_uuid: &str, item_id: &str, virtual_id: u32, season: u32, episode: u32) -> PlaylistItemHeader {
+        PlaylistItemHeader {
+            id: format!("media-server:server:shows:episode:{item_id}").intern(),
+            name: format!("Episode {episode}").intern(),
+            title: format!("Episode {episode}").intern(),
+            parent_code: series_uuid.intern(),
+            url: format!("media-server://plex/server/{item_id}?part_key=%2Flibrary%2Fparts%2Fredacted").intern(),
+            item_type: PlaylistItemType::Series,
+            xtream_cluster: XtreamCluster::Series,
+            virtual_id,
+            additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
+                episode_id: 0,
+                episode,
+                season,
+                added: Some("1700000000".intern()),
+                release_date: Some("2024-02-03".intern()),
+                series_release_date: Some("2024-01-01".intern()),
+                tmdb: Some(67890),
+                movie_image: "".intern(),
+                container_extension: "mkv".intern(),
+                video: Some(r#"{"codec_name":"h264"}"#.intern()),
+                audio: Some(r#"{"codec_name":"aac"}"#.intern()),
+            }))),
+            ..PlaylistItemHeader::default()
+        }
+    }
+
+    #[test]
+    fn materializes_media_server_series_info_episodes_after_target_virtual_ids_are_assigned() {
+        let series_uuid = "123e4567-e89b-12d3-a456-426614174111";
+        let mut series_info = PlaylistItem {
+            header: PlaylistItemHeader {
+                uuid: UUIDType::from_valid_uuid(series_uuid),
+                id: "media-server:server:shows:series:series".intern(),
+                name: "Media Server Series".intern(),
+                title: "Media Server Series".intern(),
+                url: "media-server://unavailable/server/shows/series".intern(),
+                item_type: PlaylistItemType::SeriesInfo,
+                xtream_cluster: XtreamCluster::Series,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    name: "Media Server Series".intern(),
+                    details: Some(SeriesStreamDetailProperties {
+                        year: Some(2024),
+                        seasons: Some(vec![SeriesStreamDetailSeasonProperties {
+                            name: "Season 1".intern(),
+                            season_number: 1,
+                            episode_count: 2,
+                            overview: Some("season summary".intern()),
+                            air_date: Some("2024-01-01".intern()),
+                            cover: None,
+                            cover_tmdb: None,
+                            cover_big: None,
+                            duration: None,
+                        }]),
+                        episodes: None,
+                    }),
+                    ..SeriesStreamProperties::default()
+                }))),
+                ..PlaylistItemHeader::default()
+            },
+        };
+        let series_parent_code = series_info.header.uuid.to_string();
+        let media_episode_two = PlaylistItem { header: make_media_server_episode(&series_parent_code, "episode-two", 7002, 1, 2) };
+        let media_episode_one = PlaylistItem { header: make_media_server_episode(&series_parent_code, "episode-one", 7001, 1, 1) };
+        let provider_episode = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "999".intern(),
+                parent_code: series_parent_code.intern(),
+                url: "http://provider.example.invalid/series/999.mkv".intern(),
+                item_type: PlaylistItemType::Series,
+                xtream_cluster: XtreamCluster::Series,
+                virtual_id: 7999,
+                ..PlaylistItemHeader::default()
+            },
+        };
+
+        let mut media_server_series = HashMap::<Arc<str>, Vec<SeriesStreamDetailEpisodeProperties>>::new();
+        assign_media_server_series_info_episode(&mut media_server_series, &media_episode_two.header);
+        assign_media_server_series_info_episode(&mut media_server_series, &provider_episode.header);
+        assign_media_server_series_info_episode(&mut media_server_series, &media_episode_one.header);
+
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Media Server Series".intern(),
+            channels: vec![series_info, media_episode_two, provider_episode, media_episode_one],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        materialize_media_server_series_info_episodes(&mut playlist, &media_server_series);
+        series_info = playlist[0].channels[0].clone();
+
+        let Some(StreamProperties::Series(series)) = series_info.header.additional_properties.as_ref() else {
+            panic!("missing series properties");
+        };
+        let details = series.details.as_ref().expect("series details should be present");
+        assert_eq!(details.year, Some(2024));
+        assert_eq!(details.seasons.as_ref().expect("seasons should be preserved")[0].episode_count, 2);
+        let episodes = details.episodes.as_ref().expect("media-server episodes should be materialized");
+        assert_eq!(episodes.len(), 2);
+        assert_eq!(episodes[0].id, 7001);
+        assert_eq!(episodes[0].episode_num, 1);
+        assert_eq!(episodes[0].season, 1);
+        assert_eq!(episodes[0].title.as_ref(), "Episode 1");
+        assert_eq!(episodes[0].container_extension.as_ref(), "mkv");
+        assert_eq!(episodes[0].release_date.as_ref(), "2024-02-03");
+        assert_eq!(episodes[0].series_release_date.as_deref(), Some("2024-01-01"));
+        assert_eq!(episodes[0].tmdb, Some(67890));
+        assert_eq!(episodes[0].direct_source.as_ref(), "");
+        assert_eq!(episodes[0].movie_image.as_ref(), "");
+        assert!(episodes[0].video.as_deref().is_some_and(|video| video.contains("h264")));
+        assert!(episodes[0].audio.as_deref().is_some_and(|audio| audio.contains("aac")));
+        assert_eq!(episodes[1].id, 7002);
     }
 
     #[test]
