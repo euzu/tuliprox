@@ -1,16 +1,18 @@
 use crate::media_server::{
-    MediaServerAudioTechnicalFacts, MediaServerCatalogSnapshot, MediaServerEpisode, MediaServerMovie,
-    MediaServerProviderIdHint, MediaServerStreamRef, MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
+    MediaServerAudioTechnicalFacts, MediaServerCatalogSnapshot, MediaServerDescriptiveFacts, MediaServerEpisode,
+    MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason, MediaServerSeries, MediaServerStreamRef,
+    MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
 };
 use serde_json::{Map, Number, Value};
 use shared::{
     model::{
-        EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties,
+        EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties,
         VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster,
     },
     utils::{generate_provider_playlist_uuid, Internable},
 };
-use std::{fmt::Write as _, sync::Arc};
+use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
 pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSnapshot) -> Vec<PlaylistGroup> {
     let mut groups = Vec::new();
@@ -24,11 +26,25 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
         });
     }
 
-    if !snapshot.episodes.is_empty() {
+    let mut series_channels = Vec::new();
+    for series in &snapshot.series {
+        let seasons = media_server_seasons_for_series(snapshot, series);
+        series_channels.push(media_server_series_to_playlist_item(series, &seasons));
+    }
+
+    let parent_codes = series_parent_code_map(&snapshot.series);
+    series_channels.extend(
+        snapshot
+            .episodes
+            .iter()
+            .map(|episode| media_server_episode_to_playlist_item(episode, episode_parent_code(episode, &parent_codes))),
+    );
+
+    if !series_channels.is_empty() {
         groups.push(PlaylistGroup {
             id: next_group_id(groups.len()),
             title: "Media Server Series".intern(),
-            channels: snapshot.episodes.iter().map(media_server_episode_to_playlist_item).collect(),
+            channels: series_channels,
             xtream_cluster: XtreamCluster::Series,
         });
     }
@@ -37,6 +53,47 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
 }
 
 fn next_group_id(group_count: usize) -> u32 { u32::try_from(group_count.saturating_add(1)).unwrap_or(u32::MAX) }
+
+fn media_server_seasons_for_series<'a>(
+    snapshot: &'a MediaServerCatalogSnapshot,
+    series: &MediaServerSeries,
+) -> Vec<&'a MediaServerSeason> {
+    let mut seasons = snapshot
+        .seasons
+        .iter()
+        .filter(|season| {
+            season.server_id == series.server_id
+                && season.library_id == series.library_id
+                && season.series_id.as_ref().is_some_and(|series_id| series_id == &series.item_id)
+        })
+        .collect::<Vec<_>>();
+    seasons.sort_by_key(|season| season.season.unwrap_or_default());
+    seasons
+}
+
+fn series_parent_code_map(series: &[MediaServerSeries]) -> HashMap<String, Arc<str>> {
+    series
+        .iter()
+        .map(|series| {
+            let stable_id = stable_media_server_item_id(&series.server_id, &series.library_id, &series.item_id, "series");
+            let uuid = generate_provider_playlist_uuid(&series.input_name, &stable_id, PlaylistItemType::SeriesInfo);
+            (stable_id, uuid.intern())
+        })
+        .collect()
+}
+
+fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<String, Arc<str>>) -> Arc<str> {
+    episode
+        .series_id
+        .as_ref()
+        .and_then(|series_id| {
+            parent_codes
+                .get(&stable_media_server_item_id(&episode.server_id, &episode.library_id, series_id, "series"))
+                .map(Arc::clone)
+        })
+        .or_else(|| episode.series_id.clone())
+        .unwrap_or_else(|| "".intern())
+}
 
 fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem {
     let stable_id = stable_media_server_item_id(&movie.server_id, &movie.library_id, &movie.item_id, "movie");
@@ -53,7 +110,8 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
     );
     let uuid = generate_provider_playlist_uuid(&movie.input_name, &stable_id, PlaylistItemType::Video);
     let release_date = movie.release_date.clone().or_else(|| release_date_from_year(movie.year));
-    let details = movie_details(movie.technical_facts.as_ref(), release_date);
+    let details = movie_details(movie, release_date);
+    let rating = media_server_rating(movie.descriptive_facts.as_ref());
 
     PlaylistItem {
         header: PlaylistItemHeader {
@@ -75,8 +133,8 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
                 custom_sid: None,
                 added: movie.source_version_hint.clone().unwrap_or_else(|| "".intern()),
                 container_extension: media_server_container_extension(movie.technical_facts.as_ref()),
-                rating: None,
-                rating_5based: None,
+                rating,
+                rating_5based: rating.map(rating_5based),
                 stream_type: Some("movie".intern()),
                 trailer: None,
                 tmdb: provider_tmdb_id(&movie.provider_hints),
@@ -88,7 +146,56 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
     }
 }
 
-fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode) -> PlaylistItem {
+fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&MediaServerSeason]) -> PlaylistItem {
+    let stable_id = stable_media_server_item_id(&series.server_id, &series.library_id, &series.item_id, "series");
+    let url = format!(
+        "media-server://unavailable/{}/{}/{}",
+        escape_internal_url_component(&series.server_id),
+        escape_internal_url_component(&series.library_id),
+        escape_internal_url_component(&series.item_id)
+    );
+    let uuid = generate_provider_playlist_uuid(&series.input_name, &stable_id, PlaylistItemType::SeriesInfo);
+    let release_date = series.release_date.clone().or_else(|| release_date_from_year(series.year));
+    let rating = media_server_rating(series.descriptive_facts.as_ref()).unwrap_or_default();
+
+    PlaylistItem {
+        header: PlaylistItemHeader {
+            uuid,
+            id: stable_id.intern(),
+            name: series.title.clone(),
+            title: series.title.clone(),
+            group: "Media Server Series".intern(),
+            url: url.intern(),
+            input_name: series.input_name.clone(),
+            xtream_cluster: XtreamCluster::Series,
+            item_type: PlaylistItemType::SeriesInfo,
+            additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                name: series.title.clone(),
+                series_id: 0,
+                cover: "".intern(),
+                backdrop_path: None,
+                category_id: 0,
+                cast: joined_values(series.descriptive_facts.as_ref().map(|facts| facts.cast.as_slice()))
+                    .unwrap_or_else(|| "".intern()),
+                director: joined_values(series.descriptive_facts.as_ref().map(|facts| facts.directors.as_slice()))
+                    .unwrap_or_else(|| "".intern()),
+                episode_run_time: None,
+                genre: joined_values(series.descriptive_facts.as_ref().map(|facts| facts.genres.as_slice())),
+                last_modified: series.source_version_hint.clone(),
+                plot: series.descriptive_facts.as_ref().and_then(|facts| facts.summary.clone()),
+                rating,
+                rating_5based: rating_5based(rating),
+                release_date,
+                youtube_trailer: "".intern(),
+                tmdb: provider_tmdb_id(&series.provider_hints),
+                details: series_details(series, seasons),
+            }))),
+            ..PlaylistItemHeader::default()
+        },
+    }
+}
+
+fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_code: Arc<str>) -> PlaylistItem {
     let stable_id = stable_media_server_item_id(&episode.server_id, &episode.library_id, &episode.item_id, "episode");
     let url = episode.stream_ref.as_ref().map_or_else(
         || {
@@ -115,7 +222,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode) -> Playli
             name: title.clone(),
             title,
             group: "Media Server Series".intern(),
-            parent_code: episode.series_id.clone().unwrap_or_else(|| "".intern()),
+            parent_code,
             url: url.intern(),
             input_name: episode.input_name.clone(),
             xtream_cluster: XtreamCluster::Series,
@@ -138,27 +245,129 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode) -> Playli
     }
 }
 
-fn movie_details(
-    technical: Option<&MediaServerTechnicalFacts>,
-    release_date: Option<Arc<str>>,
-) -> Option<VideoStreamDetailProperties> {
+fn movie_details(movie: &MediaServerMovie, release_date: Option<Arc<str>>) -> Option<VideoStreamDetailProperties> {
+    let technical = movie.technical_facts.as_ref();
+    let descriptive = movie.descriptive_facts.as_ref();
     let video = technical.and_then(media_server_video_json);
     let audio = technical.and_then(media_server_audio_json);
     let duration_secs = technical.and_then(|facts| facts.duration_secs).map(|duration| Arc::<str>::from(duration.to_string()));
     let bitrate = technical.and_then(|facts| facts.bitrate).unwrap_or_default();
+    let summary = descriptive.and_then(|facts| facts.summary.clone());
+    let age = descriptive.and_then(|facts| facts.parental_age.map(|age| Arc::<str>::from(age.to_string())));
 
-    if release_date.is_none() && video.is_none() && audio.is_none() && duration_secs.is_none() && bitrate == 0 {
+    let details = VideoStreamDetailProperties {
+        kinopoisk_url: None,
+        o_name: descriptive.and_then(|facts| facts.original_title.clone()),
+        cover_big: None,
+        movie_image: None,
+        release_date,
+        episode_run_time: technical.and_then(|facts| facts.duration_secs.map(|duration| duration / 60)),
+        youtube_trailer: None,
+        director: joined_values(descriptive.map(|facts| facts.directors.as_slice())),
+        actors: joined_values(descriptive.map(|facts| facts.cast.as_slice())),
+        cast: joined_values(descriptive.map(|facts| facts.cast.as_slice())),
+        description: summary.clone(),
+        plot: summary,
+        age,
+        mpaa_rating: descriptive.and_then(|facts| facts.content_rating.clone()),
+        rating_count_kinopoisk: 0,
+        country: joined_values(descriptive.map(|facts| facts.countries.as_slice())),
+        genre: joined_values(descriptive.map(|facts| facts.genres.as_slice())),
+        backdrop_path: None,
+        duration_secs,
+        duration: technical.and_then(|facts| facts.duration_secs.map(duration_secs_to_xtream_duration)),
+        video,
+        audio,
+        bitrate,
+        runtime: technical.and_then(|facts| facts.duration_secs.map(|duration| Arc::<str>::from(duration.to_string()))),
+        status: None,
+    };
+
+    has_movie_details(&details).then_some(details)
+}
+
+fn series_details(
+    series: &MediaServerSeries,
+    seasons: &[&MediaServerSeason],
+) -> Option<SeriesStreamDetailProperties> {
+    let season_details = seasons
+        .iter()
+        .map(|season| SeriesStreamDetailSeasonProperties {
+            name: season.title.clone(),
+            season_number: season.season.unwrap_or_default(),
+            episode_count: season.episode_count.unwrap_or_default(),
+            overview: season.descriptive_facts.as_ref().and_then(|facts| facts.summary.clone()),
+            air_date: season.release_date.clone().or_else(|| release_date_from_year(season.year)),
+            cover: None,
+            cover_tmdb: None,
+            cover_big: None,
+            duration: None,
+        })
+        .collect::<Vec<_>>();
+
+    if series.year.is_none() && season_details.is_empty() {
         return None;
     }
 
-    Some(VideoStreamDetailProperties {
-        release_date,
-        video,
-        audio,
-        duration_secs,
-        bitrate,
-        ..VideoStreamDetailProperties::default()
+    Some(SeriesStreamDetailProperties {
+        year: series.year,
+        seasons: (!season_details.is_empty()).then_some(season_details),
+        episodes: None,
     })
+}
+
+fn has_movie_details(details: &VideoStreamDetailProperties) -> bool {
+    details.kinopoisk_url.is_some()
+        || details.o_name.is_some()
+        || details.cover_big.is_some()
+        || details.movie_image.is_some()
+        || details.release_date.is_some()
+        || details.episode_run_time.is_some()
+        || details.youtube_trailer.is_some()
+        || details.director.is_some()
+        || details.actors.is_some()
+        || details.cast.is_some()
+        || details.description.is_some()
+        || details.plot.is_some()
+        || details.age.is_some()
+        || details.mpaa_rating.is_some()
+        || details.country.is_some()
+        || details.genre.is_some()
+        || details.backdrop_path.is_some()
+        || details.duration_secs.is_some()
+        || details.duration.is_some()
+        || details.video.is_some()
+        || details.audio.is_some()
+        || details.bitrate > 0
+        || details.runtime.is_some()
+        || details.status.is_some()
+}
+
+fn joined_values(values: Option<&[Arc<str>]>) -> Option<Arc<str>> {
+    let values = values?
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| Arc::<str>::from(values.join(", ")))
+}
+
+fn media_server_rating(descriptive: Option<&MediaServerDescriptiveFacts>) -> Option<f64> {
+    descriptive
+        .and_then(|facts| facts.audience_rating.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+}
+
+fn rating_5based(rating: f64) -> f64 { rating / 2.0 }
+
+fn duration_secs_to_xtream_duration(duration_secs: u32) -> Arc<str> {
+    let hours = duration_secs / 3600;
+    let minutes = (duration_secs % 3600) / 60;
+    let seconds = duration_secs % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}").into()
 }
 
 fn provider_tmdb_id(hints: &[MediaServerProviderIdHint]) -> Option<u32> {
@@ -275,7 +484,7 @@ fn escape_internal_url_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::{MediaServerCatalogSnapshot, MediaServerProviderIdHint};
+    use crate::media_server::{MediaServerCatalogSnapshot, MediaServerImageRef, MediaServerProviderIdHint};
     use serde_json::Value;
 
     fn movie() -> MediaServerMovie {
@@ -289,6 +498,7 @@ mod tests {
             release_date: None,
             source_version_hint: None,
             provider_hints: Vec::<MediaServerProviderIdHint>::new(),
+            descriptive_facts: None,
             technical_facts: None,
             stream_ref: Some(MediaServerStreamRef::Emby {
                 input_name: "media_server".into(),
@@ -314,6 +524,7 @@ mod tests {
             release_date: None,
             source_version_hint: None,
             provider_hints: Vec::<MediaServerProviderIdHint>::new(),
+            descriptive_facts: None,
             technical_facts: None,
             stream_ref: Some(MediaServerStreamRef::Plex {
                 input_name: "media_server".into(),
@@ -321,6 +532,54 @@ mod tests {
                 rating_key: "rating".into(),
                 part_key: "/library/parts/redacted/file.mkv".into(),
             }),
+            image_ref: None,
+        }
+    }
+
+    fn series() -> MediaServerSeries {
+        MediaServerSeries {
+            input_name: "media_server".into(),
+            server_id: "server".into(),
+            library_id: "shows".into(),
+            item_id: "series".into(),
+            title: "Show".into(),
+            year: Some(2024),
+            release_date: Some("2024-01-02".into()),
+            source_version_hint: Some("updated".into()),
+            provider_hints: vec![MediaServerProviderIdHint { namespace: "tmdb".into(), value: "222".into() }],
+            descriptive_facts: Some(MediaServerDescriptiveFacts {
+                summary: Some("show summary".into()),
+                audience_rating: Some("8.0".into()),
+                genres: vec!["Drama".into(), "Mystery".into()],
+                directors: vec!["Director Redacted".into()],
+                cast: vec!["Actor One".into(), "Actor Two".into()],
+                ..MediaServerDescriptiveFacts::default()
+            }),
+            child_count: Some(1),
+            episode_count: Some(2),
+            image_ref: None,
+        }
+    }
+
+    fn season() -> MediaServerSeason {
+        MediaServerSeason {
+            input_name: "media_server".into(),
+            server_id: "server".into(),
+            library_id: "shows".into(),
+            item_id: "season".into(),
+            series_id: Some("series".into()),
+            series_title: Some("Show".into()),
+            title: "Season 1".into(),
+            season: Some(1),
+            year: None,
+            release_date: Some("2024-01-03".into()),
+            source_version_hint: None,
+            provider_hints: Vec::new(),
+            descriptive_facts: Some(MediaServerDescriptiveFacts {
+                summary: Some("season summary".into()),
+                ..MediaServerDescriptiveFacts::default()
+            }),
+            episode_count: Some(2),
             image_ref: None,
         }
     }
@@ -341,6 +600,43 @@ mod tests {
         assert!(groups[0].channels[0].header.url.contains("media-server://emby/server%2Fone/item%3Fone%20plus%2Bspace"));
         assert_eq!(groups[1].channels[0].header.item_type, PlaylistItemType::Series);
         assert!(groups[1].channels[0].header.url.contains("part_key=%2Flibrary%2Fparts%2Fredacted%2Ffile.mkv"));
+    }
+
+    #[test]
+    fn maps_media_server_series_and_seasons_as_catalog_anchors_without_image_projection() {
+        let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
+            series: vec![series()],
+            seasons: vec![season()],
+            episodes: vec![episode()],
+            ..MediaServerCatalogSnapshot::default()
+        });
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].channels.len(), 2);
+        assert_eq!(groups[0].channels[0].header.item_type, PlaylistItemType::SeriesInfo);
+        assert_eq!(groups[0].channels[1].header.item_type, PlaylistItemType::Series);
+        assert_eq!(groups[0].channels[1].header.parent_code, groups[0].channels[0].header.uuid.intern());
+
+        let Some(StreamProperties::Series(series)) = &groups[0].channels[0].header.additional_properties else {
+            panic!("expected series properties");
+        };
+        assert_eq!(series.tmdb, Some(222));
+        assert_eq!(series.cover.as_ref(), "");
+        assert!(series.backdrop_path.is_none());
+        assert_eq!(series.plot.as_deref(), Some("show summary"));
+        assert_eq!(series.genre.as_deref(), Some("Drama, Mystery"));
+        assert_eq!(series.cast.as_ref(), "Actor One, Actor Two");
+        assert_eq!(series.director.as_ref(), "Director Redacted");
+        assert_eq!(series.rating, 8.0);
+        assert_eq!(series.rating_5based, 4.0);
+        let details = series.details.as_ref().expect("series details should contain season anchors");
+        let seasons = details.seasons.as_ref().expect("season anchors should be mapped");
+        assert_eq!(seasons[0].name.as_ref(), "Season 1");
+        assert_eq!(seasons[0].overview.as_deref(), Some("season summary"));
+        assert_eq!(seasons[0].air_date.as_deref(), Some("2024-01-03"));
+        assert_eq!(seasons[0].episode_count, 2);
+        assert!(seasons[0].cover.is_none());
+        assert!(details.episodes.is_none());
     }
 
     #[test]
@@ -402,6 +698,60 @@ mod tests {
         assert_eq!(episode.container_extension.as_ref(), "mp4");
         assert_eq!(json_field(episode.video.as_deref(), "height"), Some(Value::Number(720.into())));
         assert_eq!(json_field(episode.audio.as_deref(), "codec_name"), Some(Value::String("aac".to_string())));
+    }
+
+    #[test]
+    fn does_not_project_media_server_image_refs_without_image_resource_contract() {
+        let mut movie = movie();
+        movie.image_ref = Some(MediaServerImageRef::Plex {
+            input_name: "media_server".into(),
+            server_id: "server/one".into(),
+            rating_key: "rating".into(),
+            image_path: "/library/metadata/rating/thumb/redacted".into(),
+        });
+        let mut episode = episode();
+        episode.image_ref = Some(MediaServerImageRef::Emby {
+            input_name: "media_server".into(),
+            server_id: "server".into(),
+            item_id: "episode".into(),
+            image_kind: "Primary".into(),
+            tag: Some("tag-redacted".into()),
+        });
+        let mut series = series();
+        series.image_ref = Some(MediaServerImageRef::Jellyfin {
+            input_name: "media_server".into(),
+            server_id: "server".into(),
+            item_id: "series".into(),
+            image_kind: "Primary".into(),
+            tag: Some("tag-redacted".into()),
+        });
+
+        let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
+            movies: vec![movie],
+            series: vec![series],
+            episodes: vec![episode],
+            ..MediaServerCatalogSnapshot::default()
+        });
+
+        let Some(StreamProperties::Video(video)) = &groups[0].channels[0].header.additional_properties else {
+            panic!("expected video properties");
+        };
+        assert_eq!(video.stream_icon.as_ref(), "");
+        let details = video.details.as_ref().expect("movie year should create details");
+        assert!(details.cover_big.is_none());
+        assert!(details.movie_image.is_none());
+        assert!(details.backdrop_path.is_none());
+
+        let Some(StreamProperties::Series(series)) = &groups[1].channels[0].header.additional_properties else {
+            panic!("expected series properties");
+        };
+        assert_eq!(series.cover.as_ref(), "");
+        assert!(series.backdrop_path.is_none());
+
+        let Some(StreamProperties::Episode(episode)) = &groups[1].channels[1].header.additional_properties else {
+            panic!("expected episode properties");
+        };
+        assert_eq!(episode.movie_image.as_ref(), "");
     }
 
     #[test]

@@ -191,8 +191,8 @@ fn hex_value(value: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::media_server::{
-        MediaServerEpisode, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest,
-        MediaServerStatus,
+        MediaServerEpisode, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage,
+        MediaServerPageRequest, MediaServerSeason, MediaServerSeries, MediaServerStatus,
     };
     use futures::{stream, StreamExt};
     use reqwest::header::{HeaderValue, AUTHORIZATION};
@@ -214,6 +214,22 @@ mod tests {
         ) -> Result<MediaServerPage<MediaServerMovie>, MediaServerError> {
             unreachable!()
         }
+        async fn list_series(
+            &self,
+            _library: &MediaServerLibraryRef,
+            _page: MediaServerPageRequest,
+        ) -> Result<MediaServerPage<MediaServerSeries>, MediaServerError> {
+            unreachable!()
+        }
+
+        async fn list_seasons(
+            &self,
+            _library: &MediaServerLibraryRef,
+            _page: MediaServerPageRequest,
+        ) -> Result<MediaServerPage<MediaServerSeason>, MediaServerError> {
+            unreachable!()
+        }
+
         async fn list_episodes(
             &self,
             _library: &MediaServerLibraryRef,
