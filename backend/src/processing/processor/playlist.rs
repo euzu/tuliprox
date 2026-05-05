@@ -8,6 +8,11 @@ use crate::{
         sync_panel_api_exp_dates,
     },
     messaging::send_message,
+    media_server::{
+        media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
+        MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
+    },
+    media_server::plex::client::PlexCatalogClient,
     model::{
         AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
         FetchedPlaylist, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
@@ -362,6 +367,32 @@ fn hybrid_has_m3u_staged_cluster(input: &ConfigInput, skip_cluster: &[XtreamClus
     })
 }
 
+async fn download_plex_media_server_playlist(
+    client: &reqwest::Client,
+    input: &ConfigInput,
+) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
+    let Some(media_server) = input.media_server.as_ref() else {
+        return (
+            vec![],
+            vec![TuliproxError::Download(format!(
+                "media-server input '{}' is missing media_server configuration",
+                input.name
+            ))],
+        );
+    };
+    let http_client = MediaServerHttpClient::new(client.clone());
+    let plex_client = match PlexCatalogClient::from_input(input, http_client) {
+        Ok(client) => client,
+        Err(error) => return (vec![], vec![TuliproxError::Download(error.to_string())]),
+    };
+    let policy = MediaServerCatalogRefreshPolicy { page_size: usize::from(media_server.catalog.page_size) };
+
+    match refresh_media_server_catalog_complete_before_publish(&plex_client, policy).await {
+        Ok(snapshot) => (media_server_catalog_snapshot_to_playlist(&snapshot), vec![]),
+        Err(error) => (vec![], vec![TuliproxError::Download(error.to_string())]),
+    }
+}
+
 fn filter_skipped_clusters_from_source(
     source: Box<dyn PlaylistSource>,
     input: &ConfigInput,
@@ -507,7 +538,11 @@ async fn playlist_download_from_input(
                 let (p, e) = library::download_library_playlist(client, app_config, input).await;
                 (p, e, false, 0, 0)
             }
-            InputType::Emby | InputType::Jellyfin | InputType::Plex => (
+            InputType::Plex => {
+                let (p, e) = download_plex_media_server_playlist(client, input).await;
+                (p, e, false, 0, 0)
+            }
+            InputType::Emby | InputType::Jellyfin => (
                 vec![],
                 vec![TuliproxError::Download(format!(
                     "media-server input '{}' is configured but catalog import is not implemented yet",
