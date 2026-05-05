@@ -45,6 +45,7 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             list_slug: String::new(),
             category_name: String::new(),
             content_type: TraktContentType::Both,
+            tmdb_only: false,
             fuzzy_match_threshold: 80,
         }),
         modified: false,

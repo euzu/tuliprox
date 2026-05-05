@@ -39,6 +39,7 @@ pub struct TraktListConfig {
     pub list_slug: String,
     pub category_name: String,
     pub content_type: TraktContentType,
+    pub tmdb_only: bool,
     pub fuzzy_match_threshold: u8, // Percentage (0-100)
 }
 
@@ -50,6 +51,7 @@ impl From<&TraktListConfigDto> for TraktListConfig {
             list_slug: dto.list_slug.clone(),
             category_name: dto.category_name.clone(),
             content_type: dto.content_type,
+            tmdb_only: dto.tmdb_only,
             fuzzy_match_threshold: dto.fuzzy_match_threshold
         }
     }
@@ -62,6 +64,7 @@ impl From<&TraktListConfig> for TraktListConfigDto {
             list_slug: instance.list_slug.clone(),
             category_name: instance.category_name.clone(),
             content_type: instance.content_type,
+            tmdb_only: instance.tmdb_only,
             fuzzy_match_threshold: instance.fuzzy_match_threshold
         }
     }

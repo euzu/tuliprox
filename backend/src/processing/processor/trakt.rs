@@ -123,6 +123,10 @@ fn find_best_match_for_item<'a>(
         }
     }
 
+    if list_config.tmdb_only {
+        return None;
+    }
+
     find_best_fuzzy_match_for_item(channel, trakt_items, list_config)
 }
 
@@ -283,11 +287,81 @@ pub async fn process_trakt_categories_for_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::model::{PlaylistItemHeader, StreamProperties, TraktContentType, VideoStreamProperties};
 
     #[test]
     pub fn test_quality() {
         let quality = extract_quality("Hello HD UHD 720p");
         assert!(quality.is_some());
         assert_eq!("UHD", quality.unwrap());
+    }
+
+    #[test]
+    fn tmdb_only_list_skips_title_fallback_matches() {
+        let playlist_item = video_item("The Captive", None);
+        let trakt_items = vec![trakt_movie("The Captive", Some(1915), Some(123), 1)];
+        let list_config = list_config(true);
+
+        let matched = find_best_match_for_item(
+            (&playlist_item, normalize_title_for_matching("The Captive"), None, playlist_item.get_tmdb_id()),
+            &trakt_items,
+            &list_config,
+        );
+
+        assert!(matched.is_none());
+    }
+
+    #[test]
+    fn tmdb_only_list_keeps_tmdb_exact_matches() {
+        let playlist_item = video_item("Cautivos", Some(456));
+        let trakt_items = vec![trakt_movie("The Captive", Some(2014), Some(456), 1)];
+        let list_config = list_config(true);
+
+        let matched = find_best_match_for_item(
+            (&playlist_item, normalize_title_for_matching("Cautivos"), None, playlist_item.get_tmdb_id()),
+            &trakt_items,
+            &list_config,
+        );
+
+        assert!(matched.is_some());
+        assert_eq!(matched.expect("tmdb match").trakt_item.tmdb_id, Some(456));
+    }
+
+    fn list_config(tmdb_only: bool) -> TraktListConfig {
+        TraktListConfig {
+            user: "user".to_string(),
+            list_slug: "list".to_string(),
+            category_name: "category".to_string(),
+            content_type: TraktContentType::Vod,
+            tmdb_only,
+            fuzzy_match_threshold: 100,
+        }
+    }
+
+    fn video_item(title: &str, tmdb: Option<u32>) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: title.intern(),
+                xtream_cluster: XtreamCluster::Video,
+                additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
+                    name: title.intern(),
+                    tmdb,
+                    ..VideoStreamProperties::default()
+                }))),
+                ..PlaylistItemHeader::default()
+            },
+        }
+    }
+
+    fn trakt_movie(title: &'static str, year: Option<u32>, tmdb_id: Option<u32>, trakt_id: u32) -> TraktMatchItem<'static> {
+        TraktMatchItem {
+            title,
+            normalized_title: normalize_title_for_matching(title),
+            year,
+            tmdb_id,
+            trakt_id,
+            content_type: TraktContentType::Vod,
+            rank: Some(trakt_id),
+        }
     }
 }

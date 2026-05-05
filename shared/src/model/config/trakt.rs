@@ -1,8 +1,8 @@
 use crate::{
     error::TuliproxError,
     utils::{
-        default_as_true, default_trakt_fuzzy_threshold, is_true, DEFAULT_USER_AGENT, TRAKT_API_KEY, TRAKT_API_URL,
-        TRAKT_API_VERSION,
+        default_as_true, default_trakt_fuzzy_threshold, is_false, is_true, DEFAULT_USER_AGENT, TRAKT_API_KEY,
+        TRAKT_API_URL, TRAKT_API_VERSION,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,8 @@ pub struct TraktListConfigDto {
     pub list_slug: String,
     pub category_name: String,
     pub content_type: TraktContentType,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tmdb_only: bool,
     #[serde(default = "default_trakt_fuzzy_threshold")]
     pub fuzzy_match_threshold: u8, // Percentage (0-100)
 }
@@ -88,6 +90,7 @@ impl Default for TraktListConfigDto {
             list_slug: String::new(),
             category_name: String::new(),
             content_type: TraktContentType::default(),
+            tmdb_only: false,
             fuzzy_match_threshold: default_trakt_fuzzy_threshold(),
         }
     }
