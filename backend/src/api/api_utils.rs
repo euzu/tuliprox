@@ -4,12 +4,17 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
-            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
-            ProviderStreamFactoryOptions, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
+            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
             StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, PendingProviderReason,
         },
     },
     auth::Fingerprint,
+    media_server::{
+        playback::{media_server_stream_response as open_media_server_proxy_stream_response, parse_media_server_stream_ref},
+        plex::client::PlexCatalogClient,
+        MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
+    },
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
@@ -33,7 +38,7 @@ use serde::Serialize;
 use shared::{
     concat_string,
     model::{
-        Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
+        Claims, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
         UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
@@ -247,6 +252,9 @@ async fn get_admission_for_request(
 }
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
+    if is_media_server_playback_url(input, stream_url) {
+        return Cow::Borrowed("media-server://<redacted>");
+    }
     if is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(stream_url);
     }
@@ -1648,6 +1656,14 @@ async fn create_stream_response_details(
                     sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
                 );
                 (None, None, None)
+            } else if is_media_server_playback_url(input, request_url.as_ref()) {
+                match open_media_server_stream_for_input(app_state, input, request_url.as_ref(), req_headers).await {
+                    Ok((stream, stream_info)) => (Some(stream), stream_info, None),
+                    Err(err) => {
+                        error!("Can't open media-server stream: {err}");
+                        (None, None, None)
+                    }
+                }
             } else {
                 let parsed_url = Url::parse(&request_url);
                 let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
@@ -1771,6 +1787,9 @@ where
 {
     let item_type = params.item.get_item_type();
     let provider_url = params.item.get_provider_url();
+    if is_media_server_playback_url(params.input, provider_url.as_ref()) {
+        return None;
+    }
 
     let redirect_request = params.user.proxy.is_redirect(item_type) || params.target.is_force_redirect(item_type);
     let is_hls_request = item_type == PlaylistItemType::LiveHls || params.stream_ext == Some(HLS_EXT);
@@ -1856,6 +1875,10 @@ where
     None
 }
 
+fn is_media_server_playback_url(input: &ConfigInput, stream_url: &str) -> bool {
+    input.input_type.is_media_server() || stream_url.starts_with("media-server://")
+}
+
 fn is_throttled_stream(item_type: PlaylistItemType, throttle_kbps: usize) -> bool {
     throttle_kbps > 0
         && matches!(
@@ -1882,6 +1905,43 @@ where
         axum::body::Body::from_stream(stream)
     };
     body_stream
+}
+
+async fn open_media_server_stream_for_input(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    stream_url: &str,
+    req_headers: &HeaderMap,
+) -> Result<(BoxedProviderStream, ProviderStreamInfo), MediaServerError> {
+    let stream_ref = parse_media_server_stream_ref(&input.name, stream_url)?;
+    let range = req_headers.get(header::RANGE).and_then(|value| value.to_str().ok());
+    let http_client = MediaServerHttpClient::new(app_state.http_client.load().as_ref().clone());
+
+    let response = match input.input_type {
+        InputType::Plex => {
+            let client = PlexCatalogClient::from_input(input, http_client)?;
+            open_media_server_proxy_stream_response(&client, &stream_ref, range).await?
+        }
+        InputType::Emby | InputType::Jellyfin => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("media-server playback proxy is not implemented for this input type"));
+        }
+        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("playlist item is not backed by a media-server input"));
+        }
+    };
+
+    let headers = response
+        .headers
+        .iter()
+        .filter_map(|(key, value)| value.to_str().ok().map(|value| (key.to_string(), value.to_string())))
+        .collect::<Vec<_>>();
+    let status = response.status;
+    let stream = response.body.map_err(|err| StreamError::Stream(err.to_string())).boxed();
+    Ok((stream, Some((headers, status, None, None))))
 }
 
 /// # Panics
@@ -3484,6 +3544,36 @@ mod tests {
                 .expect("provider url should resolve");
 
         assert_eq!(resolved, "https://provider.example/live/provider-user/provider-pass/33486.m3u8");
+    }
+
+    #[test]
+    fn media_server_playback_urls_are_proxy_only_redirect_guard_candidates() {
+        let plex_input = ConfigInput {
+            input_type: InputType::Plex,
+            ..ConfigInput::default()
+        };
+        let m3u_input = ConfigInput {
+            input_type: InputType::M3u,
+            ..ConfigInput::default()
+        };
+
+        assert!(is_media_server_playback_url(
+            &plex_input,
+            "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+        ));
+        assert!(is_media_server_playback_url(
+            &m3u_input,
+            "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+        ));
+        assert!(!is_media_server_playback_url(&m3u_input, "https://provider.example/stream.mkv"));
+        assert_eq!(
+            resolve_request_url_for_logging(
+                &plex_input,
+                "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+            )
+            .as_ref(),
+            "media-server://<redacted>"
+        );
     }
 
     #[test]
