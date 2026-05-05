@@ -163,6 +163,7 @@ pub struct MediaServerAudioTechnicalFacts {
 pub struct MediaServerTechnicalFacts {
     pub container: Option<Arc<str>>,
     pub duration_secs: Option<u32>,
+    /// Source-declared bitrate normalized to bits per second (bps).
     pub bitrate: Option<u32>,
     pub video: Option<MediaServerVideoTechnicalFacts>,
     pub audio: Option<MediaServerAudioTechnicalFacts>,

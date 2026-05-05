@@ -27,9 +27,11 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
     }
 
     let mut series_channels = Vec::new();
+    let seasons_by_series = media_server_seasons_by_series(&snapshot.seasons);
     for series in &snapshot.series {
-        let seasons = media_server_seasons_for_series(snapshot, series);
-        series_channels.push(media_server_series_to_playlist_item(series, &seasons));
+        let season_key = media_server_series_season_key(&series.server_id, &series.library_id, &series.item_id);
+        let seasons = seasons_by_series.get(&season_key).map(Vec::as_slice).unwrap_or_default();
+        series_channels.push(media_server_series_to_playlist_item(series, seasons));
     }
 
     let parent_codes = series_parent_code_map(&snapshot.series);
@@ -54,21 +56,34 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
 
 fn next_group_id(group_count: usize) -> u32 { u32::try_from(group_count.saturating_add(1)).unwrap_or(u32::MAX) }
 
-fn media_server_seasons_for_series<'a>(
-    snapshot: &'a MediaServerCatalogSnapshot,
-    series: &MediaServerSeries,
-) -> Vec<&'a MediaServerSeason> {
-    let mut seasons = snapshot
-        .seasons
-        .iter()
-        .filter(|season| {
-            season.server_id == series.server_id
-                && season.library_id == series.library_id
-                && season.series_id.as_ref().is_some_and(|series_id| series_id == &series.item_id)
-        })
-        .collect::<Vec<_>>();
-    seasons.sort_by_key(|season| season.season.unwrap_or_default());
-    seasons
+type MediaServerSeriesSeasonKey = (Arc<str>, Arc<str>, Arc<str>);
+
+fn media_server_seasons_by_series(
+    seasons: &[MediaServerSeason],
+) -> HashMap<MediaServerSeriesSeasonKey, Vec<&MediaServerSeason>> {
+    let mut seasons_by_series: HashMap<MediaServerSeriesSeasonKey, Vec<&MediaServerSeason>> = HashMap::new();
+
+    for season in seasons {
+        let Some(series_id) = season.series_id.as_ref() else { continue };
+        seasons_by_series
+            .entry(media_server_series_season_key(&season.server_id, &season.library_id, series_id))
+            .or_default()
+            .push(season);
+    }
+
+    for seasons in seasons_by_series.values_mut() {
+        seasons.sort_by_key(|season| season.season.unwrap_or_default());
+    }
+
+    seasons_by_series
+}
+
+fn media_server_series_season_key(
+    server_id: &Arc<str>,
+    library_id: &Arc<str>,
+    series_id: &Arc<str>,
+) -> MediaServerSeriesSeasonKey {
+    (Arc::clone(server_id), Arc::clone(library_id), Arc::clone(series_id))
 }
 
 fn series_parent_code_map(series: &[MediaServerSeries]) -> HashMap<String, Arc<str>> {
@@ -214,6 +229,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
     } else {
         episode.title.clone()
     };
+    let technical = episode.technical_facts.as_ref();
 
     PlaylistItem {
         header: PlaylistItemHeader {
@@ -236,9 +252,9 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
                 series_release_date: None,
                 tmdb: provider_tmdb_id(&episode.provider_hints),
                 movie_image: "".intern(),
-                container_extension: media_server_container_extension(episode.technical_facts.as_ref()),
-                video: episode.technical_facts.as_ref().and_then(media_server_video_json),
-                audio: episode.technical_facts.as_ref().and_then(media_server_audio_json),
+                container_extension: media_server_container_extension(technical),
+                video: technical.and_then(media_server_video_json),
+                audio: technical.and_then(media_server_audio_json),
             }))),
             ..PlaylistItemHeader::default()
         },
@@ -649,7 +665,7 @@ mod tests {
         movie.technical_facts = Some(MediaServerTechnicalFacts {
             container: Some(".mkv".into()),
             duration_secs: Some(7_200),
-            bitrate: Some(8_000),
+            bitrate: Some(8_000_000),
             video: Some(MediaServerVideoTechnicalFacts {
                 codec: Some("hevc".into()),
                 width: Some(1_920),
@@ -685,7 +701,7 @@ mod tests {
         let details = video.details.as_ref().expect("movie technical facts should create details");
         assert_eq!(details.release_date.as_deref(), Some("2024-01-01"));
         assert_eq!(details.duration_secs.as_deref(), Some("7200"));
-        assert_eq!(details.bitrate, 8_000);
+        assert_eq!(details.bitrate, 8_000_000);
         assert_eq!(json_field(details.video.as_deref(), "codec_name"), Some(Value::String("hevc".to_string())));
         assert_eq!(json_field(details.video.as_deref(), "height"), Some(Value::Number(1_080.into())));
         assert_eq!(json_field(details.audio.as_deref(), "channels"), Some(Value::Number(6.into())));
