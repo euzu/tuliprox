@@ -1,8 +1,10 @@
-use crate::media_server::{MediaServerCatalogSnapshot, MediaServerEpisode, MediaServerMovie, MediaServerStreamRef};
+use crate::media_server::{
+    MediaServerCatalogSnapshot, MediaServerEpisode, MediaServerMovie, MediaServerProviderIdHint, MediaServerStreamRef,
+};
 use shared::{
     model::{
         EpisodeStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties,
-        VideoStreamProperties, XtreamCluster,
+        VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster,
     },
     utils::{generate_provider_playlist_uuid, Internable},
 };
@@ -36,6 +38,7 @@ fn next_group_id(group_count: usize) -> u32 { u32::try_from(group_count.saturati
 
 fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem {
     let stable_id = stable_media_server_item_id(&movie.server_id, &movie.library_id, &movie.item_id, "movie");
+    let tmdb = tmdb_hint(&movie.provider_hints);
     let url = movie.stream_ref.as_ref().map_or_else(
         || {
             format!(
@@ -73,9 +76,9 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
                 rating_5based: None,
                 stream_type: Some("movie".intern()),
                 trailer: None,
-                tmdb: None,
+                tmdb,
                 is_adult: 0,
-                details: None,
+                details: tmdb.map(|_| VideoStreamDetailProperties::default()),
             }))),
             ..PlaylistItemHeader::default()
         },
@@ -121,7 +124,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode) -> Playli
                 added: episode.source_version_hint.clone(),
                 release_date: None,
                 series_release_date: None,
-                tmdb: None,
+                tmdb: tmdb_hint(&episode.provider_hints),
                 movie_image: "".intern(),
                 container_extension: "".intern(),
                 video: None,
@@ -134,6 +137,15 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode) -> Playli
 
 fn stable_media_server_item_id(server_id: &Arc<str>, library_id: &Arc<str>, item_id: &Arc<str>, kind: &str) -> String {
     format!("media-server:{server_id}:{library_id}:{kind}:{item_id}")
+}
+
+fn tmdb_hint(provider_hints: &[MediaServerProviderIdHint]) -> Option<u32> {
+    provider_hints.iter().find_map(|hint| {
+        if !hint.namespace.as_ref().eq_ignore_ascii_case("tmdb") {
+            return None;
+        }
+        hint.value.trim().parse::<u32>().ok().filter(|id| *id > 0)
+    })
 }
 
 pub fn media_server_stream_ref_to_internal_url(stream_ref: &MediaServerStreamRef) -> String {
@@ -227,6 +239,35 @@ mod tests {
             }),
             image_ref: None,
         }
+    }
+
+    #[test]
+    fn maps_media_server_provider_tmdb_hints_to_stream_properties() {
+        let mut movie = movie();
+        movie.provider_hints = vec![
+            MediaServerProviderIdHint { namespace: "imdb".into(), value: "tt0000001".into() },
+            MediaServerProviderIdHint { namespace: "tmdb".into(), value: "12345".into() },
+        ];
+        let mut episode = episode();
+        episode.provider_hints = vec![MediaServerProviderIdHint { namespace: "TMDB".into(), value: "67890".into() }];
+
+        let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
+            movies: vec![movie],
+            episodes: vec![episode],
+            ..MediaServerCatalogSnapshot::default()
+        });
+
+        let Some(StreamProperties::Video(movie_props)) = groups[0].channels[0].header.additional_properties.as_ref()
+        else {
+            panic!("movie properties should be present");
+        };
+        assert_eq!(movie_props.tmdb, Some(12345));
+
+        let Some(StreamProperties::Episode(episode_props)) = groups[1].channels[0].header.additional_properties.as_ref()
+        else {
+            panic!("episode properties should be present");
+        };
+        assert_eq!(episode_props.tmdb, Some(67890));
     }
 
     #[test]
