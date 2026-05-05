@@ -1,6 +1,7 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::library::{MetadataResolver, MetadataStorage};
+use crate::media_server::{load_media_server_vod_item_and_properties, persist_media_server_vod_info_batch_for_input};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -9,9 +10,8 @@ use crate::processing::input_cache::resolve_input_storage_path;
 use crate::processing::processor::playlist::PlaylistProcessingContext;
 use crate::processing::processor::{
     create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
-    ProbeHandleGuard,
-    ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
-    FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
+    ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE,
+    FOREGROUND_MIN_RETRY_DELAY_SECS, FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::ptt::ptt_parse_title;
 use crate::repository::persist_input_vod_info;
@@ -132,7 +132,8 @@ async fn playlist_resolve_vod_info(
         true
     };
 
-    let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb);
+    let resolve_tmdb_enabled = fpl.input.has_flag(ConfigInputFlags::ResolveTmdb)
+        || fpl.input.media_server_tmdb_lookup_enabled();
 
     if resolve_options.has_flag(ResolveOptionsFlags::Background) && ctx.metadata_manager.is_some() {
         queue_background_vod_info(ctx, fpl, filter, &resolve_options, do_probe, resolve_tmdb_enabled);
@@ -232,7 +233,6 @@ async fn process_immediate_vod_info(
                             db_query_holder = None;
                             _db_lock_holder = None;
 
-                            // Filter for u32 IDs for persistence
                             let updates: Vec<(u32, VideoStreamProperties)> = batch
                                 .iter()
                                 .filter_map(|(id, props)| {
@@ -243,11 +243,24 @@ async fn process_immediate_vod_info(
                                     }
                                 })
                                 .collect();
-
-                            if updates.is_empty() {
-                                batch.clear();
+                            let media_server_updates: Vec<(Arc<str>, VideoStreamProperties)> = if input.input_type.is_media_server() {
+                                batch
+                                    .iter()
+                                    .filter_map(|(id, props)| {
+                                        if let ProviderIdType::Text(provider_id) = id {
+                                            Some((provider_id.clone(), props.clone()))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect()
                             } else {
-                                match persist_input_vod_info_batch(
+                                Vec::new()
+                            };
+
+                            let mut persist_failed = false;
+                            if !updates.is_empty() {
+                                if let Err(err) = persist_input_vod_info_batch(
                                     &ctx.config,
                                     &storage_path,
                                     XtreamCluster::Video,
@@ -256,14 +269,31 @@ async fn process_immediate_vod_info(
                                 )
                                 .await
                                 {
-                                    Ok(()) => batch.clear(),
-                                    Err(err) => {
-                                        error!(
-                                            "persist_input_vod_info_batch failed for XtreamCluster::Video on input '{}'. batch.clear() skipped. Error: {err}",
-                                            input.name
-                                        );
-                                    }
+                                    persist_failed = true;
+                                    error!(
+                                        "persist_input_vod_info_batch failed for XtreamCluster::Video on input '{}'. batch.clear() skipped. Error: {err}",
+                                        input.name
+                                    );
                                 }
+                            }
+                            if !media_server_updates.is_empty() {
+                                if let Err(err) = persist_media_server_vod_info_batch_for_input(
+                                    &ctx.config,
+                                    &storage_path,
+                                    input,
+                                    media_server_updates,
+                                )
+                                .await
+                                {
+                                    persist_failed = true;
+                                    error!(
+                                        "persist_input_media_server_vod_info_batch failed on input '{}'. batch.clear() skipped. Error: {err}",
+                                        input.name
+                                    );
+                                }
+                            }
+                            if !persist_failed {
+                                batch.clear();
                             }
                         }
 
@@ -341,10 +371,17 @@ async fn process_immediate_vod_info(
         // Release lock before final persist
         _db_lock_holder = None;
 
-        let updates: Vec<(u32, VideoStreamProperties)> = batch
-            .into_iter()
-            .filter_map(|(id, props)| if let ProviderIdType::Id(vid) = id { Some((vid, props)) } else { None })
-            .collect();
+        let mut updates: Vec<(u32, VideoStreamProperties)> = Vec::new();
+        let mut media_server_updates: Vec<(Arc<str>, VideoStreamProperties)> = Vec::new();
+        for (id, props) in batch {
+            match id {
+                ProviderIdType::Id(vid) => updates.push((vid, props)),
+                ProviderIdType::Text(provider_id) if input.input_type.is_media_server() => {
+                    media_server_updates.push((provider_id, props));
+                }
+                ProviderIdType::Text(_) => {}
+            }
+        }
 
         if !updates.is_empty() {
             if let Err(err) =
@@ -352,6 +389,14 @@ async fn process_immediate_vod_info(
                     .await
             {
                 error!("Failed to persist final batch VOD info: {err}");
+            }
+        }
+        if !media_server_updates.is_empty() {
+            if let Err(err) =
+                persist_media_server_vod_info_batch_for_input(&ctx.config, &storage_path, input, media_server_updates)
+                    .await
+            {
+                error!("Failed to persist final media-server batch VOD info: {err}");
             }
         }
     }
@@ -625,6 +670,21 @@ pub async fn update_vod_metadata(
         }
     }
 
+    if props.is_none() && stream_id_opt.is_none() && input.input_type.is_media_server() {
+        if let ProviderIdType::Text(provider_id) = &id {
+            match load_media_server_vod_item_and_properties(app_config, &storage_path, input, provider_id).await {
+                Ok(Some((item, loaded_props))) => {
+                    existing_item = Some(item);
+                    props = Some(loaded_props);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    debug!("Failed to query media-server VOD metadata from input cache: {err}");
+                }
+            }
+        }
+    }
+
     let mut fetched_new = false;
     let mut properties_updated = false;
     let mut probe_failure: Option<ProbeFailureKind> = None;
@@ -700,7 +760,7 @@ pub async fn update_vod_metadata(
         return Err(shared::error::TuliproxError::Config(format!("No VOD properties available after fallback creation for {display_id}")));
     };
 
-    let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
+    let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb) || input.media_server_tmdb_lookup_enabled();
 
     // 2. Resolve TMDB/Date if missing and explicitly enabled for this input
     let missing_tmdb = properties.tmdb.is_none();
@@ -991,6 +1051,17 @@ pub async fn update_vod_metadata(
                 )
                 .await
                 .map_err(|e| shared::error::TuliproxError::Config(format!("Persist error: {e}")))?;
+            } else if input.input_type.is_media_server() {
+                if let ProviderIdType::Text(provider_id) = &id {
+                    persist_media_server_vod_info_batch_for_input(
+                        app_config,
+                        &storage_path,
+                        input,
+                        vec![(provider_id.clone(), properties.clone())],
+                    )
+                    .await
+                    .map_err(|e| shared::error::TuliproxError::Config(format!("Persist error: {e}")))?;
+                }
             }
 
             debug_if_enabled!("Successfully updated VOD metadata for '{}' (ID: {})", display_title, display_id);

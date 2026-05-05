@@ -474,6 +474,15 @@ impl ConfigInput {
     }
 
     #[inline]
+    pub fn media_server_tmdb_lookup_enabled(&self) -> bool {
+        self.input_type.is_media_server()
+            && self
+                .media_server
+                .as_ref()
+                .is_some_and(|media_server| media_server.enrichment.tmdb_lookup)
+    }
+
+    #[inline]
     pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
         self.has_any_flags_or(flags, false)
     }
@@ -967,6 +976,22 @@ mod tests {
         assert_eq!(media_server.server_id.as_deref(), Some("server"));
         assert_eq!(media_server.machine_id.as_deref(), Some("machine"));
         assert_eq!(media_server.server_name.as_deref(), Some("server-name"));
+    }
+
+    #[test]
+    fn media_server_tmdb_lookup_is_separate_from_legacy_resolve_tmdb_flag() {
+        let input = ConfigInput {
+            name: "plex_media_server".into(),
+            input_type: InputType::Plex,
+            media_server: Some(MediaServerInputConfig {
+                enrichment: MediaServerEnrichmentConfigDto { tmdb_lookup: true, ..Default::default() },
+                ..media_server_config_with_library()
+            }),
+            ..Default::default()
+        };
+
+        assert!(input.media_server_tmdb_lookup_enabled());
+        assert!(!input.has_flag(ConfigInputFlags::ResolveTmdb));
     }
 
     #[test]

@@ -48,6 +48,7 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                     Some(_) => {
                         let input_options = fpl.input.options.as_ref();
                         let input_is_xtream = fpl.input.input_type.is_xtream();
+                        let media_server_tmdb_lookup = fpl.input.media_server_tmdb_lookup_enabled();
 
                         let (
                             resolve_tmdb_missing,
@@ -57,7 +58,7 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                             resolve_background
                         ) = if let Some(options) = input_options {
                             (
-                                options.has_flag($crate::model::ConfigInputFlags::ResolveTmdb),
+                                options.has_flag($crate::model::ConfigInputFlags::ResolveTmdb) || media_server_tmdb_lookup,
                                 options.has_flag($crate::model::ConfigInputFlags::[<Resolve $cluster:camel>]),
                                 options.has_flag($crate::model::ConfigInputFlags::[<Probe $cluster:camel>]),
                                 options.resolve_delay,
@@ -65,7 +66,7 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                             )
                         } else {
                             (
-                                false,
+                                media_server_tmdb_lookup,
                                 false,
                                 false,
                                 shared::utils::default_resolve_delay_secs(),

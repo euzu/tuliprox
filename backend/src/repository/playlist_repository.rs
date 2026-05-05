@@ -9,7 +9,7 @@ use crate::repository::{ensure_target_storage_path, get_input_storage_path, get_
 use crate::repository::{load_input_local_library_playlist, persist_input_library_playlist};
 use crate::repository::{load_input_m3u_playlist, m3u_get_file_path_for_db, m3u_write_playlist, persist_input_m3u_playlist};
 use crate::repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
-use crate::repository::BPlusTree;
+use crate::repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate};
 use crate::repository::{
     LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource,
     MediaServerDiskPlaylistSource, XtreamDiskPlaylistSource,
@@ -19,8 +19,11 @@ use crate::utils;
 use log::{info, warn};
 use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
-use shared::utils::{is_dash_url, is_hls_url, Internable};
+use shared::model::{
+    InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+    StreamProperties, UUIDType, VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+};
+use shared::utils::{generate_provider_playlist_uuid, is_dash_url, is_hls_url, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -559,6 +562,117 @@ pub async fn load_input_media_server_playlist(
     file_path: &Path,
 ) -> Result<Vec<PlaylistGroup>, TuliproxError> {
     load_input_local_library_playlist(app_config, file_path).await
+}
+
+pub async fn load_input_media_server_playlist_item_by_provider_id(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    input_name: &str,
+    provider_id: &str,
+    item_type: PlaylistItemType,
+) -> Result<Option<XtreamPlaylistItem>, TuliproxError> {
+    let input_name_arc = Arc::<str>::from(input_name);
+    let file_path = get_input_media_server_playlist_file_path(storage_path, &input_name_arc);
+    if !file_path.exists() {
+        return Ok(None);
+    }
+
+    let uuid = generate_provider_playlist_uuid(input_name, provider_id, item_type);
+    let file_lock = app_config.file_locks.read_lock(&file_path).await;
+    let file_path_display = file_path.display().to_string();
+    let file_path_display_for_query = file_path_display.clone();
+    let item = tokio::task::spawn_blocking(move || -> Result<Option<XtreamPlaylistItem>, TuliproxError> {
+        let _guard = file_lock;
+        let mut query = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(&file_path).map_err(|err| {
+            TuliproxError::RepositoryLibrary(format!(
+                "failed to open media-server input playlist: {file_path_display_for_query} - {err}"
+            ))
+        })?;
+        query.query(&uuid).map_err(|err| {
+            TuliproxError::RepositoryLibrary(format!(
+                "failed to query media-server input playlist: {file_path_display_for_query} - {err}"
+            ))
+        })
+    })
+    .await
+    .map_err(|err| {
+        TuliproxError::RepositoryLibrary(format!(
+            "failed to join media-server input playlist query: {file_path_display} - {err}"
+        ))
+    })??;
+
+    Ok(item)
+}
+
+pub async fn persist_input_media_server_vod_info_batch(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    input_name: &str,
+    updates: Vec<(Arc<str>, VideoStreamProperties)>,
+) -> Result<(), std::io::Error> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    let input_name_arc = Arc::<str>::from(input_name);
+    let file_path = get_input_media_server_playlist_file_path(storage_path, &input_name_arc);
+    if !file_path.exists() {
+        return Ok(());
+    }
+
+    let file_lock = app_config.file_locks.write_lock(&file_path).await;
+    let file_path_clone = file_path.clone();
+    let input_name_owned = input_name.to_string();
+    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        let _guard = file_lock;
+        let mut tree: BPlusTreeUpdate<UUIDType, XtreamPlaylistItem> =
+            BPlusTreeUpdate::try_new_with_backoff(&file_path_clone).map_err(|err| {
+                std::io::Error::other(format!(
+                    "failed to open media-server BPlusTree for input {input_name_owned}: {err}"
+                ))
+            })?;
+
+        let mut deduped_updates: HashMap<Arc<str>, VideoStreamProperties> = HashMap::with_capacity(updates.len());
+        for (provider_id, props) in updates {
+            deduped_updates.insert(provider_id, props);
+        }
+
+        let mut updated_items = Vec::with_capacity(deduped_updates.len());
+        for (provider_id, props) in deduped_updates {
+            let uuid = generate_provider_playlist_uuid(&input_name_owned, &provider_id, PlaylistItemType::Video);
+            match tree.query(&uuid) {
+                Ok(Some(mut item)) => {
+                    item.additional_properties = Some(StreamProperties::Video(Box::new(props)));
+                    updated_items.push((uuid, item));
+                }
+                Ok(None) => {
+                    log::debug!("Could not find media-server VOD input entry for metadata update");
+                }
+                Err(err) => {
+                    log::debug!("Failed to query media-server VOD input entry for metadata update: {err}");
+                }
+            }
+        }
+
+        if !updated_items.is_empty() {
+            let refs: Vec<(&UUIDType, &XtreamPlaylistItem)> = updated_items.iter().map(|(id, item)| (id, item)).collect();
+            tree.update_batch(&refs).map_err(|err| {
+                std::io::Error::other(format!(
+                    "failed to write media-server metadata batch for input {input_name_owned}: {err}"
+                ))
+            })?;
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|err| {
+        std::io::Error::other(format!(
+            "failed to join media-server metadata batch persist for {input_name}: {err}"
+        ))
+    })??;
+
+    Ok(())
 }
 
 #[cfg(test)]

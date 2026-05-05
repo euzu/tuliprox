@@ -7,6 +7,7 @@
 pub mod catalog;
 pub mod client;
 pub mod emby;
+pub mod enrichment;
 pub mod errors;
 pub mod jellyfin;
 pub mod playback;
@@ -20,6 +21,7 @@ pub mod test_fixtures;
 
 pub use catalog::*;
 pub use client::*;
+pub use enrichment::*;
 pub use errors::*;
 pub use playback::*;
 pub use playlist_mapper::*;

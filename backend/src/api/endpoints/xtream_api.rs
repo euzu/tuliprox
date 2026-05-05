@@ -950,7 +950,11 @@ pub async fn xtream_get_stream_info_response(
     };
 
     if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, Some(cluster)).await {
-        if pli.item_type.is_local() {
+        let is_media_server_item = app_state
+            .app_config
+            .get_input_by_name(&pli.input_name)
+            .is_some_and(|input| input.input_type.is_media_server());
+        if pli.item_type.is_local() || is_media_server_item {
             let Ok(xtream_output) = target.get_xtream_output().ok_or_else(|| {
                 TuliproxError::ApiXtream(format!("Unexpected: xtream output required for target {}", target.name))
             }) else {

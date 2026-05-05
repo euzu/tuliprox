@@ -8,8 +8,9 @@ use crate::{
     },
     repository::{
         get_input_storage_path, get_target_id_mapping_file, persist_input_live_info_batch,
-        persist_input_series_info_batch, persist_input_vod_info_batch, write_playlist_batch_item_upsert,
-        xtream_get_file_path, BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, TargetIdMapping,
+        persist_input_media_server_vod_info_batch, persist_input_series_info_batch, persist_input_vod_info_batch,
+        write_playlist_batch_item_upsert, xtream_get_file_path, BPlusTree, BPlusTreeQuery, BPlusTreeUpdate,
+        TargetIdMapping,
     },
     utils::{debug_if_enabled, FileReadGuard},
 };
@@ -2579,6 +2580,7 @@ impl InputWorker {
     }
 
     // Changed to static method
+    #[allow(clippy::too_many_lines)]
     async fn flush_batch_static(
         input_name: &str,
         app_state_weak: Option<&Weak<AppState>>,
@@ -2591,6 +2593,11 @@ impl InputWorker {
         let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else { return };
         let app_config = &app_state.app_config;
         let cfg = app_config.config.load();
+        let input_name_arc = Arc::<str>::from(input_name);
+        let media_server_input = app_state
+            .app_config
+            .get_input_by_name(&input_name_arc)
+            .filter(|input| input.input_type.is_media_server());
         let vod_updates = batch_buffer.take_vod_updates();
         let series_updates = batch_buffer.take_series_updates();
         let live_updates = batch_buffer.take_live_updates();
@@ -2619,6 +2626,28 @@ impl InputWorker {
                         .await
                     {
                         error!("Failed to flush VOD batch for input {input_name}: {e}");
+                    }
+                }
+
+                if media_server_input.is_some() {
+                    let media_server_updates: Vec<(Arc<str>, VideoStreamProperties)> = vod_updates
+                        .iter()
+                        .filter_map(|(id, props)| match id {
+                            ProviderIdType::Text(provider_id) => Some((provider_id.clone(), props.clone())),
+                            ProviderIdType::Id(_) => None,
+                        })
+                        .collect();
+                    if !media_server_updates.is_empty() {
+                        if let Err(e) = persist_input_media_server_vod_info_batch(
+                            app_config,
+                            &storage_path,
+                            input_name,
+                            media_server_updates,
+                        )
+                        .await
+                        {
+                            error!("Failed to flush media-server VOD batch for input {input_name}: {e}");
+                        }
                     }
                 }
             }
