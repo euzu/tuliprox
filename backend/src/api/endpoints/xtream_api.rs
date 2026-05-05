@@ -975,9 +975,33 @@ pub async fn xtream_get_stream_info_response(
             return axum::Json(pli.to_info_document(&options)).into_response();
         }
 
+        let input = app_state.app_config.get_input_by_name(&pli.input_name);
+        if input.as_ref().is_some_and(|input| input.input_type.is_media_server()) {
+            let Ok(xtream_output) = target.get_xtream_output().ok_or_else(|| {
+                TuliproxError::ApiXtream(format!("Unexpected: xtream output required for target {}", target.name))
+            }) else {
+                return try_unwrap_body!(empty_json_response_as_array());
+            };
+
+            let encrypt_secret = app_state.get_encrypt_secret();
+            let options = match xtream_mapping_option_from_target_options(
+                target,
+                xtream_output,
+                &app_state.app_config,
+                user,
+                encrypt_secret,
+            ) {
+                Ok(options) => options,
+                Err(err) => {
+                    error!("{err}");
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            };
+            return axum::Json(pli.to_info_document(&options)).into_response();
+        }
+
         if pli.provider_id > 0 {
-            let input_name = &pli.input_name;
-            if let Some(input) = app_state.app_config.get_input_by_name(input_name) {
+            if let Some(input) = input {
                 if let Some(info_url) = xtream::get_xtream_player_api_info_url(&input, cluster, pli.provider_id) {
                     // Redirect is only possible for live streams, vod and series info needs to be modified
                     if user.proxy == ProxyType::Redirect && cluster == XtreamCluster::Live {
