@@ -106,7 +106,12 @@ fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<Stri
                 .get(&stable_media_server_item_id(&episode.server_id, &episode.library_id, series_id, "series"))
                 .map(Arc::clone)
         })
-        .or_else(|| episode.series_id.clone())
+        .or_else(|| {
+            episode
+                .series_id
+                .as_ref()
+                .map(|series_id| stable_media_server_item_id(&episode.server_id, &episode.library_id, series_id, "series").intern())
+        })
         .unwrap_or_else(|| "".intern())
 }
 
@@ -615,6 +620,7 @@ mod tests {
         assert!(groups[0].channels[0].header.id.starts_with("media-server:server/one:movies:movie:item?one plus+space"));
         assert!(groups[0].channels[0].header.url.contains("media-server://emby/server%2Fone/item%3Fone%20plus%2Bspace"));
         assert_eq!(groups[1].channels[0].header.item_type, PlaylistItemType::Series);
+        assert_eq!(groups[1].channels[0].header.parent_code.as_ref(), "media-server:server:shows:series:series");
         assert!(groups[1].channels[0].header.url.contains("part_key=%2Flibrary%2Fparts%2Fredacted%2Ffile.mkv"));
     }
 
