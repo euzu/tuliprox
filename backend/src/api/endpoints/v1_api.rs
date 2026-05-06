@@ -124,7 +124,7 @@ pub fn v1_api_register(
         .route("/status", axum::routing::get(status))
         .route("/streams", axum::routing::get(streams))
         .route("/ipinfo", axum::routing::get(ipinfo))
-        .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_query))
+        .route("/stream-history", axum::routing::get(super::stream_history_api::stream_history_page_query))
         .route("/stream-history/summary", axum::routing::get(super::stream_history_api::stream_history_summary_query))
         .route("/qos-snapshots", axum::routing::get(super::stream_history_api::qos_snapshot_query))
         .route(

@@ -12,12 +12,10 @@ use crate::model::StreamHistoryRecord;
 /// Async stream of stream history records.
 /// NOTE: The stream implementation is ready but not yet wired to the API.
 /// Kept here for future use when we move back to streaming responses.
-#[allow(dead_code)]
 pub struct StreamHistoryStream {
     inner: ReceiverStream<StreamHistoryRecord>,
 }
 
-#[allow(dead_code)]
 impl StreamHistoryStream {
     /// Creates a new stream by reading files in a background task.
     ///
@@ -25,8 +23,10 @@ impl StreamHistoryStream {
     /// `AsyncStreamHistoryPendingReader` (`tokio::fs::File`).
     /// Archive files (LZ4-compressed) still require `spawn_blocking` because
     /// `lz4_flex::frame::FrameDecoder` is sync-only.
-    #[allow(clippy::needless_pass_by_value)]
     #[allow(dead_code)]
+    // Reserved for a future streaming API path; the current paged endpoints use
+    // a synchronous iterator with blocking aggregation.
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn new(dir: String, time_range: TimeRange, filters: Arc<CompiledFilter>) -> Self {
         let (tx, rx) = mpsc::channel(1024);
         let filters_clone = Arc::clone(&filters);
@@ -44,8 +44,10 @@ impl StreamHistoryStream {
     /// Reads files and sends records through the channel.
     /// - Pending files: fully async (`tokio::fs::File` + `AsyncStreamHistoryPendingReader`)
     /// - Archive files: sync via `spawn_blocking` (`lz4_flex` is sync-only)
-    #[allow(clippy::needless_pass_by_value)]
     #[allow(dead_code)]
+    // Kept together with `StreamHistoryStream::new` for the planned streaming
+    // history endpoint; not currently wired into routing.
+    #[allow(clippy::needless_pass_by_value)]
     async fn read_files_async(
         dir: &str,
         time_range: &TimeRange,
@@ -112,6 +114,7 @@ impl StreamHistoryStream {
     /// Streams records incrementally via `blocking_send` into the async channel,
     /// so memory usage stays bounded regardless of archive size.
     #[allow(dead_code)]
+    // Companion helper for the reserved async streaming history reader.
     fn read_archive_file(
         path: &Path,
         time_range: TimeRange,

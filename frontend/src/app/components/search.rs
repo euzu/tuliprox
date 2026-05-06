@@ -10,6 +10,8 @@ use yew::prelude::*;
 
 const DEBOUNCE_TIMEOUT_MS: u32 = 500;
 
+type SearchEmitter = Rc<dyn Fn(Option<Rc<Vec<String>>>)>;
+
 enum RegexState {
     Active,
     Inactive,
@@ -57,54 +59,53 @@ pub fn Search(props: &SearchProps) -> Html {
 
     let debounce_timeout = use_mut_ref(|| None::<Timeout>);
 
-    let handle_key_down = {
-        let regex = regex_active.clone();
-        let input = input_ref.clone();
+    let emit_search: SearchEmitter = {
         let on_search = props.onsearch.clone();
-        let search_fields = search_fields.clone();
         let min_length = props.min_length;
         let invalid_search = invalid_search.clone();
+        let input = input_ref.clone();
+        let regex = regex_active.clone();
+        Rc::new(move |selected_fields: Option<Rc<Vec<String>>>| {
+            invalid_search.set(false);
+            if let Some(cb_search) = on_search.as_ref() {
+                if let Some(input) = input.cast::<HtmlInputElement>() {
+                    let text = input.value();
+                    if text.len() >= min_length {
+                        if !matches!(*regex, RegexState::Inactive) {
+                            if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
+                                regex.set(RegexState::Active);
+                                cb_search.emit(SearchRequest::Regexp(text, selected_fields));
+                            } else {
+                                regex.set(RegexState::Invalid);
+                            }
+                        } else {
+                            cb_search.emit(SearchRequest::Text(text, selected_fields));
+                        }
+                    } else if text.is_empty() {
+                        cb_search.emit(SearchRequest::Clear);
+                    } else {
+                        invalid_search.set(true);
+                    }
+                }
+            }
+        })
+    };
+
+    let handle_key_down = {
+        let emit_search = emit_search.clone();
+        let search_fields = search_fields.clone();
         Callback::from(move |e: KeyboardEvent| {
-            let regex = regex.clone();
-            let input = input.clone();
-            let on_search = on_search.clone();
             if let Some(timeout) = debounce_timeout.borrow_mut().take() {
                 timeout.cancel();
             }
 
-            let search_fields = search_fields.clone();
-            let invalid_search = invalid_search.clone();
-            invalid_search.set(false);
-            let do_search = move || {
-                if let Some(cb_search) = on_search.as_ref() {
-                    if let Some(input) = input.cast::<HtmlInputElement>() {
-                        let text = input.value();
-                        if text.len() >= min_length {
-                            if !matches!(*regex, RegexState::Inactive) {
-                                if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
-                                    regex.set(RegexState::Active);
-                                    cb_search.emit(SearchRequest::Regexp(text, (*search_fields).clone()));
-                                } else {
-                                    regex.set(RegexState::Invalid);
-                                }
-                            } else {
-                                cb_search.emit(SearchRequest::Text(text, (*search_fields).clone()));
-                            }
-                        } else if text.is_empty() {
-                            cb_search.emit(SearchRequest::Clear);
-                        } else {
-                            invalid_search.set(true);
-                        }
-                    }
-                }
-            };
-
             if e.code() == "Enter" {
-                do_search();
+                emit_search((*search_fields).clone());
             } else {
-                // Set new timeout
+                let emit_search = emit_search.clone();
+                let selected_fields = (*search_fields).clone();
                 *debounce_timeout.borrow_mut() = Some(Timeout::new(DEBOUNCE_TIMEOUT_MS, move || {
-                    do_search();
+                    emit_search(selected_fields);
                 }));
             }
         })
@@ -112,15 +113,21 @@ pub fn Search(props: &SearchProps) -> Html {
 
     let handle_options_click = {
         let search_fields = search_fields.clone();
+        let emit_search = emit_search.clone();
         Callback::from(move |(_name, selections)| match selections {
             DropDownSelection::Empty => {
                 search_fields.set(None);
+                emit_search(None);
             }
             DropDownSelection::Multi(options) => {
-                search_fields.set(Some(Rc::new(options)));
+                let selected = Rc::new(options);
+                search_fields.set(Some(selected.clone()));
+                emit_search(Some(selected));
             }
             DropDownSelection::Single(option) => {
-                search_fields.set(Some(Rc::new(vec![option])));
+                let selected = Rc::new(vec![option]);
+                search_fields.set(Some(selected.clone()));
+                emit_search(Some(selected));
             }
         })
     };

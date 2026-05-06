@@ -1,22 +1,36 @@
 use crate::{
-    app::components::{Country, DateInput, NoContent, RevealContent, Search, Table, TableDefinition, TextButton},
+    app::components::{
+        Country, DateInput, DropDownOption, PagedTable, RevealContent, Search, TabItem, TabSet, Table, TableDefinition,
+        TextButton,
+    },
     hooks::use_service_context,
     i18n::use_translation,
-    services::{StreamHistoryProviderSummary, StreamHistoryQosSnapshot},
     utils::{format_bytes, format_duration, format_ts},
 };
 use futures::join;
-use shared::model::{DisconnectReason, SearchRequest, StreamHistoryEventType, StreamHistoryRecordDto};
-use std::{borrow::Cow, rc::Rc};
+use shared::{
+    model::{
+        PagedResponseDto, QosSnapshotRecordDto, QosSnapshotWindowDto, SearchRequest, StreamHistoryEventType,
+        StreamHistoryPageRequestDto, StreamHistoryProviderSummaryDto, StreamHistoryRecordDto,
+    },
+    utils::default_page_size,
+};
+use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
-use yew::prelude::*;
+use yew::{prelude::*, use_mut_ref};
 
 const NUM_COLS: usize = 15;
 const SUMMARY_NUM_COLS: usize = 6;
 const QOS_SUMMARY_NUM_COLS: usize = 8;
 const QOS_DETAIL_NUM_COLS: usize = 8;
 
-type HlsSessionKey<'a> = (Option<&'a str>, u64, Option<&'a str>, Option<u32>, Option<&'a str>);
+const STREAM_HISTORY_TAB_HISTORY: &str = "stream-history";
+const STREAM_HISTORY_TAB_QOS: &str = "qos-snapshot";
+const STREAM_HISTORY_TAB_SUMMARY: &str = "summary";
+
+fn stream_history_tab_ids() -> [&'static str; 3] {
+    [STREAM_HISTORY_TAB_HISTORY, STREAM_HISTORY_TAB_QOS, STREAM_HISTORY_TAB_SUMMARY]
+}
 
 #[derive(Clone, PartialEq)]
 struct ProviderSummaryRow {
@@ -36,13 +50,13 @@ struct QosSummaryRow {
     provider_id: u32,
     target_name: String,
     item_type: String,
-    window_24h: crate::services::StreamHistoryQosSnapshotWindow,
+    window_24h: QosSnapshotWindowDto,
 }
 
 #[derive(Clone, PartialEq)]
 struct QosDetailRow {
     window_name: String,
-    window: crate::services::StreamHistoryQosSnapshotWindow,
+    window: QosSnapshotWindowDto,
 }
 
 fn today_start_ts() -> i64 {
@@ -58,171 +72,25 @@ fn ts_to_date_str(ts: i64) -> String {
 fn optional_record_text_str(value: Option<&str>) -> &str { value.unwrap_or("-") }
 fn optional_record_text(value: Option<String>) -> String { value.unwrap_or_else(|| String::from("-")) }
 
-/// Returns true if the container indicates an HLS stream (HTTP-based segmented streaming).
-fn is_hls_container(container: Option<&str>) -> bool {
-    matches!(container, Some("mpegts") | Some("fmp4") | Some("hls"))
-}
-
-/// Aggregate HLS records by session key (source_addr + session_id + provider_name + virtual_id + input_name).
-/// HLS streams create many rapid connect/disconnect events for each segment. This function groups them
-/// into logical sessions, showing first connect, last disconnect, and summed bytes.
-///
-/// For non-HLS records, they are passed through unchanged.
-fn aggregate_hls_records(records: &[Rc<StreamHistoryRecordDto>]) -> Vec<Rc<StreamHistoryRecordDto>> {
-    use std::collections::HashMap;
-
-    // Separate HLS and non-HLS records
-    let (hls_records, non_hls): (Vec<_>, Vec<_>) =
-        records.iter().partition(|r| is_hls_container(r.container.as_deref()));
-
-    // Group HLS records by session key
-    let mut sessions: HashMap<HlsSessionKey, Vec<&StreamHistoryRecordDto>> = HashMap::new();
-    for record in hls_records {
-        let key = (
-            record.source_addr.as_deref(),
-            record.session_id,
-            record.provider_name.as_deref(),
-            record.virtual_id,
-            record.input_name.as_deref(),
-        );
-        sessions.entry(key).or_default().push(record.as_ref());
-    }
-
-    // For each session, create aggregated records
-    let mut aggregated = Vec::new();
-
-    // First, add all non-HLS records unchanged
-    aggregated.extend(non_hls.into_iter().cloned());
-
-    // Then, process each HLS session
-    for (_, session_records) in sessions {
-        if session_records.is_empty() {
-            continue;
-        }
-
-        // Sort by timestamp
-        let mut sorted = session_records.clone();
-        sorted.sort_by_key(|r| r.event_ts_utc);
-
-        // Find first connect and last disconnect
-        let first_connect = sorted.iter().find(|r| r.event_type == StreamHistoryEventType::Connect);
-        let last_disconnect = sorted.iter().rfind(|r| r.event_type == StreamHistoryEventType::Disconnect);
-
-        // Calculate session duration from first connect to last disconnect
-        let session_duration = if let (Some(fc), Some(ld)) = (first_connect, last_disconnect) {
-            let fc_ts = fc.event_ts_utc;
-            let ld_ts = ld.event_ts_utc;
-            if ld_ts > fc_ts {
-                Some(ld_ts - fc_ts)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Sum bytes from all records in session
-        let total_bytes: u64 = sorted.iter().filter_map(|r| r.bytes_sent).sum();
-
-        // Count intermediate failures (disconnects that are not the last one)
-        let intermediate_failure_count = sorted
-            .iter()
-            .filter(|r| {
-                r.event_type == StreamHistoryEventType::Disconnect
-                    && !std::ptr::eq(*r, last_disconnect.unwrap_or(&sorted[0]))
-            })
-            .count();
-
-        // Create aggregated connect record
-        if let Some(first) = first_connect {
-            let mut agg = (*first).clone();
-            agg.event_ts_utc = first.event_ts_utc;
-            agg.session_duration = session_duration;
-            agg.bytes_sent = Some(total_bytes);
-            // Mark the disconnect reason from last disconnect if available
-            if let Some(last) = last_disconnect {
-                agg.disconnect_reason = last.disconnect_reason;
-            }
-            aggregated.push(Rc::new(agg));
-        }
-
-        // If there were intermediate failures, add a failure summary row
-        if intermediate_failure_count > 0 {
-            if let Some(first) = first_connect {
-                let mut failure_row = (*first).clone();
-                failure_row.event_type = StreamHistoryEventType::Failure;
-                failure_row.event_ts_utc = first.event_ts_utc + 1; // Just after first connect
-                failure_row.session_duration = None;
-                failure_row.bytes_sent = Some(total_bytes);
-                failure_row.disconnect_reason =
-                    Some(DisconnectReason::IntermediateFailures(intermediate_failure_count));
-                aggregated.push(Rc::new(failure_row));
-            }
-        }
-
-        // Add disconnect record if it exists and is different from first connect
-        if let Some(last) = last_disconnect {
-            if !std::ptr::eq(last, first_connect.unwrap_or(&sorted[0])) {
-                let mut disc = (*last).clone();
-                disc.event_ts_utc = last.event_ts_utc;
-                disc.bytes_sent = Some(total_bytes);
-                aggregated.push(Rc::new(disc));
-            }
-        }
-    }
-
-    // Sort by timestamp descending (most recent first)
-    aggregated.sort_by_key(|b| std::cmp::Reverse(b.event_ts_utc));
-    aggregated
-}
-
-fn record_matches(record: &StreamHistoryRecordDto, filter: &SearchRequest) -> bool {
-    if matches!(filter, SearchRequest::Clear) {
-        return true;
-    }
-    let fields = [
-        // Cow::Owned(record.partition_day_utc.to_string()),
-        // Cow::Owned(record.virtual_id.as_ref().map_or_else(String::new, ToString::to_string)),
-        // Cow::Borrowed(record.input_name.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.video_codec.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.audio_codec.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.resolution.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.target_name.as_deref().unwrap_or("")),
-        // Cow::Borrowed(record.session_duration.as_deref().unwrap_or("")),
-        Cow::Owned(record.event_ts_utc.to_string()),
-        Cow::Owned(record.event_type.to_string()),
-        Cow::Borrowed(record.title.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.group.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.api_username.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.provider_name.as_deref().unwrap_or("")),
-        Cow::Owned(record.provider_id.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Owned(record.bytes_sent.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Owned(record.first_byte_latency_ms.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Borrowed(record.user_agent.as_deref().unwrap_or("")),
-        Cow::Owned(record.item_type.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Borrowed(record.container.as_deref().unwrap_or("")),
-        Cow::Owned(record.disconnect_reason.as_ref().map_or_else(String::new, ToString::to_string)),
-        Cow::Borrowed(record.source_addr.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.country.as_deref().unwrap_or("")),
-        Cow::Borrowed(record.cluster.as_deref().unwrap_or("")),
-    ];
-    match filter {
-        SearchRequest::Clear => true,
-        SearchRequest::Text(text, _) => {
-            let text_lower = text.to_lowercase();
-            fields.iter().any(|f| f.to_lowercase().contains(&text_lower))
-        }
-        SearchRequest::Regexp(pattern, _) => {
-            if let Ok(re) = shared::model::REGEX_CACHE.get_or_compile(pattern) {
-                fields.iter().any(|f| re.is_match(f))
-            } else {
-                false
-            }
-        }
+fn search_request_parts(request: &SearchRequest) -> (Option<String>, Option<String>, Option<Vec<String>>) {
+    match request {
+        SearchRequest::Clear => (None, None, None),
+        SearchRequest::Text(text, fields) => (
+            Some(text.clone()),
+            Some(String::from("text")),
+            fields.as_ref().map(|selected| selected.iter().cloned().collect()),
+        ),
+        SearchRequest::Regexp(pattern, fields) => (
+            Some(pattern.clone()),
+            Some(String::from("regex")),
+            fields.as_ref().map(|selected| selected.iter().cloned().collect()),
+        ),
     }
 }
 
-fn qos_snapshot_matches(snapshot: &StreamHistoryQosSnapshot, filter: &SearchRequest) -> bool {
+fn is_latest_request(latest_request_id: u64, request_id: u64) -> bool { latest_request_id == request_id }
+
+fn qos_snapshot_matches(snapshot: &QosSnapshotRecordDto, filter: &SearchRequest) -> bool {
     match filter {
         SearchRequest::Clear => true,
         SearchRequest::Text(text, _) => {
@@ -244,7 +112,7 @@ fn qos_snapshot_matches(snapshot: &StreamHistoryQosSnapshot, filter: &SearchRequ
                 re.is_match(&snapshot.stream_identity_key)
                     || re.is_match(&snapshot.input_name)
                     || re.is_match(&snapshot.provider_name)
-                    || re.is_match(&snapshot.item_type)
+                    || re.is_match(snapshot.item_type.as_str())
                     || re.is_match(&snapshot.target_name)
                     || re.is_match(&snapshot.provider_id.to_string())
                     || re.is_match(&snapshot.virtual_id.to_string())
@@ -256,10 +124,10 @@ fn qos_snapshot_matches(snapshot: &StreamHistoryQosSnapshot, filter: &SearchRequ
 }
 
 fn top_qos_snapshots(
-    snapshots: &[StreamHistoryQosSnapshot],
+    snapshots: &[QosSnapshotRecordDto],
     filter: &SearchRequest,
     limit: usize,
-) -> Vec<StreamHistoryQosSnapshot> {
+) -> Vec<QosSnapshotRecordDto> {
     let mut filtered =
         snapshots.iter().filter(|snapshot| qos_snapshot_matches(snapshot, filter)).cloned().collect::<Vec<_>>();
     filtered.sort_by(|left, right| {
@@ -283,7 +151,7 @@ fn qos_score_label(score: u8) -> &'static str {
     }
 }
 
-fn provider_summary_rows(summaries: &[StreamHistoryProviderSummary]) -> Vec<ProviderSummaryRow> {
+fn provider_summary_rows(summaries: &[StreamHistoryProviderSummaryDto]) -> Vec<ProviderSummaryRow> {
     summaries
         .iter()
         .map(|summary| ProviderSummaryRow {
@@ -297,7 +165,7 @@ fn provider_summary_rows(summaries: &[StreamHistoryProviderSummary]) -> Vec<Prov
         .collect()
 }
 
-fn qos_summary_rows(snapshots: &[StreamHistoryQosSnapshot]) -> Vec<QosSummaryRow> {
+fn qos_summary_rows(snapshots: &[QosSnapshotRecordDto]) -> Vec<QosSummaryRow> {
     snapshots
         .iter()
         .map(|snapshot| QosSummaryRow {
@@ -306,25 +174,23 @@ fn qos_summary_rows(snapshots: &[StreamHistoryQosSnapshot]) -> Vec<QosSummaryRow
             provider_name: snapshot.provider_name.clone(),
             provider_id: snapshot.provider_id,
             target_name: snapshot.target_name.clone(),
-            item_type: snapshot.item_type.clone(),
+            item_type: snapshot.item_type.to_string(),
             window_24h: snapshot.window_24h.clone(),
         })
         .collect()
 }
 
-fn qos_detail_rows(snapshot: &StreamHistoryQosSnapshot) -> Vec<QosDetailRow> {
+fn qos_detail_rows(snapshot: &QosSnapshotRecordDto) -> Vec<QosDetailRow> {
     [("24h", snapshot.window_24h.clone()), ("7d", snapshot.window_7d.clone()), ("30d", snapshot.window_30d.clone())]
         .into_iter()
         .map(|(window_name, window)| QosDetailRow { window_name: window_name.to_string(), window })
         .collect()
 }
 
-fn has_any_stream_history_content(
-    records: &[Rc<StreamHistoryRecordDto>],
-    summaries: &[StreamHistoryProviderSummary],
-    qos_snapshots: &[StreamHistoryQosSnapshot],
-) -> bool {
-    !records.is_empty() || !summaries.is_empty() || !qos_snapshots.is_empty()
+fn stream_history_table_items(
+    response: Option<&PagedResponseDto<StreamHistoryRecordDto>>,
+) -> Vec<Rc<StreamHistoryRecordDto>> {
+    response.map_or_else(Vec::new, |r| r.items.iter().cloned().map(Rc::new).collect())
 }
 
 #[component]
@@ -333,12 +199,42 @@ pub fn StreamHistoryView() -> Html {
     let translate = use_translation();
     let from_date = use_state(|| Some(today_start_ts()));
     let to_date = use_state(|| Some(today_start_ts()));
-    let all_records = use_state(Vec::<Rc<StreamHistoryRecordDto>>::new);
-    let summaries = use_state(Vec::<StreamHistoryProviderSummary>::new);
-    let qos_snapshots = use_state(Vec::<StreamHistoryQosSnapshot>::new);
-    let selected_qos_snapshot = use_state(|| None::<StreamHistoryQosSnapshot>);
+    let paged_response = use_state(|| None::<PagedResponseDto<StreamHistoryRecordDto>>);
+    let page = use_state(|| 1u32);
+    let page_size = use_state(default_page_size);
+    let summaries = use_state(Vec::<StreamHistoryProviderSummaryDto>::new);
+    let qos_snapshots = use_state(Vec::<QosSnapshotRecordDto>::new);
+    let selected_qos_snapshot = use_state(|| None::<QosSnapshotRecordDto>);
     let search_filter = use_state(|| SearchRequest::Clear);
     let loading = use_state(|| false);
+    let request_id = use_mut_ref(|| 0u64);
+    let search_options: Rc<Vec<DropDownOption>> = {
+        let translate = translate.clone();
+        use_memo(translate, move |translate| {
+            vec![
+                DropDownOption::new("event_ts_utc", html! { translate.t("LABEL.STREAM_HISTORY_TIME") }, false),
+                DropDownOption::new("event_type", html! { translate.t("LABEL.STREAM_HISTORY_EVENT") }, false),
+                DropDownOption::new("title", html! { translate.t("LABEL.TITLE") }, false),
+                DropDownOption::new("group", html! { translate.t("LABEL.GROUP") }, false),
+                DropDownOption::new("api_username", html! { translate.t("LABEL.USERNAME") }, false),
+                DropDownOption::new("provider_name", html! { translate.t("LABEL.PROVIDER") }, false),
+                DropDownOption::new("provider_id", html! { translate.t("LABEL.PROVIDER_ID") }, false),
+                DropDownOption::new("bytes_sent", html! { translate.t("LABEL.STREAM_HISTORY_BYTES") }, false),
+                DropDownOption::new(
+                    "first_byte_latency_ms",
+                    html! { translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE") },
+                    false,
+                ),
+                DropDownOption::new("user_agent", html! { translate.t("LABEL.USER_AGENT") }, false),
+                DropDownOption::new("item_type", html! { translate.t("LABEL.TYPE") }, false),
+                DropDownOption::new("container", html! { translate.t("LABEL.CONTAINER") }, false),
+                DropDownOption::new("disconnect_reason", html! { translate.t("LABEL.STREAM_HISTORY_REASON") }, false),
+                DropDownOption::new("source_addr", html! { translate.t("LABEL.STREAM_HISTORY_IP") }, false),
+                DropDownOption::new("country", html! { translate.t("LABEL.COUNTRY") }, false),
+                DropDownOption::new("cluster", html! { translate.t("LABEL.CLUSTER") }, false),
+            ]
+        })
+    };
 
     let handle_from_change = {
         let from_date = from_date.clone();
@@ -350,50 +246,119 @@ pub fn StreamHistoryView() -> Html {
         Callback::from(move |ts: Option<i64>| to_date.set(ts))
     };
 
+    let fetch_history_page: Rc<dyn Fn(u32, u16, SearchRequest)> = {
+        let services = services.clone();
+        let from_date = from_date.clone();
+        let to_date = to_date.clone();
+        let paged_response = paged_response.clone();
+        let loading = loading.clone();
+        let request_id = request_id.clone();
+        Rc::new(move |requested_page: u32, requested_page_size: u16, request: SearchRequest| {
+            let services = services.clone();
+            let paged_response = paged_response.clone();
+            let loading = loading.clone();
+            let request_id = request_id.clone();
+            let from_str = (*from_date).map(ts_to_date_str);
+            let to_str = (*to_date).map(ts_to_date_str);
+            let (search_text, search_mode, search_fields) = search_request_parts(&request);
+            let next_request_id = {
+                let mut current = request_id.borrow_mut();
+                *current = current.saturating_add(1);
+                *current
+            };
+            loading.set(true);
+            spawn_local(async move {
+                let result = services
+                    .stream_history
+                    .get_history_page(StreamHistoryPageRequestDto {
+                        from: from_str,
+                        to: to_str,
+                        page: requested_page,
+                        page_size: requested_page_size,
+                        search: search_text,
+                        search_mode,
+                        search_fields,
+                    })
+                    .await;
+                if is_latest_request(*request_id.borrow(), next_request_id) {
+                    match result {
+                        Ok(Some(response)) => paged_response.set(Some(response)),
+                        Ok(None) | Err(_) => paged_response.set(None),
+                    }
+                    loading.set(false);
+                }
+            });
+        })
+    };
+
     let handle_load = {
         let services = services.clone();
         let from_date = from_date.clone();
         let to_date = to_date.clone();
-        let all_records = all_records.clone();
+        let paged_response = paged_response.clone();
         let summaries = summaries.clone();
         let qos_snapshots = qos_snapshots.clone();
         let selected_qos_snapshot = selected_qos_snapshot.clone();
         let loading = loading.clone();
+        let request_id = request_id.clone();
+        let page = page.clone();
+        let page_size = page_size.clone();
+        let search_filter = search_filter.clone();
         Callback::from(move |_: String| {
             let services = services.clone();
-            let all_records = all_records.clone();
+            let paged_response = paged_response.clone();
             let summaries = summaries.clone();
             let qos_snapshots = qos_snapshots.clone();
             let selected_qos_snapshot = selected_qos_snapshot.clone();
             let loading = loading.clone();
+            let request_id = request_id.clone();
             let from_str = (*from_date).map(ts_to_date_str);
             let to_str = (*to_date).map(ts_to_date_str);
+            let next_request_id = {
+                let mut current = request_id.borrow_mut();
+                *current = current.saturating_add(1);
+                *current
+            };
+            let requested_page_size = *page_size;
+            let active_search = (*search_filter).clone();
+            let (search_text, search_mode, search_fields) = search_request_parts(&active_search);
+            page.set(1);
             loading.set(true);
             spawn_local(async move {
                 let (history_result, summary_result, qos_result) = join!(
-                    services.stream_history.get_history(from_str.as_deref(), to_str.as_deref()),
+                    services.stream_history.get_history_page(StreamHistoryPageRequestDto {
+                        from: from_str.clone(),
+                        to: to_str.clone(),
+                        page: 1,
+                        page_size: requested_page_size,
+                        search: search_text,
+                        search_mode,
+                        search_fields,
+                    }),
                     services.stream_history.get_summary(from_str.as_deref(), to_str.as_deref()),
                     services.stream_history.get_qos_snapshots()
                 );
-                match history_result {
-                    Ok(Some(records)) => all_records.set(records.into_iter().map(Rc::new).collect()),
-                    Ok(None) | Err(_) => all_records.set(Vec::new()),
-                }
-                match summary_result {
-                    Ok(Some(items)) => summaries.set(items),
-                    Ok(None) | Err(_) => summaries.set(Vec::new()),
-                }
-                match qos_result {
-                    Ok(Some(items)) => {
-                        selected_qos_snapshot.set(None);
-                        qos_snapshots.set(items);
+                if is_latest_request(*request_id.borrow(), next_request_id) {
+                    match history_result {
+                        Ok(Some(resp)) => paged_response.set(Some(resp)),
+                        Ok(None) | Err(_) => paged_response.set(None),
                     }
-                    Ok(None) | Err(_) => {
-                        selected_qos_snapshot.set(None);
-                        qos_snapshots.set(Vec::new());
+                    match summary_result {
+                        Ok(Some(items)) => summaries.set(items),
+                        Ok(None) | Err(_) => summaries.set(Vec::new()),
                     }
+                    match qos_result {
+                        Ok(Some(items)) => {
+                            selected_qos_snapshot.set(None);
+                            qos_snapshots.set(items);
+                        }
+                        Ok(None) | Err(_) => {
+                            selected_qos_snapshot.set(None);
+                            qos_snapshots.set(Vec::new());
+                        }
+                    }
+                    loading.set(false);
                 }
-                loading.set(false);
             });
         })
     };
@@ -407,22 +372,45 @@ pub fn StreamHistoryView() -> Html {
         });
     }
 
-    let handle_search = {
+    let handle_page_change = {
+        let page = page.clone();
+        let page_size = page_size.clone();
         let search_filter = search_filter.clone();
-        Callback::from(move |req: SearchRequest| search_filter.set(req))
+        let fetch_history_page = fetch_history_page.clone();
+        Callback::from(move |new_page: u32| {
+            page.set(new_page);
+            fetch_history_page(new_page, *page_size, (*search_filter).clone());
+        })
     };
 
-    let filtered: Rc<Vec<Rc<StreamHistoryRecordDto>>> =
-        use_memo(((*all_records).clone(), (*search_filter).clone()), |(records, filter)| {
-            let mut sorted: Vec<Rc<StreamHistoryRecordDto>> = records.to_vec();
-            sorted.sort_by_key(|r| r.event_ts_utc);
-            // Aggregate HLS records first on the full dataset so connect/disconnect pairs are complete
-            let aggregated = aggregate_hls_records(&sorted);
-            aggregated.into_iter().filter(|r| record_matches(r, filter)).collect()
-        });
-    let has_any_content = has_any_stream_history_content(&all_records, &summaries, &qos_snapshots);
+    let handle_page_size_change = {
+        let page = page.clone();
+        let page_size = page_size.clone();
+        let search_filter = search_filter.clone();
+        let fetch_history_page = fetch_history_page.clone();
+        Callback::from(move |new_size: u16| {
+            page.set(1);
+            page_size.set(new_size);
+            fetch_history_page(1, new_size, (*search_filter).clone());
+        })
+    };
 
-    let visible_qos_snapshots: Rc<Vec<StreamHistoryQosSnapshot>> =
+    let handle_search = {
+        let search_filter = search_filter.clone();
+        let page = page.clone();
+        let page_size = page_size.clone();
+        let fetch_history_page = fetch_history_page.clone();
+        Callback::from(move |req: SearchRequest| {
+            search_filter.set(req.clone());
+            page.set(1);
+            fetch_history_page(1, *page_size, req);
+        })
+    };
+
+    let table_items: Rc<Vec<Rc<StreamHistoryRecordDto>>> =
+        use_memo((*paged_response).clone(), |resp| stream_history_table_items(resp.as_ref()));
+
+    let visible_qos_snapshots: Rc<Vec<QosSnapshotRecordDto>> =
         use_memo(((*qos_snapshots).clone(), (*search_filter).clone()), |(snapshots, filter)| {
             top_qos_snapshots(snapshots, filter, 8)
         });
@@ -450,10 +438,10 @@ pub fn StreamHistoryView() -> Html {
     };
 
     let translate_for_table = translate.clone();
-    let table_def: Rc<TableDefinition<StreamHistoryRecordDto>> = use_memo(filtered.clone(), move |filtered| {
+    let table_def: Rc<TableDefinition<StreamHistoryRecordDto>> = use_memo(table_items.clone(), move |items| {
         let translate = translate_for_table.clone();
         TableDefinition {
-            items: Some(filtered.clone()),
+            items: Some(items.clone()),
             num_cols: NUM_COLS,
             is_sortable: Callback::from(|_| false),
             on_sort: Callback::noop(),
@@ -689,6 +677,64 @@ pub fn StreamHistoryView() -> Html {
         }
     });
 
+    let history_content = if let Some(ref resp) = *paged_response {
+        html! {
+            <PagedTable::<StreamHistoryRecordDto>
+                definition={table_def.clone()}
+                page={resp.page}
+                page_size={resp.page_size}
+                total_items={resp.total_items}
+                total_pages={resp.total_pages}
+                has_prev={resp.has_prev}
+                has_next={resp.has_next}
+                on_page_change={handle_page_change.clone()}
+                on_page_size_change={handle_page_size_change.clone()}
+            />
+        }
+    } else {
+        html! { <Table::<StreamHistoryRecordDto> definition={table_def.clone()} /> }
+    };
+
+    let qos_content = html! {
+        <>
+            <Table::<QosSummaryRow> definition={qos_summary_table_def.clone()} />
+            if (*selected_qos_snapshot).is_some() {
+                <div class="tp__stream-history__summary">
+                    <h2>{translate.t("LABEL.STREAM_HISTORY_QOS_DETAIL")}</h2>
+                    <Table::<QosDetailRow> definition={qos_detail_table_def.clone()} />
+                </div>
+            }
+        </>
+    };
+
+    let tab_ids = stream_history_tab_ids();
+    let tabs = Rc::new(vec![
+        TabItem {
+            id: tab_ids[0].to_string(),
+            title: translate.t("LABEL.STREAM_HISTORY"),
+            icon: "Playlist".to_string(),
+            children: history_content,
+            active_class: None,
+            inactive_class: None,
+        },
+        TabItem {
+            id: tab_ids[1].to_string(),
+            title: translate.t("LABEL.STREAM_HISTORY_QOS"),
+            icon: "Status".to_string(),
+            children: qos_content,
+            active_class: None,
+            inactive_class: None,
+        },
+        TabItem {
+            id: tab_ids[2].to_string(),
+            title: translate.t("LABEL.STREAM_HISTORY_SUMMARY"),
+            icon: "Stats".to_string(),
+            children: html! { <Table::<ProviderSummaryRow> definition={summary_table_def.clone()} /> },
+            active_class: None,
+            inactive_class: None,
+        },
+    ]);
+
     html! {
         <div class="tp__stream-history">
             <div class="tp__stream-history__header">
@@ -715,35 +761,15 @@ pub fn StreamHistoryView() -> Html {
                         onclick={handle_load}
                     />
                 </div>
-                <Search onsearch={Some(handle_search)} min_length={1} />
-            </div>
-            <div class="tp__stream-history__body">
+                <Search onsearch={Some(handle_search)} min_length={1} options={Some(search_options)} />
                 if *loading {
-                    <div class="tp__stream-history__loading">
+                    <div class="tp__stream-history__loading tp__stream-history__loading--inline">
                         <span>{translate.t("LABEL.STREAM_HISTORY_LOADING")}</span>
                     </div>
-                } else if !has_any_content {
-                    <NoContent />
-                } else {
-                    <div class="tp__stream-history__summary">
-                        <h2>{translate.t("LABEL.STREAM_HISTORY_SUMMARY")}</h2>
-                        <Table::<ProviderSummaryRow> definition={summary_table_def.clone()} />
-                    </div>
-                    <div class="tp__stream-history__summary">
-                        <h2>{translate.t("LABEL.STREAM_HISTORY_QOS")}</h2>
-                        <Table::<QosSummaryRow> definition={qos_summary_table_def.clone()} />
-                    </div>
-                    if (*selected_qos_snapshot).is_some() {
-                        <div class="tp__stream-history__summary">
-                            <h2>{translate.t("LABEL.STREAM_HISTORY_QOS_DETAIL")}</h2>
-                            <Table::<QosDetailRow> definition={qos_detail_table_def.clone()} />
-                        </div>
-                    }
-                    <div class="tp__stream-history__summary">
-                        <h2>{translate.t("LABEL.STREAM_HISTORY")}</h2>
-                        <Table::<StreamHistoryRecordDto> definition={table_def} />
-                    </div>
                 }
+            </div>
+            <div class="tp__stream-history__body">
+                <TabSet tabs={tabs} class="tp__stream-history__tabset" />
             </div>
         </div>
     }
@@ -751,12 +777,51 @@ pub fn StreamHistoryView() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{optional_record_text_str, provider_summary_rows, qos_detail_rows, qos_score_label, top_qos_snapshots};
-    use crate::services::{StreamHistoryProviderSummary, StreamHistoryQosSnapshot, StreamHistoryQosSnapshotWindow};
-    use shared::model::SearchRequest;
+    use super::{
+        is_latest_request, optional_record_text_str, provider_summary_rows, qos_detail_rows, qos_score_label,
+        stream_history_tab_ids, stream_history_table_items, top_qos_snapshots,
+    };
+    use shared::model::{
+        PagedResponseDto, PlaylistItemType, QosSnapshotRecordDto, QosSnapshotWindowDto, SearchRequest,
+        StreamHistoryEventType, StreamHistoryProviderSummaryDto, StreamHistoryRecordDto,
+    };
 
-    fn empty_window() -> StreamHistoryQosSnapshotWindow {
-        StreamHistoryQosSnapshotWindow {
+    fn make_record(session_id: u64) -> StreamHistoryRecordDto {
+        StreamHistoryRecordDto {
+            event_type: StreamHistoryEventType::Connect,
+            event_ts_utc: 1_700_000_000,
+            partition_day_utc: "2026-05-06".to_string(),
+            session_id,
+            source_addr: None,
+            api_username: None,
+            provider_name: None,
+            input_name: None,
+            virtual_id: Some(1),
+            item_type: Some(PlaylistItemType::Live),
+            title: Some(format!("stream-{session_id}")),
+            group: None,
+            country: None,
+            user_agent: None,
+            shared: None,
+            provider_id: None,
+            cluster: None,
+            container: None,
+            video_codec: None,
+            audio_codec: None,
+            resolution: None,
+            failure_stage: None,
+            connect_failure_reason: None,
+            disconnect_reason: None,
+            session_duration: None,
+            bytes_sent: None,
+            first_byte_latency_ms: None,
+            previous_session_id: None,
+            target_name: None,
+        }
+    }
+
+    fn empty_window() -> QosSnapshotWindowDto {
+        QosSnapshotWindowDto {
             connect_count: 0,
             connect_failed_count: 0,
             runtime_abort_count: 0,
@@ -767,6 +832,7 @@ mod tests {
             last_failure_ts: None,
             score: 0,
             confidence: 0,
+            ..Default::default()
         }
     }
 
@@ -775,20 +841,21 @@ mod tests {
         provider_name: &str,
         score: u8,
         confidence: u8,
-    ) -> StreamHistoryQosSnapshot {
-        StreamHistoryQosSnapshot {
+    ) -> QosSnapshotRecordDto {
+        QosSnapshotRecordDto {
             stream_identity_key: stream_identity_key.to_string(),
             input_name: "input-a".to_string(),
             target_name: "target-a".to_string(),
             provider_name: provider_name.to_string(),
             provider_id: 10,
             virtual_id: 99,
-            item_type: "live".to_string(),
+            item_type: PlaylistItemType::Live,
             updated_at: None,
             last_event_at: None,
-            window_24h: StreamHistoryQosSnapshotWindow { score, confidence, ..empty_window() },
+            window_24h: QosSnapshotWindowDto { score, confidence, ..empty_window() },
             window_7d: empty_window(),
             window_30d: empty_window(),
+            daily_buckets: Default::default(),
         }
     }
 
@@ -808,19 +875,20 @@ mod tests {
 
     #[test]
     fn qos_detail_rows_expand_into_fixed_window_order() {
-        let snapshot = StreamHistoryQosSnapshot {
+        let snapshot = QosSnapshotRecordDto {
             stream_identity_key: "stream-a".to_string(),
             input_name: "input-a".to_string(),
             target_name: "target-a".to_string(),
             provider_name: "provider-a".to_string(),
             provider_id: 10,
             virtual_id: 99,
-            item_type: "live".to_string(),
+            item_type: PlaylistItemType::Live,
             updated_at: None,
             last_event_at: None,
-            window_24h: StreamHistoryQosSnapshotWindow { score: 90, ..empty_window() },
-            window_7d: StreamHistoryQosSnapshotWindow { score: 70, ..empty_window() },
-            window_30d: StreamHistoryQosSnapshotWindow { score: 50, ..empty_window() },
+            window_24h: QosSnapshotWindowDto { score: 90, ..empty_window() },
+            window_7d: QosSnapshotWindowDto { score: 70, ..empty_window() },
+            window_30d: QosSnapshotWindowDto { score: 50, ..empty_window() },
+            daily_buckets: Default::default(),
         };
 
         let rows = qos_detail_rows(&snapshot);
@@ -835,7 +903,7 @@ mod tests {
 
     #[test]
     fn provider_summary_rows_preserve_summary_values() {
-        let summaries = vec![StreamHistoryProviderSummary {
+        let summaries = vec![StreamHistoryProviderSummaryDto {
             provider_name: "provider-a".to_string(),
             session_count: 4,
             disconnect_count: 1,
@@ -865,5 +933,27 @@ mod tests {
         assert_eq!(optional_record_text_str(Some("Lavf53.32.100")), "Lavf53.32.100");
         assert_eq!(optional_record_text_str(Some("live")), "live");
         assert_eq!(optional_record_text_str(None), "-");
+    }
+
+    #[test]
+    fn request_token_accepts_only_current_response() {
+        assert!(is_latest_request(7, 7));
+        assert!(!is_latest_request(8, 7));
+    }
+
+    #[test]
+    fn stream_history_table_items_come_from_current_paged_response_items() {
+        let response = PagedResponseDto::new(vec![make_record(10), make_record(11)], 1, 50, 519);
+
+        let rows = stream_history_table_items(Some(&response));
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].session_id, 10);
+        assert_eq!(rows[1].session_id, 11);
+    }
+
+    #[test]
+    fn stream_history_tabs_are_ordered_for_query_first_workflow() {
+        assert_eq!(stream_history_tab_ids(), ["stream-history", "qos-snapshot", "summary"]);
     }
 }
