@@ -714,13 +714,14 @@ impl ActiveUserManager {
     /// the underlying HTTP connection may still remain open.
     #[allow(clippy::too_many_lines)]
     pub async fn release_stream(&self, addr: &SocketAddr) -> Option<StreamInfo> {
-        let (removed_stream, username, expiry_entry, connection_changed, promotion, divergence_snapshot) = {
+        let (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
 
             let username = user_connections.key_by_addr.get(addr).map(|reg| reg.username.clone())?;
 
             let mut removed_stream = None;
             let mut expiry_entry = None;
+            let mut preserved_update = None;
             let mut connection_changed = false;
             let mut promotion = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
@@ -758,6 +759,7 @@ impl ActiveUserManager {
                                 Self::clear_session_counted(connection_data, session_token);
                             }
                             connection_data.streams[stream_idx].preserved = true;
+                            preserved_update = Some(connection_data.streams[stream_idx].clone());
                             expiry_entry = Some(entry);
                         } else {
                             removed_stream = Some(connection_data.streams.swap_remove(stream_idx));
@@ -795,9 +797,9 @@ impl ActiveUserManager {
                     }
                 }
                 let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
-                (removed_stream, username, expiry_entry, connection_changed, promotion, Some(divergence_snapshot))
+                (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, Some(divergence_snapshot))
             } else {
-                (None, username, None, false, None, None)
+                (None, username, None, None, false, None, None)
             }
         };
 
@@ -807,6 +809,10 @@ impl ActiveUserManager {
 
         if let Some(entry) = expiry_entry {
             self.enqueue_adaptive_expiry(entry).await;
+        }
+
+        if let Some(stream_info) = preserved_update {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         }
 
         if connection_changed {
@@ -828,7 +834,7 @@ impl ActiveUserManager {
 
     #[allow(clippy::too_many_lines)]
     async fn release_connection_inner(&self, addr: &SocketAddr, preserve_session_streams: bool) -> ReleasedConnection {
-        let (addr_removed, disconnected_user, removed_streams, expiry_entries, promotions) = {
+        let (addr_removed, disconnected_user, removed_streams, expiry_entries, preserved_updates, promotions) = {
             let mut user_connections = self.connections.write().await;
 
             let registration = user_connections.key_by_addr.remove(addr);
@@ -850,6 +856,7 @@ impl ActiveUserManager {
             if let Some(username) = username {
                 let mut removed_streams = Vec::new();
                 let mut expiry_entries = Vec::new();
+                let mut preserved_updates = Vec::new();
                 let mut promotions = Vec::new();
                 if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                     let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
@@ -872,16 +879,19 @@ impl ActiveUserManager {
                                 remaining_streams.push(stream_info);
                             } else if preserve_session_streams && Self::should_preserve_session_stream(&stream_info) {
                                 if let Some(entry) =
-                                self.build_preserved_stream_expiry(&username, &stream_info, &connection_data.sessions)
-                            {
-                                if let Some(kind) = connection_data.stream_kinds.remove(&stream_info.uid) {
-                                    released_kinds.push(kind);
-                                }
-                                connection_data.stream_normal_priorities.remove(&stream_info.uid);
-                                if let Some(token) = stream_info.session_token.as_ref() {
-                                    preserved_session_tokens.push(token.clone());
-                                }
-                                    stream_info.preserved = true;
+                                    self.build_preserved_stream_expiry(&username, &stream_info, &connection_data.sessions)
+                                {
+                                    if let Some(kind) = connection_data.stream_kinds.remove(&stream_info.uid) {
+                                        released_kinds.push(kind);
+                                    }
+                                    connection_data.stream_normal_priorities.remove(&stream_info.uid);
+                                    if let Some(token) = stream_info.session_token.as_ref() {
+                                        preserved_session_tokens.push(token.clone());
+                                    }
+                                    if !stream_info.preserved {
+                                        stream_info.preserved = true;
+                                        preserved_updates.push(stream_info.clone());
+                                    }
                                     expiry_entries.push(entry);
                                     remaining_streams.push(stream_info);
                                 } else {
@@ -939,14 +949,18 @@ impl ActiveUserManager {
                     }
                 }
                 let state_changed = had_registration || !removed_streams.is_empty();
-                (state_changed, Some(username), removed_streams, expiry_entries, promotions)
+                (state_changed, Some(username), removed_streams, expiry_entries, preserved_updates, promotions)
             } else {
-                (false, None, Vec::new(), Vec::new(), Vec::new())
+                (false, None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
             }
         };
 
         for entry in expiry_entries {
             self.enqueue_adaptive_expiry(entry).await;
+        }
+
+        for stream_info in preserved_updates {
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         }
 
         if let Some(ref username) = disconnected_user {
@@ -2022,7 +2036,10 @@ impl ActiveUserManager {
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
         };
-        if Self::session_has_stream(connection_data, token) {
+        let addr_has_active_stream_for_session = connection_data.streams.iter().any(|stream| {
+            stream.session_token.as_deref() == Some(token) && stream.addr == *addr && !stream.preserved
+        });
+        if addr_has_active_stream_for_session {
             return;
         }
 
@@ -2045,7 +2062,7 @@ impl ActiveUserManager {
             let can_remove = user_connections
                 .key_by_addr
                 .get(addr)
-                .is_some_and(|registration| registration.username == username);
+                .is_some_and(|registration| registration.username.is_empty() || registration.username == username);
             if can_remove {
                 user_connections.key_by_addr.remove(addr);
             }
@@ -2583,8 +2600,12 @@ impl ActiveUserManager {
         let mut touched_session = false;
         for session in &mut connection_data.sessions {
             if session.token == token {
+                // Lightweight HTTP activity (for example HLS manifest reloads) refreshes
+                // continuity metadata only. It must not become an active stream socket:
+                // otherwise a manifest or probe request can steal the visible stream addr,
+                // and the real segment socket later migrates to that stale addr instead of
+                // being released/preserved.
                 session.ts = now;
-                remember_session_addr(session, *addr);
                 touched_session = true;
                 break;
             }
@@ -2592,14 +2613,6 @@ impl ActiveUserManager {
 
         if !touched_session {
             return;
-        }
-
-        for stream in &mut connection_data.streams {
-            if stream.session_token.as_deref() == Some(token) {
-                // Only update the addr to keep it current; do NOT reset stream.ts,
-                // which represents the session start time shown as "Duration" in the dashboard.
-                stream.addr = *addr;
-            }
         }
     }
 
@@ -4847,8 +4860,8 @@ mod tests {
                 socket_bound: false,
             })
             .await;
-        manager.touch_http_activity("user2", "tok-hls-cleanup-fallback", &first_segment_addr).await;
-        manager.touch_http_activity("user2", "tok-hls-cleanup-fallback", &next_segment_addr).await;
+        manager.update_session_addr("user2", "tok-hls-cleanup-fallback", &first_segment_addr).await;
+        manager.update_session_addr("user2", "tok-hls-cleanup-fallback", &next_segment_addr).await;
 
         assert_eq!(
             manager
@@ -6140,8 +6153,160 @@ mod tests {
             .and_then(|data| data.streams.iter().find(|s| s.session_token.as_deref() == Some("tok-hls-ts")))
             .expect("stream should still exist");
         assert_eq!(stream.ts, original_ts, "touch_http_activity must not reset the stream start timestamp");
-        // addr should be updated to reflect the latest manifest request
-        assert_eq!(stream.addr, addr2, "touch_http_activity should update the stream addr");
+        // Lightweight manifest activity must not move the active stream socket.
+        assert_eq!(stream.addr, addr1, "touch_http_activity must not replace the active stream addr");
+    }
+
+    #[tokio::test]
+    async fn touch_http_activity_does_not_migrate_adaptive_stream_to_manifest_addr_on_close() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+        let mut events = event_manager.get_event_channel();
+
+        let segment_addr: SocketAddr = "127.0.0.1:55032".parse().unwrap();
+        let manifest_addr: SocketAddr = "127.0.0.1:55033".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-hls-segment".to_string(), "127.0.0.1".to_string(), segment_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-hls-manifest-touch".to_string();
+        user.max_connections = 1;
+
+        manager.add_connection(&segment_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-manifest-touch",
+                virtual_id: 7788,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &segment_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 602,
+                meter_uid: 702,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(7788),
+                user_agent: Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-hls-manifest-touch"),
+            })
+            .await
+            .expect("stream should be created");
+
+        manager
+            .touch_http_activity(&user.username, "tok-hls-manifest-touch", &manifest_addr)
+            .await;
+
+        let released = manager.release_connection(&segment_addr).await;
+        assert!(released.addr_removed);
+        assert!(released.removed_streams.is_empty(), "adaptive close should preserve without history removal");
+        assert_eq!(manager.user_connections(&user.username).await, 0);
+        assert!(manager.active_streams().await.is_empty(), "preserved adaptive streams are hidden from active snapshots");
+
+        let connections = manager.connections.read().await;
+        let data = connections.by_key.get(&user.username).expect("user should remain for preserved session");
+        let stream = data
+            .streams
+            .iter()
+            .find(|stream| stream.session_token.as_deref() == Some("tok-hls-manifest-touch"))
+            .expect("preserved stream should remain internally tracked");
+        assert!(stream.preserved);
+        assert_eq!(stream.addr, segment_addr, "closed segment must not migrate to manifest addr");
+        assert!(!data.sessions[0].active_addrs.contains(&manifest_addr));
+        drop(connections);
+
+        let mut saw_preserved_update = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream)) if stream.addr == segment_addr && stream.preserved) {
+                saw_preserved_update = true;
+            }
+        }
+        assert!(saw_preserved_update, "preserving a stream must notify the frontend so adaptive TTL cleanup can hide it");
+    }
+
+    #[tokio::test]
+    async fn clear_unbound_session_addr_prunes_manifest_addr_while_stream_is_active_elsewhere() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let segment_addr: SocketAddr = "127.0.0.1:55034".parse().unwrap();
+        let manifest_addr: SocketAddr = "127.0.0.1:55035".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-hls-segment-2".to_string(), "127.0.0.1".to_string(), segment_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-hls-manifest-clear".to_string();
+        user.max_connections = 1;
+
+        manager.add_connection(&segment_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-manifest-clear",
+                virtual_id: 7789,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &segment_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 603,
+                meter_uid: 703,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(7789),
+                user_agent: Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-hls-manifest-clear"),
+            })
+            .await
+            .expect("stream should be created");
+
+        manager.add_connection(&manifest_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-manifest-clear",
+                virtual_id: 7789,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &manifest_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        manager
+            .clear_unbound_session_addr(&user.username, "tok-hls-manifest-clear", &manifest_addr)
+            .await;
+
+        let connections = manager.connections.read().await;
+        assert!(!connections.key_by_addr.contains_key(&manifest_addr));
+        let data = connections.by_key.get(&user.username).expect("user should exist");
+        assert_eq!(data.streams[0].addr, segment_addr);
+        assert!(!data.sessions[0].active_addrs.contains(&manifest_addr));
     }
 
     #[tokio::test]
