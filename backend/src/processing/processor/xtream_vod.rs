@@ -703,10 +703,9 @@ pub async fn update_vod_metadata(
         return Err(shared::error::TuliproxError::Config(format!("No VOD properties available after fallback creation for {display_id}")));
     };
 
-    let missing_fact_policy = MissingFactEnrichmentPolicy::from_xtream_missing_fact_options(
-        resolve_missing_facts,
-        input.has_flag(ConfigInputFlags::ResolveTmdb),
-    );
+    // Xtream's legacy ResolveTmdb input flag currently gates missing identity/temporal fact enrichment.
+    let missing_fact_policy =
+        MissingFactEnrichmentPolicy::fill_missing(resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb));
 
     // 2. Resolve missing TMDB/date facts if allowed for this input
     let missing_tmdb = properties.tmdb.is_none();

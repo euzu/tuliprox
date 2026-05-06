@@ -1,8 +1,4 @@
 /// Source-neutral policy for fill-only media fact enrichment.
-///
-/// Xtream still exposes this through its legacy `ResolveTmdb` switch, but the
-/// policy describes fact families and suppliers rather than the legacy option
-/// name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MissingFactEnrichmentPolicy {
     missing_facts_enabled: bool,
@@ -11,9 +7,8 @@ pub struct MissingFactEnrichmentPolicy {
 }
 
 impl MissingFactEnrichmentPolicy {
-    /// Builds a missing-fact policy from Xtream's current compatibility flags.
-    pub fn from_xtream_missing_fact_options(resolve_missing_facts: bool, input_enabled: bool) -> Self {
-        let enabled = resolve_missing_facts && input_enabled;
+    /// Builds a missing-fact policy from an already translated boundary decision.
+    pub fn fill_missing(enabled: bool) -> Self {
         Self {
             missing_facts_enabled: enabled,
             parsed_title_supplier_enabled: enabled,
@@ -45,17 +40,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disables_missing_fact_resolution_when_request_is_off() {
-        let policy = MissingFactEnrichmentPolicy::from_xtream_missing_fact_options(false, true);
-
-        assert!(!policy.should_resolve_missing_facts(true, true));
-        assert!(!policy.should_try_parsed_title_supplier(true));
-        assert!(!policy.should_try_tmdb_supplier(true, true));
-    }
-
-    #[test]
-    fn disables_missing_fact_resolution_when_input_flag_is_off() {
-        let policy = MissingFactEnrichmentPolicy::from_xtream_missing_fact_options(true, false);
+    fn disables_missing_fact_resolution_when_policy_is_off() {
+        let policy = MissingFactEnrichmentPolicy::fill_missing(false);
 
         assert!(!policy.should_resolve_missing_facts(true, true));
         assert!(!policy.should_try_parsed_title_supplier(true));
@@ -64,7 +50,7 @@ mod tests {
 
     #[test]
     fn allows_suppliers_only_for_missing_fact_families() {
-        let policy = MissingFactEnrichmentPolicy::from_xtream_missing_fact_options(true, true);
+        let policy = MissingFactEnrichmentPolicy::fill_missing(true);
 
         assert!(policy.should_resolve_missing_facts(true, false));
         assert!(policy.should_resolve_missing_facts(false, true));

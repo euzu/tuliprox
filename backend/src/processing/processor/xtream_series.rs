@@ -822,10 +822,9 @@ pub async fn update_series_metadata(
         shared::error::TuliproxError::Config(format!("No Series properties available after fallback creation for {display_id}"))
     })?;
 
-    let missing_fact_policy = MissingFactEnrichmentPolicy::from_xtream_missing_fact_options(
-        resolve_missing_facts,
-        input.has_flag(ConfigInputFlags::ResolveTmdb),
-    );
+    // Xtream's legacy ResolveTmdb input flag currently gates missing identity/temporal fact enrichment.
+    let missing_fact_policy =
+        MissingFactEnrichmentPolicy::fill_missing(resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb));
 
     // 2. Resolve missing TMDB/date facts if allowed for this input
     let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
