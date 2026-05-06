@@ -161,11 +161,21 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test server");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.expect("accept request");
-                let mut buffer = [0; 4096];
-                let read = stream.read(&mut buffer).await.expect("read request");
-                let request = String::from_utf8_lossy(&buffer[..read]);
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                let mut request_bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 1024];
+                    let read = stream.read(&mut buffer).await.expect("read request");
+                    if read == 0 {
+                        break;
+                    }
+                    request_bytes.extend_from_slice(&buffer[..read]);
+                    if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request_bytes);
                 let page = if request.contains("page=2") { 2 } else { 1 };
                 requests.fetch_add(1, Ordering::SeqCst);
                 let body = format!("[{}]", trakt_movie_json(page));

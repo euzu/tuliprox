@@ -1335,6 +1335,7 @@
     "TRAKT": "Trakt",
     "TRAKT_CATEGORY_NAME": "Category name",
     "TRAKT_FUZZY_MATCH_THRESHOLD": "Fuzzy matchthreshold",
+    "TRAKT_TMDB_ONLY": "TMDB only",
     "TRAKT_LISTS": "Lists",
     "TRAKT_LIST_SLUG": "List Slug",
     "TRAKT_USER": "Trakt User",

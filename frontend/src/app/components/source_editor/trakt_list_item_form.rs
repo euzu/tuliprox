@@ -1,7 +1,7 @@
 use crate::{
     app::components::{select::Select, Card, DropDownOption, DropDownSelection, TextButton},
-    config_field, config_field_child, config_field_custom, edit_field_number_u8, edit_field_text,
-    generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u8,
+    edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktContentType, TraktListConfigDto};
@@ -11,6 +11,7 @@ const LABEL_TRAKT_USER: &str = "LABEL.TRAKT_USER";
 const LABEL_TRAKT_LIST_SLUG: &str = "LABEL.TRAKT_LIST_SLUG";
 const LABEL_TRAKT_CATEGORY_NAME: &str = "LABEL.TRAKT_CATEGORY_NAME";
 const LABEL_TRAKT_CONTENT_TYPE: &str = "LABEL.TRAKT_CONTENT_TYPE";
+const LABEL_TRAKT_TMDB_ONLY: &str = "LABEL.TRAKT_TMDB_ONLY";
 const LABEL_TRAKT_FUZZY_MATCH_THRESHOLD: &str = "LABEL.TRAKT_FUZZY_MATCH_THRESHOLD";
 
 generate_form_reducer!(
@@ -21,6 +22,7 @@ generate_form_reducer!(
         ListSlug => list_slug: String,
         CategoryName => category_name: String,
         ContentType => content_type: TraktContentType,
+        TmdbOnly => tmdb_only: bool,
         FuzzyMatchThreshold => fuzzy_match_threshold: u8,
     }
 );
@@ -127,6 +129,12 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
                         />
                     }
                 })}
+            }
+
+            if props.readonly {
+                { config_field_bool!(form_state.form, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only) }
+            } else {
+                { edit_field_bool!(form_state, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only, TraktListFormAction::TmdbOnly) }
             }
 
             if props.readonly {
