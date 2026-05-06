@@ -26,7 +26,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use axum::{
     body::Body,
-    http::{header, Extensions, HeaderMap, HeaderValue, Response, StatusCode},
+    http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
     response::IntoResponse,
 };
 use bytes::Bytes;
@@ -1941,11 +1941,27 @@ async fn open_media_server_stream_for_input(
     let headers = response
         .headers
         .iter()
+        .filter(|(key, _)| !is_hop_by_hop_response_header(key))
         .filter_map(|(key, value)| value.to_str().ok().map(|value| (key.to_string(), value.to_string())))
         .collect::<Vec<_>>();
     let status = response.status;
     let stream = response.body.map_err(|err| StreamError::Stream(err.to_string())).boxed();
     Ok((stream, Some((headers, status, None, None))))
+}
+
+fn is_hop_by_hop_response_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 /// # Panics
@@ -3548,6 +3564,24 @@ mod tests {
                 .expect("provider url should resolve");
 
         assert_eq!(resolved, "https://provider.example/live/provider-user/provider-pass/33486.m3u8");
+    }
+
+    #[test]
+    fn media_server_proxy_response_header_filter_drops_hop_by_hop_headers() {
+        for name in [
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "trailers",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            assert!(is_hop_by_hop_response_header(&HeaderName::from_static(name)));
+        }
+        assert!(!is_hop_by_hop_response_header(&header::CONTENT_TYPE));
     }
 
     #[test]

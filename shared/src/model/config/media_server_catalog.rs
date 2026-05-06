@@ -1,9 +1,10 @@
 use crate::{
     error::TuliproxError,
     utils::{
-        default_as_true, default_media_server_catalog_page_size, default_media_server_catalog_request_delay_ms, deserialize_as_option_string,
-        get_trimmed_string, is_blank_optional_string, is_default_media_server_catalog_page_size,
-        is_default_media_server_catalog_request_delay_ms, is_false, is_non_blank_optional_string, is_true,
+        default_as_true, default_media_server_catalog_page_size, default_media_server_catalog_request_delay_ms,
+        deserialize_as_option_string, get_trimmed_string, is_blank_optional_string,
+        is_default_media_server_catalog_page_size, is_default_media_server_catalog_request_delay_ms, is_false,
+        is_non_blank_optional_string, is_true,
     },
 };
 use enum_iterator::Sequence;
@@ -388,6 +389,17 @@ mod tests {
             vec![MediaServerLibrarySelectorDto::Detailed(MediaServerLibrarySelectorDetailsDto {
                 key: Some("10".to_string()),
                 kind: Some(MediaServerLibraryKindDto::Movies),
+                ..MediaServerLibrarySelectorDetailsDto::default()
+            })]
+        );
+
+        let by_id = serde_json::from_str::<MediaServerInputConfigDto>(r#"{"libraries":[{"id":42,"kind":"tvshows"}]}"#)
+            .expect("numeric id selectors should deserialize as strings");
+        assert_eq!(
+            by_id.libraries,
+            vec![MediaServerLibrarySelectorDto::Detailed(MediaServerLibrarySelectorDetailsDto {
+                id: Some("42".to_string()),
+                kind: Some(MediaServerLibraryKindDto::TvShows),
                 ..MediaServerLibrarySelectorDetailsDto::default()
             })]
         );

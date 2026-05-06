@@ -106,21 +106,13 @@ fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<Medi
     // materialize_media_server_series_info_episodes and rewrite_series_episode_parent_virtual_ids
     // only link episodes whose parent_code is a SeriesInfo uuid.intern(); this fallback is
     // intentionally stable but unlinkable rather than inventing a public series anchor.
-    episode
-        .series_id
-        .as_ref()
-        .and_then(|series_id| {
-            parent_codes
-                .get(&media_server_series_parent_key(&episode.input_name, &episode.server_id, &episode.library_id, series_id))
-                .map(Arc::clone)
-        })
-        .or_else(|| {
-            episode
-                .series_id
-                .as_ref()
-                .map(|series_id| stable_media_server_item_id(&episode.server_id, &episode.library_id, series_id, "series").intern())
-        })
-        .unwrap_or_else(|| "".intern())
+    let Some(series_id) = episode.series_id.as_ref() else {
+        return "".intern();
+    };
+    let stable_id = stable_media_server_item_id(&episode.server_id, &episode.library_id, series_id, "series");
+    parent_codes
+        .get(&media_server_series_parent_key(&episode.input_name, &episode.server_id, &episode.library_id, series_id))
+        .map_or_else(|| stable_id.intern(), Arc::clone)
 }
 
 fn media_server_series_parent_key<'a>(
