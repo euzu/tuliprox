@@ -1,6 +1,9 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::library::{MetadataResolver, MetadataStorage};
+use crate::media_enrichment::xtream::{
+    apply_fact_patch_to_video, video_fact_patch_from_metadata, video_fact_patch_from_year,
+};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -711,11 +714,8 @@ pub async fn update_vod_metadata(
         if missing_date && !properties.name.is_empty() {
             let meta_parse = ptt_parse_title(&properties.name);
             if let Some(year) = meta_parse.year {
-                if properties.details.is_none() {
-                    properties.details = Some(VideoStreamDetailProperties::default());
-                }
-                if let Some(details) = properties.details.as_mut() {
-                    details.release_date = Some(format!("{year}-01-01").into());
+                let patch = video_fact_patch_from_year(&properties, year);
+                if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
                     debug_if_enabled!("Parsed local year for '{}': {}", properties.name, year);
                 }
@@ -774,20 +774,12 @@ pub async fn update_vod_metadata(
             }
 
             if let Some(m) = meta {
-                if properties.tmdb.is_none() {
-                    properties.tmdb = m.tmdb_id();
-                    properties_updated = true;
-                }
                 if properties.details.is_none() {
                     properties.details = Some(VideoStreamDetailProperties::default());
                 }
-                if let Some(details) = properties.details.as_mut() {
-                    if details.release_date.is_none() {
-                        if let Some(year) = m.year() {
-                            details.release_date = Some(format!("{year}-01-01").into());
-                            properties_updated = true;
-                        }
-                    }
+                let patch = video_fact_patch_from_metadata(&properties, &m);
+                if apply_fact_patch_to_video(&mut properties, &patch) {
+                    properties_updated = true;
                 }
                 if properties_updated {
                     let id_display = properties.tmdb.map_or("None".to_string(), |id| id.to_string());

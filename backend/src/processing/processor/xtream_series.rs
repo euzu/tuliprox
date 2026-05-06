@@ -1,6 +1,9 @@
 use crate::api::model::UpdateTask;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::{MetadataResolver, MetadataStorage};
+use crate::media_enrichment::xtream::{
+    apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_year,
+};
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget, MetadataUpdateConfig};
 use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
@@ -843,9 +846,11 @@ pub async fn update_series_metadata(
         if properties.release_date.is_none() {
             let meta_parse = ptt_parse_title(&properties.name);
             if let Some(year) = meta_parse.year {
-                properties.release_date = Some(format!("{year}-01-01").into());
-                properties_updated = true;
-                debug_if_enabled!("Parsed local year for Series '{}': {}", properties.name, year);
+                let patch = series_fact_patch_from_year(&properties, year);
+                if apply_fact_patch_to_series(&mut properties, &patch) {
+                    properties_updated = true;
+                    debug_if_enabled!("Parsed local year for Series '{}': {}", properties.name, year);
+                }
             }
         }
 
@@ -871,12 +876,8 @@ pub async fn update_series_metadata(
         }
 
         if let Some(m) = meta {
-            if properties.tmdb.is_none() {
-                properties.tmdb = m.tmdb_id();
-                properties_updated = true;
-            }
-            if properties.release_date.is_none() {
-                properties.release_date = m.year().map(|y| format!("{y}-01-01").into());
+            let patch = series_fact_patch_from_metadata(&properties, &m);
+            if apply_fact_patch_to_series(&mut properties, &patch) {
                 properties_updated = true;
             }
             if properties_updated {
