@@ -2597,7 +2597,6 @@ impl ActiveUserManager {
 
         connection_data.ts = now;
 
-        let mut touched_session = false;
         for session in &mut connection_data.sessions {
             if session.token == token {
                 // Lightweight HTTP activity (for example HLS manifest reloads) refreshes
@@ -2606,13 +2605,8 @@ impl ActiveUserManager {
                 // and the real segment socket later migrates to that stale addr instead of
                 // being released/preserved.
                 session.ts = now;
-                touched_session = true;
                 break;
             }
-        }
-
-        if !touched_session {
-            return;
         }
     }
 

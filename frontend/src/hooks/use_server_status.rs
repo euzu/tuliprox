@@ -171,6 +171,12 @@ fn apply_downloads_delta(download_streams: &mut Vec<StreamInfo>, delta: &Downloa
 fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserConnectionChange) {
     match event {
         ActiveUserConnectionChange::Updated(stream_info) => {
+            if stream_info.preserved {
+                if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
+                    server_status.active_user_streams.remove(pos);
+                }
+                return;
+            }
             if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
                 server_status.active_user_streams[pos] = stream_info;
             } else {
@@ -418,6 +424,28 @@ mod tests {
         assert_eq!(status.active_users, 0);
         assert_eq!(status.active_user_connections, 0);
         assert!(status.active_user_streams.is_empty());
+    }
+
+    #[test]
+    fn test_preserved_update_removes_active_stream_without_clearing_other_rows() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls);
+        preserved.preserved = true;
+        let other = test_stream(2, "127.0.0.1:5678", Some("tok-other"), PlaylistItemType::LiveHls);
+        let mut status = shared::model::StatusCheck {
+            active_users: 2,
+            active_user_connections: 2,
+            active_user_streams: vec![
+                test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls),
+                other.clone(),
+            ],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(preserved));
+
+        assert_eq!(status.active_user_streams, vec![other]);
+        assert_eq!(status.active_users, 2);
+        assert_eq!(status.active_user_connections, 2);
     }
 
     fn test_download(id: &str, status: TransferStatusDto, kind: TaskKindDto) -> FileDownloadDto {
