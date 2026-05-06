@@ -879,8 +879,6 @@ pub async fn update_series_metadata(
             let patch = series_fact_patch_from_metadata(&properties, &m);
             if apply_fact_patch_to_series(&mut properties, &patch) {
                 properties_updated = true;
-            }
-            if properties_updated {
                 let id_display = properties.tmdb.map_or("None".to_string(), |id| id.to_string());
                 debug_if_enabled!("Resolved TMDB for Series ID {}: {}", display_id, id_display);
             }

@@ -774,14 +774,9 @@ pub async fn update_vod_metadata(
             }
 
             if let Some(m) = meta {
-                if properties.details.is_none() {
-                    properties.details = Some(VideoStreamDetailProperties::default());
-                }
                 let patch = video_fact_patch_from_metadata(&properties, &m);
                 if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
-                }
-                if properties_updated {
                     let id_display = properties.tmdb.map_or("None".to_string(), |id| id.to_string());
                     trace_if_enabled!("Resolved TMDB for '{}' (ID: {}): {}", display_title, display_id, id_display);
                 }
