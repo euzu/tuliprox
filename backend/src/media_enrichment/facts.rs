@@ -71,11 +71,11 @@ pub fn build_missing_fact_patch(current: &MediaItemFacts, supplied: &SuppliedMed
     }
 }
 
-pub fn synthetic_release_date_from_year(year: u32) -> String { format!("{year}-01-01") }
+pub fn synthetic_release_date_from_year(year: u32) -> String { format!("{year:04}-01-01") }
 
 fn valid_tmdb_id(tmdb_id: Option<u32>) -> Option<u32> { tmdb_id.filter(|id| *id > 0) }
 
-fn valid_year(year: Option<u32>) -> Option<u32> { year.filter(|year| *year > 0) }
+fn valid_year(year: Option<u32>) -> Option<u32> { year.filter(|year| (1..=9999).contains(year)) }
 
 #[cfg(test)]
 mod tests {
@@ -131,6 +131,21 @@ mod tests {
     fn zero_ids_and_years_are_not_trusted_facts() {
         let current = MediaItemFacts::movie(None, None);
         let supplied = SuppliedMediaFacts::new(MediaItemKind::Movie, Some(0), None, Some(0));
+
+        let patch = build_missing_fact_patch(&current, &supplied);
+
+        assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn synthetic_release_date_is_zero_padded() {
+        assert_eq!(synthetic_release_date_from_year(99), "0099-01-01");
+    }
+
+    #[test]
+    fn years_over_9999_are_not_trusted_facts() {
+        let current = MediaItemFacts::movie(None, None);
+        let supplied = SuppliedMediaFacts::new(MediaItemKind::Movie, None, None, Some(10000));
 
         let patch = build_missing_fact_patch(&current, &supplied);
 

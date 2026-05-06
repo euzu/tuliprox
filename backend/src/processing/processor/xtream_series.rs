@@ -824,10 +824,13 @@ pub async fn update_series_metadata(
     let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
 
     // 2. Resolve TMDB/Date if missing
+    let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
+    let has_title_candidate = title_candidate.is_some_and(|title| !title.is_empty()) || !properties.name.is_empty();
+
     if resolve_tmdb
         && resolve_tmdb_enabled
         && (properties.tmdb.is_none() || properties.release_date.is_none())
-        && !properties.name.is_empty()
+        && has_title_candidate
     {
         let config = app_config.config.load();
         let library_config = config.library.as_ref();
@@ -842,17 +845,20 @@ pub async fn update_series_metadata(
         let mut tried_title = false;
 
         // Try extracting year locally first
-        if properties.release_date.is_none() {
-            if let Some((year, patch)) = series_fact_patch_from_title(&properties, &properties.name) {
+        let local_title_candidate = title_candidate
+            .filter(|title| !title.is_empty())
+            .unwrap_or(properties.name.as_ref())
+            .to_string();
+        if properties.release_date.is_none() && !local_title_candidate.is_empty() {
+            if let Some((year, patch)) = series_fact_patch_from_title(&properties, &local_title_candidate) {
                 if apply_fact_patch_to_series(&mut properties, &patch) {
                     properties_updated = true;
-                    debug_if_enabled!("Parsed local year for Series '{}': {}", properties.name, year);
+                    debug_if_enabled!("Parsed local year for Series '{}': {}", local_title_candidate, year);
                 }
             }
         }
 
         // 1. & 2. Playlist Title
-        let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
         if let Some(title) = title_candidate {
             if !title.is_empty() {
                 trace!("Resolving TMDB for Series using Playlist Title '{title}' (ID: {display_id})...");

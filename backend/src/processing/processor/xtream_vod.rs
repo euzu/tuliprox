@@ -709,12 +709,18 @@ pub async fn update_vod_metadata(
     let missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
     if resolve_tmdb && resolve_tmdb_enabled && (missing_tmdb || missing_date) {
+        let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
+        let local_title_candidate = title_candidate
+            .filter(|title| !title.is_empty())
+            .unwrap_or(properties.name.as_ref())
+            .to_string();
+
         // Try local parsing first
-        if missing_date && !properties.name.is_empty() {
-            if let Some((year, patch)) = video_fact_patch_from_title(&properties, &properties.name) {
+        if missing_date && !local_title_candidate.is_empty() {
+            if let Some((year, patch)) = video_fact_patch_from_title(&properties, &local_title_candidate) {
                 if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
-                    debug_if_enabled!("Parsed local year for '{}': {}", properties.name, year);
+                    debug_if_enabled!("Parsed local year for '{}': {}", local_title_candidate, year);
                 }
             }
         }
@@ -736,7 +742,6 @@ pub async fn update_vod_metadata(
             let mut tried_title = false;
 
             // 1. & 2. Playlist Title
-            let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
             if let Some(title) = title_candidate {
                 if !title.is_empty() {
                     debug!("Resolving TMDB for VOD using Playlist Title '{title}' (ID: {display_id})...");
