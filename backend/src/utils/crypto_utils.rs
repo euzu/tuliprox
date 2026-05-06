@@ -69,8 +69,8 @@ mod tests {
 
     #[test]
     fn aes_ctr_format_matches_existing_openssl_tokens() {
-        let secret: [u8; 16] = std::array::from_fn(|i| u8::try_from(i).expect("index out of bounds"));
-        let iv: [u8; 16] = std::array::from_fn(|i| u8::try_from(i + 16).expect("index out of bounds"));
+        let secret: [u8; 16] = std::array::from_fn(|i| u8::try_from(i).expect("Invalid secret key length:"));
+        let iv: [u8; 16] = std::array::from_fn(|i| u8::try_from(i + 16).expect("Invalid IV length:"));
         let plain = "hello world";
         let expected_token = "EBESExQVFhcYGRobHB0eH2-bgxiO9XQB4mKK";
 
