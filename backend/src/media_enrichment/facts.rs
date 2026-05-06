@@ -1,5 +1,3 @@
-use crate::library::MediaMetadata;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaItemKind {
     Movie,
@@ -46,11 +44,6 @@ impl SuppliedMediaFacts {
     }
 
     pub fn from_release_year(kind: MediaItemKind, year: u32) -> Self { Self::new(kind, None, None, Some(year)) }
-
-    pub fn from_metadata(metadata: &MediaMetadata) -> Self {
-        let kind = if metadata.is_movie() { MediaItemKind::Movie } else { MediaItemKind::Series };
-        Self::new(kind, metadata.tmdb_id(), None, metadata.year())
-    }
 
     fn resolved_release_date(&self) -> Option<String> {
         self.release_date.clone().or_else(|| self.release_year.map(synthetic_release_date_from_year))

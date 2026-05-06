@@ -2,7 +2,7 @@ use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::library::{MetadataResolver, MetadataStorage};
 use crate::media_enrichment::xtream::{
-    apply_fact_patch_to_video, video_fact_patch_from_metadata, video_fact_patch_from_year,
+    apply_fact_patch_to_video, video_fact_patch_from_metadata, video_fact_patch_from_title,
 };
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
@@ -16,7 +16,6 @@ use crate::processing::processor::{
     ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
-use crate::ptt::ptt_parse_title;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
@@ -712,9 +711,7 @@ pub async fn update_vod_metadata(
     if resolve_tmdb && resolve_tmdb_enabled && (missing_tmdb || missing_date) {
         // Try local parsing first
         if missing_date && !properties.name.is_empty() {
-            let meta_parse = ptt_parse_title(&properties.name);
-            if let Some(year) = meta_parse.year {
-                let patch = video_fact_patch_from_year(&properties, year);
+            if let Some((year, patch)) = video_fact_patch_from_title(&properties, &properties.name) {
                 if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
                     debug_if_enabled!("Parsed local year for '{}': {}", properties.name, year);

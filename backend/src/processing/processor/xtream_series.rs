@@ -2,7 +2,7 @@ use crate::api::model::UpdateTask;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::{MetadataResolver, MetadataStorage};
 use crate::media_enrichment::xtream::{
-    apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_year,
+    apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_title,
 };
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget, MetadataUpdateConfig};
@@ -16,7 +16,6 @@ use crate::processing::processor::{
     ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
-use crate::ptt::ptt_parse_title;
 use crate::repository::persists_input_series_info;
 use crate::repository::{
     get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource, PlaylistSource,
@@ -844,9 +843,7 @@ pub async fn update_series_metadata(
 
         // Try extracting year locally first
         if properties.release_date.is_none() {
-            let meta_parse = ptt_parse_title(&properties.name);
-            if let Some(year) = meta_parse.year {
-                let patch = series_fact_patch_from_year(&properties, year);
+            if let Some((year, patch)) = series_fact_patch_from_title(&properties, &properties.name) {
                 if apply_fact_patch_to_series(&mut properties, &patch) {
                     properties_updated = true;
                     debug_if_enabled!("Parsed local year for Series '{}': {}", properties.name, year);
