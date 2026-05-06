@@ -1,6 +1,7 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::library::{MetadataResolver, MetadataStorage};
+use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
 use crate::media_enrichment::xtream::{
     apply_fact_patch_to_video, video_fact_patch_from_metadata, video_fact_patch_from_title,
 };
@@ -512,7 +513,7 @@ async fn update_vod_info_immediate(
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
-    let resolve_tmdb =
+    let resolve_missing_facts =
         fetch_info || reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_vod_metadata(
@@ -525,7 +526,7 @@ async fn update_vod_info_immediate(
         Some(&pli.header.title),
         false,
         fetch_info,
-        resolve_tmdb,
+        resolve_missing_facts,
         reasons.contains(ResolveReason::Probe),
         db_query,
         None,
@@ -540,7 +541,7 @@ async fn update_vod_info_immediate(
 /// * `save` - If true, persists changes to the input database immediately (Instant strategy).
 ///   If false, returns the properties so the caller can batch persist them (Bundled strategy).
 /// * `fetch_info` - If true, fetches details from Provider API. If false, uses existing/dummy data.
-/// * `resolve_tmdb` - If true, resolves missing TMDB/date metadata from available titles.
+/// * `resolve_missing_facts` - If true, resolves missing TMDB/date facts from available titles.
 /// * `db_query` - Optional pre-opened DB handle to avoid re-opening file.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 pub async fn update_vod_metadata(
@@ -553,7 +554,7 @@ pub async fn update_vod_metadata(
     playlist_title: Option<&str>,
     save: bool,
     fetch_info: bool,
-    resolve_tmdb: bool,
+    resolve_missing_facts: bool,
     do_probe: bool,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
     tmdb_resolved_out: Option<&AtomicBool>,
@@ -702,13 +703,16 @@ pub async fn update_vod_metadata(
         return Err(shared::error::TuliproxError::Config(format!("No VOD properties available after fallback creation for {display_id}")));
     };
 
-    let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
+    let missing_fact_policy = MissingFactEnrichmentPolicy::from_xtream_missing_fact_options(
+        resolve_missing_facts,
+        input.has_flag(ConfigInputFlags::ResolveTmdb),
+    );
 
-    // 2. Resolve TMDB/Date if missing and explicitly enabled for this input
+    // 2. Resolve missing TMDB/date facts if allowed for this input
     let missing_tmdb = properties.tmdb.is_none();
     let missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
-    if resolve_tmdb && resolve_tmdb_enabled && (missing_tmdb || missing_date) {
+    if missing_fact_policy.should_resolve_missing_facts(missing_tmdb, missing_date) {
         let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
         let local_title_candidate = title_candidate
             .filter(|title| !title.is_empty())
@@ -716,7 +720,7 @@ pub async fn update_vod_metadata(
             .to_string();
 
         // Try local parsing first
-        if missing_date && !local_title_candidate.is_empty() {
+        if missing_fact_policy.should_try_parsed_title_supplier(missing_date) && !local_title_candidate.is_empty() {
             if let Some((year, patch)) = video_fact_patch_from_title(&properties, &local_title_candidate) {
                 if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
@@ -728,7 +732,7 @@ pub async fn update_vod_metadata(
         // Re-check missing date after local parse
         let still_missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
-        if missing_tmdb || still_missing_date {
+        if missing_fact_policy.should_try_tmdb_supplier(missing_tmdb, still_missing_date) {
             let config = app_config.config.load();
             let library_config = config.library.as_ref();
             let metadata_update_config = config.metadata_update.as_ref();
@@ -745,7 +749,9 @@ pub async fn update_vod_metadata(
             if let Some(title) = title_candidate {
                 if !title.is_empty() {
                     debug!("Resolving TMDB for VOD using Playlist Title '{title}' (ID: {display_id})...");
-                    meta = meta_resolver.resolve_from_title(title, properties.tmdb, true, resolve_tmdb_enabled).await;
+                    meta = meta_resolver
+                        .resolve_from_title(title, properties.tmdb, true, missing_fact_policy.tmdb_supplier_enabled())
+                        .await;
                     tried_title = true;
                 }
             }
@@ -759,7 +765,12 @@ pub async fn update_vod_metadata(
                 if !tried_title || !title_already_tried {
                     trace!("Fallback to API Name '{}'...", properties.name);
                     meta = meta_resolver
-                        .resolve_from_title(&properties.name, properties.tmdb, true, resolve_tmdb_enabled)
+                        .resolve_from_title(
+                            &properties.name,
+                            properties.tmdb,
+                            true,
+                            missing_fact_policy.tmdb_supplier_enabled(),
+                        )
                         .await;
                 }
             }
@@ -769,8 +780,9 @@ pub async fn update_vod_metadata(
                 if let Some(o_name) = properties.details.as_ref().and_then(|d| d.o_name.as_deref()) {
                     if !o_name.is_empty() && o_name != properties.name.as_ref() {
                         trace!("Fallback to API Original Name '{o_name}'...");
-                        meta =
-                            meta_resolver.resolve_from_title(o_name, properties.tmdb, true, resolve_tmdb_enabled).await;
+                        meta = meta_resolver
+                            .resolve_from_title(o_name, properties.tmdb, true, missing_fact_policy.tmdb_supplier_enabled())
+                            .await;
                     }
                 }
             }
@@ -952,7 +964,7 @@ pub async fn update_vod_metadata(
         out.store(probe_pending, Ordering::Relaxed);
     }
 
-    let probe_only_unresolved = do_probe && !fetch_info && !resolve_tmdb && !properties_updated && !fetched_new;
+    let probe_only_unresolved = do_probe && !fetch_info && !resolve_missing_facts && !properties_updated && !fetched_new;
     if probe_only_unresolved {
         if let Some(kind) = probe_failure {
             let err = match kind {
