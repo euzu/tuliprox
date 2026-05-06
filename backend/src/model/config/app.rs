@@ -63,6 +63,41 @@ impl AppConfig {
     pub fn set_mappings(&self, mapping_path: &str, mappings_cfg: &Mappings) {
         self.set_mapping_path(Some(mapping_path));
         let sources = self.sources.load();
+
+        // Warn only if mappings were actually loaded; target mapping stores still need updating below.
+        if !mappings_cfg.mappings.mapping.is_empty() {
+            // Collect all mapping_ids referenced by targets
+            let mut referenced_ids: HashSet<&str> = HashSet::new();
+            for source in &sources.sources {
+                for target in &source.targets {
+                    if let Some(ref ids) = target.mapping_ids {
+                        for id in ids {
+                            referenced_ids.insert(id.as_str());
+                        }
+                    }
+                }
+            }
+
+            // Warn about loaded-but-unreferenced mappings (may be intentional template/experiment files)
+            for mapping in &mappings_cfg.mappings.mapping {
+                if !referenced_ids.contains(mapping.id.as_str()) {
+                    warn!(
+                        "Mapping '{}' is loaded but not referenced by any target; it has no effect unless added to a target mapping list",
+                        mapping.id
+                    );
+                }
+            }
+
+            // Warn about mappings that have neither mapper nor counter
+            for mapping in &mappings_cfg.mappings.mapping {
+                let has_mapper = mapping.mapper.as_ref().is_some_and(|m| !m.is_empty());
+                let has_counter = mapping.t_counter.as_ref().is_some_and(|c| !c.is_empty());
+                if !has_mapper && !has_counter {
+                    warn!("Mapping '{}' has neither mapper nor counter and has no effect", mapping.id);
+                }
+            }
+        }
+
         for source in &sources.sources {
             for target in &source.targets {
                 if let Some(mapping_ids) = &target.mapping_ids {
@@ -484,5 +519,98 @@ impl AppConfig {
 
     pub async fn is_ffmpeg_available(&self) -> bool {
         self.media_tools.is_ffmpeg_available().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ConfigSource, Mapping, MappingDefinition, Mapper};
+    use crate::utils::FileLockManager;
+    use shared::foundation::Filter;
+    use shared::model::{ConfigPaths, ProcessingOrder};
+
+    fn empty_paths() -> ConfigPaths {
+        ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }
+    }
+
+    fn test_app_config_with_target(target: Arc<ConfigTarget>) -> AppConfig {
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig {
+                sources: vec![ConfigSource { inputs: Vec::new(), targets: vec![target] }],
+                ..SourcesConfig::default()
+            })),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(empty_paths())),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        }
+    }
+
+    fn target_with_mapping_id(mapping_id: &str) -> Arc<ConfigTarget> {
+        Arc::new(ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "target".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: Vec::new(),
+            rename: None,
+            mapping_ids: Some(vec![mapping_id.to_string()]),
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::Frm,
+            watch: None,
+            use_memory_cache: false,
+        })
+    }
+
+    fn mappings_with_one_mapper(mapping_id: &str) -> Mappings {
+        Mappings {
+            mappings: MappingDefinition {
+                templates: None,
+                mapping: vec![Mapping {
+                    id: mapping_id.to_string(),
+                    mapper: Some(vec![Mapper::default()]),
+                    ..Mapping::default()
+                }],
+            },
+        }
+    }
+
+    fn empty_mappings() -> Mappings {
+        Mappings {
+            mappings: MappingDefinition { templates: None, mapping: Vec::new() },
+        }
+    }
+
+    #[test]
+    fn set_mappings_clears_existing_target_mappings_when_reload_is_empty() {
+        let target = target_with_mapping_id("map1");
+        let app_config = test_app_config_with_target(Arc::clone(&target));
+
+        app_config.set_mappings("mappings", &mappings_with_one_mapper("map1"));
+        assert!(target.mapping.load().is_some(), "initial mapping registration should attach mapping to target");
+
+        app_config.set_mappings("mappings", &empty_mappings());
+        assert!(target.mapping.load().is_none(), "empty mapping reload must clear stale target mappings");
     }
 }
