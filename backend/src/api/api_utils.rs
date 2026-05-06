@@ -764,7 +764,6 @@ pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOpt
 /// Metadata capturing which grace strategy was chosen and the original connection kind,
 /// used to reconstruct the remaining-strategies slice on user-grace failure.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct GraceResolutionContext {
     /// Index of the grace strategy that was actually used.
     pub(crate) strategy_index: usize,
@@ -773,12 +772,14 @@ pub(crate) struct GraceResolutionContext {
     /// The original `ConnectionKind` from the admission decision that led to this grace.
     /// Preserved so that the remaining-strategy fallback can return the correct kind
     /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.
+    #[allow(dead_code)]
+    // Stored so the original admission kind remains available when follow-up
+    // grace fallback reconstruction starts using it again.
     pub(crate) kind: Option<crate::api::model::ConnectionKind>,
 }
 
 /// Structured result of evaluating admission strategies.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct AdmissionStrategyResolution {
     pub(crate) admission: crate::api::model::ConnectionAdmission,
     pub(crate) grace_mode: Option<crate::api::model::GraceMode>,

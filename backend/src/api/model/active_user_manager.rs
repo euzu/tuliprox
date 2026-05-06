@@ -2053,6 +2053,17 @@ impl ActiveUserManager {
             false
         };
         if !cleared {
+            let can_remove_registration = !connection_data.has_session_addr(addr)
+                && !connection_data.streams.iter().any(|stream| stream.addr == *addr);
+            if can_remove_registration {
+                let can_remove = user_connections
+                    .key_by_addr
+                    .get(addr)
+                    .is_some_and(|registration| registration.username.is_empty() || registration.username == username);
+                if can_remove {
+                    user_connections.key_by_addr.remove(addr);
+                }
+            }
             return;
         }
 
@@ -6300,6 +6311,68 @@ mod tests {
         assert!(!connections.key_by_addr.contains_key(&manifest_addr));
         let data = connections.by_key.get(&user.username).expect("user should exist");
         assert_eq!(data.streams[0].addr, segment_addr);
+        assert!(!data.sessions[0].active_addrs.contains(&manifest_addr));
+    }
+
+    #[tokio::test]
+    async fn clear_unbound_session_addr_prunes_touch_only_manifest_addr() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let segment_addr: SocketAddr = "127.0.0.1:55036".parse().unwrap();
+        let manifest_addr: SocketAddr = "127.0.0.1:55037".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-hls-segment-3".to_string(), "127.0.0.1".to_string(), segment_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-hls-manifest-touch-clear".to_string();
+        user.max_connections = 1;
+
+        manager.add_connection(&segment_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-hls-manifest-touch-clear",
+                virtual_id: 7790,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &segment_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 604,
+                meter_uid: 704,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(7790),
+                user_agent: Cow::Borrowed("player/1.0"),
+                session_token: Some("tok-hls-manifest-touch-clear"),
+            })
+            .await
+            .expect("stream should be created");
+
+        manager
+            .touch_http_activity(&user.username, "tok-hls-manifest-touch-clear", &manifest_addr)
+            .await;
+        manager
+            .clear_unbound_session_addr(&user.username, "tok-hls-manifest-touch-clear", &manifest_addr)
+            .await;
+
+        let connections = manager.connections.read().await;
+        assert!(!connections.key_by_addr.contains_key(&manifest_addr));
+        let data = connections.by_key.get(&user.username).expect("user should exist");
+        assert_eq!(data.streams[0].addr, segment_addr);
+        assert_eq!(data.sessions[0].addr, segment_addr);
         assert!(!data.sessions[0].active_addrs.contains(&manifest_addr));
     }
 

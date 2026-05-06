@@ -3,6 +3,7 @@
   justify-content: center;
   align-items: center;
   fill: var(--icon-button-color);
+  color: var(--icon-button-color);
   background-color: transparent;
   border: none;
   border-radius: var(--border-radius);
@@ -15,6 +16,7 @@
   &:focus,
   &:hover {
     fill: var(--icon-button-hover-color);
+    color: var(--icon-button-hover-color);
     outline: none;
   }
 

@@ -73,8 +73,6 @@
         &:nth-child(even) {
           background-color: var(--table-alternate-background-color);
         }
-        &:nth-child(odd) {
-        }
         &:not(:last-child) {
           border-bottom: 1px solid var(--border-color);
         }
@@ -110,4 +108,44 @@
     width: 100%;
     text-align: right;
   }
+}
+
+.tp__paged-table {
+
+  &__controls {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+    padding: var(--padding-default) 0;
+
+  }
+
+  &__paging-info {
+    display: flex;
+    flex-flow: row nowrap;
+    gap: var(--gap-larger);
+    align-items: center;
+  }
+
+  &__size {
+    display: flex;
+    flex-flow: row nowrap;
+    gap: var(--gap-default);
+    align-items: center;
+  }
+
+  &__buttons {
+    display: flex;
+    flex-flow: row nowrap;
+    gap: var(--gap-default);
+    align-items: center;
+  }
+
+  &__pages {
+    display: flex;
+    flex-flow: row nowrap;
+    gap: var(--gap-default);
+    align-items: center;
+  }
+
 }

@@ -1,11 +1,12 @@
+use crate::model::macros;
 use crate::utils::arc_str_serde;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use shared::model::{PlaylistItemType, QosSnapshotDailyBucketDto, QosSnapshotRecordDto, QosSnapshotWindowDto};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use shared::model::PlaylistItemType;
 use crate::repository::{BPlusTree, BPlusTreeUpdate, FlushPolicy};
 
 const SNAPSHOT_FILE_NAME: &str = "qos_snapshot.db";
@@ -33,6 +34,56 @@ pub struct QosSnapshotWindow {
     pub confidence: u8,
 }
 
+macros::from_impl!(QosSnapshotWindow);
+
+impl From<&QosSnapshotWindowDto> for QosSnapshotWindow {
+    fn from(dto: &QosSnapshotWindowDto) -> Self {
+        Self {
+            connect_count: dto.connect_count,
+            connect_failed_count: dto.connect_failed_count,
+            startup_capacity_failure_count: dto.startup_capacity_failure_count,
+            provider_open_failure_count: dto.provider_open_failure_count,
+            first_byte_failure_count: dto.first_byte_failure_count,
+            runtime_abort_count: dto.runtime_abort_count,
+            provider_closed_count: dto.provider_closed_count,
+            preempt_count: dto.preempt_count,
+            avg_first_byte_latency_ms: dto.avg_first_byte_latency_ms,
+            avg_session_duration_secs: dto.avg_session_duration_secs,
+            avg_provider_reconnect_count: dto.avg_provider_reconnect_count,
+            last_success_ts: dto.last_success_ts,
+            last_failure_ts: dto.last_failure_ts,
+            successive_failure_streak: dto.successive_failure_streak,
+            sample_size: dto.sample_size,
+            score: dto.score,
+            confidence: dto.confidence,
+        }
+    }
+}
+
+impl From<&QosSnapshotWindow> for QosSnapshotWindowDto {
+    fn from(entity: &QosSnapshotWindow) -> Self {
+        Self {
+            connect_count: entity.connect_count,
+            connect_failed_count: entity.connect_failed_count,
+            startup_capacity_failure_count: entity.startup_capacity_failure_count,
+            provider_open_failure_count: entity.provider_open_failure_count,
+            first_byte_failure_count: entity.first_byte_failure_count,
+            runtime_abort_count: entity.runtime_abort_count,
+            provider_closed_count: entity.provider_closed_count,
+            preempt_count: entity.preempt_count,
+            avg_first_byte_latency_ms: entity.avg_first_byte_latency_ms,
+            avg_session_duration_secs: entity.avg_session_duration_secs,
+            avg_provider_reconnect_count: entity.avg_provider_reconnect_count,
+            last_success_ts: entity.last_success_ts,
+            last_failure_ts: entity.last_failure_ts,
+            successive_failure_streak: entity.successive_failure_streak,
+            sample_size: entity.sample_size,
+            score: entity.score,
+            confidence: entity.confidence,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QosSnapshotDailyBucket {
     pub connect_count: u64,
@@ -53,6 +104,54 @@ pub struct QosSnapshotDailyBucket {
     pub last_failure_ts: Option<u64>,
 }
 
+macros::from_impl!(QosSnapshotDailyBucket);
+
+impl From<&QosSnapshotDailyBucketDto> for QosSnapshotDailyBucket {
+    fn from(dto: &QosSnapshotDailyBucketDto) -> Self {
+        Self {
+            connect_count: dto.connect_count,
+            connect_failed_count: dto.connect_failed_count,
+            startup_capacity_failure_count: dto.startup_capacity_failure_count,
+            provider_open_failure_count: dto.provider_open_failure_count,
+            first_byte_failure_count: dto.first_byte_failure_count,
+            runtime_abort_count: dto.runtime_abort_count,
+            provider_closed_count: dto.provider_closed_count,
+            preempt_count: dto.preempt_count,
+            total_first_byte_latency_ms: dto.total_first_byte_latency_ms,
+            total_first_byte_latency_samples: dto.total_first_byte_latency_samples,
+            total_session_duration_secs: dto.total_session_duration_secs,
+            total_session_duration_samples: dto.total_session_duration_samples,
+            total_provider_reconnect_count: dto.total_provider_reconnect_count,
+            total_provider_reconnect_samples: dto.total_provider_reconnect_samples,
+            last_success_ts: dto.last_success_ts,
+            last_failure_ts: dto.last_failure_ts,
+        }
+    }
+}
+
+impl From<&QosSnapshotDailyBucket> for QosSnapshotDailyBucketDto {
+    fn from(entity: &QosSnapshotDailyBucket) -> Self {
+        Self {
+            connect_count: entity.connect_count,
+            connect_failed_count: entity.connect_failed_count,
+            startup_capacity_failure_count: entity.startup_capacity_failure_count,
+            provider_open_failure_count: entity.provider_open_failure_count,
+            first_byte_failure_count: entity.first_byte_failure_count,
+            runtime_abort_count: entity.runtime_abort_count,
+            provider_closed_count: entity.provider_closed_count,
+            preempt_count: entity.preempt_count,
+            total_first_byte_latency_ms: entity.total_first_byte_latency_ms,
+            total_first_byte_latency_samples: entity.total_first_byte_latency_samples,
+            total_session_duration_secs: entity.total_session_duration_secs,
+            total_session_duration_samples: entity.total_session_duration_samples,
+            total_provider_reconnect_count: entity.total_provider_reconnect_count,
+            total_provider_reconnect_samples: entity.total_provider_reconnect_samples,
+            last_success_ts: entity.last_success_ts,
+            last_failure_ts: entity.last_failure_ts,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QosSnapshotRecord {
     pub stream_identity_key: String,
@@ -71,6 +170,56 @@ pub struct QosSnapshotRecord {
     pub window_7d: QosSnapshotWindow,
     pub window_30d: QosSnapshotWindow,
     pub daily_buckets: BTreeMap<String, QosSnapshotDailyBucket>,
+}
+
+macros::from_impl!(QosSnapshotRecord);
+
+impl From<&QosSnapshotRecordDto> for QosSnapshotRecord {
+    fn from(dto: &QosSnapshotRecordDto) -> Self {
+        Self {
+            stream_identity_key: dto.stream_identity_key.clone(),
+            input_name: Arc::from(dto.input_name.as_str()),
+            target_name: Arc::from(dto.target_name.as_str()),
+            provider_name: Arc::from(dto.provider_name.as_str()),
+            provider_id: dto.provider_id,
+            virtual_id: dto.virtual_id,
+            item_type: dto.item_type,
+            updated_at: dto.updated_at.unwrap_or(0),
+            last_event_at: dto.last_event_at.unwrap_or(0),
+            window_24h: QosSnapshotWindow::from(&dto.window_24h),
+            window_7d: QosSnapshotWindow::from(&dto.window_7d),
+            window_30d: QosSnapshotWindow::from(&dto.window_30d),
+            daily_buckets: dto
+                .daily_buckets
+                .iter()
+                .map(|(day, bucket)| (day.clone(), QosSnapshotDailyBucket::from(bucket)))
+                .collect(),
+        }
+    }
+}
+
+impl From<&QosSnapshotRecord> for QosSnapshotRecordDto {
+    fn from(entity: &QosSnapshotRecord) -> Self {
+        Self {
+            stream_identity_key: entity.stream_identity_key.clone(),
+            input_name: entity.input_name.to_string(),
+            target_name: entity.target_name.to_string(),
+            provider_name: entity.provider_name.to_string(),
+            provider_id: entity.provider_id,
+            virtual_id: entity.virtual_id,
+            item_type: entity.item_type,
+            updated_at: Some(entity.updated_at),
+            last_event_at: Some(entity.last_event_at),
+            window_24h: QosSnapshotWindowDto::from(&entity.window_24h),
+            window_7d: QosSnapshotWindowDto::from(&entity.window_7d),
+            window_30d: QosSnapshotWindowDto::from(&entity.window_30d),
+            daily_buckets: entity
+                .daily_buckets
+                .iter()
+                .map(|(day, bucket)| (day.clone(), QosSnapshotDailyBucketDto::from(bucket)))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
