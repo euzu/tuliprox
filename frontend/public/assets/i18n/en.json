@@ -1433,7 +1433,14 @@
     "HIDE_TRANSFERRED": "Hide Transferred",
     "HIDE_PLAYER": "Hide Player",
     "HIDE_USER_COMMENT": "Hide User Comment",
-    "HIDE_EPG": "Hide EPG"
+    "HIDE_EPG": "Hide EPG",
+    "ROWS": "Rows",
+    "FIRST_PAGE": "First Page",
+    "LAST_PAGE": "Last Page",
+    "NEXT_PAGE": "Next Page",
+    "PREVIOUS_PAGE": "Previous Page",
+    "PAGE": "Page",
+    "PAGES": "Pages"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

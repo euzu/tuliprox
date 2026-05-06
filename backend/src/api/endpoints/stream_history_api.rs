@@ -13,6 +13,8 @@ use crate::utils::stream_history_viewer::{
     discover_files, resolve_time_range, CompiledFilter,
     StreamHistoryQuery, TimeRange,
 };
+use crate::utils::{ default_page, default_page_size};
+
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -42,10 +44,6 @@ pub(crate) struct HistoryPageParams {
     #[serde(rename = "search_field")]
     pub search_fields: Option<Vec<String>>,
 }
-
-fn default_page() -> u32 { 1 }
-
-fn default_page_size() -> u16 { 50 }
 
 // TODO make shared Search fields
 

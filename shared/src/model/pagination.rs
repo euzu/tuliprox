@@ -1,8 +1,5 @@
+use crate::utils::{default_page, default_page_size};
 use serde::{Deserialize, Serialize};
-
-fn default_page() -> u32 { 1 }
-
-fn default_page_size() -> u16 { 50 }
 
 /// Search mode for paged queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
