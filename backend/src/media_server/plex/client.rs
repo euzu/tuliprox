@@ -116,7 +116,7 @@ impl PlexCatalogClient {
         })?;
         let identity = self.fetch_identity(&base_url, &token).await?;
         verify_direct_selectors(&self.config, &identity)?;
-        let status = identity.into_status(None)?;
+        let status = identity.into_status(None, None)?;
         Ok(PlexConnectionState { base_url, token, status })
     }
 
@@ -139,8 +139,8 @@ impl PlexCatalogClient {
         for candidate in candidates {
             match self.fetch_identity(&candidate, &resource_token).await {
                 Ok(identity) => {
-                    verify_resource_identity(resource.machine_identifier.as_deref(), &identity)?;
-                    let status = identity.into_status(resource.owned.map(|owned| owned != 0))?;
+                    verify_resource_identity(resource, &identity)?;
+                    let status = identity.into_status(resource.client_identifier.as_deref(), resource.owned.map(|owned| owned != 0))?;
                     return Ok(PlexConnectionState { base_url: candidate, token: resource_token, status });
                 }
                 Err(error) => last_error = Some(error),
@@ -427,12 +427,18 @@ struct PlexIdentityDto {
 }
 
 impl PlexIdentityDto {
-    fn into_status(self, owned: Option<bool>) -> Result<MediaServerStatus, MediaServerError> {
-        let server_id = self.machine_identifier.as_deref().and_then(non_blank).map(Arc::<str>::from).ok_or_else(|| {
-            MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
-                .provider("plex")
-                .detail("Plex PMS identity did not expose a stable machine identifier")
-        })?;
+    fn into_status(self, fallback_server_id: Option<&str>, owned: Option<bool>) -> Result<MediaServerStatus, MediaServerError> {
+        let server_id = self
+            .machine_identifier
+            .as_deref()
+            .and_then(non_blank)
+            .or_else(|| fallback_server_id.and_then(non_blank))
+            .map(Arc::<str>::from)
+            .ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
+                    .provider("plex")
+                    .detail("Plex PMS identity did not expose a stable machine identifier")
+            })?;
         Ok(MediaServerStatus {
             kind: MediaServerKind::Plex,
             server_id,
@@ -501,10 +507,7 @@ fn select_resource<'a>(
             .filter(|resource| resource.machine_identifier.as_deref().is_some_and(|value| value == machine_id))
             .collect::<Vec<_>>()
     } else if let Some(server_id) = config.server_id.as_deref() {
-        plex_servers
-            .into_iter()
-            .filter(|resource| resource.client_identifier.as_deref().is_some_and(|value| value == server_id))
-            .collect::<Vec<_>>()
+        plex_servers.into_iter().filter(|resource| resource_matches_server_id(resource, server_id)).collect::<Vec<_>>()
     } else if let Some(server_name) = config.server_name.as_deref() {
         plex_servers
             .into_iter()
@@ -583,11 +586,22 @@ fn verify_direct_selectors(config: &PlexClientConfig, identity: &PlexIdentityDto
     Ok(())
 }
 
-fn verify_resource_identity(resource_machine_id: Option<&str>, identity: &PlexIdentityDto) -> Result<(), MediaServerError> {
-    if let Some(resource_machine_id) = resource_machine_id {
+fn resource_matches_server_id(resource: &crate::media_server::plex::dto::PlexResourceDto, server_id: &str) -> bool {
+    // For Plex Media Server resources, MyPlex exposes the stable server identity as
+    // clientIdentifier. PMS /identity exposes the same identity as machineIdentifier.
+    resource.client_identifier.as_deref().is_some_and(|value| value == server_id)
+        || resource.machine_identifier.as_deref().is_some_and(|value| value == server_id)
+}
+
+fn verify_resource_identity(
+    resource: &crate::media_server::plex::dto::PlexResourceDto,
+    identity: &PlexIdentityDto,
+) -> Result<(), MediaServerError> {
+    let expected_server_id = resource.machine_identifier.as_deref().or(resource.client_identifier.as_deref());
+    if let Some(expected_server_id) = expected_server_id {
         verify_selector(
             identity.machine_identifier.as_deref(),
-            resource_machine_id,
+            expected_server_id,
             "selected Plex resource identity did not match PMS identity",
         )?;
     }
@@ -742,6 +756,61 @@ mod tests {
         let selected = select_resource(&resources, &config()).expect("resource selected");
 
         assert_eq!(selected.machine_identifier.as_deref(), Some("machine-redacted"));
+    }
+
+    #[test]
+    fn server_id_selector_matches_myplex_client_identifier_and_verifies_pms_identity() {
+        let mut config = config();
+        config.machine_id = None;
+        config.server_id = Some("machine-redacted".into());
+        let resource = PlexResourceDto {
+            name: Some("Server Redacted".to_string()),
+            product: Some("Plex Media Server".to_string()),
+            product_version: None,
+            client_identifier: Some("machine-redacted".to_string()),
+            machine_identifier: None,
+            owned: Some(1),
+            access_token: Some("resource-token-redacted".to_string()),
+            connections: Vec::new(),
+        };
+        let resources = [resource];
+        let selected = select_resource(&resources, &config).expect("resource selected by server_id");
+        let identity = PlexIdentityDto {
+            machine_identifier: Some("machine-redacted".to_string()),
+            friendly_name: Some("PMS Redacted".to_string()),
+            version: Some("1.0".to_string()),
+        };
+
+        verify_resource_identity(selected, &identity).expect("MyPlex resource matches PMS identity");
+        let status = identity
+            .into_status(selected.client_identifier.as_deref(), selected.owned.map(|owned| owned != 0))
+            .expect("status maps");
+
+        assert_eq!(status.server_id.as_ref(), "machine-redacted");
+        assert_eq!(status.owned, Some(true));
+    }
+
+    #[test]
+    fn selected_resource_identity_rejects_client_identifier_mismatch() {
+        let resource = PlexResourceDto {
+            name: Some("Server Redacted".to_string()),
+            product: Some("Plex Media Server".to_string()),
+            product_version: None,
+            client_identifier: Some("resource-redacted".to_string()),
+            machine_identifier: None,
+            owned: Some(0),
+            access_token: Some("resource-token-redacted".to_string()),
+            connections: Vec::new(),
+        };
+        let identity = PlexIdentityDto {
+            machine_identifier: Some("machine-redacted".to_string()),
+            friendly_name: Some("PMS Redacted".to_string()),
+            version: Some("1.0".to_string()),
+        };
+
+        let error = verify_resource_identity(&resource, &identity).expect_err("identity mismatch is rejected");
+
+        assert_eq!(error.kind, MediaServerErrorKind::MediaServerDiscoveryFailed);
     }
 
     #[test]

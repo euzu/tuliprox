@@ -1656,7 +1656,7 @@ async fn create_stream_response_details(
                     sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
                 );
                 (None, None, None)
-            } else if is_media_server_playback_url(input, request_url.as_ref()) {
+            } else if is_media_server_stream_ref_url(request_url.as_ref()) {
                 match open_media_server_stream_for_input(app_state, input, request_url.as_ref(), req_headers).await {
                     Ok((stream, stream_info)) => (Some(stream), stream_info, None),
                     Err(err) => {
@@ -1876,7 +1876,11 @@ where
 }
 
 fn is_media_server_playback_url(input: &ConfigInput, stream_url: &str) -> bool {
-    input.input_type.is_media_server() || stream_url.starts_with("media-server://")
+    input.input_type.is_media_server() || is_media_server_stream_ref_url(stream_url)
+}
+
+fn is_media_server_stream_ref_url(stream_url: &str) -> bool {
+    Url::parse(stream_url).is_ok_and(|url| url.scheme() == "media-server")
 }
 
 fn is_throttled_stream(item_type: PlaylistItemType, throttle_kbps: usize) -> bool {
@@ -3566,6 +3570,10 @@ mod tests {
             "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
         ));
         assert!(!is_media_server_playback_url(&m3u_input, "https://provider.example/stream.mkv"));
+        assert!(!is_media_server_stream_ref_url("https://provider.example/stream.mkv"));
+        assert!(is_media_server_stream_ref_url(
+            "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+        ));
         assert_eq!(
             resolve_request_url_for_logging(
                 &plex_input,

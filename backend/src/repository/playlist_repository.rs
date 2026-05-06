@@ -232,23 +232,23 @@ fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<Ser
         return None;
     }
 
-    let episode = match header.additional_properties.as_ref() {
-        Some(StreamProperties::Episode(episode)) => Some(episode.as_ref()),
-        _ => None,
+    let Some(StreamProperties::Episode(episode)) = header.additional_properties.as_ref() else {
+        return None;
     };
+    let episode = episode.as_ref();
 
     Some(SeriesStreamDetailEpisodeProperties {
         id: header.virtual_id,
-        episode_num: episode.map_or(0, |ep| ep.episode),
-        season: episode.map_or(0, |ep| ep.season),
+        episode_num: episode.episode,
+        season: episode.season,
         title: non_blank_arc(&header.title).unwrap_or_else(|| non_blank_arc(&header.name).unwrap_or_else(|| "Episode".intern())),
-        container_extension: episode.map_or_else(|| "".intern(), |ep| ep.container_extension.clone()),
+        container_extension: episode.container_extension.clone(),
         custom_sid: None,
-        added: episode.and_then(|ep| ep.added.clone()).unwrap_or_else(|| "".intern()),
+        added: episode.added.clone().unwrap_or_else(|| "".intern()),
         direct_source: "".intern(),
-        tmdb: episode.and_then(|ep| ep.tmdb),
-        release_date: episode.and_then(|ep| ep.release_date.clone()).unwrap_or_else(|| "".intern()),
-        series_release_date: episode.and_then(|ep| ep.series_release_date.clone()),
+        tmdb: episode.tmdb,
+        release_date: episode.release_date.clone().unwrap_or_else(|| "".intern()),
+        series_release_date: episode.series_release_date.clone(),
         plot: None,
         crew: None,
         duration_secs: 0,
@@ -256,8 +256,8 @@ fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<Ser
         movie_image: "".intern(),
         bitrate: 0,
         rating: None,
-        video: episode.and_then(|ep| ep.video.clone()),
-        audio: episode.and_then(|ep| ep.audio.clone()),
+        video: episode.video.clone(),
+        audio: episode.audio.clone(),
     })
 }
 
@@ -803,10 +803,22 @@ mod tests {
         let series_parent_code = series_info.header.uuid.to_string();
         let media_episode_two = PlaylistItem { header: make_media_server_episode(&series_parent_code, "episode-two", 7002, 1, 2) };
         let media_episode_one = PlaylistItem { header: make_media_server_episode(&series_parent_code, "episode-one", 7001, 1, 1) };
+        let malformed_media_episode = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "media-server:server:shows:episode:malformed".intern(),
+                parent_code: series_parent_code.clone().intern(),
+                url: "media-server://plex/server/malformed?part_key=%2Flibrary%2Fparts%2Fredacted".intern(),
+                item_type: PlaylistItemType::Series,
+                xtream_cluster: XtreamCluster::Series,
+                virtual_id: 7003,
+                additional_properties: None,
+                ..PlaylistItemHeader::default()
+            },
+        };
         let provider_episode = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "999".intern(),
-                parent_code: series_parent_code.intern(),
+                parent_code: series_parent_code.clone().intern(),
                 url: "http://provider.example.invalid/series/999.mkv".intern(),
                 item_type: PlaylistItemType::Series,
                 xtream_cluster: XtreamCluster::Series,
@@ -818,12 +830,13 @@ mod tests {
         let mut media_server_series = HashMap::<Arc<str>, Vec<SeriesStreamDetailEpisodeProperties>>::new();
         assign_media_server_series_info_episode(&mut media_server_series, &media_episode_two.header);
         assign_media_server_series_info_episode(&mut media_server_series, &provider_episode.header);
+        assign_media_server_series_info_episode(&mut media_server_series, &malformed_media_episode.header);
         assign_media_server_series_info_episode(&mut media_server_series, &media_episode_one.header);
 
         let mut playlist = vec![PlaylistGroup {
             id: 1,
             title: "Media Server Series".intern(),
-            channels: vec![series_info, media_episode_two, provider_episode, media_episode_one],
+            channels: vec![series_info, media_episode_two, provider_episode, malformed_media_episode, media_episode_one],
             xtream_cluster: XtreamCluster::Series,
         }];
 
@@ -851,6 +864,7 @@ mod tests {
         assert!(episodes[0].video.as_deref().is_some_and(|video| video.contains("h264")));
         assert!(episodes[0].audio.as_deref().is_some_and(|audio| audio.contains("aac")));
         assert_eq!(episodes[1].id, 7002);
+        assert!(!episodes.iter().any(|episode| episode.id == 7003));
     }
 
     #[test]

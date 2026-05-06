@@ -6,6 +6,7 @@ use crate::media_server::{
     MediaServerVideoTechnicalFacts,
 };
 use shared::model::{MediaServerLibraryKindDto, MediaServerLibrarySelectorDto};
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -151,11 +152,11 @@ pub fn plex_video_to_episode(
 }
 
 fn plex_section_kind_matches(section_type: Option<&str>, expected: MediaServerLibraryKindDto) -> bool {
-    matches!(
-        (plex_library_kind(section_type), expected),
-        (MediaServerLibraryKind::Movies, MediaServerLibraryKindDto::Movies)
-            | (MediaServerLibraryKind::TvShows, MediaServerLibraryKindDto::TvShows)
-    )
+    let kind = plex_library_kind(section_type);
+    match expected {
+        MediaServerLibraryKindDto::Movies => matches!(kind, MediaServerLibraryKind::Movies),
+        MediaServerLibraryKindDto::TvShows => matches!(kind, MediaServerLibraryKind::TvShows),
+    }
 }
 
 fn plex_library_kind(section_type: Option<&str>) -> MediaServerLibraryKind {
@@ -171,7 +172,25 @@ fn matches_trimmed(candidate: Option<&str>, expected: &str) -> bool {
 }
 
 fn first_media(media: &[PlexMediaDto]) -> Option<&PlexMediaDto> {
-    media.iter().find(|media| media_has_catalog_facts(media))
+    media
+        .iter()
+        .enumerate()
+        .filter(|(_, media)| media_has_catalog_facts(media))
+        .max_by_key(|(index, media)| media_preference_key(media, *index))
+        .map(|(_, media)| media)
+}
+
+fn media_preference_key(media: &PlexMediaDto, index: usize) -> (bool, u32, u64, Reverse<usize>) {
+    (
+        first_part_key(media).is_some(),
+        media.bitrate.unwrap_or_default(),
+        media_resolution_pixels(media),
+        Reverse(index),
+    )
+}
+
+fn media_resolution_pixels(media: &PlexMediaDto) -> u64 {
+    u64::from(media.width.unwrap_or_default()) * u64::from(media.height.unwrap_or_default())
 }
 
 fn media_has_catalog_facts(media: &PlexMediaDto) -> bool {
@@ -342,12 +361,23 @@ fn provider_hints(guid: Option<&str>, guids: &[PlexGuidDto]) -> Vec<MediaServerP
 fn parse_guid(value: &str) -> Option<(Arc<str>, Arc<str>)> {
     let value = value.trim();
     let (namespace, id) = value.split_once("://")?;
-    let namespace = namespace.trim().to_ascii_lowercase();
-    let id = id.trim();
-    if namespace.is_empty() || id.is_empty() {
+    let namespace = normalize_guid_namespace(namespace)?;
+    let id = id.split('?').next().unwrap_or(id).trim();
+    if id.is_empty() {
         return None;
     }
-    Some((Arc::<str>::from(namespace), Arc::<str>::from(id)))
+    Some((namespace, Arc::<str>::from(id)))
+}
+
+fn normalize_guid_namespace(namespace: &str) -> Option<Arc<str>> {
+    let namespace = namespace.trim().to_ascii_lowercase();
+    let namespace = namespace.strip_prefix("com.plexapp.agents.").unwrap_or(&namespace);
+    let namespace = match namespace {
+        "themoviedb" => "tmdb",
+        "thetvdb" => "tvdb",
+        value => value,
+    };
+    (!namespace.is_empty()).then(|| Arc::<str>::from(namespace))
 }
 
 fn tag_values(tags: &[crate::media_server::plex::dto::PlexTagDto]) -> Vec<Arc<str>> {
@@ -365,7 +395,7 @@ fn source_version_hint(updated_at: Option<i64>, added_at: Option<i64>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::plex::dto::PlexMediaContainerDto;
+    use crate::media_server::plex::dto::{PlexMediaContainerDto, PlexMediaDto, PlexPartDto};
     use crate::media_server::test_fixtures::{PLEX_EPISODES_XML, PLEX_MOVIES_XML, PLEX_SEASONS_XML, PLEX_SHOWS_XML};
 
     fn input_name() -> Arc<str> { Arc::<str>::from("media_server") }
@@ -485,20 +515,74 @@ mod tests {
     }
 
     #[test]
+    fn first_media_prefers_best_deterministic_playable_version() {
+        let low_bitrate = media_with_part("low", Some(1_000), Some(1920), Some(1080));
+        let high_bitrate = media_with_part("high", Some(4_000), Some(1280), Some(720));
+        let high_resolution = media_with_part("resolution", Some(4_000), Some(3840), Some(2160));
+        let metadata_only = PlexMediaDto {
+            id: Some("metadata".to_string()),
+            container: Some("mkv".to_string()),
+            duration: None,
+            bitrate: Some(10_000),
+            width: Some(7680),
+            height: Some(4320),
+            audio_channels: None,
+            audio_codec: None,
+            video_codec: None,
+            video_resolution: None,
+            parts: Vec::new(),
+        };
+        let media = vec![metadata_only, low_bitrate, high_resolution, high_bitrate];
+
+        let preferred = first_media(&media).expect("preferred media");
+
+        assert_eq!(preferred.parts[0].key.as_deref(), Some("/library/parts/resolution/file.mkv"));
+    }
+
+    fn media_with_part(id: &str, bitrate: Option<u32>, width: Option<u32>, height: Option<u32>) -> PlexMediaDto {
+        PlexMediaDto {
+            id: Some(id.to_string()),
+            container: Some("mkv".to_string()),
+            duration: None,
+            bitrate,
+            width,
+            height,
+            audio_channels: None,
+            audio_codec: None,
+            video_codec: None,
+            video_resolution: None,
+            parts: vec![PlexPartDto {
+                id: Some(id.to_string()),
+                key: Some(format!("/library/parts/{id}/file.mkv")),
+                size: None,
+                file: Some("/redacted/upstream/path/file.mkv".to_string()),
+                container: Some("mkv".to_string()),
+            }],
+        }
+    }
+
+    #[test]
     fn parses_guid_hints_case_normalized_and_ignores_malformed_values() {
         let hints = provider_hints(
-            Some("TmDb://123"),
+            Some("TmDb://123?lang=en"),
             &[
-                PlexGuidDto { id: Some("imdb://tt-redacted".to_string()) },
+                PlexGuidDto { id: Some("com.plexapp.agents.imdb://tt-redacted?lang=en".to_string()) },
                 PlexGuidDto { id: Some("malformed".to_string()) },
                 PlexGuidDto { id: Some("tmdb://123".to_string()) },
                 PlexGuidDto { id: Some("tvdb://  ".to_string()) },
+                PlexGuidDto { id: Some("com.plexapp.agents.themoviedb://456".to_string()) },
+                PlexGuidDto { id: Some("com.plexapp.agents.thetvdb://789?lang=en".to_string()) },
             ],
         );
 
         assert_eq!(
             hints.iter().map(|hint| (hint.namespace.as_ref(), hint.value.as_ref())).collect::<Vec<_>>(),
-            vec![("tmdb", "123"), ("imdb", "tt-redacted")]
+            vec![
+                ("tmdb", "123"),
+                ("imdb", "tt-redacted"),
+                ("tmdb", "456"),
+                ("tvdb", "789")
+            ]
         );
     }
 }

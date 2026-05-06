@@ -102,6 +102,10 @@ fn series_parent_code_map(series: &[MediaServerSeries]) -> HashMap<MediaServerSe
 }
 
 fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<MediaServerSeriesKey<'_>, Arc<str>>) -> Arc<str> {
+    // Orphan episodes keep a stable media-server parent key when no SeriesInfo anchor exists.
+    // materialize_media_server_series_info_episodes and rewrite_series_episode_parent_virtual_ids
+    // only link episodes whose parent_code is a SeriesInfo uuid.intern(); this fallback is
+    // intentionally stable but unlinkable rather than inventing a public series anchor.
     episode
         .series_id
         .as_ref()
@@ -324,6 +328,10 @@ fn series_details(
     series: &MediaServerSeries,
     seasons: &[&MediaServerSeason],
 ) -> Option<SeriesStreamDetailProperties> {
+    if series.year.is_none() && seasons.is_empty() {
+        return None;
+    }
+
     let season_details = seasons
         .iter()
         .map(|season| SeriesStreamDetailSeasonProperties {
@@ -338,10 +346,6 @@ fn series_details(
             duration: None,
         })
         .collect::<Vec<_>>();
-
-    if series.year.is_none() && season_details.is_empty() {
-        return None;
-    }
 
     Some(SeriesStreamDetailProperties {
         year: series.year,
@@ -416,7 +420,9 @@ fn provider_tmdb_id(hints: &[MediaServerProviderIdHint]) -> Option<u32> {
 }
 
 fn release_date_from_year(year: Option<u32>) -> Option<Arc<str>> {
-    year.filter(|year| *year > 0).map(|year| Arc::<str>::from(format!("{year}-01-01")))
+    // Synthetic year-only fallback for Xtream compatibility; callers must treat this as
+    // non-authoritative and not as proof of an exact mid-year release date.
+    year.filter(|year| *year > 0).map(|year| Arc::<str>::from(format!("{year}-07-01")))
 }
 
 fn media_server_container_extension(technical: Option<&MediaServerTechnicalFacts>) -> Arc<str> {
@@ -779,7 +785,7 @@ mod tests {
         assert_eq!(video.tmdb, Some(12345));
         assert_eq!(video.container_extension.as_ref(), "mkv");
         let details = video.details.as_ref().expect("movie technical facts should create details");
-        assert_eq!(details.release_date.as_deref(), Some("2024-01-01"));
+        assert_eq!(details.release_date.as_deref(), Some("2024-07-01"));
         assert_eq!(details.duration_secs.as_deref(), Some("7200"));
         assert_eq!(details.bitrate, 8_000_000);
         assert_eq!(json_field(details.video.as_deref(), "codec_name"), Some(Value::String("hevc".to_string())));
