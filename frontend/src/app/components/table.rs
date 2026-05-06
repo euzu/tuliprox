@@ -300,6 +300,10 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
     let range_end = (page as u64) * page_size as u64;
     let range_end = range_end.min(total_items);
     let pagination_items = build_pagination_items(page, total_pages);
+    let first_page_label = translate.t("LABEL.FIRST_PAGE");
+    let previous_page_label = translate.t("LABEL.PREVIOUS_PAGE");
+    let next_page_label = translate.t("LABEL.NEXT_PAGE");
+    let last_page_label = translate.t("LABEL.LAST_PAGE");
 
     let handle_first = {
         let on_page_change = on_page_change.clone();
@@ -369,7 +373,8 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
                             class="tp__paged-table__btn tp__icon-button"
                             disabled={!has_prev}
                             onclick={handle_first}
-                            title={translate.t("LABEL.FIRST_PAGE")}
+                            title={first_page_label.clone()}
+                            aria-label={first_page_label}
                         >
                             <AppIcon name="ChevronDoubleLeft" />
                         </button>
@@ -378,7 +383,8 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
                             class="tp__paged-table__btn tp__icon-button"
                             disabled={!has_prev}
                             onclick={handle_prev}
-                            title={translate.t("LABEL.PREVIOUS_PAGE")}
+                            title={previous_page_label.clone()}
+                            aria-label={previous_page_label}
                         >
                             <AppIcon name="ChevronLeft" />
                         </button>
@@ -412,7 +418,8 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
                             class="tp__paged-table__btn tp__icon-button"
                             disabled={!has_next}
                             onclick={handle_next}
-                            title={translate.t("LABEL.NEXT_PAGE")}
+                            title={next_page_label.clone()}
+                            aria-label={next_page_label}
                         >
                             <AppIcon name="ChevronRight" />
                         </button>
@@ -421,7 +428,8 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
                             class="tp__paged-table__btn tp__icon-button"
                             disabled={!has_next}
                             onclick={handle_last}
-                            title={translate.t("LABEL.LAST_PAGE")}
+                            title={last_page_label.clone()}
+                            aria-label={last_page_label}
                         >
                             <AppIcon name="ChevronDoubleRight" />
                         </button>

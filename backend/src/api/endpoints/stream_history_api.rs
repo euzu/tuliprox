@@ -9,43 +9,21 @@ use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::model::AppState;
 use crate::model::StreamHistoryRecord;
 use crate::repository::{QosSnapshotRecord, QosSnapshotRepository, StreamHistoryFileReader};
-use crate::utils::stream_history_viewer::{
-    discover_files, resolve_time_range, CompiledFilter,
-    StreamHistoryQuery, TimeRange,
-};
-use crate::utils::{ default_page, default_page_size};
+use crate::utils::stream_history_viewer::{discover_files, resolve_time_range, CompiledFilter, StreamHistoryQuery, TimeRange};
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
-use shared::model::{PageRequestDto, PagedResponseDto, SearchMode, StreamHistoryEventType, StreamHistoryRecordDto};
-
-#[derive(Deserialize)]
-pub(crate) struct HistoryQueryParams {
-    pub from: Option<String>,
-    pub to: Option<String>,
-    #[serde(default)]
-    #[serde(flatten)]
-    pub filter: HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct HistoryPageParams {
-    pub from: Option<String>,
-    pub to: Option<String>,
-    #[serde(default = "default_page")]
-    pub page: u32,
-    #[serde(default = "default_page_size")]
-    pub page_size: u16,
-    pub search: Option<String>,
-    pub search_mode: Option<String>,
-    #[serde(rename = "search_field")]
-    pub search_fields: Option<Vec<String>>,
-}
+use shared::model::{
+    PageRequestDto, PagedResponseDto, SearchMode, StreamHistoryEventType, StreamHistoryPageRequestDto,
+    StreamHistoryProviderSummaryDto, QosSnapshotRecordDto, StreamHistoryQueryRequestDto, StreamHistoryRecordDto,
+};
 
 // TODO make shared Search fields
+
+const MAX_STREAM_HISTORY_PAGE_HEAP_CAPACITY: usize = 100_000;
 
 #[derive(Clone, Copy)]
 enum SearchField {
@@ -131,16 +109,6 @@ struct ErrorResponse {
     error: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct ProviderSummary {
-    pub provider_name: Arc<str>,
-    pub session_count: u64,
-    pub disconnect_count: u64,
-    pub total_bytes_sent: u64,
-    pub avg_session_duration_secs: Option<u64>,
-    pub avg_first_byte_latency_ms: Option<u64>,
-}
-
 fn error_response(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, axum::Json(ErrorResponse { error: msg.into() })).into_response()
 }
@@ -168,58 +136,6 @@ fn get_qos_storage_directory_from_config(config: &crate::model::Config) -> Optio
         .filter(|qos| qos.enabled)
         .map(|_| config.storage_dir.clone())
 }
-
-// pub(crate) async fn stream_history_query(
-//     State(app_state): State<Arc<AppState>>,
-//     Query(params): Query<HistoryQueryParams>,
-// ) -> Response {
-//     let Some(history_dir) = get_history_directory(&app_state) else {
-//         return error_response(StatusCode::SERVICE_UNAVAILABLE, "Stream history is not enabled");
-//     };
-//
-//     let query = StreamHistoryQuery {
-//         from: params.from,
-//         to: params.to,
-//         path: None,
-//         filter: if params.filter.is_empty() { None } else { Some(params.filter) },
-//     };
-//
-//     let time_range = match resolve_time_range(&query) {
-//         Ok(tr) => tr,
-//         Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
-//     };
-//
-//     let filters = match query.filter.as_ref() {
-//         Some(raw) => match CompiledFilter::compile(raw) {
-//             Ok(f) => f,
-//             Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
-//         },
-//         None => match CompiledFilter::compile(&HashMap::new()) {
-//             Ok(filter) => filter,
-//             Err(err) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, err),
-//         },
-//     };
-//
-//     // Collect file records and batch records on blocking thread, then combine.
-//     // batch_records must be fetched on a real OS thread (not the async thread),
-//     // so we include it inside spawn_blocking where blocking_recv() is safe.
-//     let app_state_clone = Arc::clone(&app_state);
-//     let mut file_records = collect_records(&history_dir, &time_range, &filters).await.unwrap_or_default();
-//     let batch_records = if let Some(hw) = app_state_clone
-//         .connection_manager
-//         .history_writer()
-//         .load()
-//         .as_ref()
-//     {
-//         hw.get_current_batch().await.unwrap_or_else(|_| Vec::new())
-//     } else {
-//         Vec::new()
-//     };
-//
-//     let mut all_records = batch_records;
-//     all_records.append(&mut file_records);
-//     axum::Json(all_records).into_response()
-// }
 
 fn compile_search_matcher(search: Option<&str>, mode: SearchMode) -> Result<Option<Regex>, String> {
     let Some(search) = search.filter(|value| !value.is_empty()) else {
@@ -407,18 +323,34 @@ struct TopHistoryPageCollector {
     heap: BinaryHeap<Reverse<RankedHistoryRecord>>,
 }
 
+enum StreamHistoryPageQueryError {
+    InvalidWindow(String),
+    Internal(String),
+}
+
 impl TopHistoryPageCollector {
-    fn new(page: u32, page_size: u16) -> Self {
-        let start = usize::try_from(u64::from(page.saturating_sub(1)) * u64::from(page_size)).unwrap_or(usize::MAX);
+    fn new(page: u32, page_size: u16) -> Result<Self, String> {
+        let start_u64 = u64::from(page.saturating_sub(1))
+            .checked_mul(u64::from(page_size))
+            .ok_or_else(|| format!("Invalid stream history page window: page={page}, page_size={page_size}"))?;
+        let start = usize::try_from(start_u64)
+            .map_err(|_| format!("Invalid stream history page start: page={page}, page_size={page_size}"))?;
         let limit = usize::from(page_size);
-        let capacity = start.saturating_add(limit);
-        Self {
+        let capacity = start
+            .checked_add(limit)
+            .ok_or_else(|| format!("Invalid stream history page capacity: start={start}, page_size={page_size}"))?;
+        if capacity > MAX_STREAM_HISTORY_PAGE_HEAP_CAPACITY {
+            return Err(format!(
+                "Stream history page window too large: page={page}, page_size={page_size}, start={start}, capacity={capacity}, max={MAX_STREAM_HISTORY_PAGE_HEAP_CAPACITY}"
+            ));
+        }
+        Ok(Self {
             capacity,
             start,
             limit,
             total_items: 0,
             heap: BinaryHeap::with_capacity(capacity),
-        }
+        })
     }
 
     fn push(&mut self, record: StreamHistoryRecord, matcher: Option<&Regex>, fields: &[SearchField]) {
@@ -493,11 +425,11 @@ fn paginate_stream_history_records<I>(
     fields: &[SearchField],
     page: u32,
     page_size: u16,
-) -> PagedResponseDto<StreamHistoryRecordDto>
+) -> Result<PagedResponseDto<StreamHistoryRecordDto>, String>
 where
     I: Iterator<Item = StreamHistoryRecord>,
 {
-    let mut collector = TopHistoryPageCollector::new(page, page_size);
+    let mut collector = TopHistoryPageCollector::new(page, page_size)?;
     let mut hls_sessions: HashMap<HlsKey, HlsSessionAccumulator> = HashMap::new();
 
     for record in records {
@@ -514,7 +446,7 @@ where
         }
     }
 
-    collector.finish(page, page_size)
+    Ok(collector.finish(page, page_size))
 }
 
 #[cfg(test)]
@@ -543,7 +475,7 @@ fn paginate_aggregated_records(
     }
     filtered.sort_unstable_by_key(|record| Reverse(record.event_ts_utc));
 
-    let mut collector = TopHistoryPageCollector::new(page, page_size);
+    let Ok(mut collector) = TopHistoryPageCollector::new(page, page_size) else { return PagedResponseDto::new(Vec::new(), page, page_size, 0) };
     for record in filtered {
         collector.push(record, None, &[]);
     }
@@ -553,7 +485,7 @@ fn paginate_aggregated_records(
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn stream_history_page_query(
     State(app_state): State<Arc<AppState>>,
-    Query(params): Query<HistoryPageParams>,
+    Query(params): Query<StreamHistoryPageRequestDto>,
 ) -> Response {
     let Some(history_dir) = get_history_directory(&app_state) else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "Stream history is not enabled");
@@ -606,27 +538,21 @@ pub(crate) async fn stream_history_page_query(
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        let empty_filter = match CompiledFilter::compile(&HashMap::new()) {
-            Ok(filter) => Arc::new(filter),
-            Err(err) => {
-                log::error!("Failed to compile empty stream history filter: {err}");
-                return PagedResponseDto::new(Vec::new(), page, page_size, 0);
-            }
-        };
+        let empty_filter = CompiledFilter::compile(&HashMap::new())
+            .map(Arc::new)
+            .map_err(|err| StreamHistoryPageQueryError::Internal(format!("Failed to compile stream history filter: {err}")))?;
 
-        let file_iter = match futures::executor::block_on(collect_records_iter(&history_dir, time_range, empty_filter)) {
-            Ok(iter) => iter,
-            Err(e) => {
-                log::error!("Failed to open stream history files: {e}");
-                return PagedResponseDto::new(Vec::new(), page, page_size, 0);
-            }
-        };
+        let file_iter = futures::executor::block_on(collect_records_iter(&history_dir, time_range, empty_filter))
+            .map_err(|err| StreamHistoryPageQueryError::Internal(format!("Failed to open stream history files: {err}")))?;
 
         paginate_stream_history_records(file_iter, batch_records, search_matcher.as_ref(), &search_fields, page, page_size)
+            .map_err(StreamHistoryPageQueryError::InvalidWindow)
     }).await;
 
     match result {
-        Ok(response) => axum::Json(response).into_response(),
+        Ok(Ok(response)) => axum::Json(response).into_response(),
+        Ok(Err(StreamHistoryPageQueryError::InvalidWindow(message))) => error_response(StatusCode::BAD_REQUEST, message),
+        Ok(Err(StreamHistoryPageQueryError::Internal(message))) => error_response(StatusCode::INTERNAL_SERVER_ERROR, message),
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {e}")),
     }
 }
@@ -634,7 +560,7 @@ pub(crate) async fn stream_history_page_query(
 pub(crate) async fn stream_history_summary_query(
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
     State(app_state): State<Arc<AppState>>,
-    Query(params): Query<HistoryQueryParams>,
+    Query(params): Query<StreamHistoryQueryRequestDto>,
 ) -> Response {
     let Some(history_dir) = get_history_directory(&app_state) else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "Stream history is not enabled");
@@ -663,13 +589,8 @@ pub(crate) async fn stream_history_summary_query(
         },
     };
 
-    // Chain batch records (in-memory) with file records iterator.
-    // batch_records must be fetched on a real OS thread (not the async thread),
-    // so we include it inside spawn_blocking where blocking_recv() is safe.
     let filters_arc = Arc::new(filters);
-    let app_state_clone = Arc::clone(&app_state);
-    // Fetch batch records from within the blocking thread so blocking_recv() is safe
-    let batch_records = if let Some(hw) = app_state_clone
+    let batch_records = if let Some(hw) = app_state
         .connection_manager
         .history_writer()
         .load()
@@ -680,17 +601,24 @@ pub(crate) async fn stream_history_summary_query(
         Vec::new()
     };
 
-    let file_iter = match collect_records_iter(&history_dir, time_range, filters_arc).await {
-        Ok(iter) => iter,
-        Err(e) => {
-            log::error!("Failed to discover stream history files for summary: {e}");
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to discover history files: {e}"));
-        }
-    };
+    let result = tokio::task::spawn_blocking(move || {
+        let file_iter = futures::executor::block_on(collect_records_iter(&history_dir, time_range, filters_arc))?;
+        let combined = batch_records.into_iter().chain(file_iter);
+        io::Result::Ok(aggregate_provider_summaries_from_iter(combined))
+    })
+    .await;
 
-    let combined = batch_records.into_iter().chain(file_iter);
-    let summaries = aggregate_provider_summaries_from_iter(combined);
-    json_or_bin_response(accept.as_deref(), &summaries).into_response()
+    match result {
+        Ok(Ok(summaries)) => json_or_bin_response(accept.as_deref(), &summaries).into_response(),
+        Ok(Err(err)) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to discover history files: {err}"),
+        ),
+        Err(err) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Stream history summary task failed: {err}"),
+        ),
+    }
 }
 
 pub(crate) async fn qos_snapshot_query(
@@ -824,41 +752,6 @@ impl Iterator for RecordFileIter {
     }
 }
 
-// /// Returns a Vec of filtered records from history files.
-// /// Used by `stream_history_query` to collect all records before responding.
-// async fn collect_records(
-//     dir: &str,
-//     time_range: &TimeRange,
-//     filters: &CompiledFilter,
-// ) -> io::Result<Vec<StreamHistoryRecord>> {
-//     let files = discover_files(Path::new(dir), time_range).await?;
-//     let (range_start, range_end) = *time_range;
-//
-//     let mut records = Vec::new();
-//
-//     for file in &files {
-//         let iter: Box<dyn Iterator<Item=io::Result<StreamHistoryRecord>>> = if file.is_archive {
-//             let (reader, _) = StreamHistoryFileReader::from_archive(&file.path, Some(*time_range))?;
-//             Box::new(reader)
-//         } else {
-//             let (reader, _) = StreamHistoryFileReader::from_pending(&file.path, Some(*time_range))?;
-//             Box::new(reader)
-//         };
-//
-//         for result in iter {
-//             let record = result?;
-//             if record.event_ts_utc < range_start || record.event_ts_utc > range_end {
-//                 continue;
-//             }
-//             if !filters.matches(&record) {
-//                 continue;
-//             }
-//             records.push(record);
-//         }
-//     }
-//
-//     Ok(records)
-// }
 
 /// Returns a lazy iterator over filtered records from history files.
 async fn collect_records_iter(
@@ -874,7 +767,7 @@ async fn collect_records_iter(
 // path against a simpler whole-slice aggregation.
 pub(crate) fn aggregate_provider_summaries(
     records: &[StreamHistoryRecord],
-) -> Vec<ProviderSummary> {
+) -> Vec<StreamHistoryProviderSummaryDto> {
     #[derive(Default)]
     struct Acc {
         session_count: u64,
@@ -908,8 +801,8 @@ pub(crate) fn aggregate_provider_summaries(
 
     by_provider
         .into_iter()
-        .map(|(provider_name, acc)| ProviderSummary {
-            provider_name,
+        .map(|(provider_name, acc)| StreamHistoryProviderSummaryDto {
+            provider_name: provider_name.to_string(),
             session_count: acc.session_count,
             disconnect_count: acc.disconnect_count,
             total_bytes_sent: acc.total_bytes_sent,
@@ -924,7 +817,7 @@ pub(crate) fn aggregate_provider_summaries(
 /// records one-by-one without any intermediate allocation.
 pub fn aggregate_provider_summaries_from_iter<I: Iterator<Item=StreamHistoryRecord>>(
     records: I,
-) -> Vec<ProviderSummary> {
+) -> Vec<StreamHistoryProviderSummaryDto> {
     #[derive(Default)]
     struct Acc {
         session_count: u64,
@@ -958,8 +851,8 @@ pub fn aggregate_provider_summaries_from_iter<I: Iterator<Item=StreamHistoryReco
 
     by_provider
         .into_iter()
-        .map(|(provider_name, acc)| ProviderSummary {
-            provider_name,
+        .map(|(provider_name, acc)| StreamHistoryProviderSummaryDto {
+            provider_name: provider_name.to_string(),
             session_count: acc.session_count,
             disconnect_count: acc.disconnect_count,
             total_bytes_sent: acc.total_bytes_sent,
@@ -1008,7 +901,7 @@ fn collect_filtered_qos_snapshots(
     storage_dir: &Path,
     filter: &CompiledQosSnapshotFilter,
     limit: usize,
-) -> io::Result<Vec<QosSnapshotRecord>> {
+) -> io::Result<Vec<QosSnapshotRecordDto>> {
     let mut filtered = Vec::with_capacity(limit);
     QosSnapshotRepository::for_each_snapshot_read_only(storage_dir, |snapshot| {
         if !filter.matches(snapshot) {
@@ -1020,7 +913,7 @@ fn collect_filtered_qos_snapshots(
             filtered.pop();
         }
     })?;
-    Ok(filtered)
+    Ok(filtered.iter().map(QosSnapshotRecordDto::from).collect())
 }
 
 fn qos_snapshot_order(left: &QosSnapshotRecord, right: &QosSnapshotRecord) -> std::cmp::Ordering {
@@ -1031,8 +924,10 @@ fn qos_snapshot_order(left: &QosSnapshotRecord, right: &QosSnapshotRecord) -> st
         .then_with(|| left.stream_identity_key.cmp(&right.stream_identity_key))
 }
 
-fn load_qos_snapshot(storage_dir: &str, stream_identity_key: &str) -> io::Result<Option<QosSnapshotRecord>> {
-    QosSnapshotRepository::get_snapshot_read_only(Path::new(storage_dir), stream_identity_key)
+fn load_qos_snapshot(storage_dir: &str, stream_identity_key: &str) -> io::Result<Option<QosSnapshotRecordDto>> {
+    Ok(QosSnapshotRepository::get_snapshot_read_only(Path::new(storage_dir), stream_identity_key)?
+        .as_ref()
+        .map(QosSnapshotRecordDto::from))
 }
 
 #[cfg(test)]
@@ -1107,7 +1002,7 @@ mod tests {
         ]);
 
         assert_eq!(summaries.len(), 2);
-        assert_eq!(summaries[0].provider_name.as_ref(), "acme");
+        assert_eq!(summaries[0].provider_name.as_str(), "acme");
         assert_eq!(summaries[0].session_count, 2);
         assert_eq!(summaries[0].total_bytes_sent, 400);
         assert_eq!(summaries[0].avg_session_duration_secs, Some(15));
@@ -1174,20 +1069,28 @@ mod tests {
     }
 
     #[test]
-    fn paged_stream_history_keeps_hls_connect_failed_rows() {
+    fn paged_stream_history_keeps_hls_connect_failed_rows() -> Result<(), String> {
         let mut failed = make_record("acme", None, Some(0), None, None);
         failed.event_type = StreamHistoryEventType::ConnectFailed;
         failed.event_ts_utc = 77;
         failed.container = Some(String::from("hls"));
 
-        let response = paginate_stream_history_records(vec![failed].into_iter(), Vec::new(), None, &[], 1, 50);
+        let response = paginate_stream_history_records(vec![failed].into_iter(), Vec::new(), None, &[], 1, 50)?;
         assert_eq!(response.total_items, 1);
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].event_type, StreamHistoryEventType::ConnectFailed);
+        Ok(())
     }
 
     #[test]
-    fn paged_stream_history_uses_deterministic_tie_breakers_for_equal_timestamps() {
+    fn paged_stream_history_rejects_oversized_page_window_before_heap_allocation() {
+        let result = TopHistoryPageCollector::new(u32::MAX, 200);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn paged_stream_history_uses_deterministic_tie_breakers_for_equal_timestamps() -> Result<(), String> {
         let mut left = make_record("acme", Some(10), Some(100), Some(50), Some(DisconnectReason::ClientClosed));
         left.event_ts_utc = 100;
         left.session_id = 10;
@@ -1203,7 +1106,7 @@ mod tests {
             &[],
             1,
             1,
-        );
+        )?;
         let second = paginate_stream_history_records(
             vec![right, left].into_iter(),
             Vec::new(),
@@ -1211,11 +1114,12 @@ mod tests {
             &[],
             1,
             1,
-        );
+        )?;
 
         assert_eq!(first.items.len(), 1);
         assert_eq!(second.items.len(), 1);
         assert_eq!(first.items[0].session_id, second.items[0].session_id);
+        Ok(())
     }
 
     fn make_qos_snapshot(

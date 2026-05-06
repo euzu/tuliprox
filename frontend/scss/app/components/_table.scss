@@ -73,8 +73,6 @@
         &:nth-child(even) {
           background-color: var(--table-alternate-background-color);
         }
-        &:nth-child(odd) {
-        }
         &:not(:last-child) {
           border-bottom: 1px solid var(--border-color);
         }
@@ -129,9 +127,6 @@
     align-items: center;
   }
 
-  &__info {
-  }
-
   &__size {
     display: flex;
     flex-flow: row nowrap;
@@ -146,23 +141,11 @@
     align-items: center;
   }
 
-  &__page-info {
-
-  }
-
   &__pages {
     display: flex;
     flex-flow: row nowrap;
     gap: var(--gap-default);
     align-items: center;
-  }
-
-  &__page {
-
-  }
-
-  &__ellipsis {
-
   }
 
 }

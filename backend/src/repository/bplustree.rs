@@ -43,9 +43,9 @@ use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
-// Constants (Restored)
 const PAGE_SIZE: u16 = 4096;
 pub const PAGE_SIZE_USIZE: usize = PAGE_SIZE as usize;
+const ZERO_PADDING_CHUNK: [u8; PAGE_SIZE_USIZE] = [0u8; PAGE_SIZE_USIZE];
 const LEN_SIZE: usize = 4;
 const FLAG_SIZE: usize = 1;
 pub(crate) const MAGIC: &[u8; 4] = b"BTRE";
@@ -121,9 +121,34 @@ fn advise_mmap(mmap: &Mmap, advice: Advice, context: &str) {
 }
 
 fn mmap_with_advice(file: &File, advice: Advice, context: &str) -> Option<Mmap> {
-    let mmap = unsafe { Mmap::map(file).ok()? };
+    let mmap = unsafe {
+        match Mmap::map(file) {
+            Ok(mmap) => mmap,
+            Err(err) => {
+                warn!("Failed to mmap B+Tree for {context}; falling back to buffered file I/O: {err}");
+                return None;
+            }
+        }
+    };
     advise_mmap(&mmap, advice, context);
     Some(mmap)
+}
+
+/// Read exact bytes from a file at a specific offset.
+/// Uses `FileExt::read_exact_at` on Unix for thread-safe concurrent reads.
+/// Falls back to `seek` + `read_exact` + `seek` back on other platforms.
+pub(crate) fn read_exact_at_offset(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    file.read_exact_at(buf, offset)?;
+    #[cfg(not(unix))]
+    {
+        let mut f = file;
+        let current_pos = f.stream_position()?;
+        f.seek(SeekFrom::Start(offset))?;
+        f.read_exact(buf)?;
+        f.seek(SeekFrom::Start(current_pos))?;
+    }
+    Ok(())
 }
 
 /*
@@ -1390,10 +1415,14 @@ where
 
             let content_size = FLAG_SIZE + LEN_SIZE + keys_len as usize + LEN_SIZE + info_len as usize;
             let blocks = content_size.div_ceil(PAGE_SIZE_USIZE);
+            let capacity = blocks * PAGE_SIZE_USIZE;
+            debug_assert!(
+                content_size <= capacity,
+                "Leaf node content ({content_size}B) exceeds allocated capacity ({capacity}B)"
+            );
 
             file.seek(SeekFrom::Start(offset))?;
 
-            let capacity = blocks * PAGE_SIZE_USIZE;
             if buffer.len() < capacity {
                 buffer.resize(capacity, 0);
             }
@@ -1445,6 +1474,11 @@ where
             file.seek(SeekFrom::Start(parent_start))?;
 
             let total_capacity = blocks_needed * PAGE_SIZE_USIZE;
+            let actual_content = FLAG_SIZE + LEN_SIZE + keys_len as usize + LEN_SIZE + pointers_len as usize;
+            debug_assert!(
+                actual_content <= total_capacity,
+                "Internal node content ({actual_content}B) exceeds allocated capacity ({total_capacity}B)"
+            );
             if buffer.len() < total_capacity {
                 buffer.resize(total_capacity, 0);
             }
@@ -1472,296 +1506,284 @@ where
 
     /// Serialize the tree in breadth-first order for better disk locality
     /// This improves query performance by keeping nodes at the same level contiguous
-    #[allow(clippy::too_many_lines)]
     fn serialize_breadth_first<W: Write + Seek>(
         &mut self,
         file: &mut W,
         buffer: &mut Vec<u8>,
         start_offset: u64,
     ) -> io::Result<u64> {
-        use std::collections::HashMap;
-
         let mut serial_buf = Vec::with_capacity(PAGE_SIZE_USIZE);
 
-        // Pass 1: Populate value_info for all leaf nodes (Mutable)
-        // This calculates value sizes and determines packing WITHOUT assigning final offsets yet.
-        // We use placeholder offsets (0) which will be corrected after node layout is determined.
-        {
-            let mut current_level_mut = vec![&mut *self];
-            while !current_level_mut.is_empty() {
-                let mut next_level_mut = Vec::new();
-                for node in current_level_mut {
-                    if node.is_leaf {
-                        node.value_info.clear();
-                        // Serialize all values first to determine sizes
-                        let mut serialized_values: Vec<Vec<u8>> = Vec::new();
-                        for value in &node.values {
-                            serial_buf.clear();
-                            binary_serialize_into(&mut serial_buf, value)?;
-                            serialized_values.push(serial_buf.clone());
-                        }
+        self.serialize_bfs_pass1_populate_value_info(&mut serial_buf)?;
+        let (node_offsets, child_ids_by_node, current_offset) =
+            self.serialize_bfs_pass2_calculate_offsets(&mut serial_buf, start_offset)?;
+        self.serialize_bfs_pass3_assign_value_offsets(current_offset);
+        self.serialize_bfs_pass4_write_nodes(file, buffer, &mut serial_buf, &node_offsets, &child_ids_by_node)?;
+        self.serialize_bfs_pass5_write_values(file, buffer, &mut serial_buf)?;
 
-                        // Determine the packing structure with placeholder offsets (0)
-                        // Final offsets will be assigned in Pass 3
-                        let mut current_pack_index: u16 = 0;
-                        let mut current_pack_size = PACK_BLOCK_HEADER_SIZE;
-                        let mut pack_count = 0u32;
+        Ok(start_offset)
+    }
 
-                        for value_bytes in serialized_values {
-                            let size = value_bytes.len();
+    fn serialize_bfs_pass1_populate_value_info(&mut self, serial_buf: &mut Vec<u8>) -> io::Result<()> {
+        let mut current_level_mut = vec![self];
+        while !current_level_mut.is_empty() {
+            let mut next_level_mut = Vec::new();
+            for node in current_level_mut {
+                if node.is_leaf {
+                    node.value_info.clear();
+                    let mut serialized_values: Vec<Vec<u8>> = Vec::new();
+                    for value in &node.values {
+                        serial_buf.clear();
+                        binary_serialize_into(serial_buf, value)?;
+                        serialized_values.push(serial_buf.clone());
+                    }
 
-                            if size <= SMALL_VALUE_THRESHOLD {
-                                let entry_size = PACK_VALUE_HEADER_SIZE + size;
+                    let mut current_pack_index: u16 = 0;
+                    let mut current_pack_size = PACK_BLOCK_HEADER_SIZE;
+                    let mut pack_count = 0u32;
 
-                                if current_pack_size + entry_size <= PAGE_SIZE_USIZE {
-                                    // Add to current pack
-                                    node.value_info.push(ValueInfo {
-                                        mode: ValueStorageMode::Packed(u64::from(pack_count), current_pack_index),
-                                        length: u32::try_from(size).map_err(to_io_error)?,
-                                        cache: Mutex::new(None),
-                                    });
-                                    current_pack_index += 1;
-                                    current_pack_size += entry_size;
-                                } else {
-                                    // Start new pack
-                                    pack_count += 1;
-                                    current_pack_index = 1;
-                                    current_pack_size = PACK_BLOCK_HEADER_SIZE + entry_size;
+                    for value_bytes in serialized_values {
+                        let size = value_bytes.len();
 
-                                    node.value_info.push(ValueInfo {
-                                        mode: ValueStorageMode::Packed(u64::from(pack_count), 0),
-                                        length: u32::try_from(size).map_err(to_io_error)?,
-                                        cache: Mutex::new(None),
-                                    });
-                                }
+                        if size <= SMALL_VALUE_THRESHOLD {
+                            let entry_size = PACK_VALUE_HEADER_SIZE + size;
+
+                            if current_pack_size + entry_size <= PAGE_SIZE_USIZE {
+                                node.value_info.push(ValueInfo {
+                                    mode: ValueStorageMode::Packed(u64::from(pack_count), current_pack_index),
+                                    length: u32::try_from(size).map_err(to_io_error)?,
+                                    cache: Mutex::new(None),
+                                });
+                                current_pack_index += 1;
+                                current_pack_size += entry_size;
                             } else {
-                                // Large value - use Single storage with optional compression
-                                // Pre-calculate compressed size if applicable
-                                let (flag, payload) = compress_if_beneficial(&value_bytes);
-                                let stored_size = 1 + payload.len();
-
-                                let cache = if flag == COMPRESSION_FLAG_LZ4 {
-                                    Some(CacheData::Compressed(flag, payload.into_owned()))
-                                } else {
-                                    None // Don't cache uncompressed data to save memory
-                                };
+                                pack_count += 1;
+                                current_pack_index = 1;
+                                current_pack_size = PACK_BLOCK_HEADER_SIZE + entry_size;
 
                                 node.value_info.push(ValueInfo {
-                                    mode: ValueStorageMode::Single(u64::MAX),
-                                    length: u32::try_from(stored_size).map_err(to_io_error)?,
-                                    cache: Mutex::new(cache),
+                                    mode: ValueStorageMode::Packed(u64::from(pack_count), 0),
+                                    length: u32::try_from(size).map_err(to_io_error)?,
+                                    cache: Mutex::new(None),
                                 });
                             }
-                        }
-                    } else {
-                        for child in &mut node.children {
-                            next_level_mut.push(child);
-                        }
-                    }
-                }
-                current_level_mut = next_level_mut;
-            }
-        }
+                        } else {
+                            let (flag, payload) = compress_if_beneficial(&value_bytes);
+                            let stored_size = 1 + payload.len();
 
-        // Pass 2: Calculate offsets for all nodes in breadth-first order (Immutable)
-        // Now value_info is populated, so calculate_serialized_size() returns correct sizes
-        let (node_offsets, child_ids_by_node, mut current_offset) = {
-            let mut node_refs: Vec<&BPlusTreeNode<K, V>> = vec![&*self];
-            let mut node_offsets: Vec<u64> = vec![start_offset];
-            let mut child_ids_by_node: Vec<Vec<usize>> = vec![Vec::new()];
-            let mut current_offset = start_offset + self.calculate_serialized_size(&mut serial_buf)?;
-            let mut current_level = vec![0usize];
+                            let cache = if flag == COMPRESSION_FLAG_LZ4 {
+                                Some(CacheData::Compressed(flag, payload.into_owned()))
+                            } else {
+                                None
+                            };
 
-            while !current_level.is_empty() {
-                let mut next_level = Vec::new();
-                for node_id in current_level {
-                    let node = node_refs[node_id];
-                    if !node.is_leaf {
-                        for child in &node.children {
-                            let child_id = node_refs.len();
-                            node_refs.push(child);
-                            node_offsets.push(current_offset);
-                            child_ids_by_node.push(Vec::new());
-                            child_ids_by_node[node_id].push(child_id);
-                            current_offset += child.calculate_serialized_size(&mut serial_buf)?;
-                            next_level.push(child_id);
+                            node.value_info.push(ValueInfo {
+                                mode: ValueStorageMode::Single(u64::MAX),
+                                length: u32::try_from(stored_size).map_err(to_io_error)?,
+                                cache: Mutex::new(cache),
+                            });
                         }
                     }
-                }
-                current_level = next_level;
-            }
-
-            (node_offsets, child_ids_by_node, current_offset)
-        };
-
-        // Pass 3: Assign final value block offsets and update value_info (Mutable)
-        // current_offset now points past all nodes, we can allocate value blocks here
-        {
-            let mut current_level_mut = vec![&mut *self];
-            while !current_level_mut.is_empty() {
-                let mut next_level_mut = Vec::new();
-                for node in current_level_mut {
-                    if node.is_leaf {
-                        // Track pack block offsets: pack_count -> actual_offset
-                        let mut pack_block_offsets: HashMap<u64, u64> = HashMap::new();
-
-                        // First pass: assign offsets to pack blocks and single values
-                        for info in &mut node.value_info {
-                            match &mut info.mode {
-                                ValueStorageMode::Packed(pack_idx, _index) => {
-                                    if !pack_block_offsets.contains_key(pack_idx) {
-                                        pack_block_offsets.insert(*pack_idx, current_offset);
-                                        current_offset += PAGE_SIZE_USIZE as u64;
-                                    }
-                                }
-                                ValueStorageMode::Single(offset) if *offset == u64::MAX => {
-                                    // Assign actual offset for single value (byte-aligned)
-                                    *offset = current_offset;
-                                    // info.length already contains the correct stored size
-                                    current_offset += u64::from(info.length);
-                                }
-                                ValueStorageMode::Single(_) | ValueStorageMode::Tombstone => {}
-                            }
-                        }
-
-                        // Second pass: update pack indices to actual offsets
-                        for info in &mut node.value_info {
-                            if let ValueStorageMode::Packed(pack_idx, index) = &mut info.mode {
-                                let actual_offset = pack_block_offsets[pack_idx];
-                                *pack_idx = actual_offset;
-                                let _ = index;
-                            }
-                        }
-                    } else {
-                        for child in &mut node.children {
-                            next_level_mut.push(child);
-                        }
-                    }
-                }
-                current_level_mut = next_level_mut;
-            }
-        }
-
-        // Pass 4: Write nodes with their keys and value pointers (Immutable)
-        {
-            let mut node_refs: Vec<&BPlusTreeNode<K, V>> = vec![&*self];
-            let mut node_cursor = 0;
-            while node_cursor < node_refs.len() {
-                let node = node_refs[node_cursor];
-                if !node.is_leaf {
-                    node_refs.extend(node.children.iter());
-                }
-                node_cursor += 1;
-            }
-
-            if node_refs.len() != node_offsets.len() || node_refs.len() != child_ids_by_node.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "B+Tree serialization produced inconsistent node offset table",
-                ));
-            }
-
-            for (node_id, node) in node_refs.iter().enumerate() {
-                let node_offset = node_offsets[node_id];
-
-                if node.is_leaf {
-                    node.serialize_to_block(file, buffer, &mut serial_buf, node_offset)?;
                 } else {
-                    let node_child_ids = child_ids_by_node.get(node_id).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "B+Tree serialization missing child id table entry",
-                        )
-                    })?;
-                    let mut child_offsets = Vec::with_capacity(node_child_ids.len());
-                    for child_id in node_child_ids {
-                        let Some(child_offset) = node_offsets.get(*child_id) else {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "B+Tree serialization child id has no offset",
-                            ));
-                        };
-                        child_offsets.push(*child_offset);
+                    for child in &mut node.children {
+                        next_level_mut.push(child);
                     }
-
-                    node.serialize_internal_with_offsets(
-                        file,
-                        buffer,
-                        &mut serial_buf,
-                        node_offset,
-                        &child_offsets,
-                    )?;
                 }
             }
+            current_level_mut = next_level_mut;
+        }
+        Ok(())
+    }
+
+    fn serialize_bfs_pass2_calculate_offsets(
+        &self,
+        serial_buf: &mut Vec<u8>,
+        start_offset: u64,
+    ) -> io::Result<(Vec<u64>, Vec<Vec<usize>>, u64)> {
+        let mut node_refs: Vec<&BPlusTreeNode<K, V>> = vec![self];
+        let mut node_offsets: Vec<u64> = vec![start_offset];
+        let mut child_ids_by_node: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut current_offset = start_offset + self.calculate_serialized_size(serial_buf)?;
+        let mut current_level = vec![0usize];
+
+        while !current_level.is_empty() {
+            let mut next_level = Vec::new();
+            for node_id in current_level {
+                let node = node_refs[node_id];
+                if !node.is_leaf {
+                    for child in &node.children {
+                        let child_id = node_refs.len();
+                        node_refs.push(child);
+                        node_offsets.push(current_offset);
+                        child_ids_by_node.push(Vec::new());
+                        child_ids_by_node[node_id].push(child_id);
+                        current_offset += child.calculate_serialized_size(serial_buf)?;
+                        next_level.push(child_id);
+                    }
+                }
+            }
+            current_level = next_level;
         }
 
-        // Pass 5: Write all value blocks (packed and single) (Immutable)
-        {
-            let mut current_level_values = vec![&*self];
-            while !current_level_values.is_empty() {
-                let mut next_level = Vec::new();
-                for node in current_level_values {
-                    if node.is_leaf {
-                        // Group values by their storage location
-                        let mut pack_blocks: HashMap<u64, Vec<(u16, Vec<u8>)>> = HashMap::new();
+        Ok((node_offsets, child_ids_by_node, current_offset))
+    }
 
-                        for (value, info) in node.values.iter().zip(node.value_info.iter()) {
-                            serial_buf.clear();
-                            binary_serialize_into(&mut serial_buf, value)?;
+    fn serialize_bfs_pass3_assign_value_offsets(&mut self, mut current_offset: u64) {
+        use std::collections::HashMap;
+        let mut current_level_mut = vec![self];
+        while !current_level_mut.is_empty() {
+            let mut next_level_mut = Vec::new();
+            for node in current_level_mut {
+                if node.is_leaf {
+                    let mut pack_block_offsets: HashMap<u64, u64> = HashMap::new();
 
-                            match info.mode {
-                                ValueStorageMode::Packed(block_offset, index) => {
-                                    pack_blocks.entry(block_offset).or_default().push((index, serial_buf.clone()));
+                    for info in &mut node.value_info {
+                        match &mut info.mode {
+                            ValueStorageMode::Packed(pack_idx, _index) => {
+                                if !pack_block_offsets.contains_key(pack_idx) {
+                                    pack_block_offsets.insert(*pack_idx, current_offset);
+                                    current_offset += PAGE_SIZE_USIZE as u64;
                                 }
-                                ValueStorageMode::Single(block_offset) => {
-                                    // Write single value with compression format
-                                    file.seek(SeekFrom::Start(block_offset))?;
+                            }
+                            ValueStorageMode::Single(offset) if *offset == u64::MAX => {
+                                *offset = current_offset;
+                                current_offset += u64::from(info.length);
+                            }
+                            ValueStorageMode::Single(_) | ValueStorageMode::Tombstone => {}
+                        }
+                    }
 
-                                    // Apply adaptive compression or use cache
-                                    let cache_guard = info.cache.lock();
-                                    let (flag, payload_ref) = if let Some(cache_data) = cache_guard.as_ref() {
-                                        if let CacheData::Compressed(c_flag, c_payload) = cache_data {
-                                            (*c_flag, c_payload.as_slice())
-                                        } else {
-                                            (COMPRESSION_FLAG_NONE, serial_buf.as_slice())
-                                        }
+                    for info in &mut node.value_info {
+                        if let ValueStorageMode::Packed(pack_idx, _index) = &mut info.mode {
+                            let actual_offset = pack_block_offsets[pack_idx];
+                            *pack_idx = actual_offset;
+                        }
+                    }
+                } else {
+                    for child in &mut node.children {
+                        next_level_mut.push(child);
+                    }
+                }
+            }
+            current_level_mut = next_level_mut;
+        }
+    }
+
+    fn serialize_bfs_pass4_write_nodes<W: Write + Seek>(
+        &self,
+        file: &mut W,
+        buffer: &mut Vec<u8>,
+        serial_buf: &mut Vec<u8>,
+        node_offsets: &[u64],
+        child_ids_by_node: &[Vec<usize>],
+    ) -> io::Result<()> {
+        let mut node_refs: Vec<&BPlusTreeNode<K, V>> = vec![self];
+        let mut node_cursor = 0;
+        while node_cursor < node_refs.len() {
+            let node = node_refs[node_cursor];
+            if !node.is_leaf {
+                node_refs.extend(node.children.iter());
+            }
+            node_cursor += 1;
+        }
+
+        if node_refs.len() != node_offsets.len() || node_refs.len() != child_ids_by_node.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "B+Tree serialization produced inconsistent node offset table",
+            ));
+        }
+
+        for (node_id, node) in node_refs.iter().enumerate() {
+            let node_offset = node_offsets[node_id];
+
+            if node.is_leaf {
+                node.serialize_to_block(file, buffer, serial_buf, node_offset)?;
+            } else {
+                let node_child_ids = child_ids_by_node.get(node_id).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "B+Tree serialization missing child id table entry",
+                    )
+                })?;
+                let mut child_offsets = Vec::with_capacity(node_child_ids.len());
+                for child_id in node_child_ids {
+                    let Some(child_offset) = node_offsets.get(*child_id) else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "B+Tree serialization child id has no offset",
+                        ));
+                    };
+                    child_offsets.push(*child_offset);
+                }
+
+                node.serialize_internal_with_offsets(
+                    file,
+                    buffer,
+                    serial_buf,
+                    node_offset,
+                    &child_offsets,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn serialize_bfs_pass5_write_values<W: Write + Seek>(
+        &self,
+        file: &mut W,
+        buffer: &mut [u8],
+        serial_buf: &mut Vec<u8>,
+    ) -> io::Result<()> {
+        use std::collections::HashMap;
+        let mut current_level_values = vec![self];
+        while !current_level_values.is_empty() {
+            let mut next_level = Vec::new();
+            for node in current_level_values {
+                if node.is_leaf {
+                    let mut pack_blocks: HashMap<u64, Vec<(u16, Vec<u8>)>> = HashMap::new();
+
+                    for (value, info) in node.values.iter().zip(node.value_info.iter()) {
+                        serial_buf.clear();
+                        binary_serialize_into(serial_buf, value)?;
+
+                        match info.mode {
+                            ValueStorageMode::Packed(block_offset, index) => {
+                                pack_blocks.entry(block_offset).or_default().push((index, serial_buf.clone()));
+                            }
+                            ValueStorageMode::Single(block_offset) => {
+                                file.seek(SeekFrom::Start(block_offset))?;
+
+                                let cache_guard = info.cache.lock();
+                                let (flag, payload_ref) =
+                                    if let Some(CacheData::Compressed(c_flag, c_payload)) = cache_guard.as_ref() {
+                                        (*c_flag, c_payload.as_slice())
                                     } else {
-                                        // If not cached, it means it wasn't beneficial (or we chose not to cache it)
-                                        // So we write raw bytes with NONE flag
                                         (COMPRESSION_FLAG_NONE, serial_buf.as_slice())
                                     };
 
-                                    // Write: [flag:1][payload]
-                                    file.write_all(&[flag])?;
-                                    file.write_all(payload_ref)?;
-                                }
-                                ValueStorageMode::Tombstone => {}
+                                file.write_all(&[flag])?;
+                                file.write_all(payload_ref)?;
                             }
-                        }
-
-                        // Write packed blocks
-                        for (block_offset, mut values) in pack_blocks {
-                            // Sort by index to ensure correct order
-                            values.sort_by_key(|(idx, _)| *idx);
-
-                            // Convert to slice references
-                            let value_refs: Vec<(u16, &[u8])> =
-                                values.iter().map(|(idx, bytes)| (*idx, bytes.as_slice())).collect();
-
-                            Self::write_packed_block(file, buffer, block_offset, &value_refs)?;
-                        }
-                    } else {
-                        for child in &node.children {
-                            next_level.push(child);
+                            ValueStorageMode::Tombstone => {}
                         }
                     }
-                }
-                current_level_values = next_level;
-            }
-        }
 
-        // Root offset is what Pass 2 assigned to 'self'
-        Ok(start_offset)
+                    for (block_offset, mut values) in pack_blocks {
+                        values.sort_by_key(|(idx, _)| *idx);
+                        let value_refs: Vec<(u16, &[u8])> =
+                            values.iter().map(|(idx, bytes)| (*idx, bytes.as_slice())).collect();
+                        Self::write_packed_block(file, buffer, block_offset, &value_refs)?;
+                    }
+                } else {
+                    for child in &node.children {
+                        next_level.push(child);
+                    }
+                }
+            }
+            current_level_values = next_level;
+        }
+        Ok(())
     }
 
     /// Serialize an internal node with pre-calculated child offsets
@@ -2458,7 +2480,7 @@ where
             let mut parent_level_pointers: Vec<(K, u64)> = Vec::new();
             let children = next_level_pointers;
 
-            for chunk in children.chunks(self.inner_order + 1) {
+            for chunk in children.chunks(self.inner_order) {
                 let mut node = BPlusTreeNode::<K, V>::new(false);
                 let mut pointers = Vec::new();
 
@@ -2654,7 +2676,7 @@ fn query_tree_contains_live_key<K, V, R: Read + Seek>(
     cache: &mut SplitNodeCache<K, V>,
     key: &K,
     start_offset: u64,
-    has_tombstones: bool,
+    _has_tombstones: bool,
 ) -> Result<bool, BPlusTreeError>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -2666,13 +2688,9 @@ where
 
         if node.is_leaf {
             return Ok(match node.keys.binary_search(key) {
-                Ok(idx) => {
-                    if has_tombstones {
-                        node.value_info.get(idx).is_some_and(|info| !info.is_tombstone())
-                    } else {
-                        node.value_info.get(idx).is_some()
-                    }
-                }
+                // Always check tombstone — the has_tombstones flag is only a hint
+                // and may be incorrect for legacy files or after corruption.
+                Ok(idx) => node.value_info.get(idx).is_some_and(|info| !info.is_tombstone()),
                 Err(_) => false,
             });
         }
@@ -2701,39 +2719,73 @@ where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
-    #[inline]
-    fn fallback_scan<K, V, R: Read + Seek>(
+    fn rightmost_live_value_le<K, V, R: Read + Seek>(
         file: &mut R,
         buffer: &mut Vec<u8>,
+        cache: &mut SplitNodeCache<K, V>,
         key: &K,
-        start_offset: u64,
+        mut offset: u64,
     ) -> Result<Option<V>, BPlusTreeError>
     where
         K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
         V: Serialize + for<'de> Deserialize<'de> + Clone,
     {
-        let mut stack: OffsetStack = smallvec![start_offset];
-        let mut last: Option<V> = None;
-
-        while let Some(offset) = stack.pop() {
-            let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_block(file, buffer, offset, false)?;
+        loop {
+            let (node, pointers) = read_node_cached(file, buffer, cache, offset)?;
             if node.is_leaf {
-                for (leaf_key, info) in node.keys.iter().zip(node.value_info.iter()) {
-                    if leaf_key <= key && !info.is_tombstone() {
-                        last = Some(BPlusTreeNode::<K, V>::load_value_from_info(file, info)?);
+                let mut idx = get_entry_index_upper_bound::<K>(&node.keys, key);
+                while idx > 0 {
+                    idx -= 1;
+                    let Some(info) = node.value_info.get(idx) else {
+                        continue;
+                    };
+                    if info.is_tombstone() {
+                        continue;
                     }
+                    return Ok(Some(BPlusTreeNode::<K, V>::load_value_from_info(file, info)?));
                 }
+                return Ok(None);
             } else if let Some(ptrs) = pointers {
-                for ptr in ptrs.into_iter().rev() {
-                    stack.push(ptr);
+                let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
+                let Some(next_offset) = ptrs
+                    .get(child_idx)
+                    .or_else(|| child_idx.checked_sub(1).and_then(|previous| ptrs.get(previous)))
+                    .or_else(|| ptrs.last())
+                else {
+                    return Ok(None);
+                };
+                offset = *next_offset;
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn previous_subtree_value<K, V, R: Read + Seek>(
+        file: &mut R,
+        buffer: &mut Vec<u8>,
+        cache: &mut SplitNodeCache<K, V>,
+        key: &K,
+        ancestors: &mut Vec<(Vec<u64>, usize)>,
+    ) -> Result<Option<V>, BPlusTreeError>
+    where
+        K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+        V: Serialize + for<'de> Deserialize<'de> + Clone,
+    {
+        while let Some((ptrs, child_idx)) = ancestors.pop() {
+            if let Some(previous_idx) = child_idx.checked_sub(1) {
+                if let Some(previous_offset) = ptrs.get(previous_idx) {
+                    if let Some(value) = rightmost_live_value_le(file, buffer, cache, key, *previous_offset)? {
+                        return Ok(Some(value));
+                    }
                 }
             }
         }
-
-        Ok(last)
+        Ok(None)
     }
 
     let mut offset = start_offset;
+    let mut ancestors: Vec<(Vec<u64>, usize)> = Vec::new();
     loop {
         let (node, pointers) = read_node_cached(file, buffer, cache, offset)?;
 
@@ -2750,14 +2802,16 @@ where
                 let value = BPlusTreeNode::<K, V>::load_value_from_info(file, info)?;
                 return Ok(Some(value));
             }
-            return fallback_scan(file, buffer, key, start_offset);
+            return previous_subtree_value(file, buffer, cache, key, &mut ancestors);
         }
 
         let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
         if let Some(child_offsets) = pointers {
             if let Some(child_offset) = child_offsets.get(child_idx) {
+                ancestors.push((child_offsets.clone(), child_idx));
                 offset = *child_offset;
             } else if let Some(last) = child_offsets.last() {
+                ancestors.push((child_offsets.clone(), child_offsets.len().saturating_sub(1)));
                 offset = *last;
             } else {
                 return Ok(None);
@@ -2891,7 +2945,7 @@ fn query_tree_mmap_contains_live_key<K, V>(
     node_cache: &mut SplitNodeCache<K, V>,
     key: &K,
     start_offset: u64,
-    has_tombstones: bool,
+    _has_tombstones: bool,
 ) -> Result<bool, BPlusTreeError>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -2903,13 +2957,9 @@ where
 
         if node.is_leaf {
             return Ok(match node.keys.binary_search(key) {
-                Ok(idx) => {
-                    if has_tombstones {
-                        node.value_info.get(idx).is_some_and(|info| !info.is_tombstone())
-                    } else {
-                        node.value_info.get(idx).is_some()
-                    }
-                }
+                // Always check tombstone — the has_tombstones flag is only a hint
+                // and may be incorrect for legacy files or after corruption.
+                Ok(idx) => node.value_info.get(idx).is_some_and(|info| !info.is_tombstone()),
                 Err(_) => false,
             });
         }
@@ -3030,39 +3080,71 @@ where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
-    #[inline]
-    fn fallback_scan<K, V>(
+    fn rightmost_live_value_le<K, V>(
         mmap: &[u8],
         cursor: &mut io::Cursor<&[u8]>,
         key: &K,
-        start_offset: u64,
+        mut offset: u64,
     ) -> Result<Option<V>, BPlusTreeError>
     where
         K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
         V: Serialize + for<'de> Deserialize<'de> + Clone,
     {
-        let mut stack: OffsetStack = smallvec![start_offset];
-        let mut last: Option<V> = None;
-
-        while let Some(offset) = stack.pop() {
+        loop {
             let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, cursor, offset, false)?;
             if node.is_leaf {
-                for (leaf_key, info) in node.keys.iter().zip(node.value_info.iter()) {
-                    if leaf_key <= key && !info.is_tombstone() {
-                        last = Some(BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?);
+                let mut idx = get_entry_index_upper_bound::<K>(&node.keys, key);
+                while idx > 0 {
+                    idx -= 1;
+                    let Some(info) = node.value_info.get(idx) else {
+                        continue;
+                    };
+                    if info.is_tombstone() {
+                        continue;
                     }
+                    return Ok(Some(BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?));
                 }
+                return Ok(None);
             } else if let Some(ptrs) = pointers {
-                for ptr in ptrs.into_iter().rev() {
-                    stack.push(ptr);
+                let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
+                let Some(next_offset) = ptrs
+                    .get(child_idx)
+                    .or_else(|| child_idx.checked_sub(1).and_then(|previous| ptrs.get(previous)))
+                    .or_else(|| ptrs.last())
+                else {
+                    return Ok(None);
+                };
+                offset = *next_offset;
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn previous_subtree_value<K, V>(
+        mmap: &[u8],
+        cursor: &mut io::Cursor<&[u8]>,
+        key: &K,
+        ancestors: &mut Vec<(Vec<u64>, usize)>,
+    ) -> Result<Option<V>, BPlusTreeError>
+    where
+        K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
+        V: Serialize + for<'de> Deserialize<'de> + Clone,
+    {
+        while let Some((ptrs, child_idx)) = ancestors.pop() {
+            if let Some(previous_idx) = child_idx.checked_sub(1) {
+                if let Some(previous_offset) = ptrs.get(previous_idx) {
+                    if let Some(value) = rightmost_live_value_le(mmap, cursor, key, *previous_offset)? {
+                        return Ok(Some(value));
+                    }
                 }
             }
         }
-
-        Ok(last)
+        Ok(None)
     }
 
     let mut offset = start_offset;
+    let mut ancestors: Vec<(Vec<u64>, usize)> = Vec::new();
     loop {
         let (node, pointers) = BPlusTreeNode::<K, V>::deserialize_from_mmap(mmap, cursor, offset, false)?;
 
@@ -3079,12 +3161,13 @@ where
                 let value = BPlusTreeNode::<K, V>::load_value_from_info(cursor, info)?;
                 return Ok(Some(value));
             }
-            return fallback_scan(mmap, cursor, key, start_offset);
+            return previous_subtree_value(mmap, cursor, key, &mut ancestors);
         }
 
         let child_idx = get_entry_index_upper_bound::<K>(&node.keys, key);
         if let Some(child_offsets) = pointers {
             if let Some(child_offset) = child_offsets.get(child_idx) {
+                ancestors.push((child_offsets.clone(), child_idx));
                 offset = *child_offset;
             } else {
                 return Ok(None);
@@ -3168,18 +3251,11 @@ where
         }
 
         // Try Mmap
-        let mmap = mmap_with_advice(&file, Advice::Random, "B+Tree query");
+        let mmap = mmap_with_advice(&file, Advice::Normal, "B+Tree query");
 
         // Verify Header
         let mut header = [0u8; METADATA_DATA_START_POS];
-        #[cfg(unix)]
-        file.read_exact_at(&mut header, 0)?;
-        #[cfg(not(unix))]
-        {
-            let mut f = &file;
-            f.seek(SeekFrom::Start(0))?;
-            f.read_exact(&mut header)?;
-        }
+        read_exact_at_offset(&file, &mut header, 0)?;
 
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
@@ -3238,7 +3314,7 @@ where
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "Missing filepath for mmap clone"));
             }
             let file = File::open(&self.filepath)?;
-            if let Some(mapped) = mmap_with_advice(&file, Advice::Random, "B+Tree query clone") {
+            if let Some(mapped) = mmap_with_advice(&file, Advice::Normal, "B+Tree query clone") {
                 (None, Some(mapped))
             } else {
                 (Some(utils::file_reader(file)), None)
@@ -3280,16 +3356,7 @@ where
 
     fn read_root_offset_and_tombstone_flag_from_file(file: &File) -> io::Result<(u64, bool)> {
         let mut root_and_metadata_len = [0u8; size_of::<u64>() + size_of::<u32>()];
-        #[cfg(unix)]
-        file.read_exact_at(&mut root_and_metadata_len, ROOT_OFFSET_POS)?;
-        #[cfg(not(unix))]
-        {
-            let mut f = file;
-            let current_pos = f.stream_position()?;
-            f.seek(SeekFrom::Start(ROOT_OFFSET_POS))?;
-            f.read_exact(&mut root_and_metadata_len)?;
-            f.seek(SeekFrom::Start(current_pos))?;
-        }
+        read_exact_at_offset(file, &mut root_and_metadata_len, ROOT_OFFSET_POS)?;
         let root_offset = u64::from_le_bytes(
             root_and_metadata_len[0..8]
                 .try_into()
@@ -3317,7 +3384,7 @@ where
             let (root_offset, has_tombstones) = Self::read_root_offset_and_tombstone_flag_from_file(&file)?;
 
             if remap_required {
-                if let Some(remapped) = mmap_with_advice(&file, Advice::Random, "B+Tree query remap") {
+                if let Some(remapped) = mmap_with_advice(&file, Advice::Normal, "B+Tree query remap") {
                     self.file = None;
                     self.mmap = Some(remapped);
                 } else {
@@ -3787,9 +3854,6 @@ where
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
     fn new(tree: &'a mut BPlusTreeQuery<K, V>, start: Bound<K>, end: Bound<K>) -> Self {
-        if let Some(mmap) = &tree.mmap {
-            advise_mmap(mmap, Advice::Sequential, "range leaf iterator");
-        }
         Self {
             tree,
             start_bound: start,
@@ -3899,6 +3963,7 @@ where
             Bound::Included(key) | Bound::Excluded(key) => Some(key),
             Bound::Unbounded => None,
         };
+        self.tree.refresh_root_offset_if_due()?;
         self.descend_to_leaf(self.tree.root_offset, start_key.as_ref())
     }
 
@@ -4027,14 +4092,6 @@ where
             };
 
             return Some(Ok((key, value)));
-        }
-    }
-}
-
-impl<K, V> Drop for RangeLeafIterator<'_, K, V> {
-    fn drop(&mut self) {
-        if let Some(mmap) = &self.tree.mmap {
-            advise_mmap(mmap, Advice::Random, "range leaf iterator drop");
         }
     }
 }
@@ -4293,9 +4350,6 @@ where
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
     fn new(query: BPlusTreeQuery<K, V>) -> Self {
-        if let Some(mmap) = &query.mmap {
-            advise_mmap(mmap, Advice::Sequential, "owned B+Tree iterator");
-        }
         let root_offset = query.root_offset;
         Self { query, stack: smallvec![(root_offset, 0)], leaf_keys: Vec::new(), leaf_values: Vec::new(), leaf_idx: 0 }
     }
@@ -4414,14 +4468,6 @@ where
     }
 }
 
-impl<K, V> Drop for BPlusTreeDiskIteratorOwned<K, V> {
-    fn drop(&mut self) {
-        if let Some(mmap) = &self.query.mmap {
-            advise_mmap(mmap, Advice::Random, "owned B+Tree iterator drop");
-        }
-    }
-}
-
 /// Generic reader that can be either a sorted index iterator or a regular disk iterator.
 /// Used for fallback logic (Sorted -> Unsorted).
 pub enum PlaylistIteratorReader<K, V, SortKey> {
@@ -4459,9 +4505,6 @@ where
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
     fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
-        if let Some(mmap) = &query.mmap {
-            advise_mmap(mmap, Advice::Sequential, "borrowed B+Tree iterator");
-        }
         let root_offset = query.root_offset;
         Self { query, stack: smallvec![(root_offset, 0)], leaf_keys: Vec::new(), leaf_values: Vec::new(), leaf_idx: 0 }
     }
@@ -4549,14 +4592,6 @@ where
                     self.stack.push((next_ptr, 0));
                 }
             }
-        }
-    }
-}
-
-impl<K, V> Drop for BPlusTreeDiskIterator<'_, K, V> {
-    fn drop(&mut self) {
-        if let Some(mmap) = &self.query.mmap {
-            advise_mmap(mmap, Advice::Random, "borrowed B+Tree iterator drop");
         }
     }
 }
@@ -4687,14 +4722,7 @@ where
 
         // Verify Header
         let mut header = [0u8; METADATA_DATA_START_POS];
-        #[cfg(unix)]
-        f.read_exact_at(&mut header, 0)?;
-        #[cfg(not(unix))]
-        {
-            let mut tmp_f = &f;
-            tmp_f.seek(SeekFrom::Start(0))?;
-            tmp_f.read_exact(&mut header)?;
-        }
+        read_exact_at_offset(&f, &mut header, 0)?;
 
         if &header[0..4] != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic number"));
@@ -4898,14 +4926,12 @@ where
     }
 
     pub fn query(&mut self, key: &K) -> Result<Option<V>, BPlusTreeError> {
-        let mut reader = utils::file_reader(&mut self.file);
-        query_tree(&mut reader, &mut self.read_buffer, &mut self.cache, key, self.root_offset)
+        query_tree(&mut self.file, &mut self.read_buffer, &mut self.cache, key, self.root_offset)
     }
 
     pub fn is_empty(&mut self) -> Result<bool, BPlusTreeError> {
-        let mut reader = utils::file_reader(&mut self.file);
         let (node, _) =
-            BPlusTreeNode::<K, V>::deserialize_from_block(&mut reader, &mut self.read_buffer, self.root_offset, false)?;
+            BPlusTreeNode::<K, V>::deserialize_from_block(&mut self.file, &mut self.read_buffer, self.root_offset, false)?;
         Ok(node.is_leaf && node.keys.is_empty())
     }
 
@@ -5294,14 +5320,18 @@ where
                 self.file.get_mut().write_all(&payload)?;
 
                 // Zero-pad remaining space
-                let padding_len = existing_len - new_stored_len;
-                if padding_len > 0 {
-                    let zeros = vec![0u8; padding_len];
-                    self.file.get_mut().write_all(&zeros)?;
+                let mut padding_len = existing_len - new_stored_len;
+                while padding_len > 0 {
+                    let chunk_len = padding_len.min(ZERO_PADDING_CHUNK.len());
+                    self.file.get_mut().write_all(&ZERO_PADDING_CHUNK[..chunk_len])?;
+                    padding_len -= chunk_len;
                 }
 
-                // Invalidate BufReader cache since we bypassed it to write
-                self.file.stream_position()?; // alias for seek(SeekFrom::Current(0))
+                // Force BufReader to discard its internal buffer by seeking to
+                // the underlying file position. stream_position() / seek(Current(0))
+                // does NOT reliably invalidate stale buffered data.
+                let pos = self.file.get_mut().stream_position()?;
+                self.file.seek(SeekFrom::Start(pos))?;
 
                 Ok(InPlaceUpdateResult::Success)
             }
@@ -5353,7 +5383,9 @@ where
             // Jump directly to the offset (avoid reading entire block and linear scan)
             self.file.seek(SeekFrom::Start(block_offset + u64::from(pos)))?;
             self.file.get_mut().write_all(new_value_bytes)?;
-            self.file.stream_position()?;
+            // Force BufReader to discard its internal buffer.
+            let pos = self.file.get_mut().stream_position()?;
+            self.file.seek(SeekFrom::Start(pos))?;
             return Ok(());
         }
 
@@ -5397,8 +5429,9 @@ where
                 // Cache the offset for future updates
                 *cache.lock() = Some(CacheData::PackedOffset(u16::try_from(pos).map_err(to_io_error)?));
 
-                // Invalidate BufReader cache
-                self.file.stream_position()?; // alias for seek(SeekFrom::Current(0))
+                // Force BufReader to discard its internal buffer.
+                let pos = self.file.get_mut().stream_position()?;
+                self.file.seek(SeekFrom::Start(pos))?;
 
                 return Ok(());
             }
