@@ -113,7 +113,6 @@ pub struct MediaServerInputConfig {
     pub user_id: Option<String>,
     pub account_token: Option<String>,
     pub server_id: Option<String>,
-    pub machine_id: Option<String>,
     pub server_name: Option<String>,
     pub prefer_https: bool,
     pub allow_relay: bool,
@@ -133,7 +132,6 @@ impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
             user_id: normalized.user_id,
             account_token: normalized.account_token,
             server_id: normalized.server_id,
-            machine_id: normalized.machine_id,
             server_name: normalized.server_name,
             prefer_https: normalized.prefer_https,
             allow_relay: normalized.allow_relay,
@@ -151,9 +149,7 @@ impl MediaServerInputConfig {
     }
 
     pub fn has_plex_server_selector(&self) -> bool {
-        is_non_blank_optional_string(&self.server_id)
-            || is_non_blank_optional_string(&self.machine_id)
-            || is_non_blank_optional_string(&self.server_name)
+        is_non_blank_optional_string(&self.server_id) || is_non_blank_optional_string(&self.server_name)
     }
 }
 
@@ -579,7 +575,7 @@ impl ConfigInput {
                 }
                 if trimmed_url.is_empty() && !media_server.has_plex_server_selector() {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires a server selector such as media_server.machine_id, media_server.server_id, or media_server.server_name when input.url is omitted (input: {})",
+                        "media-server input type plex requires a server selector such as media_server.server_id or media_server.server_name when input.url is omitted (input: {})",
                         self.name
                     )));
                 }
@@ -936,7 +932,6 @@ mod tests {
                 user_id: Some(" user ".to_string()),
                 account_token: Some(" account-token ".to_string()),
                 server_id: Some(" server ".to_string()),
-                machine_id: Some(" machine ".to_string()),
                 server_name: Some(" server-name ".to_string()),
                 ..MediaServerInputConfigDto {
                     libraries: vec![MediaServerLibrarySelectorDto::Name(" Movies ".to_string())],
@@ -958,7 +953,6 @@ mod tests {
         assert_eq!(media_server.user_id.as_deref(), Some("user"));
         assert_eq!(media_server.account_token.as_deref(), Some("account-token"));
         assert_eq!(media_server.server_id.as_deref(), Some("server"));
-        assert_eq!(media_server.machine_id.as_deref(), Some("machine"));
         assert_eq!(media_server.server_name.as_deref(), Some("server-name"));
     }
 
@@ -969,7 +963,7 @@ mod tests {
             input_type: InputType::Plex,
             media_server: Some(MediaServerInputConfig {
                 account_token: Some("token".to_string()),
-                machine_id: Some("machine".to_string()),
+                server_id: Some("server".to_string()),
                 ..media_server_config_with_library()
             }),
             enabled: true,

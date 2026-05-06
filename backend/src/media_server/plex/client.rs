@@ -30,7 +30,6 @@ struct PlexClientConfig {
     token: Option<Arc<str>>,
     account_token: Option<Arc<str>>,
     server_id: Option<Arc<str>>,
-    machine_id: Option<Arc<str>>,
     server_name: Option<Arc<str>>,
     prefer_https: bool,
     allow_relay: bool,
@@ -79,7 +78,6 @@ impl PlexCatalogClient {
                 token: media_server.token.as_deref().and_then(non_blank).map(Arc::<str>::from),
                 account_token: media_server.account_token.as_deref().and_then(non_blank).map(Arc::<str>::from),
                 server_id: media_server.server_id.as_deref().and_then(non_blank).map(Arc::<str>::from),
-                machine_id: media_server.machine_id.as_deref().and_then(non_blank).map(Arc::<str>::from),
                 server_name: media_server.server_name.as_deref().and_then(non_blank).map(Arc::<str>::from),
                 prefer_https: media_server.prefer_https,
                 allow_relay: media_server.allow_relay,
@@ -501,12 +499,7 @@ fn select_resource<'a>(
         })
         .collect::<Vec<_>>();
 
-    let matches = if let Some(machine_id) = config.machine_id.as_deref() {
-        plex_servers
-            .into_iter()
-            .filter(|resource| resource.machine_identifier.as_deref().is_some_and(|value| value == machine_id))
-            .collect::<Vec<_>>()
-    } else if let Some(server_id) = config.server_id.as_deref() {
+    let matches = if let Some(server_id) = config.server_id.as_deref() {
         plex_servers.into_iter().filter(|resource| resource_matches_server_id(resource, server_id)).collect::<Vec<_>>()
     } else if let Some(server_name) = config.server_name.as_deref() {
         plex_servers
@@ -574,9 +567,6 @@ const fn https_sort_key(is_https: bool, prefer_https: bool) -> u8 {
 }
 
 fn verify_direct_selectors(config: &PlexClientConfig, identity: &PlexIdentityDto) -> Result<(), MediaServerError> {
-    if let Some(machine_id) = config.machine_id.as_deref() {
-        verify_selector(identity.machine_identifier.as_deref(), machine_id, "configured Plex machine selector did not match PMS identity")?;
-    }
     if let Some(server_id) = config.server_id.as_deref() {
         verify_selector(identity.machine_identifier.as_deref(), server_id, "configured Plex server selector did not match PMS identity")?;
     }
@@ -731,8 +721,7 @@ mod tests {
             direct_url: None,
             token: None,
             account_token: Some("account-token-redacted".into()),
-            server_id: None,
-            machine_id: Some("machine-redacted".into()),
+            server_id: Some("machine-redacted".into()),
             server_name: None,
             prefer_https: true,
             allow_relay: false,
@@ -741,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_plex_resource_by_machine_id_without_exposing_token() {
+    fn server_id_selector_matches_myplex_machine_identifier_without_exposing_token() {
         let resource = PlexResourceDto {
             name: Some("Server Redacted".to_string()),
             product: Some("Plex Media Server".to_string()),
@@ -760,9 +749,7 @@ mod tests {
 
     #[test]
     fn server_id_selector_matches_myplex_client_identifier_and_verifies_pms_identity() {
-        let mut config = config();
-        config.machine_id = None;
-        config.server_id = Some("machine-redacted".into());
+        let config = config();
         let resource = PlexResourceDto {
             name: Some("Server Redacted".to_string()),
             product: Some("Plex Media Server".to_string()),
@@ -816,7 +803,7 @@ mod tests {
     #[test]
     fn rejects_ambiguous_plex_resource_name() {
         let mut config = config();
-        config.machine_id = None;
+        config.server_id = None;
         config.server_name = Some("Server Redacted".into());
         let resource = PlexResourceDto {
             name: Some("Server Redacted".to_string()),
@@ -937,7 +924,6 @@ mod tests {
             user_id: None,
             account_token: None,
             server_id: None,
-            machine_id: None,
             server_name: None,
             prefer_https: true,
             allow_relay: false,

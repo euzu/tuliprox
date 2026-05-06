@@ -679,7 +679,7 @@ impl ConfigInputDto {
                 }
                 if trimmed_url.is_empty() && !media_server.has_plex_server_selector() {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires a server selector such as media_server.machine_id, media_server.server_id, or media_server.server_name when input.url is omitted (input: {})",
+                        "media-server input type plex requires a server selector such as media_server.server_id or media_server.server_name when input.url is omitted (input: {})",
                         self.name
                     )));
                 }
