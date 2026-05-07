@@ -5,7 +5,7 @@ use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
 use shared::error::TuliproxError;
 use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, XtreamCluster};
-use shared::utils::{Internable, CONSTANTS};
+use shared::utils::{hash_string, Internable, CONSTANTS};
 use indexmap::IndexMap;
 use std::sync::Arc;
 use strsim::normalized_levenshtein;
@@ -165,8 +165,11 @@ fn create_category_from_matches<'a>(
                     header.set_field("caption", &caption);
                 }
             }
+            let source_uuid = header.uuid;
             header.group = group_title.clone();
             header.gen_uuid();
+            let source_uuid = if source_uuid == Default::default() { header.uuid } else { source_uuid };
+            header.uuid = hash_string(&format!("trakt-category:{}:{}", category_config.category_name, source_uuid));
             matched_items_by_cluster.entry(header.xtream_cluster).or_default().push(modified_item);
         });
     }
@@ -358,9 +361,37 @@ mod tests {
         assert_eq!(matched.expect("tmdb match").trakt_item.tmdb_id, Some(456));
     }
 
+    #[test]
+    fn same_playlist_item_can_appear_in_multiple_trakt_categories() {
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Original".intern(),
+            channels: vec![video_item("The Smashing Machine", Some(760329))],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+        let trakt_items = vec![trakt_list_movie("The Smashing Machine", Some(2025), Some(760329), 1)];
+        let a24_config = named_list_config("▸ A24", true);
+        let renoir_config = named_list_config("▸ Cines Renoir", true);
+
+        let a24 = match_trakt_items_with_playlist(&trakt_items, &playlist, &a24_config);
+        let renoir = match_trakt_items_with_playlist(&trakt_items, &playlist, &renoir_config);
+
+        assert_eq!(a24.len(), 1);
+        assert_eq!(renoir.len(), 1);
+        let a24_item = &a24[0].channels[0];
+        let renoir_item = &renoir[0].channels[0];
+        assert_eq!(a24_item.header.group.as_ref(), "▸ A24");
+        assert_eq!(renoir_item.header.group.as_ref(), "▸ Cines Renoir");
+        assert_ne!(a24_item.header.uuid, renoir_item.header.uuid);
+    }
+
     fn list_config(tmdb_only: bool) -> TraktCategoryConfig {
+        named_list_config("category", tmdb_only)
+    }
+
+    fn named_list_config(category_name: &str, tmdb_only: bool) -> TraktCategoryConfig {
         TraktCategoryConfig {
-            category_name: "category".to_string(),
+            category_name: category_name.to_string(),
             content_type: TraktContentType::Vod,
             tmdb_only,
             fuzzy_match_threshold: 100,
@@ -391,6 +422,30 @@ mod tests {
             trakt_id,
             content_type: TraktContentType::Vod,
             rank: Some(trakt_id),
+        }
+    }
+
+    fn trakt_list_movie(title: &str, year: Option<u32>, tmdb_id: Option<u32>, trakt_id: u32) -> TraktListItem {
+        TraktListItem {
+            id: u64::from(trakt_id),
+            rank: Some(trakt_id),
+            listed_at: String::new(),
+            notes: None,
+            item_type: "movie".to_string(),
+            movie: Some(crate::model::TraktMovie {
+                ids: crate::model::TraktIds {
+                    trakt: trakt_id,
+                    slug: title.to_string(),
+                    tvdb: None,
+                    imdb: None,
+                    tmdb: tmdb_id,
+                    tvrage: None,
+                },
+                title: title.to_string(),
+                year,
+            }),
+            show: None,
+            content_type: TraktContentType::Vod,
         }
     }
 }
