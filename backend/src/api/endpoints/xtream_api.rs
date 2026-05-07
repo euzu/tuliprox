@@ -837,6 +837,13 @@ create_xtream_player_api_resource!(xtream_player_api_live_resource, ApiStreamCon
 create_xtream_player_api_resource!(xtream_player_api_series_resource, ApiStreamContext::Series);
 create_xtream_player_api_resource!(xtream_player_api_movie_resource, ApiStreamContext::Movie);
 
+fn empty_stream_info_response(cluster: XtreamCluster) -> axum::response::Response {
+    match cluster {
+        XtreamCluster::Video => try_unwrap_body!(empty_json_response_as_object()),
+        XtreamCluster::Live | XtreamCluster::Series => try_unwrap_body!(empty_json_response_as_array()),
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 struct XtreamApiTimeShiftRequest {
     username: String,
@@ -961,7 +968,7 @@ pub async fn xtream_get_stream_info_response(
     };
 
     let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, Some(cluster)).await else {
-        return try_unwrap_body!(empty_json_response_as_array());
+        return empty_stream_info_response(cluster);
     };
 
     let input = app_state.app_config.get_input_by_name(&pli.input_name);
@@ -969,7 +976,7 @@ pub async fn xtream_get_stream_info_response(
     // handle local items and media server
     if pli.item_type.is_local() || is_media_server {
         let Some(xtream_output) = target.get_xtream_output() else {
-            return try_unwrap_body!(empty_json_response_as_array());
+            return empty_stream_info_response(cluster);
         };
 
         let encrypt_secret = app_state.get_encrypt_secret();
@@ -1594,13 +1601,28 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_xtream_playback_extension, XtreamApiTimeShiftRequest};
+    use super::{empty_stream_info_response, resolve_xtream_playback_extension, XtreamApiTimeShiftRequest};
     use crate::api::model::UserApiRequest;
     use shared::{
         model::{PlaylistItemType, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem},
         utils::Internable,
     };
     use std::sync::Arc;
+
+    async fn response_body_text(response: axum::response::Response) -> Result<String, String> {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(|err| format!("failed to read response body: {err}"))?;
+        String::from_utf8(body.to_vec()).map_err(|err| format!("response body is not UTF-8: {err}"))
+    }
+
+    #[tokio::test]
+    async fn empty_stream_info_response_uses_vod_object_and_list_shapes() -> Result<(), String> {
+        assert_eq!(response_body_text(empty_stream_info_response(XtreamCluster::Video)).await?, "{}");
+        assert_eq!(response_body_text(empty_stream_info_response(XtreamCluster::Live)).await?, "[]");
+        assert_eq!(response_body_text(empty_stream_info_response(XtreamCluster::Series)).await?, "[]");
+        Ok(())
+    }
 
     fn create_test_vod_item(url: &str, container_extension: &str, item_type: PlaylistItemType) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
