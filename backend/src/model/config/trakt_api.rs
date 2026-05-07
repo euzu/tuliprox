@@ -23,6 +23,32 @@ pub struct TraktListItem {
 }
 
 impl TraktListItem {
+    pub fn from_movie_chart(movie: TraktMovie, rank: u32) -> Self {
+        Self {
+            id: u64::from(movie.ids.trakt),
+            rank: Some(rank),
+            listed_at: String::new(),
+            notes: None,
+            item_type: "movie".to_string(),
+            movie: Some(movie),
+            show: None,
+            content_type: TraktContentType::Vod,
+        }
+    }
+
+    pub fn from_show_chart(show: TraktShow, rank: u32) -> Self {
+        Self {
+            id: u64::from(show.ids.trakt),
+            rank: Some(rank),
+            listed_at: String::new(),
+            notes: None,
+            item_type: "show".to_string(),
+            movie: None,
+            show: Some(show),
+            content_type: TraktContentType::Series,
+        }
+    }
+
     pub fn prepare(&mut self) {
         self.content_type = match self.item_type.as_str() {
             "movie" => if self.movie.is_some() { TraktContentType::Vod } else { TraktContentType::Both },

@@ -1,11 +1,12 @@
 use super::errors::handle_trakt_api_error;
-use crate::model::{TraktApiConfig, TraktListConfig, TraktListItem};
+use crate::model::{TraktApiConfig, TraktChartConfig, TraktListConfig, TraktListItem, TraktMovie, TraktShow};
 use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
+use serde::Deserialize;
 use shared::{error::TuliproxError, utils::{trim_last_slash, DEFAULT_USER_AGENT, TRAKT_API_KEY}};
 
-const TRAKT_LIST_PAGE_LIMIT: u32 = 100;
-const TRAKT_LIST_MAX_PAGES: u32 = 100;
+const TRAKT_PAGE_LIMIT: u32 = 100;
+const TRAKT_MAX_PAGES: u32 = 100;
 
 pub struct TraktClient {
     client: reqwest::Client,
@@ -39,6 +40,47 @@ impl TraktClient {
         format!("{}/users/{user}/lists/{list_slug}/items", trim_last_slash(&self.api_config.url))
     }
 
+    fn build_chart_url(&self, chart_config: &TraktChartConfig) -> String {
+        format!("{}/{}/{}", trim_last_slash(&self.api_config.url), chart_config.kind, chart_config.chart)
+    }
+
+    pub async fn get_chart_items(&self, chart_config: &TraktChartConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
+        debug!("Fetching Trakt chart {}:{}", chart_config.kind, chart_config.chart);
+
+        let mut page = 1;
+        let mut items = Vec::new();
+        loop {
+            let mut page_items = self.get_chart_items_page(chart_config, page).await?;
+            let page_count = page_items.page_count;
+            let item_count = page_items.item_count;
+            debug!(
+                "Fetched Trakt chart {}:{} page {page}/{page_count} with {} items",
+                chart_config.kind,
+                chart_config.chart,
+                page_items.items.len()
+            );
+            let is_last_page = page >= page_count || page >= TRAKT_MAX_PAGES || page_items.items.is_empty();
+            items.append(&mut page_items.items);
+            if is_last_page {
+                if page >= TRAKT_MAX_PAGES && page < page_count {
+                    debug!(
+                        "Stopped Trakt chart {}:{} after {TRAKT_MAX_PAGES} pages; reported page count was {page_count}",
+                        chart_config.kind, chart_config.chart
+                    );
+                }
+                info!(
+                    "Successfully fetched {} items from Trakt chart {}:{}{}",
+                    items.len(),
+                    chart_config.kind,
+                    chart_config.chart,
+                    item_count.map(|count| format!(" (reported item count: {count})")).unwrap_or_default()
+                );
+                return Ok(items);
+            }
+            page += 1;
+        }
+    }
+
     pub async fn get_list_items(&self, list_config: &TraktListConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
         debug!("Fetching Trakt list {}:{}", list_config.user, list_config.list_slug);
 
@@ -54,12 +96,12 @@ impl TraktClient {
                 list_config.list_slug,
                 page_items.items.len()
             );
-            let is_last_page = page >= page_count || page >= TRAKT_LIST_MAX_PAGES || page_items.items.is_empty();
+            let is_last_page = page >= page_count || page >= TRAKT_MAX_PAGES || page_items.items.is_empty();
             items.append(&mut page_items.items);
             if is_last_page {
-                if page >= TRAKT_LIST_MAX_PAGES && page < page_count {
+                if page >= TRAKT_MAX_PAGES && page < page_count {
                     debug!(
-                        "Stopped Trakt list {}:{} after {TRAKT_LIST_MAX_PAGES} pages; reported page count was {page_count}",
+                        "Stopped Trakt list {}:{} after {TRAKT_MAX_PAGES} pages; reported page count was {page_count}",
                         list_config.user, list_config.list_slug
                     );
                 }
@@ -82,7 +124,7 @@ impl TraktClient {
         page: u32,
     ) -> Result<TraktListItemsPage, TuliproxError> {
         let url = self.build_list_url(&list_config.user, &list_config.list_slug);
-        let request_url = format!("{url}?page={page}&limit={TRAKT_LIST_PAGE_LIMIT}");
+        let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
         let response = self
             .client
             .get(&request_url)
@@ -108,12 +150,96 @@ impl TraktClient {
 
         Ok(TraktListItemsPage { items, page_count, item_count })
     }
+
+    async fn get_chart_items_page(
+        &self,
+        chart_config: &TraktChartConfig,
+        page: u32,
+    ) -> Result<TraktListItemsPage, TuliproxError> {
+        let url = self.build_chart_url(chart_config);
+        let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
+        let response = self
+            .client
+            .get(&request_url)
+            .headers(self.headers.clone())
+            .send()
+            .await
+            .map_err(|err| TuliproxError::Config(format!("Failed to fetch Trakt chart {url}: {err}")))?;
+
+        if !response.status().is_success() {
+            handle_trakt_api_error(response.status(), "charts", &format!("{}:{}", chart_config.kind, chart_config.chart))?;
+        }
+
+        let page_count = parse_trakt_pagination_header(response.headers(), "x-pagination-page-count").unwrap_or(page);
+        let item_count = parse_trakt_pagination_header(response.headers(), "x-pagination-item-count");
+        let response_text = response
+            .text()
+            .await
+            .map_err(|error: reqwest::Error| TuliproxError::Config(format!("Failed to read Trakt response: {error}")))?;
+
+        let items = parse_chart_items(&response_text, chart_config, page)
+            .map_err(|error| TuliproxError::Config(format!("Failed to parse Trakt chart response: {error}")))?;
+
+        Ok(TraktListItemsPage { items, page_count, item_count })
+    }
 }
 
 struct TraktListItemsPage {
     items: Vec<TraktListItem>,
     page_count: u32,
     item_count: Option<u32>,
+}
+
+fn parse_chart_items(
+    response_text: &str,
+    chart_config: &TraktChartConfig,
+    page: u32,
+) -> Result<Vec<TraktListItem>, serde_json::Error> {
+    let rank_base = page.saturating_sub(1).saturating_mul(TRAKT_PAGE_LIMIT);
+    match (chart_config.kind, chart_config.chart) {
+        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Popular) => {
+            let items = serde_json::from_str::<Vec<TraktMovie>>(response_text)?;
+            Ok(items
+                .into_iter()
+                .enumerate()
+                .map(|(index, movie)| TraktListItem::from_movie_chart(movie, rank_base + index as u32 + 1))
+                .collect())
+        }
+        (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Trending) => {
+            let items = serde_json::from_str::<Vec<TraktTrendingMovieItem>>(response_text)?;
+            Ok(items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| TraktListItem::from_movie_chart(item.movie, rank_base + index as u32 + 1))
+                .collect())
+        }
+        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Popular) => {
+            let items = serde_json::from_str::<Vec<TraktShow>>(response_text)?;
+            Ok(items
+                .into_iter()
+                .enumerate()
+                .map(|(index, show)| TraktListItem::from_show_chart(show, rank_base + index as u32 + 1))
+                .collect())
+        }
+        (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Trending) => {
+            let items = serde_json::from_str::<Vec<TraktTrendingShowItem>>(response_text)?;
+            Ok(items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| TraktListItem::from_show_chart(item.show, rank_base + index as u32 + 1))
+                .collect())
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct TraktTrendingMovieItem {
+    movie: TraktMovie,
+}
+
+#[derive(Deserialize)]
+struct TraktTrendingShowItem {
+    show: TraktShow,
 }
 
 fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Option<u32> {
@@ -123,8 +249,8 @@ fn parse_trakt_pagination_header(headers: &HeaderMap, name: &'static str) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::TraktContentType;
-    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+    use shared::model::{TraktChartKind, TraktChartType, TraktContentType};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
     use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
 
     #[tokio::test]
@@ -157,6 +283,46 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn get_chart_items_fetches_public_trending_movies() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_single_response_trakt_server(
+            r#"[{"watchers":42,"movie":{"title":"Movie 1","year":2026,"ids":{"trakt":1,"slug":"movie-1","tvdb":null,"imdb":null,"tmdb":11,"tvrage":null}}}]"#,
+            Arc::clone(&requests),
+        )
+        .await;
+        let client = client(base_url);
+        let chart_config = chart_config(TraktChartKind::Movies, TraktChartType::Trending);
+
+        let items = client.get_chart_items(&chart_config).await.expect("trending movie chart should load");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].rank, Some(1));
+        assert_eq!(items[0].content_type, TraktContentType::Vod);
+        assert_eq!(items[0].movie.as_ref().expect("movie").ids.tmdb, Some(11));
+        assert!(requests.lock().expect("requests")[0].contains("GET /movies/trending?page=1&limit=100 "));
+    }
+
+    #[tokio::test]
+    async fn get_chart_items_fetches_public_popular_shows() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let base_url = spawn_single_response_trakt_server(
+            r#"[{"title":"Show 1","year":2026,"ids":{"trakt":2,"slug":"show-1","tvdb":null,"imdb":null,"tmdb":22,"tvrage":null}}]"#,
+            Arc::clone(&requests),
+        )
+        .await;
+        let client = client(base_url);
+        let chart_config = chart_config(TraktChartKind::Shows, TraktChartType::Popular);
+
+        let items = client.get_chart_items(&chart_config).await.expect("popular show chart should load");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].rank, Some(1));
+        assert_eq!(items[0].content_type, TraktContentType::Series);
+        assert_eq!(items[0].show.as_ref().expect("show").ids.tmdb, Some(22));
+        assert!(requests.lock().expect("requests")[0].contains("GET /shows/popular?page=1&limit=100 "));
+    }
+
     async fn spawn_paged_trakt_server(requests: Arc<AtomicUsize>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test server");
         let addr = listener.local_addr().expect("local addr");
@@ -187,6 +353,55 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    async fn spawn_single_response_trakt_server(body: &'static str, requests: Arc<Mutex<Vec<String>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else { return };
+            let mut request_bytes = Vec::new();
+            loop {
+                let mut buffer = [0; 1024];
+                let read = stream.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request_bytes.extend_from_slice(&buffer[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            requests.lock().expect("requests").push(String::from_utf8_lossy(&request_bytes).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write response");
+        });
+        format!("http://{addr}")
+    }
+
+    fn client(base_url: String) -> TraktClient {
+        TraktClient::new(
+            reqwest::Client::new(),
+            TraktApiConfig {
+                api_key: "test-key".to_string(),
+                version: "2".to_string(),
+                url: base_url,
+                user_agent: "tuliprox-test".to_string(),
+            },
+        )
+    }
+
+    fn chart_config(kind: TraktChartKind, chart: TraktChartType) -> TraktChartConfig {
+        TraktChartConfig {
+            kind,
+            chart,
+            category_name: "category".to_string(),
+            tmdb_only: false,
+            fuzzy_match_threshold: 90,
+        }
     }
 
     fn trakt_movie_json(page: u32) -> String {

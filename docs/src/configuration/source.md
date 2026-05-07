@@ -1058,24 +1058,42 @@ sources:
                   category_name: "📺 Latest TV Shows"
                   content_type: series
                   fuzzy_match_threshold: 80
+              charts:
+                - kind: movies
+                  chart: trending
+                  category_name: "🔥 Trending Movies"
+                  tmdb_only: true
+                - kind: shows
+                  chart: popular
+                  category_name: "⭐ Popular Shows"
+                  tmdb_only: true
 ```
 
-This configuration creates two additional virtual categories populated with matched entries from the configured Trakt
-lists.
+This configuration creates additional virtual categories populated with matched entries from the configured Trakt user
+lists and public Trakt charts.
 
 ##### Trakt Parameters
 
-| Parameter                       | Type    | Required | Default                | Technical Impact & Background                                                                                                              |
-|:--------------------------------|:--------|:--------:|:-----------------------|:-------------------------------------------------------------------------------------------------------------------------------------------|
-| `api.api_key`                   | String  |   Yes    |                        | Trakt API key used for authenticated access. Without a valid key, Tuliprox cannot fetch remote list content.                               |
-| `api.version`                   | String  |    No    | `"2"`                  | API version header value. This ensures Tuliprox formats requests against the correct Trakt API version.                                    |
-| `api.url`                       | String  |    No    | `https://api.trakt.tv` | Base API URL for Trakt requests. This defines the remote endpoint Tuliprox queries for list data.                                          |
-| `api.user_agent`                | String  |    No    |                        | Optional `User-Agent` used for Trakt API requests. This can help satisfy API gateway expectations or deployment-specific request policies. |
-| `lists[].user`                  | String  |   Yes    |                        | Trakt username owning the list. This identifies which account namespace Tuliprox fetches list data from.                                   |
-| `lists[].list_slug`             | String  |   Yes    |                        | Trakt list slug. Combined with `user`, this uniquely identifies the remote list to load.                                                   |
-| `lists[].category_name`         | String  |   Yes    |                        | Name of the generated virtual category inside Tuliprox's Xtream output. This controls where matched entries appear to clients.             |
-| `lists[].content_type`          | Enum    |   Yes    |                        | `vod` or `series`. This determines which class of playlist entries Tuliprox will attempt to match and inject into the generated category.  |
-| `lists[].fuzzy_match_threshold` | Integer |    No    |                        | Fuzzy matching threshold for title matching. Higher values reduce false positives but may miss loosely matching items.                     |
+| Parameter                        | Type    | Required | Default                | Technical Impact & Background                                                                                                              |
+| :------------------------------- | :------ | :------: | :--------------------- | :----------------------------------------------------------------------------------------------------------------------------------------- |
+| `api.api_key`                    | String  | Yes      |                        | Trakt API key used for authenticated access. Without a valid key, Tuliprox cannot fetch remote list content.                               |
+| `api.version`                    | String  | No       | `"2"`                  | API version header value. This ensures Tuliprox formats requests against the correct Trakt API version.                                    |
+| `api.url`                        | String  | No       | `https://api.trakt.tv` | Base API URL for Trakt requests. This defines the remote endpoint Tuliprox queries for list data.                                          |
+| `api.user_agent`                 | String  | No       |                        | Optional `User-Agent` used for Trakt API requests. This can help satisfy API gateway expectations or deployment-specific request policies. |
+| `lists[].user`                   | String  | Yes      |                        | Trakt username owning the list. This identifies which account namespace Tuliprox fetches list data from.                                   |
+| `lists[].list_slug`              | String  | Yes      |                        | Trakt list slug. Combined with `user`, this uniquely identifies the remote list to load.                                                   |
+| `lists[].category_name`          | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output. This controls where matched entries appear to clients.             |
+| `lists[].content_type`           | Enum    | Yes      |                        | `vod` or `series`. This determines which class of playlist entries Tuliprox will attempt to match and inject into the generated category.  |
+| `lists[].fuzzy_match_threshold`  | Integer | No       |                        | Fuzzy matching threshold for title matching. Higher values reduce false positives but may miss loosely matching items.                     |
+| `charts[]`                       | List    | No       | `[]`                   | Public Trakt chart definitions. Unlike `lists[]`, these are system charts and do not have a user/list owner.                               |
+| `charts[].kind`                  | Enum    | Yes      |                        | `movies` or `shows`. Aliases such as `movie`, `vod`, `show`, `series`, and `tvshows` are accepted.                                         |
+| `charts[].chart`                 | Enum    | Yes      |                        | Public chart to fetch. MVP supports `trending` and `popular`.                                                                              |
+| `charts[].category_name`         | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output.                                                                    |
+| `charts[].tmdb_only`             | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted. This is recommended for dynamic charts to avoid fuzzy false positives.                 |
+| `charts[].fuzzy_match_threshold` | Integer | No       |                        | Fuzzy matching threshold for chart title matching when `tmdb_only` is not enabled.                                                         |
+
+The `charts[]` MVP intentionally supports only public, non-OAuth Trakt charts. User-specific recommendations and
+account-scoped history feeds are not fetched by this block.
 
 ### 2. Type `m3u`
 

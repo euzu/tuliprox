@@ -403,13 +403,15 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
             // Handle Trakt configuration
             let trakt_lists = (*trakt_lists_state).clone();
-            output.trakt = if trakt_lists.is_empty() {
+            let trakt_charts = trakt_state.data().charts.clone();
+            output.trakt = if trakt_lists.is_empty() && trakt_charts.is_empty() {
                 None
             } else {
                 Some(TraktConfigDto {
                     enabled: trakt_state.data().enabled,
                     api: trakt_api_state.data().clone(),
                     lists: trakt_lists,
+                    charts: trakt_charts,
                 })
             };
 

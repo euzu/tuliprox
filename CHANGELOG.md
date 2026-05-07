@@ -10,6 +10,9 @@
 
 ## 🌟 New Features
 
+- **Trakt Charts**: Xtream Trakt integration can now build virtual categories from public Trakt charts via `trakt.charts[]`.
+  - MVP supports `movies/shows` with `trending` and `popular`.
+  - User-owned Trakt lists remain configured separately under `trakt.lists[]`.
 - **Per-User Output Clusters**: API proxy users can now be restricted to specific clusters on their assigned target via
   `output_clusters`.
   - Supported values: `live`, `vod`, `series`.

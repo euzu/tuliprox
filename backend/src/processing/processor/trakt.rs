@@ -1,5 +1,5 @@
 use crate::model::{ConfigTarget, TraktListItem, TraktMatchItem};
-use crate::model::{TraktConfig, TraktListConfig, TraktMatchResult};
+use crate::model::{TraktCategoryConfig, TraktConfig, TraktMatchResult};
 use crate::utils::{extract_year_from_title, normalize_title_for_matching, TraktClient};
 use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
@@ -48,11 +48,11 @@ fn calculate_year_bonus(playlist_year: Option<u32>, trakt_year: Option<u32>) -> 
     0.0
 }
 
-fn find_best_fuzzy_match_for_item<'a>(channel: (&'a PlaylistItem, String, Option<u32>, Option<u32>), trakt_items: &'a [TraktMatchItem], list_config: &'a TraktListConfig) -> Option<TraktMatchResult<'a>> {
+fn find_best_fuzzy_match_for_item<'a>(channel: (&'a PlaylistItem, String, Option<u32>, Option<u32>), trakt_items: &'a [TraktMatchItem], category_config: &'a TraktCategoryConfig) -> Option<TraktMatchResult<'a>> {
     // Try fuzzy matching if no exact match found
     let normalized_playlist_title = channel.1;
     let playlist_year = channel.2;
-    let threshold = f64::from(list_config.fuzzy_match_threshold) / 100.0;
+    let threshold = f64::from(category_config.fuzzy_match_threshold) / 100.0;
     let mut best_match: Option<(&TraktMatchItem, f64)> = None;
 
     for trakt_item in trakt_items {
@@ -106,7 +106,7 @@ fn find_best_fuzzy_match_for_item<'a>(channel: (&'a PlaylistItem, String, Option
 fn find_best_match_for_item<'a>(
     channel: (&'a PlaylistItem, String, Option<u32>, Option<u32>),
     trakt_items: &'a [TraktMatchItem<'a>],
-    list_config: &'a TraktListConfig,
+    category_config: &'a TraktCategoryConfig,
 ) -> Option<TraktMatchResult<'a>> {
     // Try TMDB exact matching first
     if let Some(playlist_tmdb_id) = channel.3 {
@@ -123,16 +123,16 @@ fn find_best_match_for_item<'a>(
         }
     }
 
-    if list_config.tmdb_only {
+    if category_config.tmdb_only {
         return None;
     }
 
-    find_best_fuzzy_match_for_item(channel, trakt_items, list_config)
+    find_best_fuzzy_match_for_item(channel, trakt_items, category_config)
 }
 
 fn create_category_from_matches<'a>(
     matches: Vec<TraktMatchResult<'a>>,
-    list_config: &'a TraktListConfig,
+    category_config: &'a TraktCategoryConfig,
 ) -> Vec<PlaylistGroup> {
     if matches.is_empty() { return vec![]; }
 
@@ -149,7 +149,7 @@ fn create_category_from_matches<'a>(
         ))
     });
 
-    let group_title = list_config.category_name.as_str().intern();
+    let group_title = category_config.category_name.as_str().intern();
 
     for match_result in sorted_matches {
         let mut modified_item = match_result.playlist_item.clone();
@@ -184,31 +184,31 @@ fn create_category_from_matches<'a>(
 fn match_trakt_items_with_playlist<'a>(
     trakt_items: &'a [TraktListItem],
     playlist: &'a [PlaylistGroup],
-    list_config: &'a TraktListConfig,
+    category_config: &'a TraktCategoryConfig,
 ) -> Vec<PlaylistGroup> {
     let trakt_match_items: Vec<TraktMatchItem<'a>> = trakt_items
         .iter()
-        .filter(|item| should_include_item(item, list_config.content_type))
+        .filter(|item| should_include_item(item, category_config.content_type))
         .filter_map(TraktMatchItem::from_trakt_list_item)
         .collect();
 
-    debug!("Matching {} Trakt items against playlist for content type {:?}", trakt_match_items.len(), list_config.content_type);
+    debug!("Matching {} Trakt items against playlist for content type {:?}", trakt_match_items.len(), category_config.content_type);
 
     let mut matches = Vec::new();
     for playlist_group in playlist {
         for channel in &playlist_group.channels {
-            if is_compatible_content_type(channel.header.xtream_cluster, list_config.content_type) {
+            if is_compatible_content_type(channel.header.xtream_cluster, category_config.content_type) {
                 let normalized_title = normalize_title_for_matching(&channel.header.title);
                 let channel_year = extract_year_from_title(&channel.header.title);
                 let channel_tmdb_id = channel.get_tmdb_id();
-                if let Some(matched) = find_best_match_for_item((channel, normalized_title, channel_year, channel_tmdb_id), &trakt_match_items, list_config) {
+                if let Some(matched) = find_best_match_for_item((channel, normalized_title, channel_year, channel_tmdb_id), &trakt_match_items, category_config) {
                     matches.push(matched);
                 }
             }
         }
     }
 
-    create_category_from_matches(matches, list_config)
+    create_category_from_matches(matches, category_config)
 }
 
 pub struct TraktCategoriesProcessor {
@@ -227,29 +227,35 @@ impl TraktCategoriesProcessor {
         target: &ConfigTarget,
         trakt_config: &TraktConfig,
     ) -> Result<Option<Vec<PlaylistGroup>>, Vec<TuliproxError>> {
-        if trakt_config.lists.is_empty() {
-            debug!("No Trakt lists configured for target {}", target.name);
+        if trakt_config.lists.is_empty() && trakt_config.charts.is_empty() {
+            debug!("No Trakt lists or charts configured for target {}", target.name);
             return Ok(None);
         }
 
-        info!("Processing {} Trakt lists for target {}", trakt_config.lists.len(), target.name);
+        info!(
+            "Processing {} Trakt lists and {} Trakt charts for target {}",
+            trakt_config.lists.len(),
+            trakt_config.charts.len(),
+            target.name
+        );
         let mut new_categories = Vec::new();
         let mut total_matches = 0;
 
         for list_config in &trakt_config.lists {
             let cache_key = format!("{}:{}", list_config.user, list_config.list_slug);
+            let category_config = TraktCategoryConfig::from(list_config);
 
             match self.client.get_list_items(list_config).await {
                 Ok(trakt_items) => {
                     debug!("Processing Trakt list {cache_key} with {} items", trakt_items.len());
 
-                    let categories = match_trakt_items_with_playlist(&trakt_items, playlist, list_config);
+                    let categories = match_trakt_items_with_playlist(&trakt_items, playlist, &category_config);
                     for category in categories {
                         if !category.channels.is_empty() {
                             total_matches += category.channels.len();
                             let category_len = category.channels.len();
                             new_categories.push(category);
-                            debug!("Created Trakt category '{}' with {category_len} items", list_config.category_name);
+                            debug!("Created Trakt category '{}' with {category_len} items", category_config.category_name);
                         }
                     }
                 }
@@ -259,9 +265,34 @@ impl TraktCategoriesProcessor {
             }
         }
 
+        for chart_config in &trakt_config.charts {
+            let cache_key = format!("{}:{}", chart_config.kind, chart_config.chart);
+            let category_config = TraktCategoryConfig::from(chart_config);
 
-        info!("Trakt processing complete: created {} categories with {total_matches} total matches",
-             new_categories.len());
+            match self.client.get_chart_items(chart_config).await {
+                Ok(trakt_items) => {
+                    debug!("Processing Trakt chart {cache_key} with {} items", trakt_items.len());
+
+                    let categories = match_trakt_items_with_playlist(&trakt_items, playlist, &category_config);
+                    for category in categories {
+                        if !category.channels.is_empty() {
+                            total_matches += category.channels.len();
+                            let category_len = category.channels.len();
+                            new_categories.push(category);
+                            debug!("Created Trakt category '{}' with {category_len} items", category_config.category_name);
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!("Failed to fetch Trakt chart {cache_key}: {}", err.message());
+                }
+            }
+        }
+
+        info!(
+            "Trakt processing complete: created {} categories with {total_matches} total matches",
+            new_categories.len()
+        );
 
         Ok(Some(new_categories))
     }
@@ -327,10 +358,8 @@ mod tests {
         assert_eq!(matched.expect("tmdb match").trakt_item.tmdb_id, Some(456));
     }
 
-    fn list_config(tmdb_only: bool) -> TraktListConfig {
-        TraktListConfig {
-            user: "user".to_string(),
-            list_slug: "list".to_string(),
+    fn list_config(tmdb_only: bool) -> TraktCategoryConfig {
+        TraktCategoryConfig {
             category_name: "category".to_string(),
             content_type: TraktContentType::Vod,
             tmdb_only,
