@@ -10,8 +10,11 @@ use log::error;
 use shared::create_bitset;
 use shared::error::TuliproxError;
 use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, TargetType, XtreamCluster};
-use shared::utils::{extract_extension_from_url, Internable};
+use shared::utils::{extract_extension_from_url, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::task;
@@ -79,11 +82,48 @@ fn build_rewritten_url(
     }
 }
 
+fn resolve_effective_source_url<'a>(
+    m3u_pli: &'a M3uPlaylistItem,
+    input_by_name: &HashMap<Arc<str>, Arc<crate::model::ConfigInput>>,
+) -> Cow<'a, str> {
+    if !m3u_pli.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return Cow::Borrowed(m3u_pli.url.as_ref());
+    }
+
+    input_by_name.get(&m3u_pli.input_name).map_or_else(
+        || {
+            error!(
+                "Input '{}' not found while resolving provider URL '{}'",
+                m3u_pli.input_name,
+                sanitize_sensitive_info(&m3u_pli.url)
+            );
+            Cow::Borrowed(m3u_pli.url.as_ref())
+        },
+        |input| match input.resolve_url(&m3u_pli.url) {
+            Ok(resolved) => match resolved {
+                Cow::Borrowed(url) => Cow::Borrowed(url),
+                Cow::Owned(url) => Cow::Owned(url),
+            },
+            Err(err) => {
+                error!(
+                    "Failed to resolve provider URL '{}' for input '{}': {}",
+                    sanitize_sensitive_info(&m3u_pli.url),
+                    m3u_pli.input_name,
+                    sanitize_sensitive_info(err.to_string().as_str())
+                );
+                Cow::Borrowed(m3u_pli.url.as_ref())
+            }
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_rewrite(
     mut m3u_pli: M3uPlaylistItem,
     base_url: &str,
     username: &str,
     password: &str,
+    input_by_name: &HashMap<Arc<str>, Arc<crate::model::ConfigInput>>,
     target_options: Option<&ConfigTargetOptions>,
     flags: M3uPlaylistIteratorFlagsSet,
     proxy_type: ProxyType,
@@ -93,12 +133,14 @@ fn apply_rewrite(
     let should_rewrite_urls =
         if is_redirect { flags.contains(M3uPlaylistIteratorFlags::MaskRedirectUrl) } else { true };
 
+    let effective_source_url = resolve_effective_source_url(&m3u_pli, input_by_name);
+
     if should_rewrite_urls {
         let stream_url = build_rewritten_url(
             base_url,
             username,
             password,
-            m3u_pli.url.as_ref(),
+            effective_source_url.as_ref(),
             &m3u_pli,
             flags.contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
             storage_const::M3U_STREAM_PATH,
@@ -122,14 +164,18 @@ fn apply_rewrite(
         m3u_pli.t_stream_url = stream_url.intern();
         m3u_pli.t_resource_url = resource_url;
     } else {
-        // Keep original URL (clone required because target field is distinct)
-        m3u_pli.t_stream_url = m3u_pli.url.clone();
+        m3u_pli.t_stream_url = match effective_source_url {
+            Cow::Borrowed(_) => Arc::clone(&m3u_pli.url),
+            Cow::Owned(url) => url.intern(),
+        };
         m3u_pli.t_resource_url = None;
     }
 
     m3u_pli
 }
 
+
+#[allow(clippy::too_many_lines)]
 impl M3uPlaylistIterator {
     pub async fn new(
         cfg: &AppConfig,
@@ -166,6 +212,13 @@ impl M3uPlaylistIterator {
         let proxy_type = user.proxy;
         let output_clusters = user.output_clusters;
         let target_options = target.options.clone();
+        let input_by_name: HashMap<Arc<str>, Arc<crate::model::ConfigInput>> = cfg
+            .sources
+            .load()
+            .inputs
+            .iter()
+            .map(|input| (Arc::clone(&input.name), Arc::clone(input)))
+            .collect();
 
         let m3u_path = m3u_path.clone();
         let index_path = get_file_path_for_db_index(&m3u_path);
@@ -207,8 +260,16 @@ impl M3uPlaylistIterator {
                     }
                 }
 
-                let item =
-                    apply_rewrite(item, &base_url, &username, &password, target_options.as_ref(), flags, proxy_type);
+                let item = apply_rewrite(
+                    item,
+                    &base_url,
+                    &username,
+                    &password,
+                    &input_by_name,
+                    target_options.as_ref(),
+                    flags,
+                    proxy_type,
+                );
 
                 if let Some(prev) = pending.replace(item) {
                     if tx.blocking_send((prev, true)).is_err() {
@@ -282,5 +343,115 @@ impl Stream for M3uPlaylistM3uTextIterator {
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_rewrite, M3uPlaylistIteratorFlags, M3uPlaylistIteratorFlagsSet};
+    use crate::model::{ConfigInput, ConfigProvider, ProviderDnsCache};
+    use shared::{
+        model::{M3uPlaylistItem, PlaylistItemType, ProviderUrlSelectionPolicy, ProxyType},
+        utils::Internable,
+    };
+    use std::{
+        collections::HashMap,
+        sync::{atomic::AtomicUsize, Arc},
+    };
+
+    fn provider_input() -> Arc<ConfigInput> {
+        Arc::new(ConfigInput {
+            name: "example1".intern(),
+            provider_configs: Some(vec![Arc::new(ConfigProvider {
+                name: "example".intern(),
+                urls: vec!["http://example.com".intern()],
+                provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+                current_url_index: AtomicUsize::new(0),
+                dns: None,
+                dns_cache: Arc::new(ProviderDnsCache::default()),
+            })]),
+            ..ConfigInput::default()
+        })
+    }
+
+    fn m3u_item(url: &str) -> M3uPlaylistItem {
+        M3uPlaylistItem {
+            virtual_id: 813_294,
+            provider_id: "813294".intern(),
+            name: "France 4K".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "FR| FRANCE 4K".intern(),
+            title: "France 4K".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: url.intern(),
+            epg_channel_id: None,
+            input_name: "example1".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        }
+    }
+
+    #[test]
+    fn redirect_without_mask_resolves_provider_scheme_url() {
+        let input = provider_input();
+        let input_by_name = HashMap::from([(Arc::clone(&input.name), input)]);
+        let rewritten = apply_rewrite(
+            m3u_item("provider://example/live/user/pass/813294.ts"),
+            "https://example.com",
+            "user",
+            "pass",
+            &input_by_name,
+            None,
+            M3uPlaylistIteratorFlagsSet::new(),
+            ProxyType::Redirect,
+        );
+
+        assert_eq!(rewritten.t_stream_url.as_ref(), "http://example.com/live/user/pass/813294.ts");
+    }
+
+    #[test]
+    fn redirect_without_mask_keeps_regular_url() {
+        let input_by_name = HashMap::new();
+        let rewritten = apply_rewrite(
+            m3u_item("http://example.com/live/user/pass/813294.ts"),
+            "https://example.com",
+            "user",
+            "pass",
+            &input_by_name,
+            None,
+            M3uPlaylistIteratorFlagsSet::new(),
+            ProxyType::Redirect,
+        );
+
+        assert_eq!(rewritten.t_stream_url.as_ref(), "http://example.com/live/user/pass/813294.ts");
+    }
+
+    #[test]
+    fn masked_redirect_uses_resolved_provider_source_for_rewritten_url() {
+        let input = provider_input();
+        let input_by_name = HashMap::from([(Arc::clone(&input.name), input)]);
+        let mut flags = M3uPlaylistIteratorFlagsSet::new();
+        flags.set(M3uPlaylistIteratorFlags::MaskRedirectUrl);
+
+        let rewritten = apply_rewrite(
+            m3u_item("provider://example/live/user/pass/813294.ts"),
+            "https://example.com",
+            "user",
+            "pass",
+            &input_by_name,
+            None,
+            flags,
+            ProxyType::Redirect,
+        );
+
+        assert_eq!(rewritten.t_stream_url.as_ref(), "https://example.com/m3u-stream/user/pass/813294.ts");
     }
 }
