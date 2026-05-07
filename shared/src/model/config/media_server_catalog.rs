@@ -1,28 +1,15 @@
 use crate::{
     error::TuliproxError,
-    utils::{default_as_true, default_media_server_catalog_page_size, default_media_server_catalog_request_delay_ms, get_trimmed_string,
-            is_blank_optional_string, is_default_media_server_catalog_page_size, is_default_media_server_catalog_request_delay_ms,
-            is_false,
-            is_non_blank_optional_string,
-            is_true,
+    utils::{
+        default_as_true, default_media_server_catalog_page_size, default_media_server_catalog_request_delay_ms,
+        get_trimmed_string, is_blank_optional_string, is_default_media_server_catalog_page_size,
+        is_default_media_server_catalog_request_delay_ms, is_false, is_non_blank_optional_string, is_true,
     },
 };
 use enum_iterator::Sequence;
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    Sequence,
-    PartialEq,
-    Eq,
-    Default
-)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum MediaServerCatalogRefreshModeDto {
     #[serde(rename = "manual")]
     #[default]
@@ -87,17 +74,7 @@ impl MediaServerCatalogConfigDto {
     }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    Sequence,
-    PartialEq,
-    Eq,
-    Default
-)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum MediaServerPlaybackInfoPolicyDto {
     #[serde(rename = "on_demand")]
     #[default]
@@ -138,17 +115,7 @@ impl MediaServerPlaybackConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 }
 
-#[derive(
-    Debug,
-    Copy,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    Sequence,
-    PartialEq,
-    Eq,
-    Default
-)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
 pub enum MediaServerImagePolicyDto {
     #[serde(rename = "proxy_on_demand")]
     #[default]
@@ -315,11 +282,19 @@ impl MediaServerInputConfigDto {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
-    use std::net::IpAddr;
-    use crate::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, DnsPrefer, DnsScheme, InputType, OnConnectErrorPolicy, OnResolveErrorPolicy, ProviderDnsDto, ProviderUrlSelectionPolicy, StagedInputDto};
-    use crate::utils::Internable;
     use super::*;
+    use crate::{
+        model::{
+            ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, DnsPrefer,
+            DnsScheme, InputType, OnConnectErrorPolicy, OnResolveErrorPolicy, ProviderDnsDto,
+            ProviderUrlSelectionPolicy, StagedInputDto,
+        },
+        utils::Internable,
+    };
+    use std::{
+        collections::{HashMap, HashSet},
+        net::IpAddr,
+    };
 
     fn create_test_dto() -> ConfigInputDto {
         ConfigInputDto { name: "test_input".intern(), ..ConfigInputDto::default() }
@@ -405,7 +380,7 @@ mod tests {
         let err = serde_json::from_str::<MediaServerInputConfigDto>(
             r#"{"libraries":["Movies"],"enrichment":{"ffprobe":true,"tmdb_lookup":true,"fetch_images":true}}"#,
         )
-            .expect_err("media_server.enrichment must not be accepted");
+        .expect_err("media_server.enrichment must not be accepted");
 
         assert!(err.to_string().contains("unknown field `enrichment`"));
     }

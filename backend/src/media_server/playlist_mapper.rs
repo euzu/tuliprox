@@ -26,10 +26,10 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
         });
     }
 
-    let mut series_channels = Vec::new();
+    let mut series_channels = Vec::with_capacity(snapshot.series.len().saturating_add(snapshot.episodes.len()));
     let seasons_by_series = media_server_seasons_by_series(&snapshot.seasons);
     for series in &snapshot.series {
-        let season_key = media_server_series_season_key(&series.server_id, &series.library_id, &series.item_id);
+        let season_key = media_server_series_season_key(&series.input_name, &series.server_id, &series.library_id, &series.item_id);
         let seasons = seasons_by_series.get(&season_key).map(Vec::as_slice).unwrap_or_default();
         series_channels.push(media_server_series_to_playlist_item(series, seasons));
     }
@@ -56,17 +56,17 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
 
 fn next_group_id(group_count: usize) -> u32 { u32::try_from(group_count.saturating_add(1)).unwrap_or(u32::MAX) }
 
-type MediaServerSeriesSeasonKey = (Arc<str>, Arc<str>, Arc<str>);
+type MediaServerSeriesKey<'a> = (&'a str, &'a str, &'a str, &'a str);
 
 fn media_server_seasons_by_series(
     seasons: &[MediaServerSeason],
-) -> HashMap<MediaServerSeriesSeasonKey, Vec<&MediaServerSeason>> {
-    let mut seasons_by_series: HashMap<MediaServerSeriesSeasonKey, Vec<&MediaServerSeason>> = HashMap::new();
+) -> HashMap<MediaServerSeriesKey<'_>, Vec<&MediaServerSeason>> {
+    let mut seasons_by_series: HashMap<MediaServerSeriesKey<'_>, Vec<&MediaServerSeason>> = HashMap::new();
 
     for season in seasons {
         let Some(series_id) = season.series_id.as_ref() else { continue };
         seasons_by_series
-            .entry(media_server_series_season_key(&season.server_id, &season.library_id, series_id))
+            .entry(media_server_series_season_key(&season.input_name, &season.server_id, &season.library_id, series_id))
             .or_default()
             .push(season);
     }
@@ -78,32 +78,36 @@ fn media_server_seasons_by_series(
     seasons_by_series
 }
 
-fn media_server_series_season_key(
-    server_id: &Arc<str>,
-    library_id: &Arc<str>,
-    series_id: &Arc<str>,
-) -> MediaServerSeriesSeasonKey {
-    (Arc::clone(server_id), Arc::clone(library_id), Arc::clone(series_id))
+fn media_server_series_season_key<'a>(
+    input_name: &'a Arc<str>,
+    server_id: &'a Arc<str>,
+    library_id: &'a Arc<str>,
+    series_id: &'a Arc<str>,
+) -> MediaServerSeriesKey<'a> {
+    (input_name.as_ref(), server_id.as_ref(), library_id.as_ref(), series_id.as_ref())
 }
 
-fn series_parent_code_map(series: &[MediaServerSeries]) -> HashMap<String, Arc<str>> {
+fn series_parent_code_map(series: &[MediaServerSeries]) -> HashMap<MediaServerSeriesKey<'_>, Arc<str>> {
     series
         .iter()
         .map(|series| {
             let stable_id = stable_media_server_item_id(&series.server_id, &series.library_id, &series.item_id, "series");
             let uuid = generate_provider_playlist_uuid(&series.input_name, &stable_id, PlaylistItemType::SeriesInfo);
-            (stable_id, uuid.intern())
+            (
+                media_server_series_parent_key(&series.input_name, &series.server_id, &series.library_id, &series.item_id),
+                uuid.intern(),
+            )
         })
         .collect()
 }
 
-fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<String, Arc<str>>) -> Arc<str> {
+fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<MediaServerSeriesKey<'_>, Arc<str>>) -> Arc<str> {
     episode
         .series_id
         .as_ref()
         .and_then(|series_id| {
             parent_codes
-                .get(&stable_media_server_item_id(&episode.server_id, &episode.library_id, series_id, "series"))
+                .get(&media_server_series_parent_key(&episode.input_name, &episode.server_id, &episode.library_id, series_id))
                 .map(Arc::clone)
         })
         .or_else(|| {
@@ -113,6 +117,15 @@ fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<Stri
                 .map(|series_id| stable_media_server_item_id(&episode.server_id, &episode.library_id, series_id, "series").intern())
         })
         .unwrap_or_else(|| "".intern())
+}
+
+fn media_server_series_parent_key<'a>(
+    input_name: &'a Arc<str>,
+    server_id: &'a Arc<str>,
+    library_id: &'a Arc<str>,
+    series_id: &'a Arc<str>,
+) -> MediaServerSeriesKey<'a> {
+    (input_name.as_ref(), server_id.as_ref(), library_id.as_ref(), series_id.as_ref())
 }
 
 fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem {
@@ -649,8 +662,8 @@ mod tests {
         assert_eq!(series.genre.as_deref(), Some("Drama, Mystery"));
         assert_eq!(series.cast.as_ref(), "Actor One, Actor Two");
         assert_eq!(series.director.as_ref(), "Director Redacted");
-        assert_eq!(series.rating, 8.0f64);
-        assert_eq!(series.rating_5based, 4.0f64);
+        assert!(series.rating - 8.0 < 0.0001);
+        assert!(series.rating_5based - 4.0 < 0.0001);
         let details = series.details.as_ref().expect("series details should contain season anchors");
         let seasons = details.seasons.as_ref().expect("season anchors should be mapped");
         assert_eq!(seasons[0].name.as_ref(), "Season 1");
@@ -659,6 +672,67 @@ mod tests {
         assert_eq!(seasons[0].episode_count, 2);
         assert!(seasons[0].cover.is_none());
         assert!(details.episodes.is_none());
+    }
+
+    #[test]
+    fn maps_media_server_series_relationships_scoped_by_input_name() -> Result<(), String> {
+        let mut series_a = series();
+        series_a.input_name = "media_server_a".into();
+        let mut series_b = series();
+        series_b.input_name = "media_server_b".into();
+
+        let mut season_a = season();
+        season_a.input_name = "media_server_a".into();
+        season_a.title = "Season A".into();
+        let mut season_b = season();
+        season_b.input_name = "media_server_b".into();
+        season_b.title = "Season B".into();
+
+        let mut episode_a = episode();
+        episode_a.input_name = "media_server_a".into();
+        episode_a.item_id = "episode-a".into();
+        let mut episode_b = episode();
+        episode_b.input_name = "media_server_b".into();
+        episode_b.item_id = "episode-b".into();
+
+        let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
+            series: vec![series_a, series_b],
+            seasons: vec![season_b, season_a],
+            episodes: vec![episode_a, episode_b],
+            ..MediaServerCatalogSnapshot::default()
+        });
+
+        let [group] = groups.as_slice() else {
+            return Err(format!("expected one series group, got {}", groups.len()));
+        };
+        let [series_a_item, series_b_item, episode_first_item, episode_second_item] = group.channels.as_slice() else {
+            return Err(format!("expected two series anchors and two episodes, got {}", group.channels.len()));
+        };
+
+        assert_eq!(episode_first_item.header.parent_code, series_a_item.header.uuid.intern());
+        assert_eq!(episode_second_item.header.parent_code, series_b_item.header.uuid.intern());
+
+        let Some(StreamProperties::Series(series_first_properties)) = &series_a_item.header.additional_properties else {
+            return Err("expected series A properties".to_string());
+        };
+        let Some(StreamProperties::Series(series_second_properties)) = &series_b_item.header.additional_properties else {
+            return Err("expected series B properties".to_string());
+        };
+        let seasons_first = series_first_properties
+            .details
+            .as_ref()
+            .and_then(|details| details.seasons.as_ref())
+            .ok_or_else(|| "expected series A seasons".to_string())?;
+        let seasons_second = series_second_properties
+            .details
+            .as_ref()
+            .and_then(|details| details.seasons.as_ref())
+            .ok_or_else(|| "expected series B seasons".to_string())?;
+
+        assert_eq!(seasons_first.iter().map(|season| season.name.as_ref()).collect::<Vec<_>>(), vec!["Season A"]);
+        assert_eq!(seasons_second.iter().map(|season| season.name.as_ref()).collect::<Vec<_>>(), vec!["Season B"]);
+
+        Ok(())
     }
 
     #[test]
