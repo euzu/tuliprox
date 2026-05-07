@@ -38,6 +38,7 @@ mod web_ui;
 
 mod favourites;
 mod library;
+mod media_server_catalog;
 mod network_access;
 mod proxy_user_status;
 mod qos_aggregation;
@@ -84,3 +85,4 @@ pub use trakt::*;
 pub use video_download::*;
 pub use web_auth::*;
 pub use web_ui::*;
+pub use media_server_catalog::*;

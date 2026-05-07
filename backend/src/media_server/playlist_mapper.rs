@@ -649,8 +649,8 @@ mod tests {
         assert_eq!(series.genre.as_deref(), Some("Drama, Mystery"));
         assert_eq!(series.cast.as_ref(), "Actor One, Actor Two");
         assert_eq!(series.director.as_ref(), "Director Redacted");
-        assert_eq!(series.rating, 8.0);
-        assert_eq!(series.rating_5based, 4.0);
+        assert_eq!(series.rating, 8.0f64);
+        assert_eq!(series.rating_5based, 4.0f64);
         let details = series.details.as_ref().expect("series details should contain season anchors");
         let seasons = details.seasons.as_ref().expect("season anchors should be mapped");
         assert_eq!(seasons[0].name.as_ref(), "Season 1");

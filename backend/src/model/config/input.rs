@@ -5,11 +5,7 @@ use log::warn;
 use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
-use shared::model::{
-    ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType,
-    MediaServerCatalogConfigDto, MediaServerImagePolicyDto, MediaServerLibrarySelectorDto, MediaServerInputConfigDto,
-    MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster,
-};
+use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicyDto, MediaServerInputConfigDto, MediaServerLibrarySelectorDto, MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster};
 use shared::utils::{
     get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
     BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
@@ -917,7 +913,7 @@ fn assemble_provider_url_at_index(
 mod tests {
     use super::*;
     use crate::model::ConfigProvider;
-    use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
+    use shared::model::{ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelectorDto, ProviderUrlSelectionPolicy};
     use std::borrow::Cow;
     use std::sync::Arc;
 

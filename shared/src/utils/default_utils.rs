@@ -464,3 +464,13 @@ pub fn is_default_stream_history_retention_days(retention_days: &u16) -> bool {
 }
 
 pub fn is_blank_stream_history_directory(directory: &str) -> bool { directory.trim().is_empty() }
+
+
+pub const fn default_media_server_catalog_page_size() -> u16 { 100 }
+pub const fn default_media_server_catalog_request_delay_ms() -> u64 { 250 }
+pub const fn is_default_media_server_catalog_page_size(value: &u16) -> bool {
+    *value == default_media_server_catalog_page_size()
+}
+pub const fn is_default_media_server_catalog_request_delay_ms(value: &u64) -> bool {
+    *value == default_media_server_catalog_request_delay_ms()
+}

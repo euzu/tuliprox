@@ -460,7 +460,7 @@ mod tests {
         let record = StreamHistoryRecord::from_connect(&info);
 
         assert_eq!(record.connect_ts_utc, Some(info.ts));
-        assert!(sample_connect_record().connect_ts_utc == Some(info.ts));
+        assert_eq!(sample_connect_record().connect_ts_utc, Some(info.ts));
     }
 
     #[test]
