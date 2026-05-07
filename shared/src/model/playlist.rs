@@ -1478,4 +1478,91 @@ mod tests {
         let xtream_item = XtreamPlaylistItem::from(&item);
         assert_eq!(xtream_item.provider_id, 12345);
     }
+
+    #[test]
+    fn m3u_to_m3u_emits_tvg_id_from_epg_channel_id() {
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("epg_channel_123".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"tvg-id="epg_channel_123""#), "M3U output must contain tvg-id from epg_channel_id");
+    }
+
+    #[test]
+    fn m3u_to_m3u_emits_tvg_chno_from_chno() {
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 42,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: None,
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"tvg-chno="42""#), "M3U output must contain tvg-chno from chno");
+    }
+
+    #[test]
+    fn m3u_to_m3u_omits_tvg_chno_when_chno_is_zero() {
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: None,
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(!output.contains("tvg-chno"), "M3U output must not contain tvg-chno when chno is 0");
+    }
 }
