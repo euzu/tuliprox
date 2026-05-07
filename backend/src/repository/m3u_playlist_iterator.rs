@@ -435,6 +435,23 @@ mod tests {
     }
 
     #[test]
+    fn redirect_without_mask_preserves_provider_scheme_url_when_input_is_missing() {
+        let input_by_name = HashMap::new();
+        let rewritten = apply_rewrite(
+            m3u_item("provider://example/live/user/pass/813294.ts"),
+            "https://example.com",
+            "user",
+            "pass",
+            &input_by_name,
+            None,
+            M3uPlaylistIteratorFlagsSet::new(),
+            ProxyType::Redirect,
+        );
+
+        assert_eq!(rewritten.t_stream_url.as_ref(), "provider://example/live/user/pass/813294.ts");
+    }
+
+    #[test]
     fn masked_redirect_uses_resolved_provider_source_for_rewritten_url() {
         let input = provider_input();
         let input_by_name = HashMap::from([(Arc::clone(&input.name), input)]);
