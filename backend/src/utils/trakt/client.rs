@@ -202,7 +202,7 @@ fn parse_chart_items(
             Ok(items
                 .into_iter()
                 .enumerate()
-                .map(|(index, movie)| TraktListItem::from_movie_chart(movie, rank_base + index as u32 + 1))
+                .map(|(index, movie)| TraktListItem::from_movie_chart(movie, chart_rank(rank_base, index)))
                 .collect())
         }
         (shared::model::TraktChartKind::Movies, shared::model::TraktChartType::Trending) => {
@@ -210,7 +210,7 @@ fn parse_chart_items(
             Ok(items
                 .into_iter()
                 .enumerate()
-                .map(|(index, item)| TraktListItem::from_movie_chart(item.movie, rank_base + index as u32 + 1))
+                .map(|(index, item)| TraktListItem::from_movie_chart(item.movie, chart_rank(rank_base, index)))
                 .collect())
         }
         (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Popular) => {
@@ -218,7 +218,7 @@ fn parse_chart_items(
             Ok(items
                 .into_iter()
                 .enumerate()
-                .map(|(index, show)| TraktListItem::from_show_chart(show, rank_base + index as u32 + 1))
+                .map(|(index, show)| TraktListItem::from_show_chart(show, chart_rank(rank_base, index)))
                 .collect())
         }
         (shared::model::TraktChartKind::Shows, shared::model::TraktChartType::Trending) => {
@@ -226,10 +226,14 @@ fn parse_chart_items(
             Ok(items
                 .into_iter()
                 .enumerate()
-                .map(|(index, item)| TraktListItem::from_show_chart(item.show, rank_base + index as u32 + 1))
+                .map(|(index, item)| TraktListItem::from_show_chart(item.show, chart_rank(rank_base, index)))
                 .collect())
         }
     }
+}
+
+fn chart_rank(rank_base: u32, index: usize) -> u32 {
+    rank_base.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)).saturating_add(1)
 }
 
 #[derive(Deserialize)]

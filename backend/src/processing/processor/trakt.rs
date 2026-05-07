@@ -4,7 +4,7 @@ use crate::utils::{extract_year_from_title, normalize_title_for_matching, TraktC
 use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
 use shared::error::TuliproxError;
-use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, XtreamCluster};
+use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, UUIDType, XtreamCluster};
 use shared::utils::{hash_string, Internable, CONSTANTS};
 use indexmap::IndexMap;
 use std::sync::Arc;
@@ -168,7 +168,7 @@ fn create_category_from_matches<'a>(
             let source_uuid = header.uuid;
             header.group = group_title.clone();
             header.gen_uuid();
-            let source_uuid = if source_uuid == Default::default() { header.uuid } else { source_uuid };
+            let source_uuid = if source_uuid == UUIDType::default() { header.uuid } else { source_uuid };
             header.uuid = hash_string(&format!("trakt-category:{}:{}", category_config.category_name, source_uuid));
             matched_items_by_cluster.entry(header.xtream_cluster).or_default().push(modified_item);
         });
