@@ -1,7 +1,8 @@
 use crate::media_server::{
     redaction::redact_media_server_text, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerImageRef,
     MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest,
-    MediaServerResourceResponse, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
+    MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus, MediaServerStreamRef,
+    MediaServerStreamResponse,
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -19,6 +20,18 @@ pub trait MediaServerCatalogClient: Send + Sync {
         library: &MediaServerLibraryRef,
         page: MediaServerPageRequest,
     ) -> Result<MediaServerPage<MediaServerMovie>, MediaServerError>;
+
+    async fn list_series(
+        &self,
+        library: &MediaServerLibraryRef,
+        page: MediaServerPageRequest,
+    ) -> Result<MediaServerPage<MediaServerSeries>, MediaServerError>;
+
+    async fn list_seasons(
+        &self,
+        library: &MediaServerLibraryRef,
+        page: MediaServerPageRequest,
+    ) -> Result<MediaServerPage<MediaServerSeason>, MediaServerError>;
 
     async fn list_episodes(
         &self,

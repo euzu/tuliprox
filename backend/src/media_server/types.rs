@@ -127,6 +127,48 @@ pub struct MediaServerProviderIdHint {
     pub value: Arc<str>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaServerDescriptiveFacts {
+    pub original_title: Option<Arc<str>>,
+    pub sort_title: Option<Arc<str>>,
+    pub summary: Option<Arc<str>>,
+    pub tagline: Option<Arc<str>>,
+    pub studio: Option<Arc<str>>,
+    pub network: Option<Arc<str>>,
+    pub content_rating: Option<Arc<str>>,
+    pub parental_age: Option<u32>,
+    pub audience_rating: Option<Arc<str>>,
+    pub genres: Vec<Arc<str>>,
+    pub countries: Vec<Arc<str>>,
+    pub directors: Vec<Arc<str>>,
+    pub writers: Vec<Arc<str>>,
+    pub cast: Vec<Arc<str>>,
+    pub crew: Vec<Arc<str>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaServerVideoTechnicalFacts {
+    pub codec: Option<Arc<str>>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaServerAudioTechnicalFacts {
+    pub codec: Option<Arc<str>>,
+    pub channels: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MediaServerTechnicalFacts {
+    pub container: Option<Arc<str>>,
+    pub duration_secs: Option<u32>,
+    /// Source-declared bitrate normalized to bits per second (bps).
+    pub bitrate: Option<u32>,
+    pub video: Option<MediaServerVideoTechnicalFacts>,
+    pub audio: Option<MediaServerAudioTechnicalFacts>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaServerMovie {
     pub input_name: Arc<str>,
@@ -135,9 +177,48 @@ pub struct MediaServerMovie {
     pub item_id: Arc<str>,
     pub title: Arc<str>,
     pub year: Option<u32>,
+    pub release_date: Option<Arc<str>>,
     pub source_version_hint: Option<Arc<str>>,
     pub provider_hints: Vec<MediaServerProviderIdHint>,
+    pub descriptive_facts: Option<MediaServerDescriptiveFacts>,
+    pub technical_facts: Option<MediaServerTechnicalFacts>,
     pub stream_ref: Option<MediaServerStreamRef>,
+    pub image_ref: Option<MediaServerImageRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaServerSeries {
+    pub input_name: Arc<str>,
+    pub server_id: Arc<str>,
+    pub library_id: Arc<str>,
+    pub item_id: Arc<str>,
+    pub title: Arc<str>,
+    pub year: Option<u32>,
+    pub release_date: Option<Arc<str>>,
+    pub source_version_hint: Option<Arc<str>>,
+    pub provider_hints: Vec<MediaServerProviderIdHint>,
+    pub descriptive_facts: Option<MediaServerDescriptiveFacts>,
+    pub child_count: Option<u32>,
+    pub episode_count: Option<u32>,
+    pub image_ref: Option<MediaServerImageRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaServerSeason {
+    pub input_name: Arc<str>,
+    pub server_id: Arc<str>,
+    pub library_id: Arc<str>,
+    pub item_id: Arc<str>,
+    pub series_id: Option<Arc<str>>,
+    pub series_title: Option<Arc<str>>,
+    pub title: Arc<str>,
+    pub season: Option<u32>,
+    pub year: Option<u32>,
+    pub release_date: Option<Arc<str>>,
+    pub source_version_hint: Option<Arc<str>>,
+    pub provider_hints: Vec<MediaServerProviderIdHint>,
+    pub descriptive_facts: Option<MediaServerDescriptiveFacts>,
+    pub episode_count: Option<u32>,
     pub image_ref: Option<MediaServerImageRef>,
 }
 
@@ -152,8 +233,11 @@ pub struct MediaServerEpisode {
     pub title: Arc<str>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
+    pub release_date: Option<Arc<str>>,
     pub source_version_hint: Option<Arc<str>>,
     pub provider_hints: Vec<MediaServerProviderIdHint>,
+    pub descriptive_facts: Option<MediaServerDescriptiveFacts>,
+    pub technical_facts: Option<MediaServerTechnicalFacts>,
     pub stream_ref: Option<MediaServerStreamRef>,
     pub image_ref: Option<MediaServerImageRef>,
 }
