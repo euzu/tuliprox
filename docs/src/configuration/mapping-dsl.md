@@ -277,6 +277,21 @@ mapping:
 | `concat`   | *(Optional)* The separator string between the number and the original field for Prefix/Suffix (e.g., `". "`).                                     |
 | `padding`  | *(Optional)* Zero-padding length (e.g., `padding: 3` turns `1` into `001`).                                                                       |
 
+### Channel number timing
+
+`tvg-chno` is stored as `chno`. Mapper scripts run before final automatic channel
+numbering, so `@chno` inside a mapper only contains the number from the source
+playlist or a value already assigned by a previous mapping. If it is `0`, the
+final generated channel number has not been assigned yet.
+
+After filtering, mapping, merging, and sorting, Tuliprox assigns missing channel
+numbers only for channels where `chno == 0`. Existing non-zero channel numbers
+are preserved. Counter mappings run after this automatic assignment and can be
+used when numbering must follow the final output order.
+
+`tvg-id` remains the EPG channel ID (`epg_channel_id`) and should not be used
+for channel numbering.
+
 ---
 
 ## Advanced Examples

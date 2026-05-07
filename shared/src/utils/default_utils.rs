@@ -32,6 +32,10 @@ pub fn is_empty_optional_vec<T>(s: &Option<Vec<T>>) -> bool { s.as_ref().is_none
 
 pub fn default_as_default() -> String { "default".into() }
 
+pub fn default_page() -> u32 { 1 }
+
+pub fn default_page_size() -> u16 { 25 }
+
 pub const fn is_default_runtime_config_report_format(value: &RuntimeConfigReportFormat) -> bool {
     matches!(value, RuntimeConfigReportFormat::Yaml)
 }

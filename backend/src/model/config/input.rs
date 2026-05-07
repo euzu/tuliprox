@@ -1131,6 +1131,25 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_url_provider_stream_path_requires_provider_name() {
+        let provider = ConfigProvider::from(&ConfigProviderDto {
+            name: "myprovider".into(),
+            urls: vec!["http://provider.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        });
+        let input = ConfigInput {
+            name: "test_input".into(),
+            provider_configs: Some(vec![Arc::new(provider)]),
+            ..Default::default()
+        };
+
+        let err = input.resolve_url("provider://live/user/pass/813294.ts").unwrap_err();
+
+        assert!(err.to_string().contains("Provider config for 'live' not found"));
+    }
+
+    #[test]
     fn test_resolve_provider_scheme_url_starts_from_first_url_for_new_resolution() {
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "myprovider".into(),

@@ -49,6 +49,17 @@
     justify-content: center;
     padding: var(--padding-default);
     color: var(--modest-text-color);
+
+    &--inline {
+      justify-content: flex-start;
+      padding: 0 0 0 var(--padding-small);
+      min-height: 2rem;
+    }
+  }
+
+  &__tabset {
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   &__cell {

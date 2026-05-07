@@ -764,7 +764,6 @@ pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOpt
 /// Metadata capturing which grace strategy was chosen and the original connection kind,
 /// used to reconstruct the remaining-strategies slice on user-grace failure.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct GraceResolutionContext {
     /// Index of the grace strategy that was actually used.
     pub(crate) strategy_index: usize,
@@ -773,12 +772,14 @@ pub(crate) struct GraceResolutionContext {
     /// The original `ConnectionKind` from the admission decision that led to this grace.
     /// Preserved so that the remaining-strategy fallback can return the correct kind
     /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.
+    #[allow(dead_code)]
+    // Stored so the original admission kind remains available when follow-up
+    // grace fallback reconstruction starts using it again.
     pub(crate) kind: Option<crate::api::model::ConnectionKind>,
 }
 
 /// Structured result of evaluating admission strategies.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct AdmissionStrategyResolution {
     pub(crate) admission: crate::api::model::ConnectionAdmission,
     pub(crate) grace_mode: Option<crate::api::model::GraceMode>,
@@ -1325,11 +1326,11 @@ pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_i
     modified.replacen(&input_user_info.password, &alt_input_user_info.password, 1)
 }
 
-fn resolve_redirect_location(input: &ConfigInput, stream_url: &str) -> Result<String, TuliproxError> {
-    Ok(match input.resolve_url(stream_url)? {
-        Cow::Borrowed(url) => url.to_string(),
-        Cow::Owned(url) => url,
-    })
+pub(crate) fn resolve_redirect_location<'a>(
+    input: Option<&ConfigInput>,
+    stream_url: &'a str,
+) -> Result<Cow<'a, str>, TuliproxError> {
+    input.map_or(Ok(Cow::Borrowed(stream_url)), |input| input.resolve_url(stream_url))
 }
 
 async fn get_redirect_alternative_url(
@@ -1786,8 +1787,15 @@ where
             let redirect_url =
                 if is_dash_request { replace_url_extension(&redirect_url, DASH_EXT).into() } else { redirect_url };
             let redirect_url = get_redirect_alternative_url(app_state, &redirect_url, params.input).await;
-            debug_if_enabled!("Redirecting stream request to {}", sanitize_sensitive_info(&redirect_url));
-            return Some(redirect(&redirect_url).into_response());
+            let redirect_url = match resolve_redirect_location(Some(params.input), &redirect_url) {
+                Ok(url) => url,
+                Err(err) => {
+                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    return Some(StatusCode::BAD_REQUEST.into_response());
+                }
+            };
+            debug_if_enabled!("Redirecting stream request to {}", sanitize_sensitive_info(redirect_url.as_ref()));
+            return Some(redirect(redirect_url.as_ref()).into_response());
         }
     } else if params.target_type == TargetType::Xtream {
         let Some(provider_id) = params.provider_id else {
@@ -1815,7 +1823,7 @@ where
                     None => url.to_string(),
                 },
             };
-            let stream_url = match resolve_redirect_location(params.input, &stream_url) {
+            let stream_url = match resolve_redirect_location(Some(params.input), &stream_url) {
                 Ok(url) => url,
                 Err(err) => {
                     error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
@@ -1839,9 +1847,9 @@ where
 
             debug_if_enabled!(
                 "Redirecting stream request to {}",
-                sanitize_sensitive_info(resolve_request_url_for_logging(params.input, &stream_url).as_ref())
+                sanitize_sensitive_info(resolve_request_url_for_logging(params.input, stream_url.as_ref()).as_ref())
             );
-            return Some(redirect(&stream_url).into_response());
+            return Some(redirect(stream_url.as_ref()).into_response());
         }
     }
 
@@ -3472,7 +3480,7 @@ mod tests {
         };
 
         let resolved =
-            resolve_redirect_location(&input, "provider://develop/live/provider-user/provider-pass/33486.m3u8")
+            resolve_redirect_location(Some(&input), "provider://develop/live/provider-user/provider-pass/33486.m3u8")
                 .expect("provider url should resolve");
 
         assert_eq!(resolved, "https://provider.example/live/provider-user/provider-pass/33486.m3u8");

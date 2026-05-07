@@ -388,7 +388,7 @@
       "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
     },
     "EPG_SOURCE": {
-      "LOGO_OVERRIDE": "Overrides the channel logos provided by the EPG with the ones from the playlist or external mapping.",
+      "LOGO_OVERRIDE": "Replaces playlist/provider logos with icons from this XMLTV EPG source.",
       "PRIORITY": "Determines which EPG source is preferred if multiple sources provide data for the same channel.",
       "URL": "The URL of the XMLTV EPG file."
     },
@@ -875,7 +875,7 @@
     "CLEAR": "Clear",
     "CLIENT_IP": "Client IP",
     "CLOSE": "Close",
-    "CLUSTER": "Type",
+    "CLUSTER": "Cluster",
     "COMMENT": "Comment",
     "CONFIG": "Config",
     "CONFIGURATION": "Configuration",
@@ -1174,6 +1174,7 @@
     "PROTOCOL": "Protocol",
     "PROVIDER": "Provider",
     "PROVIDER_DNS": "Provider DNS",
+    "PROVIDER_ID": "Provider ID",
     "PROVIDER_NAME": "Provider Name",
     "PROVIDER_URL_SELECTION_POLICY": "Provider URL Selection Policy",
     "PROVIDER_URL_SELECTION_RESUME_LAST_WORKING": "Resume Last Working",
@@ -1433,7 +1434,14 @@
     "HIDE_TRANSFERRED": "Hide Transferred",
     "HIDE_PLAYER": "Hide Player",
     "HIDE_USER_COMMENT": "Hide User Comment",
-    "HIDE_EPG": "Hide EPG"
+    "HIDE_EPG": "Hide EPG",
+    "ROWS": "Rows",
+    "FIRST_PAGE": "First Page",
+    "LAST_PAGE": "Last Page",
+    "NEXT_PAGE": "Next Page",
+    "PREVIOUS_PAGE": "Previous Page",
+    "PAGE": "Page",
+    "PAGES": "Pages"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",

@@ -40,3 +40,7 @@ pub fn t_safe(i18n: &YewI18n, key: &str) -> Option<String> {
         Some(result)
     }
 }
+
+pub fn encoding_for_query(s: &str) -> String {
+    js_sys::encode_uri_component(s).as_string().unwrap_or_else(|| s.to_string())
+}

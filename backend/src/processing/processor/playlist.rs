@@ -1631,7 +1631,7 @@ mod tests {
     use super::*;
     use crate::model::StagedInput;
     use shared::foundation::{get_filter, ValueProvider};
-    use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType};
+    use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
     use shared::utils::Internable;
 
     fn item_with_props(props: StreamProperties) -> PlaylistItem {
@@ -1847,5 +1847,142 @@ mod tests {
 
         assert!(filter.filter(&vod_provider));
         assert!(!filter.filter(&live_provider));
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_preserves_non_zero_chno() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group A".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 10, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+            PlaylistGroup {
+                id: 2,
+                title: "Group C".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 1, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // Non-zero chno values must be preserved
+        assert_eq!(groups[0].channels[0].header.chno, 10);
+        assert_eq!(groups[1].channels[0].header.chno, 1);
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_assigns_zero_chno_only() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group A".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // All zero-chno channels should get assigned numbers starting at 1
+        assert_eq!(groups[0].channels[0].header.chno, 1);
+        assert_eq!(groups[0].channels[1].header.chno, 2);
+        assert_eq!(groups[0].channels[2].header.chno, 3);
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_skips_existing_nonzero_numbers() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group A".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 5, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 2, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // Existing non-zero numbers (2, 5) must be skipped when assigning new numbers
+        assert_eq!(groups[0].channels[0].header.chno, 5); // preserved
+        assert_eq!(groups[0].channels[2].header.chno, 2); // preserved
+        // B gets 1 (smallest available), D gets 3 (next available after 1 and existing 2)
+        assert_eq!(groups[0].channels[1].header.chno, 1);
+        assert_eq!(groups[0].channels[3].header.chno, 3);
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_assigns_following_group_order() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group 1".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+            PlaylistGroup {
+                id: 2,
+                title: "Group 2".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // Numbers should follow iteration order across groups: A=1, B=2, C=3
+        assert_eq!(groups[0].channels[0].header.chno, 1);
+        assert_eq!(groups[0].channels[1].header.chno, 2);
+        assert_eq!(groups[1].channels[0].header.chno, 3);
     }
 }
