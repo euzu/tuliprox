@@ -433,8 +433,18 @@ async fn m3u_api_resource(
         None => axum::http::StatusCode::NOT_FOUND.into_response(),
         Some(url) => {
             if user.proxy.is_redirect(m3u_item.item_type) || target.is_force_redirect(m3u_item.item_type) {
-                debug!("Redirecting stream request to {}", sanitize_sensitive_info(&url));
-                redirect(&url).into_response()
+                let input = app_state.app_config.get_input_by_name(&m3u_item.input_name);
+                let redirect_url = crate::api::api_utils::resolve_redirect_location(input.as_deref(), &url);
+                match redirect_url {
+                    Ok(redirect_url) => {
+                        debug!("Redirecting stream request to {}", sanitize_sensitive_info(redirect_url.as_ref()));
+                        redirect(redirect_url.as_ref()).into_response()
+                    }
+                    Err(err) => {
+                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                        axum::http::StatusCode::BAD_REQUEST.into_response()
+                    }
+                }
             } else {
                 resource_response(&app_state, &url, &req_headers, None).await.into_response()
             }

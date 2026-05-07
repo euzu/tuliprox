@@ -758,8 +758,18 @@ async fn xtream_player_api_resource(
         None => axum::http::StatusCode::NOT_FOUND.into_response(),
         Some(url) => {
             if user.proxy.is_redirect(pli.item_type) || target.is_force_redirect(pli.item_type) {
-                trace_if_enabled!("Redirecting resource request to {}", sanitize_sensitive_info(&url));
-                redirect(&url).into_response()
+                let input = app_state.app_config.get_input_by_name(&pli.input_name);
+                let redirect_url = api_utils::resolve_redirect_location(input.as_deref(), &url);
+                match redirect_url {
+                    Ok(redirect_url) => {
+                        trace_if_enabled!("Redirecting resource request to {}", sanitize_sensitive_info(redirect_url.as_ref()));
+                        redirect(redirect_url.as_ref()).into_response()
+                    }
+                    Err(err) => {
+                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                        axum::http::StatusCode::BAD_REQUEST.into_response()
+                    }
+                }
             } else {
                 trace_if_enabled!("Resource request to {}", sanitize_sensitive_info(&url));
                 resource_response(app_state, &url, req_headers, None).await.into_response()
@@ -981,7 +991,13 @@ pub async fn xtream_get_stream_info_response(
                 if let Some(info_url) = xtream::get_xtream_player_api_info_url(&input, cluster, pli.provider_id) {
                     // Redirect is only possible for live streams, vod and series info needs to be modified
                     if user.proxy == ProxyType::Redirect && cluster == XtreamCluster::Live {
-                        return redirect(&info_url).into_response();
+                        return match api_utils::resolve_redirect_location(Some(&input), &info_url) {
+                            Ok(redirect_url) => redirect(redirect_url.as_ref()).into_response(),
+                            Err(err) => {
+                                error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                                axum::http::StatusCode::BAD_REQUEST.into_response()
+                            }
+                        };
                     } else if let Ok(content) = xtream::get_xtream_stream_info(
                         &app_state.http_client.load(),
                         app_state,
@@ -1066,7 +1082,13 @@ async fn xtream_get_short_epg(
                             info_url = format!("{info_url}&limit={limit}");
                         }
                         if user.proxy.is_redirect(pli.item_type) || target.is_force_redirect(pli.item_type) {
-                            return redirect(&info_url).into_response();
+                            return match api_utils::resolve_redirect_location(Some(&input), &info_url) {
+                                Ok(redirect_url) => redirect(redirect_url.as_ref()).into_response(),
+                                Err(err) => {
+                                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                                    axum::http::StatusCode::BAD_REQUEST.into_response()
+                                }
+                            };
                         }
 
                         let input_source = InputSource::from(&*input).with_url(info_url);
