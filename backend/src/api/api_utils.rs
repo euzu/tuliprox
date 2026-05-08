@@ -1876,7 +1876,7 @@ where
 }
 
 fn is_media_server_playback_url(input: &ConfigInput, stream_url: &str) -> bool {
-    input.input_type.is_media_server() || is_media_server_stream_ref_url(stream_url)
+    input.input_type == InputType::Plex || is_media_server_stream_ref_url(stream_url)
 }
 
 fn is_media_server_stream_ref_url(stream_url: &str) -> bool {
@@ -3590,6 +3590,10 @@ mod tests {
             input_type: InputType::Plex,
             ..ConfigInput::default()
         };
+        let emby_input = ConfigInput {
+            input_type: InputType::Emby,
+            ..ConfigInput::default()
+        };
         let m3u_input = ConfigInput {
             input_type: InputType::M3u,
             ..ConfigInput::default()
@@ -3603,6 +3607,8 @@ mod tests {
             &m3u_input,
             "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
         ));
+        assert!(is_media_server_playback_url(&plex_input, "https://plex.example/stream.mkv"));
+        assert!(!is_media_server_playback_url(&emby_input, "https://emby.example/stream.mkv"));
         assert!(!is_media_server_playback_url(&m3u_input, "https://provider.example/stream.mkv"));
         assert!(!is_media_server_stream_ref_url("https://provider.example/stream.mkv"));
         assert!(is_media_server_stream_ref_url(

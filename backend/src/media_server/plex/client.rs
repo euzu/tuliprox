@@ -640,6 +640,11 @@ fn pms_part_url(base_url: &Arc<str>, part_key: &str) -> Result<String, MediaServ
             .provider("plex")
             .detail("Plex part_key did not resolve to the selected PMS origin"));
     }
+    if !url.path().starts_with("/library/parts/") {
+        return Err(MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
+            .provider("plex")
+            .detail("Plex part_key did not resolve to a direct part resource"));
+    }
     if url.query_pairs().any(|(name, _)| is_sensitive_plex_part_query_name(&name)) {
         return Err(MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
             .provider("plex")
@@ -898,6 +903,12 @@ mod tests {
         assert_eq!(
             pms_part_url(&base, "//evil.example.invalid/library/parts/part-redacted/file.mkv")
                 .expect_err("network-path refs must not escape the selected PMS")
+                .kind,
+            MediaServerErrorKind::NoDirectPlayableMediaServerSource
+        );
+        assert_eq!(
+            pms_part_url(&base, "/library/parts/../../identity")
+                .expect_err("normalized paths must stay under direct part refs")
                 .kind,
             MediaServerErrorKind::NoDirectPlayableMediaServerSource
         );
