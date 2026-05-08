@@ -4,10 +4,13 @@ use crate::utils::{extract_year_from_title, normalize_title_for_matching, TraktC
 use crate::utils::{trace_if_enabled, with};
 use log::{debug, info, trace, warn};
 use shared::error::TuliproxError;
-use shared::model::{FieldGetAccessor, FieldSetAccessor, PlaylistGroup, PlaylistItem, TraktContentType, UUIDType, XtreamCluster};
+use shared::model::{
+    FieldGetAccessor, FieldSetAccessor, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
+    TraktContentType, UUIDType, XtreamCluster,
+};
 use shared::utils::{hash_string, Internable, CONSTANTS};
 use indexmap::IndexMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use strsim::normalized_levenshtein;
 
 fn extract_quality(value: &str) -> Option<&str> {
@@ -34,6 +37,20 @@ fn is_compatible_content_type(cluster: XtreamCluster, content_type: TraktContent
         TraktContentType::Vod => cluster == XtreamCluster::Video,
         TraktContentType::Series => cluster == XtreamCluster::Series,
         TraktContentType::Both => matches!(cluster, XtreamCluster::Video | XtreamCluster::Series),
+    }
+}
+
+fn is_matchable_playlist_item(item_type: PlaylistItemType, content_type: TraktContentType) -> bool {
+    match content_type {
+        TraktContentType::Vod => matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo),
+        TraktContentType::Series => matches!(item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo),
+        TraktContentType::Both => matches!(
+            item_type,
+            PlaylistItemType::Video
+                | PlaylistItemType::LocalVideo
+                | PlaylistItemType::SeriesInfo
+                | PlaylistItemType::LocalSeriesInfo
+        ),
     }
 }
 
@@ -133,6 +150,7 @@ fn find_best_match_for_item<'a>(
 fn create_category_from_matches<'a>(
     matches: Vec<TraktMatchResult<'a>>,
     category_config: &'a TraktCategoryConfig,
+    series_children_by_parent_code: &HashMap<Arc<str>, Vec<&'a PlaylistItem>>,
 ) -> Vec<PlaylistGroup> {
     if matches.is_empty() { return vec![]; }
 
@@ -152,26 +170,31 @@ fn create_category_from_matches<'a>(
     let group_title = category_config.category_name.as_str().intern();
 
     for match_result in sorted_matches {
-        let mut modified_item = match_result.playlist_item.clone();
-        with!(mut modified_item.header => header {
-            let title = header.get_field("caption").unwrap_or_else(|| Arc::clone(&header.title));
-            if extract_quality(&title).is_none() {
-                if let Some(quality) = extract_quality(&header.group) {
-                    let mut caption = String::with_capacity(title.len() + 6);
-                    caption.push('[');
-                    caption.push_str(quality);
-                    caption.push_str("] ");
-                    caption.push_str(&title);
-                    header.set_field("caption", &caption);
-                }
+        let modified_item = clone_item_for_trakt_category(
+            match_result.playlist_item,
+            category_config.category_name.as_str(),
+            &group_title,
+        );
+        let parent_uuid = modified_item.header.uuid.intern();
+        let is_series_info = matches!(
+            modified_item.header.item_type,
+            PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo
+        );
+        let child_lookup_keys = if is_series_info {
+            series_info_child_lookup_keys(match_result.playlist_item)
+        } else {
+            Vec::new()
+        };
+        let cluster = modified_item.header.xtream_cluster;
+        matched_items_by_cluster.entry(cluster).or_default().push(modified_item);
+
+        if let Some(children) = child_lookup_keys.iter().find_map(|key| series_children_by_parent_code.get(key)) {
+            for child in children {
+                let mut child = clone_item_for_trakt_category(child, category_config.category_name.as_str(), &group_title);
+                child.header.parent_code = parent_uuid.clone();
+                matched_items_by_cluster.entry(child.header.xtream_cluster).or_default().push(child);
             }
-            let source_uuid = header.uuid;
-            header.group = group_title.clone();
-            header.gen_uuid();
-            let source_uuid = if source_uuid == UUIDType::default() { header.uuid } else { source_uuid };
-            header.uuid = hash_string(&format!("trakt-category:{}:{}", category_config.category_name, source_uuid));
-            matched_items_by_cluster.entry(header.xtream_cluster).or_default().push(modified_item);
-        });
+        }
     }
 
     matched_items_by_cluster.into_iter().map(|(cluster, channels)| {
@@ -182,6 +205,55 @@ fn create_category_from_matches<'a>(
             xtream_cluster: cluster,
         }
     }).collect()
+}
+
+fn clone_item_for_trakt_category(item: &PlaylistItem, category_name: &str, group_title: &Arc<str>) -> PlaylistItem {
+    let mut modified_item = item.clone();
+    let source_uuid = if modified_item.header.uuid == UUIDType::default() {
+        modified_item.get_uuid()
+    } else {
+        modified_item.header.uuid
+    };
+
+    with!(mut modified_item.header => header {
+        let title = header.get_field("caption").unwrap_or_else(|| Arc::clone(&header.title));
+        if extract_quality(&title).is_none() {
+            if let Some(quality) = extract_quality(&header.group) {
+                let mut caption = String::with_capacity(title.len() + 6);
+                caption.push('[');
+                caption.push_str(quality);
+                caption.push_str("] ");
+                caption.push_str(&title);
+                header.set_field("caption", &caption);
+            }
+        }
+        header.group = group_title.clone();
+        header.uuid = hash_string(&format!("trakt-category:{category_name}:{source_uuid}"));
+    });
+
+    modified_item
+}
+
+fn series_info_child_lookup_keys(series_info: &PlaylistItem) -> Vec<Arc<str>> {
+    match series_info.header.item_type {
+        PlaylistItemType::LocalSeriesInfo => vec![series_info.header.id.clone(), series_info.header.uuid.intern()],
+        PlaylistItemType::SeriesInfo => vec![series_info.get_uuid().intern(), series_info.header.uuid.intern()],
+        _ => Vec::new(),
+    }
+}
+
+fn series_children_by_parent_code(playlist: &[PlaylistGroup]) -> HashMap<Arc<str>, Vec<&PlaylistItem>> {
+    let mut children = HashMap::<Arc<str>, Vec<&PlaylistItem>>::new();
+    for playlist_group in playlist {
+        for channel in &playlist_group.channels {
+            if matches!(channel.header.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
+                && !channel.header.parent_code.is_empty()
+            {
+                children.entry(channel.header.parent_code.clone()).or_default().push(channel);
+            }
+        }
+    }
+    children
 }
 
 fn match_trakt_items_with_playlist<'a>(
@@ -200,7 +272,9 @@ fn match_trakt_items_with_playlist<'a>(
     let mut matches = Vec::new();
     for playlist_group in playlist {
         for channel in &playlist_group.channels {
-            if is_compatible_content_type(channel.header.xtream_cluster, category_config.content_type) {
+            if is_compatible_content_type(channel.header.xtream_cluster, category_config.content_type)
+                && is_matchable_playlist_item(channel.header.item_type, category_config.content_type)
+            {
                 let normalized_title = normalize_title_for_matching(&channel.header.title);
                 let channel_year = extract_year_from_title(&channel.header.title);
                 let channel_tmdb_id = channel.get_tmdb_id();
@@ -211,7 +285,8 @@ fn match_trakt_items_with_playlist<'a>(
         }
     }
 
-    create_category_from_matches(matches, category_config)
+    let series_children_by_parent_code = series_children_by_parent_code(playlist);
+    create_category_from_matches(matches, category_config, &series_children_by_parent_code)
 }
 
 pub struct TraktCategoriesProcessor {
@@ -321,7 +396,10 @@ pub async fn process_trakt_categories_for_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{PlaylistItemHeader, StreamProperties, TraktContentType, VideoStreamProperties};
+    use shared::model::{
+        EpisodeStreamProperties, PlaylistItemHeader, SeriesStreamProperties, StreamProperties, TraktContentType,
+        VideoStreamProperties,
+    };
 
     #[test]
     pub fn test_quality() {
@@ -385,6 +463,62 @@ mod tests {
         assert_ne!(a24_item.header.uuid, renoir_item.header.uuid);
     }
 
+    #[test]
+    fn trakt_series_categories_clone_episode_children() {
+        let mut series = series_item("Slow Horses", Some(12345));
+        let source_parent_code = series.get_uuid().intern();
+        series.header.uuid = series.get_uuid();
+        let episode = episode_item("Old Scores", &source_parent_code, 7001);
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Media Server Series".intern(),
+            channels: vec![series, episode],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+        let trakt_items = vec![trakt_list_show("Slow Horses", Some(2022), Some(12345), 1)];
+        let config = named_series_config("Trending", true);
+
+        let categories = match_trakt_items_with_playlist(&trakt_items, &playlist, &config);
+
+        assert_eq!(categories.len(), 1);
+        assert_eq!(categories[0].channels.len(), 2);
+        let cloned_series = categories[0]
+            .channels
+            .iter()
+            .find(|item| item.header.item_type == PlaylistItemType::SeriesInfo)
+            .expect("series info clone");
+        let cloned_episode = categories[0]
+            .channels
+            .iter()
+            .find(|item| item.header.item_type == PlaylistItemType::Series)
+            .expect("episode clone");
+        assert_eq!(cloned_series.header.group.as_ref(), "Trending");
+        assert_eq!(cloned_episode.header.group.as_ref(), "Trending");
+        assert_eq!(cloned_episode.header.parent_code, cloned_series.header.uuid.intern());
+    }
+
+    #[test]
+    fn trakt_series_matching_ignores_episode_rows() {
+        let episode = episode_item("Slow Horses", &"series-parent".intern(), 7001);
+        let playlist = vec![PlaylistGroup {
+            id: 1,
+            title: "Media Server Series".intern(),
+            channels: vec![episode],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+        let trakt_items = vec![trakt_list_show("Slow Horses", Some(2022), Some(12345), 1)];
+        let config = TraktCategoryConfig {
+            category_name: "Trending".to_string(),
+            content_type: TraktContentType::Series,
+            tmdb_only: false,
+            fuzzy_match_threshold: 100,
+        };
+
+        let categories = match_trakt_items_with_playlist(&trakt_items, &playlist, &config);
+
+        assert!(categories.is_empty());
+    }
+
     fn list_config(tmdb_only: bool) -> TraktCategoryConfig {
         named_list_config("category", tmdb_only)
     }
@@ -398,15 +532,76 @@ mod tests {
         }
     }
 
+    fn named_series_config(category_name: &str, tmdb_only: bool) -> TraktCategoryConfig {
+        TraktCategoryConfig {
+            category_name: category_name.to_string(),
+            content_type: TraktContentType::Series,
+            tmdb_only,
+            fuzzy_match_threshold: 100,
+        }
+    }
+
     fn video_item(title: &str, tmdb: Option<u32>) -> PlaylistItem {
         PlaylistItem {
             header: PlaylistItemHeader {
                 title: title.intern(),
                 xtream_cluster: XtreamCluster::Video,
+                item_type: PlaylistItemType::Video,
                 additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                     name: title.intern(),
                     tmdb,
                     ..VideoStreamProperties::default()
+                }))),
+                ..PlaylistItemHeader::default()
+            },
+        }
+    }
+
+    fn series_item(title: &str, tmdb: Option<u32>) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                id: format!("series-{title}").intern(),
+                input_name: "input".intern(),
+                title: title.intern(),
+                name: title.intern(),
+                url: format!("media-server://unavailable/server/shows/{title}").intern(),
+                xtream_cluster: XtreamCluster::Series,
+                item_type: PlaylistItemType::SeriesInfo,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    name: title.intern(),
+                    tmdb,
+                    ..SeriesStreamProperties::default()
+                }))),
+                ..PlaylistItemHeader::default()
+            },
+        }
+    }
+
+    fn episode_item(title: &str, parent_code: &Arc<str>, virtual_id: u32) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                uuid: hash_string(&format!("episode:{title}:{virtual_id}")),
+                id: format!("episode-{virtual_id}").intern(),
+                input_name: "input".intern(),
+                parent_code: parent_code.clone(),
+                title: title.intern(),
+                name: title.intern(),
+                url: format!("media-server://plex/server/{virtual_id}?part_key=%2Flibrary%2Fparts%2Fredacted").intern(),
+                virtual_id,
+                xtream_cluster: XtreamCluster::Series,
+                item_type: PlaylistItemType::Series,
+                additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
+                    episode_id: virtual_id,
+                    episode: 1,
+                    season: 1,
+                    added: None,
+                    release_date: None,
+                    series_release_date: None,
+                    tmdb: None,
+                    movie_image: "".intern(),
+                    container_extension: "mkv".intern(),
+                    video: None,
+                    audio: None,
                 }))),
                 ..PlaylistItemHeader::default()
             },
@@ -433,19 +628,40 @@ mod tests {
             notes: None,
             item_type: "movie".to_string(),
             movie: Some(crate::model::TraktMovie {
-                ids: crate::model::TraktIds {
-                    trakt: trakt_id,
-                    slug: title.to_string(),
-                    tvdb: None,
-                    imdb: None,
-                    tmdb: tmdb_id,
-                    tvrage: None,
-                },
+                ids: trakt_ids(title, tmdb_id, trakt_id),
                 title: title.to_string(),
                 year,
             }),
             show: None,
             content_type: TraktContentType::Vod,
+        }
+    }
+
+    fn trakt_list_show(title: &str, year: Option<u32>, tmdb_id: Option<u32>, trakt_id: u32) -> TraktListItem {
+        TraktListItem {
+            id: u64::from(trakt_id),
+            rank: Some(trakt_id),
+            listed_at: String::new(),
+            notes: None,
+            item_type: "show".to_string(),
+            movie: None,
+            show: Some(crate::model::TraktShow {
+                ids: trakt_ids(title, tmdb_id, trakt_id),
+                title: title.to_string(),
+                year,
+            }),
+            content_type: TraktContentType::Series,
+        }
+    }
+
+    fn trakt_ids(title: &str, tmdb_id: Option<u32>, trakt_id: u32) -> crate::model::TraktIds {
+        crate::model::TraktIds {
+            trakt: trakt_id,
+            slug: title.to_string(),
+            tvdb: None,
+            imdb: None,
+            tmdb: tmdb_id,
+            tvrage: None,
         }
     }
 }
