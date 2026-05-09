@@ -193,6 +193,8 @@ pub struct XtreamSeriesInfoEpisodeInfo {
     pub air_date: Arc<str>,
     #[serde(default, with = "arc_str_serde")]
     pub crew: Arc<str>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub rating: f64,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
