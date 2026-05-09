@@ -244,6 +244,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
         episode.title.clone()
     };
     let technical = episode.technical_facts.as_ref();
+    let plot = episode.descriptive_facts.as_ref().and_then(|facts| facts.summary.clone());
 
     PlaylistItem {
         header: PlaylistItemHeader {
@@ -264,6 +265,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
                 added: episode.source_version_hint.clone(),
                 release_date: episode.release_date.clone(),
                 series_release_date: None,
+                plot,
                 tmdb: provider_tmdb_id(&episode.provider_hints),
                 movie_image: "".intern(),
                 container_extension: media_server_container_extension(technical),
@@ -758,6 +760,10 @@ mod tests {
         let mut episode = episode();
         episode.provider_hints = vec![MediaServerProviderIdHint { namespace: "TmDb".into(), value: "67890".into() }];
         episode.release_date = Some("2024-02-03".into());
+        episode.descriptive_facts = Some(MediaServerDescriptiveFacts {
+            summary: Some("episode summary".into()),
+            ..MediaServerDescriptiveFacts::default()
+        });
         episode.technical_facts = Some(MediaServerTechnicalFacts {
             container: Some("mp4".into()),
             video: Some(MediaServerVideoTechnicalFacts { codec: Some("h264".into()), width: Some(1_280), height: Some(720) }),
@@ -789,6 +795,7 @@ mod tests {
         };
         assert_eq!(episode.tmdb, Some(67890));
         assert_eq!(episode.release_date.as_deref(), Some("2024-02-03"));
+        assert_eq!(episode.plot.as_deref(), Some("episode summary"));
         assert_eq!(episode.container_extension.as_ref(), "mp4");
         assert_eq!(json_field(episode.video.as_deref(), "height"), Some(Value::Number(720.into())));
         assert_eq!(json_field(episode.audio.as_deref(), "codec_name"), Some(Value::String("aac".to_string())));

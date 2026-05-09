@@ -249,7 +249,7 @@ fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<Ser
         tmdb: episode.tmdb,
         release_date: episode.release_date.clone().unwrap_or_else(|| "".intern()),
         series_release_date: episode.series_release_date.clone(),
-        plot: None,
+        plot: episode.plot.clone(),
         crew: None,
         duration_secs: 0,
         duration: "".intern(),
@@ -756,6 +756,7 @@ mod tests {
                 added: Some("1700000000".intern()),
                 release_date: Some("2024-02-03".intern()),
                 series_release_date: Some("2024-01-01".intern()),
+                plot: Some("Episode summary".intern()),
                 tmdb: Some(67890),
                 movie_image: "".intern(),
                 container_extension: "mkv".intern(),
@@ -858,6 +859,7 @@ mod tests {
         assert_eq!(episodes[0].container_extension.as_ref(), "mkv");
         assert_eq!(episodes[0].release_date.as_ref(), "2024-02-03");
         assert_eq!(episodes[0].series_release_date.as_deref(), Some("2024-01-01"));
+        assert_eq!(episodes[0].plot.as_deref(), Some("Episode summary"));
         assert_eq!(episodes[0].tmdb, Some(67890));
         assert_eq!(episodes[0].direct_source.as_ref(), "");
         assert_eq!(episodes[0].movie_image.as_ref(), "");
