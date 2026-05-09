@@ -253,7 +253,7 @@ fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<Ser
         crew: None,
         duration_secs: 0,
         duration: "".intern(),
-        movie_image: "".intern(),
+        movie_image: episode.movie_image.clone(),
         bitrate: 0,
         rating: None,
         video: episode.video.clone(),
@@ -758,7 +758,7 @@ mod tests {
                 series_release_date: Some("2024-01-01".intern()),
                 plot: Some("Episode summary".intern()),
                 tmdb: Some(67890),
-                movie_image: "".intern(),
+                movie_image: "media-server://image/plex/server/episode?image_path=%2Flibrary%2Fmetadata%2Fredacted%2Fthumb".intern(),
                 container_extension: "mkv".intern(),
                 video: Some(r#"{"codec_name":"h264"}"#.intern()),
                 audio: Some(r#"{"codec_name":"aac"}"#.intern()),
@@ -862,7 +862,10 @@ mod tests {
         assert_eq!(episodes[0].plot.as_deref(), Some("Episode summary"));
         assert_eq!(episodes[0].tmdb, Some(67890));
         assert_eq!(episodes[0].direct_source.as_ref(), "");
-        assert_eq!(episodes[0].movie_image.as_ref(), "");
+        assert_eq!(
+            episodes[0].movie_image.as_ref(),
+            "media-server://image/plex/server/episode?image_path=%2Flibrary%2Fmetadata%2Fredacted%2Fthumb"
+        );
         assert!(episodes[0].video.as_deref().is_some_and(|video| video.contains("h264")));
         assert!(episodes[0].audio.as_deref().is_some_and(|audio| audio.contains("aac")));
         assert_eq!(episodes[1].id, 7002);
