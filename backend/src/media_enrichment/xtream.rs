@@ -24,6 +24,19 @@ pub fn video_fact_patch_from_title(
     Some((year, build_missing_fact_patch(&video_current_facts(properties), &supplied)))
 }
 
+pub fn video_fact_patch_from_title_candidates<'a, I>(
+    properties: &VideoStreamProperties,
+    titles: I,
+) -> Option<(&'a str, u32, MediaFactPatch)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    titles.into_iter().filter(|title| !title.is_empty()).find_map(|title| {
+        let (year, patch) = video_fact_patch_from_title(properties, title)?;
+        (!patch.is_empty()).then_some((title, year, patch))
+    })
+}
+
 pub fn series_fact_patch_from_metadata(
     properties: &SeriesStreamProperties,
     metadata: &MediaMetadata,
@@ -37,6 +50,19 @@ pub fn series_fact_patch_from_title(
 ) -> Option<(u32, MediaFactPatch)> {
     let (year, supplied) = supplied_release_year_from_title(MediaItemKind::Series, title)?;
     Some((year, build_missing_fact_patch(&series_current_facts(properties), &supplied)))
+}
+
+pub fn series_fact_patch_from_title_candidates<'a, I>(
+    properties: &SeriesStreamProperties,
+    titles: I,
+) -> Option<(&'a str, u32, MediaFactPatch)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    titles.into_iter().filter(|title| !title.is_empty()).find_map(|title| {
+        let (year, patch) = series_fact_patch_from_title(properties, title)?;
+        (!patch.is_empty()).then_some((title, year, patch))
+    })
 }
 
 pub fn apply_fact_patch_to_video(properties: &mut VideoStreamProperties, patch: &MediaFactPatch) -> bool {
@@ -131,6 +157,36 @@ mod tests {
     }
 
     #[test]
+    fn builds_video_patch_from_first_parseable_title_candidate() {
+        let properties = VideoStreamProperties { tmdb: Some(603), ..VideoStreamProperties::default() };
+
+        let Some((title, year, patch)) =
+            video_fact_patch_from_title_candidates(&properties, ["No year", "The Matrix 1999"])
+        else {
+            panic!("expected fallback title year patch");
+        };
+
+        assert_eq!(title, "The Matrix 1999");
+        assert_eq!(year, 1999);
+        assert_eq!(patch.release_date.as_deref(), Some("1999-01-01"));
+        assert!(patch.tmdb_id.is_none());
+    }
+
+    #[test]
+    fn video_title_candidates_skip_empty_patches_after_current_facts_are_complete() {
+        let properties = VideoStreamProperties {
+            tmdb: Some(603),
+            details: Some(VideoStreamDetailProperties {
+                release_date: Some("1999-03-31".into()),
+                ..VideoStreamDetailProperties::default()
+            }),
+            ..VideoStreamProperties::default()
+        };
+
+        assert!(video_fact_patch_from_title_candidates(&properties, ["The Matrix 1999"]).is_none());
+    }
+
+    #[test]
     fn applies_video_patch_to_missing_facts() {
         let mut properties = VideoStreamProperties::default();
         let patch = MediaFactPatch { tmdb_id: Some(603), release_date: Some("1999-01-01".to_string()) };
@@ -166,6 +222,33 @@ mod tests {
 
         assert_eq!(year, 2008);
         assert_eq!(patch.release_date.as_deref(), Some("2008-01-01"));
+    }
+
+    #[test]
+    fn builds_series_patch_from_first_parseable_title_candidate() {
+        let properties = SeriesStreamProperties { tmdb: Some(1396), ..SeriesStreamProperties::default() };
+
+        let Some((title, year, patch)) =
+            series_fact_patch_from_title_candidates(&properties, ["No year", "Breaking Bad 2008"])
+        else {
+            panic!("expected fallback title year patch");
+        };
+
+        assert_eq!(title, "Breaking Bad 2008");
+        assert_eq!(year, 2008);
+        assert_eq!(patch.release_date.as_deref(), Some("2008-01-01"));
+        assert!(patch.tmdb_id.is_none());
+    }
+
+    #[test]
+    fn series_title_candidates_skip_empty_patches_after_current_facts_are_complete() {
+        let properties = SeriesStreamProperties {
+            tmdb: Some(1396),
+            release_date: Some("2008-01-20".into()),
+            ..SeriesStreamProperties::default()
+        };
+
+        assert!(series_fact_patch_from_title_candidates(&properties, ["Breaking Bad 2008"]).is_none());
     }
 
     #[test]

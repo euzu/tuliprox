@@ -3,7 +3,7 @@ use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateT
 use crate::library::{MetadataResolver, MetadataStorage};
 use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
 use crate::media_enrichment::xtream::{
-    apply_fact_patch_to_video, video_fact_patch_from_metadata, video_fact_patch_from_title,
+    apply_fact_patch_to_video, video_fact_patch_from_metadata, video_fact_patch_from_title_candidates,
 };
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
@@ -713,17 +713,22 @@ pub async fn update_vod_metadata(
 
     if missing_fact_policy.should_resolve_missing_facts(missing_tmdb, missing_date) {
         let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
-        let local_title_candidate = title_candidate
-            .filter(|title| !title.is_empty())
-            .unwrap_or(properties.name.as_ref())
-            .to_string();
 
         // Try local parsing first
-        if missing_fact_policy.should_try_parsed_title_supplier(missing_date) && !local_title_candidate.is_empty() {
-            if let Some((year, patch)) = video_fact_patch_from_title(&properties, &local_title_candidate) {
+        if missing_fact_policy.should_try_parsed_title_supplier(missing_date) {
+            let local_patch = {
+                let original_name_candidate = properties.details.as_ref().and_then(|d| d.o_name.as_deref());
+                let candidates = [
+                    title_candidate,
+                    (!properties.name.is_empty()).then_some(properties.name.as_ref()),
+                    original_name_candidate,
+                ];
+                video_fact_patch_from_title_candidates(&properties, candidates.into_iter().flatten())
+            };
+            if let Some((title, year, patch)) = local_patch {
+                debug_if_enabled!("Parsed local year for '{}': {}", title, year);
                 if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
-                    debug_if_enabled!("Parsed local year for '{}': {}", local_title_candidate, year);
                 }
             }
         }
@@ -776,7 +781,8 @@ pub async fn update_vod_metadata(
 
             // 4. API Original Name (fallback)
             if meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none())) {
-                if let Some(o_name) = properties.details.as_ref().and_then(|d| d.o_name.as_deref()) {
+                let original_name_candidate = properties.details.as_ref().and_then(|d| d.o_name.as_deref());
+                if let Some(o_name) = original_name_candidate {
                     if !o_name.is_empty() && o_name != properties.name.as_ref() {
                         trace!("Fallback to API Original Name '{o_name}'...");
                         meta = meta_resolver
