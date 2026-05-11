@@ -2,7 +2,7 @@ use crate::media_server::MediaServerError;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use reqwest::{header::HeaderMap, StatusCode};
-use shared::model::InputType;
+use shared::model::{InputType, MediaServerLibraryKind};
 use std::{fmt, sync::Arc};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -44,13 +44,6 @@ pub struct MediaServerStatus {
     pub display_name: Option<Arc<str>>,
     pub version: Option<Arc<str>>,
     pub owned: Option<bool>,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum MediaServerLibraryKind {
-    Movies,
-    TvShows,
-    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

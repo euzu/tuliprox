@@ -317,6 +317,8 @@ pub struct EpisodeStreamProperties {
     pub release_date: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub series_release_date: Option<Arc<str>>, // Global series release date
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
@@ -782,7 +784,7 @@ impl SeriesStreamProperties {
                             tmdb: info.info.tmdb,
                             release_date: e.info.as_ref().map(|i| i.air_date.clone()).unwrap_or_default(),
                             series_release_date: None,
-                            plot: None,
+                            plot: e.info.as_ref().and_then(|i| i.plot.clone()),
                             crew: e.info.as_ref().map(|i| i.crew.clone()),
                             duration_secs: e.info.as_ref().map(|i| i.duration_secs).unwrap_or_default(),
                             duration: e.info.as_ref().map(|i| i.duration.clone()).unwrap_or_default(),
@@ -883,7 +885,7 @@ impl SeriesStreamProperties {
                             tmdb,
                             release_date: e.info.air_date.clone(),
                             series_release_date: None,
-                            plot: None,
+                            plot: e.info.plot.clone(),
                             crew: e.info.crew.clone(),
                             duration_secs: e.info.duration_secs,
                             duration: e.info.duration.clone(),
@@ -915,6 +917,7 @@ impl EpisodeStreamProperties {
             release_date: Some(episode.release_date.clone()),
             // Inherit global release date from the Series object if available
             series_release_date: series.release_date.clone(),
+            plot: episode.plot.clone(),
             tmdb: episode.tmdb.or(series.tmdb),
             movie_image: episode.movie_image.clone(),
             container_extension: episode.container_extension.clone(),
@@ -1018,6 +1021,39 @@ mod tests {
         assert_eq!(props.trailer.as_deref(), Some("legacy-trailer"));
         assert_eq!(props.tmdb, Some(7788));
         assert_eq!(props.is_adult, 1);
+    }
+
+    #[test]
+    fn from_series_info_preserves_episode_plot() {
+        let info: XtreamSeriesInfo = serde_json::from_value(json!({
+            "info": {
+                "name": "Example Show"
+            },
+            "episodes": {
+                "1": [{
+                    "id": 101,
+                    "episode_num": 1,
+                    "season": 1,
+                    "title": "Pilot",
+                    "container_extension": "mkv",
+                    "info": {
+                        "air_date": "2024-01-01",
+                        "plot": "Episode plot",
+                        "movie_image": "https://img.example/still.jpg"
+                    }
+                }]
+            }
+        }))
+        .expect("sample XtreamSeriesInfo should deserialize");
+
+        let props = SeriesStreamProperties::from_info_without_existing(&info, 7);
+        let episode = props
+            .details
+            .and_then(|details| details.episodes)
+            .and_then(|episodes| episodes.first().cloned())
+            .expect("episode should be mapped");
+
+        assert_eq!(episode.plot.as_deref(), Some("Episode plot"));
     }
 
     #[test]

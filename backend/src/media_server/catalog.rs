@@ -1,8 +1,10 @@
+use shared::model::MediaServerLibraryKind;
 use crate::media_server::{
     MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerLibrary,
-    MediaServerLibraryKind, MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
+    MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
     MediaServerSeries,
 };
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaServerCatalogCursor {
@@ -34,10 +36,11 @@ impl MediaServerCatalogCursor {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MediaServerCatalogRefreshPolicy {
     pub page_size: usize,
+    pub request_delay_ms: u64,
 }
 
 impl Default for MediaServerCatalogRefreshPolicy {
-    fn default() -> Self { Self { page_size: 100 } }
+    fn default() -> Self { Self { page_size: 100, request_delay_ms: 0 } }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -118,6 +121,7 @@ where
                     let next_request = page.next_request();
                     snapshot.movies.extend(page.items);
                     let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
                     page_request = next;
                 }
             }
@@ -129,6 +133,7 @@ where
                     let next_request = page.next_request();
                     snapshot.series.extend(page.items);
                     let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
                     page_request = next;
                 }
 
@@ -139,6 +144,7 @@ where
                     let next_request = page.next_request();
                     snapshot.seasons.extend(page.items);
                     let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
                     page_request = next;
                 }
 
@@ -149,6 +155,7 @@ where
                     let next_request = page.next_request();
                     snapshot.episodes.extend(page.items);
                     let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
                     page_request = next;
                 }
             }
@@ -157,6 +164,12 @@ where
     }
 
     Ok(snapshot)
+}
+
+async fn wait_before_next_catalog_page(policy: MediaServerCatalogRefreshPolicy) {
+    if policy.request_delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(policy.request_delay_ms)).await;
+    }
 }
 
 fn validate_page_progress<T>(library: &MediaServerLibrary, page: &MediaServerPage<T>) -> Result<(), MediaServerError> {
@@ -181,11 +194,15 @@ mod tests {
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use reqwest::{header::HeaderMap, StatusCode};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Instant,
+    };
 
     #[derive(Default)]
     struct MockMediaServerCatalogClient {
         movie_pages: Mutex<Vec<Result<MediaServerPage<MediaServerMovie>, MediaServerError>>>,
+        movie_call_times: Mutex<Vec<Instant>>,
         series_pages: Mutex<Vec<Result<MediaServerPage<MediaServerSeries>, MediaServerError>>>,
         season_pages: Mutex<Vec<Result<MediaServerPage<MediaServerSeason>, MediaServerError>>>,
         episode_pages: Mutex<Vec<Result<MediaServerPage<MediaServerEpisode>, MediaServerError>>>,
@@ -216,6 +233,7 @@ mod tests {
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
         ) -> Result<MediaServerPage<MediaServerMovie>, MediaServerError> {
+            self.movie_call_times.lock().expect("lock").push(Instant::now());
             self.movie_pages.lock().expect("lock").remove(0)
         }
 
@@ -395,11 +413,32 @@ mod tests {
         ]);
 
         let outcome = cache
-            .refresh_or_retain(&client, MediaServerCatalogRefreshPolicy { page_size: 1 })
+            .refresh_or_retain(&client, MediaServerCatalogRefreshPolicy { page_size: 1, ..MediaServerCatalogRefreshPolicy::default() })
             .await;
 
         assert!(matches!(outcome, MediaServerCatalogRefreshOutcome::Retained { retained: true, .. }));
         assert_eq!(cache.trusted().expect("previous snapshot retained").movies[0].item_id.as_ref(), "old");
+    }
+
+    #[tokio::test]
+    async fn refresh_waits_configured_delay_between_catalog_pages() {
+        let client = MockMediaServerCatalogClient::with_libraries(vec![movie_library()]);
+        client.movie_pages.lock().expect("lock").extend([
+            Ok(MediaServerPage::new(MediaServerPageRequest::new(0, 1), Some(2), vec![movie("movie-1")])),
+            Ok(MediaServerPage::new(MediaServerPageRequest::new(1, 1), Some(2), vec![movie("movie-2")])),
+        ]);
+
+        let snapshot = refresh_media_server_catalog_complete_before_publish(
+            &client,
+            MediaServerCatalogRefreshPolicy { page_size: 1, request_delay_ms: 20 },
+        )
+        .await
+        .expect("catalog refresh succeeds");
+
+        let call_times = client.movie_call_times.lock().expect("lock");
+        assert_eq!(snapshot.movies.len(), 2);
+        assert_eq!(call_times.len(), 2);
+        assert!(call_times[1].duration_since(call_times[0]).as_millis() >= 15);
     }
 
     #[tokio::test]

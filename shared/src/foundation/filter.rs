@@ -6,7 +6,6 @@ use crate::{
     foundation::value_provider::ValueProvider,
     utils::{DirectedGraph, Internable, CONSTANTS},
 };
-use enum_iterator::all;
 use indexmap::IndexSet;
 use log::{error, log_enabled, trace, Level};
 use pest::{iterators::Pair, Parser};
@@ -16,6 +15,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
+use strum::IntoEnumIterator;
 
 #[derive(Debug, Clone)]
 pub struct CompiledRegex {
@@ -121,7 +121,7 @@ impl Filter {
             Self::FieldComparison(field, rewc) => {
                 let (is_match, value) = if field == &ItemField::Caption {
                     get_caption(provider, rewc)
-                } else if let Some(value) = provider.get(field.as_str()) {
+                } else if let Some(value) = provider.get(field.as_ref()) {
                     (rewc.re.is_match(&value), value)
                 } else {
                     (false, "".intern())
@@ -136,7 +136,7 @@ impl Filter {
                 is_match
             }
             Self::TypeComparison(field, item_type) => {
-                if let Some(value) = provider.get(field.as_str()) {
+                if let Some(value) = provider.get(field.as_ref()) {
                     get_filter_item_type(&value).is_some_and(|pli_type| {
                         let is_match = match item_type {
                             PlaylistItemType::Video => {
@@ -221,7 +221,7 @@ impl std::fmt::Display for Filter {
 fn get_parser_item_field(expr: &Pair<Rule>) -> Result<ItemField, TuliproxError> {
     if expr.as_rule() == Rule::field {
         let field_text = expr.as_str();
-        for item in all::<ItemField>() {
+        for item in ItemField::iter() {
             if field_text.eq_ignore_ascii_case(item.to_string().as_str()) {
                 return Ok(item);
             }

@@ -7,6 +7,7 @@ macro_rules! include_modules {
         pub mod api;
         pub mod auth;
         pub mod library;
+        pub mod media_enrichment;
         pub mod media_server;
         pub mod messaging;
         pub mod model;

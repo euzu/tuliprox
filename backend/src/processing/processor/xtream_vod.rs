@@ -1,6 +1,11 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
-use crate::library::{MetadataResolver, MetadataStorage};
+use crate::library::{MediaMetadata, MetadataResolver, MetadataStorage};
+use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
+use crate::media_enrichment::xtream::{
+    apply_fact_patch_to_video, distinct_non_empty_title_candidates, video_fact_patch_from_metadata,
+    video_fact_patch_from_title_candidates,
+};
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
@@ -13,7 +18,6 @@ use crate::processing::processor::{
     ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
-use crate::ptt::ptt_parse_title;
 use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
@@ -510,7 +514,7 @@ async fn update_vod_info_immediate(
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
 ) -> Result<Option<VideoStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
-    let resolve_tmdb =
+    let resolve_missing_facts =
         fetch_info || reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_vod_metadata(
@@ -523,7 +527,7 @@ async fn update_vod_info_immediate(
         Some(&pli.header.title),
         false,
         fetch_info,
-        resolve_tmdb,
+        resolve_missing_facts,
         reasons.contains(ResolveReason::Probe),
         db_query,
         None,
@@ -538,7 +542,7 @@ async fn update_vod_info_immediate(
 /// * `save` - If true, persists changes to the input database immediately (Instant strategy).
 ///   If false, returns the properties so the caller can batch persist them (Bundled strategy).
 /// * `fetch_info` - If true, fetches details from Provider API. If false, uses existing/dummy data.
-/// * `resolve_tmdb` - If true, resolves missing TMDB/date metadata from available titles.
+/// * `resolve_missing_facts` - If true, resolves missing TMDB/date facts from available titles.
 /// * `db_query` - Optional pre-opened DB handle to avoid re-opening file.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 pub async fn update_vod_metadata(
@@ -551,7 +555,7 @@ pub async fn update_vod_metadata(
     playlist_title: Option<&str>,
     save: bool,
     fetch_info: bool,
-    resolve_tmdb: bool,
+    resolve_missing_facts: bool,
     do_probe: bool,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
     tmdb_resolved_out: Option<&AtomicBool>,
@@ -700,24 +704,31 @@ pub async fn update_vod_metadata(
         return Err(shared::error::TuliproxError::Config(format!("No VOD properties available after fallback creation for {display_id}")));
     };
 
-    let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
+    // Xtream's legacy ResolveTmdb input flag currently gates missing identity/temporal fact enrichment.
+    let missing_fact_policy =
+        MissingFactEnrichmentPolicy::fill_missing(resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb));
 
-    // 2. Resolve TMDB/Date if missing and explicitly enabled for this input
+    // 2. Resolve missing TMDB/date facts if allowed for this input
     let missing_tmdb = properties.tmdb.is_none();
     let missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
-    if resolve_tmdb && resolve_tmdb_enabled && (missing_tmdb || missing_date) {
+    if missing_fact_policy.should_resolve_missing_facts(missing_tmdb, missing_date) {
         // Try local parsing first
-        if missing_date && !properties.name.is_empty() {
-            let meta_parse = ptt_parse_title(&properties.name);
-            if let Some(year) = meta_parse.year {
-                if properties.details.is_none() {
-                    properties.details = Some(VideoStreamDetailProperties::default());
-                }
-                if let Some(details) = properties.details.as_mut() {
-                    details.release_date = Some(format!("{year}-01-01").into());
+        if missing_fact_policy.should_try_parsed_title_supplier(missing_date) {
+            let local_patch = {
+                let original_name_candidate = properties.details.as_ref().and_then(|d| d.o_name.as_deref());
+                let candidates = distinct_non_empty_title_candidates([
+                    playlist_title,
+                    existing_item.as_ref().map(|i| i.title.as_ref()),
+                    (!properties.name.is_empty()).then_some(properties.name.as_ref()),
+                    original_name_candidate,
+                ]);
+                video_fact_patch_from_title_candidates(&properties, candidates)
+            };
+            if let Some((title, year, patch)) = local_patch {
+                debug_if_enabled!("Parsed local year for '{}': {}", title, year);
+                if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
-                    debug_if_enabled!("Parsed local year for '{}': {}", properties.name, year);
                 }
             }
         }
@@ -725,7 +736,7 @@ pub async fn update_vod_metadata(
         // Re-check missing date after local parse
         let still_missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
-        if missing_tmdb || still_missing_date {
+        if missing_fact_policy.should_try_tmdb_supplier(missing_tmdb, still_missing_date) {
             let config = app_config.config.load();
             let library_config = config.library.as_ref();
             let metadata_update_config = config.metadata_update.as_ref();
@@ -735,61 +746,33 @@ pub async fn update_vod_metadata(
             let meta_resolver =
                 MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
 
-            let mut meta = None;
-            let mut tried_title = false;
+            let mut meta: Option<MediaMetadata> = None;
+            let original_name_candidate = properties.details.as_ref().and_then(|d| d.o_name.as_deref());
+            let candidates = distinct_non_empty_title_candidates([
+                playlist_title,
+                existing_item.as_ref().map(|i| i.title.as_ref()),
+                (!properties.name.is_empty()).then_some(properties.name.as_ref()),
+                original_name_candidate,
+            ]);
 
-            // 1. & 2. Playlist Title
-            let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
-            if let Some(title) = title_candidate {
-                if !title.is_empty() {
+            for title in candidates {
+                if meta.as_ref().is_some_and(|m| m.tmdb_id().is_some()) {
+                    break;
+                }
+                if Some(title) == playlist_title || existing_item.as_ref().is_some_and(|item| item.title.as_ref() == title) {
                     debug!("Resolving TMDB for VOD using Playlist Title '{title}' (ID: {display_id})...");
-                    meta = meta_resolver.resolve_from_title(title, properties.tmdb, true, resolve_tmdb_enabled).await;
-                    tried_title = true;
-                }
-            }
-
-            // 3. API Name (fallback)
-            if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty()
-            {
-                let title_already_tried =
-                    if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
-
-                if !tried_title || !title_already_tried {
+                } else if title == properties.name.as_ref() {
                     trace!("Fallback to API Name '{}'...", properties.name);
-                    meta = meta_resolver
-                        .resolve_from_title(&properties.name, properties.tmdb, true, resolve_tmdb_enabled)
-                        .await;
+                } else {
+                    trace!("Fallback to API Original Name '{title}'...");
                 }
-            }
-
-            // 4. API Original Name (fallback)
-            if meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none())) {
-                if let Some(o_name) = properties.details.as_ref().and_then(|d| d.o_name.as_deref()) {
-                    if !o_name.is_empty() && o_name != properties.name.as_ref() {
-                        trace!("Fallback to API Original Name '{o_name}'...");
-                        meta =
-                            meta_resolver.resolve_from_title(o_name, properties.tmdb, true, resolve_tmdb_enabled).await;
-                    }
-                }
+                meta = meta_resolver.resolve_from_title(title, properties.tmdb, true, true).await;
             }
 
             if let Some(m) = meta {
-                if properties.tmdb.is_none() {
-                    properties.tmdb = m.tmdb_id();
+                let patch = video_fact_patch_from_metadata(&properties, &m);
+                if apply_fact_patch_to_video(&mut properties, &patch) {
                     properties_updated = true;
-                }
-                if properties.details.is_none() {
-                    properties.details = Some(VideoStreamDetailProperties::default());
-                }
-                if let Some(details) = properties.details.as_mut() {
-                    if details.release_date.is_none() {
-                        if let Some(year) = m.year() {
-                            details.release_date = Some(format!("{year}-01-01").into());
-                            properties_updated = true;
-                        }
-                    }
-                }
-                if properties_updated {
                     let id_display = properties.tmdb.map_or("None".to_string(), |id| id.to_string());
                     trace_if_enabled!("Resolved TMDB for '{}' (ID: {}): {}", display_title, display_id, id_display);
                 }
@@ -963,7 +946,7 @@ pub async fn update_vod_metadata(
         out.store(probe_pending, Ordering::Relaxed);
     }
 
-    let probe_only_unresolved = do_probe && !fetch_info && !resolve_tmdb && !properties_updated && !fetched_new;
+    let probe_only_unresolved = do_probe && !fetch_info && !resolve_missing_facts && !properties_updated && !fetched_new;
     if probe_only_unresolved {
         if let Some(kind) = probe_failure {
             let err = match kind {

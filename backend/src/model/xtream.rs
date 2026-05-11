@@ -9,8 +9,8 @@ use shared::model::{
     XtreamMappingOptions,
 };
 use shared::utils::{arc_str_serde, concat_path_leading_slash, deserialize_number_from_string_or_zero};
-use enum_iterator::all;
 use crate::model::XtreamTargetFlags;
+use strum::IntoEnumIterator;
 
 #[derive(Deserialize, Default)]
 pub struct XtreamCategory {
@@ -38,7 +38,7 @@ pub fn xtream_mapping_option_from_target_options(target: &ConfigTarget, target_o
     let mut reverse_item_types = PlaylistItemTypeSet::empty();
     let mut resource_proxy_item_types = PlaylistItemTypeSet::empty();
 
-    for item_type in all::<PlaylistItemType>() {
+    for item_type in PlaylistItemType::iter() {
         if user.proxy.is_reverse(item_type) && !force_redirect.as_ref().is_some_and(|o| o.has_cluster(item_type)) {
             reverse_item_types.insert(item_type);
         }

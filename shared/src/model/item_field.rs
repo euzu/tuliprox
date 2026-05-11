@@ -1,95 +1,19 @@
-use crate::error::TuliproxError;
-use enum_iterator::Sequence;
 use serde::{Deserialize, Deserializer};
 use std::{fmt::Display, str::FromStr};
+use strum_macros::{AsRefStr, EnumIter, EnumString};
 
-#[derive(Debug, Copy, Clone, serde::Serialize, Sequence, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, serde::Serialize, Eq, PartialEq, EnumIter, EnumString, AsRefStr)]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
+#[serde(rename_all = "lowercase")]
 pub enum ItemField {
-    #[serde(rename = "group")]
     Group,
-    #[serde(rename = "name")]
     Name,
-    #[serde(rename = "title")]
     Title,
-    #[serde(rename = "genre")]
     Genre,
-    #[serde(rename = "url")]
     Url,
-    #[serde(rename = "input")]
     Input,
-    #[serde(rename = "type")]
     Type,
-    #[serde(rename = "caption")]
     Caption,
-}
-
-impl ItemField {
-    const GROUP: &'static str = "Group";
-    const NAME: &'static str = "Name";
-    const TITLE: &'static str = "Title";
-    const GENRE: &'static str = "Genre";
-    const URL: &'static str = "Url";
-    const INPUT: &'static str = "Input";
-    const TYPE: &'static str = "Type";
-    const CAPTION: &'static str = "Caption";
-
-    pub fn as_str(&self) -> &'static str {
-        match *self {
-            Self::Group => Self::GROUP,
-            Self::Name => Self::NAME,
-            Self::Title => Self::TITLE,
-            Self::Genre => Self::GENRE,
-            Self::Url => Self::URL,
-            Self::Input => Self::INPUT,
-            Self::Type => Self::TYPE,
-            Self::Caption => Self::CAPTION,
-        }
-    }
-}
-
-impl Display for ItemField {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match *self {
-                Self::Group => Self::GROUP,
-                Self::Name => Self::NAME,
-                Self::Title => Self::TITLE,
-                Self::Genre => Self::GENRE,
-                Self::Url => Self::URL,
-                Self::Input => Self::INPUT,
-                Self::Type => Self::TYPE,
-                Self::Caption => Self::CAPTION,
-            }
-        )
-    }
-}
-
-impl FromStr for ItemField {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq_ignore_ascii_case(Self::GROUP) {
-            Ok(Self::Group)
-        } else if s.eq_ignore_ascii_case(Self::NAME) {
-            Ok(Self::Name)
-        } else if s.eq_ignore_ascii_case(Self::TITLE) {
-            Ok(Self::Title)
-        } else if s.eq_ignore_ascii_case(Self::GENRE) {
-            Ok(Self::Genre)
-        } else if s.eq_ignore_ascii_case(Self::CAPTION) {
-            Ok(Self::Caption)
-        } else if s.eq_ignore_ascii_case(Self::URL) {
-            Ok(Self::Url)
-        } else if s.eq_ignore_ascii_case(Self::INPUT) {
-            Ok(Self::Input)
-        } else if s.eq_ignore_ascii_case(Self::TYPE) {
-            Ok(Self::Type)
-        } else {
-            Err(TuliproxError::Config(format!("Unknown ItemField: {}", s)))
-        }
-    }
 }
 
 impl<'de> Deserialize<'de> for ItemField {
@@ -99,5 +23,45 @@ impl<'de> Deserialize<'de> for ItemField {
     {
         let s = String::deserialize(deserializer)?;
         ItemField::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Display for ItemField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Group => "Group",
+            Self::Name => "Name",
+            Self::Title => "Title",
+            Self::Genre => "Genre",
+            Self::Url => "Url",
+            Self::Input => "Input",
+            Self::Type => "Type",
+            Self::Caption => "Caption",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_field_from_str_keeps_legacy_case_insensitive_parsing() {
+        assert_eq!(ItemField::from_str("Group").expect("legacy field casing parses"), ItemField::Group);
+        assert_eq!(ItemField::from_str("TITLE").expect("upper case field parses"), ItemField::Title);
+    }
+
+    #[test]
+    fn item_field_deserialize_uses_case_insensitive_strum_parser() {
+        assert_eq!(
+            serde_json::from_str::<ItemField>("\"Group\"").expect("legacy field casing parses"),
+            ItemField::Group
+        );
+        assert_eq!(serde_json::from_str::<ItemField>("\"TITLE\"").expect("upper case field parses"), ItemField::Title);
+    }
+
+    #[test]
+    fn item_field_serialize_keeps_lowercase_config_shape() {
+        assert_eq!(serde_json::to_string(&ItemField::Group).expect("item field serializes"), "\"group\"");
     }
 }

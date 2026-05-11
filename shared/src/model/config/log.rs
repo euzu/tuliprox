@@ -1,46 +1,29 @@
-use crate::{
-    error::TuliproxError,
-    utils::{
-        default_as_true, is_blank_optional_str, is_blank_optional_string, is_default_runtime_config_report_format,
-        is_false, is_true,
-    },
+use crate::utils::{
+    default_as_true, is_blank_optional_str, is_blank_optional_string, is_default_runtime_config_report_format,
+    is_false, is_true,
 };
-use enum_iterator::Sequence;
-use std::{fmt::Display, str::FromStr};
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, Sequence)]
-#[serde(rename_all = "snake_case")]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Default,
+    EnumIter,
+    EnumString,
+    AsRefStr,
+    Display,
+)]
+#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum RuntimeConfigReportFormat {
     #[default]
     Yaml,
     Json,
-}
-
-impl RuntimeConfigReportFormat {
-    const JSON: &'static str = "json";
-    const YAML: &'static str = "yaml";
-}
-
-impl Display for RuntimeConfigReportFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let str = match self {
-            RuntimeConfigReportFormat::Yaml => RuntimeConfigReportFormat::YAML,
-            RuntimeConfigReportFormat::Json => RuntimeConfigReportFormat::JSON,
-        };
-        write!(f, "{str}")
-    }
-}
-
-impl FromStr for RuntimeConfigReportFormat {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            RuntimeConfigReportFormat::YAML => Ok(RuntimeConfigReportFormat::Yaml),
-            RuntimeConfigReportFormat::JSON => Ok(RuntimeConfigReportFormat::Json),
-            _ => Err(TuliproxError::Config(format!("Invalid Runtime config report format {s}"))),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

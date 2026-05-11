@@ -249,11 +249,11 @@ fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<Ser
         tmdb: episode.tmdb,
         release_date: episode.release_date.clone().unwrap_or_else(|| "".intern()),
         series_release_date: episode.series_release_date.clone(),
-        plot: None,
+        plot: episode.plot.clone(),
         crew: None,
         duration_secs: 0,
         duration: "".intern(),
-        movie_image: "".intern(),
+        movie_image: episode.movie_image.clone(),
         bitrate: 0,
         rating: None,
         video: episode.video.clone(),
@@ -814,8 +814,9 @@ mod tests {
                 added: Some("1700000000".intern()),
                 release_date: Some("2024-02-03".intern()),
                 series_release_date: Some("2024-01-01".intern()),
+                plot: Some("Episode summary".intern()),
                 tmdb: Some(67890),
-                movie_image: "".intern(),
+                movie_image: "media-server://image/plex/server/episode?image_path=%2Flibrary%2Fmetadata%2Fredacted%2Fthumb".intern(),
                 container_extension: "mkv".intern(),
                 video: Some(r#"{"codec_name":"h264"}"#.intern()),
                 audio: Some(r#"{"codec_name":"aac"}"#.intern()),
@@ -861,10 +862,22 @@ mod tests {
         let series_parent_code = series_info.header.uuid.to_string();
         let media_episode_two = PlaylistItem { header: make_media_server_episode(&series_parent_code, "episode-two", 7002, 1, 2) };
         let media_episode_one = PlaylistItem { header: make_media_server_episode(&series_parent_code, "episode-one", 7001, 1, 1) };
+        let malformed_media_episode = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "media-server:server:shows:episode:malformed".intern(),
+                parent_code: series_parent_code.clone().intern(),
+                url: "media-server://plex/server/malformed?part_key=%2Flibrary%2Fparts%2Fredacted".intern(),
+                item_type: PlaylistItemType::Series,
+                xtream_cluster: XtreamCluster::Series,
+                virtual_id: 7003,
+                additional_properties: None,
+                ..PlaylistItemHeader::default()
+            },
+        };
         let provider_episode = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "999".intern(),
-                parent_code: series_parent_code.intern(),
+                parent_code: series_parent_code.clone().intern(),
                 url: "http://provider.example.invalid/series/999.mkv".intern(),
                 item_type: PlaylistItemType::Series,
                 xtream_cluster: XtreamCluster::Series,
@@ -876,12 +889,13 @@ mod tests {
         let mut media_server_series = HashMap::<Arc<str>, Vec<SeriesStreamDetailEpisodeProperties>>::new();
         assign_media_server_series_info_episode(&mut media_server_series, &media_episode_two.header);
         assign_media_server_series_info_episode(&mut media_server_series, &provider_episode.header);
+        assign_media_server_series_info_episode(&mut media_server_series, &malformed_media_episode.header);
         assign_media_server_series_info_episode(&mut media_server_series, &media_episode_one.header);
 
         let mut playlist = vec![PlaylistGroup {
             id: 1,
             title: "Media Server Series".intern(),
-            channels: vec![series_info, media_episode_two, provider_episode, media_episode_one],
+            channels: vec![series_info, media_episode_two, provider_episode, malformed_media_episode, media_episode_one],
             xtream_cluster: XtreamCluster::Series,
         }];
 
@@ -903,12 +917,17 @@ mod tests {
         assert_eq!(episodes[0].container_extension.as_ref(), "mkv");
         assert_eq!(episodes[0].release_date.as_ref(), "2024-02-03");
         assert_eq!(episodes[0].series_release_date.as_deref(), Some("2024-01-01"));
+        assert_eq!(episodes[0].plot.as_deref(), Some("Episode summary"));
         assert_eq!(episodes[0].tmdb, Some(67890));
         assert_eq!(episodes[0].direct_source.as_ref(), "");
-        assert_eq!(episodes[0].movie_image.as_ref(), "");
+        assert_eq!(
+            episodes[0].movie_image.as_ref(),
+            "media-server://image/plex/server/episode?image_path=%2Flibrary%2Fmetadata%2Fredacted%2Fthumb"
+        );
         assert!(episodes[0].video.as_deref().is_some_and(|video| video.contains("h264")));
         assert!(episodes[0].audio.as_deref().is_some_and(|audio| audio.contains("aac")));
         assert_eq!(episodes[1].id, 7002);
+        assert!(!episodes.iter().any(|episode| episode.id == 7003));
     }
 
     #[test]

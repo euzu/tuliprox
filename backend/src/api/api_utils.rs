@@ -4,12 +4,21 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
-            tee_stream, AppState, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
-            ProviderStreamFactoryOptions, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
+            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
             StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, PendingProviderReason,
         },
     },
     auth::Fingerprint,
+    media_server::{
+        playback::{
+            media_server_image_response as open_media_server_proxy_image_response,
+            media_server_stream_response as open_media_server_proxy_stream_response,
+            parse_media_server_image_ref, parse_media_server_stream_ref,
+        },
+        plex::client::PlexCatalogClient,
+        MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
+    },
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
@@ -21,7 +30,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use axum::{
     body::Body,
-    http::{header, Extensions, HeaderMap, HeaderValue, Response, StatusCode},
+    http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
     response::IntoResponse,
 };
 use bytes::Bytes;
@@ -33,7 +42,7 @@ use serde::Serialize;
 use shared::{
     concat_string,
     model::{
-        Claims, InputFetchMethod, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
+        Claims, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
         UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
@@ -247,6 +256,9 @@ async fn get_admission_for_request(
 }
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
+    if is_media_server_playback_url(input, stream_url) {
+        return Cow::Borrowed("media-server://<redacted>");
+    }
     if is_sanitize_sensitive_info_enabled() {
         return Cow::Borrowed(stream_url);
     }
@@ -1648,6 +1660,14 @@ async fn create_stream_response_details(
                     sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
                 );
                 (None, None, None)
+            } else if is_media_server_stream_ref_url(request_url.as_ref()) {
+                match open_media_server_stream_for_input(app_state, input, request_url.as_ref(), req_headers).await {
+                    Ok((stream, stream_info)) => (Some(stream), stream_info, None),
+                    Err(err) => {
+                        error!("Can't open media-server stream: {err}");
+                        (None, None, None)
+                    }
+                }
             } else {
                 let parsed_url = Url::parse(&request_url);
                 let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
@@ -1771,6 +1791,9 @@ where
 {
     let item_type = params.item.get_item_type();
     let provider_url = params.item.get_provider_url();
+    if is_media_server_playback_url(params.input, provider_url.as_ref()) {
+        return None;
+    }
 
     let redirect_request = params.user.proxy.is_redirect(item_type) || params.target.is_force_redirect(item_type);
     let is_hls_request = item_type == PlaylistItemType::LiveHls || params.stream_ext == Some(HLS_EXT);
@@ -1856,6 +1879,14 @@ where
     None
 }
 
+fn is_media_server_playback_url(input: &ConfigInput, stream_url: &str) -> bool {
+    input.input_type == InputType::Plex || is_media_server_stream_ref_url(stream_url)
+}
+
+fn is_media_server_stream_ref_url(stream_url: &str) -> bool {
+    Url::parse(stream_url).is_ok_and(|url| url.scheme() == "media-server")
+}
+
 fn is_throttled_stream(item_type: PlaylistItemType, throttle_kbps: usize) -> bool {
     throttle_kbps > 0
         && matches!(
@@ -1882,6 +1913,59 @@ where
         axum::body::Body::from_stream(stream)
     };
     body_stream
+}
+
+async fn open_media_server_stream_for_input(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    stream_url: &str,
+    req_headers: &HeaderMap,
+) -> Result<(BoxedProviderStream, ProviderStreamInfo), MediaServerError> {
+    let stream_ref = parse_media_server_stream_ref(&input.name, stream_url)?;
+    let range = req_headers.get(header::RANGE).and_then(|value| value.to_str().ok());
+    let http_client = MediaServerHttpClient::new(app_state.http_client.load().as_ref().clone());
+
+    let response = match input.input_type {
+        InputType::Plex => {
+            let client = PlexCatalogClient::from_input(input, http_client)?;
+            open_media_server_proxy_stream_response(&client, &stream_ref, range).await?
+        }
+        InputType::Emby | InputType::Jellyfin => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("media-server playback proxy is not implemented for this input type"));
+        }
+        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("playlist item is not backed by a media-server input"));
+        }
+    };
+
+    let headers = response
+        .headers
+        .iter()
+        .filter(|(key, _)| !is_hop_by_hop_response_header(key))
+        .filter_map(|(key, value)| value.to_str().ok().map(|value| (key.to_string(), value.to_string())))
+        .collect::<Vec<_>>();
+    let status = response.status;
+    let stream = response.body.map_err(|err| StreamError::Stream(err.to_string())).boxed();
+    Ok((stream, Some((headers, status, None, None))))
+}
+
+fn is_hop_by_hop_response_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 /// # Panics
@@ -3070,6 +3154,20 @@ pub async fn resource_response(
     if resource_url.is_empty() {
         return StatusCode::NO_CONTENT.into_response();
     }
+    if resource_url.starts_with("media-server://image/") {
+        return match open_media_server_image_resource(app_state, resource_url).await {
+            Ok(response) => response,
+            Err(err) => {
+                let status = media_server_image_error_status(&err);
+                match status {
+                    StatusCode::BAD_REQUEST => warn!("Invalid media-server image resource URL: {err}"),
+                    StatusCode::NOT_FOUND => debug!("Media-server image resource was not found: {err}"),
+                    _ => error!("Can't open media-server image from upstream: {err}"),
+                }
+                status.into_response()
+            }
+        };
+    }
     let filter: HeaderFilter = Some(Box::new(|key| key != "if-none-match" && key != "if-modified-since"));
     let req_headers = get_headers_from_request(req_headers, &filter);
     if let Some(cache) = app_state.cache.load().as_ref() {
@@ -3095,6 +3193,88 @@ pub async fn resource_response(
     }
     error!("Url is malformed {}", sanitize_sensitive_info(resource_url));
     StatusCode::BAD_REQUEST.into_response()
+}
+
+async fn open_media_server_image_resource(
+    app_state: &Arc<AppState>,
+    resource_url: &str,
+) -> Result<Response<Body>, MediaServerError> {
+    let image_ref = parse_media_server_image_ref(resource_url)?;
+    let input_name = media_server_image_input_name(&image_ref);
+    let input = app_state.app_config.get_input_by_name(input_name).ok_or_else(|| {
+        MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+            .provider("media-server")
+            .detail("media-server image input was not found")
+    })?;
+    let http_client = MediaServerHttpClient::new(app_state.http_client.load().as_ref().clone());
+
+    let response = match input.input_type {
+        InputType::Plex => {
+            let client = PlexCatalogClient::from_input(&input, http_client)?;
+            open_media_server_proxy_image_response(&client, &image_ref).await?
+        }
+        InputType::Emby | InputType::Jellyfin => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("media-server image proxy is not implemented for this input type"));
+        }
+        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("media-server image input is not backed by a media-server input"));
+        }
+    };
+
+    let mut builder = Response::builder().status(response.status);
+    for (key, value) in &response.headers {
+        if !is_hop_by_hop_response_header(key) {
+            builder = builder.header(key, value);
+        }
+    }
+    let body = response.body.map_err(|err| StreamError::Stream(err.to_string()));
+    builder.body(Body::from_stream(body)).map_err(|err| {
+        MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .provider("media-server")
+            .detail(format!("media-server image response build failed: {err}"))
+    })
+}
+
+fn media_server_image_error_status(err: &MediaServerError) -> StatusCode {
+    match err.kind {
+        MediaServerErrorKind::MediaServerItemNotFound | MediaServerErrorKind::NoDirectPlayableMediaServerSource => {
+            StatusCode::NOT_FOUND
+        }
+        MediaServerErrorKind::MediaServerStreamOpenFailed if is_media_server_image_validation_error(err) => {
+            StatusCode::BAD_REQUEST
+        }
+        MediaServerErrorKind::MediaServerStreamOpenFailed
+        | MediaServerErrorKind::MediaServerAuthDenied
+        | MediaServerErrorKind::MediaServerUnavailable
+        | MediaServerErrorKind::MediaServerLibraryUnavailable
+        | MediaServerErrorKind::MediaServerLibraryTypeUnsupported
+        | MediaServerErrorKind::MediaServerCatalogDecodeFailed
+        | MediaServerErrorKind::MediaServerCatalogPageStalled
+        | MediaServerErrorKind::MediaServerCatalogIncomplete
+        | MediaServerErrorKind::MediaServerRateLimited
+        | MediaServerErrorKind::MediaServerDiscoveryFailed => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn is_media_server_image_validation_error(err: &MediaServerError) -> bool {
+    err.detail_text().is_some_and(|detail| {
+        detail.contains("resource URL is not a media server image URL")
+            || detail.contains("media server image URL is missing required path parts")
+            || detail.contains("unsupported media server image URL scheme")
+            || detail.contains("media-server image input is not backed by a media-server input")
+    })
+}
+
+fn media_server_image_input_name(image_ref: &MediaServerImageRef) -> &Arc<str> {
+    match image_ref {
+        MediaServerImageRef::Emby { input_name, .. }
+        | MediaServerImageRef::Jellyfin { input_name, .. }
+        | MediaServerImageRef::Plex { input_name, .. } => input_name,
+    }
 }
 
 pub fn separate_number_and_remainder(input: &str) -> (&str, Option<&str>) {
@@ -3484,6 +3664,79 @@ mod tests {
                 .expect("provider url should resolve");
 
         assert_eq!(resolved, "https://provider.example/live/provider-user/provider-pass/33486.m3u8");
+    }
+
+    #[test]
+    fn media_server_proxy_response_header_filter_drops_hop_by_hop_headers() {
+        for name in [
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "trailers",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            assert!(is_hop_by_hop_response_header(&HeaderName::from_static(name)));
+        }
+        assert!(!is_hop_by_hop_response_header(&header::CONTENT_TYPE));
+    }
+
+    #[test]
+    fn media_server_image_error_status_classifies_client_and_upstream_failures() {
+        let parse_error = MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("media server image URL is missing required path parts");
+        assert_eq!(media_server_image_error_status(&parse_error), StatusCode::BAD_REQUEST);
+
+        let not_found = MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+            .detail("plex media-server image URL is missing image_path");
+        assert_eq!(media_server_image_error_status(&not_found), StatusCode::NOT_FOUND);
+
+        let upstream = MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("media-server image request failed");
+        assert_eq!(media_server_image_error_status(&upstream), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn media_server_playback_urls_are_proxy_only_redirect_guard_candidates() {
+        let plex_input = ConfigInput {
+            input_type: InputType::Plex,
+            ..ConfigInput::default()
+        };
+        let emby_input = ConfigInput {
+            input_type: InputType::Emby,
+            ..ConfigInput::default()
+        };
+        let m3u_input = ConfigInput {
+            input_type: InputType::M3u,
+            ..ConfigInput::default()
+        };
+
+        assert!(is_media_server_playback_url(
+            &plex_input,
+            "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+        ));
+        assert!(is_media_server_playback_url(
+            &m3u_input,
+            "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+        ));
+        assert!(is_media_server_playback_url(&plex_input, "https://plex.example/stream.mkv"));
+        assert!(!is_media_server_playback_url(&emby_input, "https://emby.example/stream.mkv"));
+        assert!(!is_media_server_playback_url(&m3u_input, "https://provider.example/stream.mkv"));
+        assert!(!is_media_server_stream_ref_url("https://provider.example/stream.mkv"));
+        assert!(is_media_server_stream_ref_url(
+            "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+        ));
+        assert_eq!(
+            resolve_request_url_for_logging(
+                &plex_input,
+                "media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted"
+            )
+            .as_ref(),
+            "media-server://<redacted>"
+        );
     }
 
     #[test]
