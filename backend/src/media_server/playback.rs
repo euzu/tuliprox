@@ -151,6 +151,59 @@ pub fn parse_media_server_stream_ref(input_name: &Arc<str>, item_url: &str) -> R
     }
 }
 
+pub fn parse_media_server_image_ref(resource_url: &str) -> Result<MediaServerImageRef, MediaServerError> {
+    let Some(rest) = resource_url.strip_prefix("media-server://image/") else {
+        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("resource URL is not a media server image URL"));
+    };
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let parts: Vec<String> = path.split('/').map(unescape_internal_url_component).collect();
+    if parts.len() < 4 {
+        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("media server image URL is missing required path parts"));
+    }
+
+    match parts[0].as_str() {
+        "emby" => Ok(MediaServerImageRef::Emby {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            server_id: Arc::<str>::from(parts[2].as_str()),
+            item_id: Arc::<str>::from(parts[3].as_str()),
+            image_kind: query_value(query, "image_kind")
+                .map(Arc::<str>::from)
+                .ok_or_else(|| {
+                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                        .detail("emby media-server image URL is missing image_kind")
+                })?,
+            tag: query_value(query, "tag").map(Arc::<str>::from),
+        }),
+        "jellyfin" => Ok(MediaServerImageRef::Jellyfin {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            server_id: Arc::<str>::from(parts[2].as_str()),
+            item_id: Arc::<str>::from(parts[3].as_str()),
+            image_kind: query_value(query, "image_kind")
+                .map(Arc::<str>::from)
+                .ok_or_else(|| {
+                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                        .detail("jellyfin media-server image URL is missing image_kind")
+                })?,
+            tag: query_value(query, "tag").map(Arc::<str>::from),
+        }),
+        "plex" => Ok(MediaServerImageRef::Plex {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            server_id: Arc::<str>::from(parts[2].as_str()),
+            rating_key: Arc::<str>::from(parts[3].as_str()),
+            image_path: query_value(query, "image_path")
+                .map(Arc::<str>::from)
+                .ok_or_else(|| {
+                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                        .detail("plex media-server image URL is missing image_path")
+                })?,
+        }),
+        _ => Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("unsupported media server image URL scheme")),
+    }
+}
+
 fn query_value(query: &str, key: &str) -> Option<String> {
     url::form_urlencoded::parse(query.as_bytes())
         .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
@@ -191,8 +244,9 @@ fn hex_value(value: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::media_server::{
-        MediaServerEpisode, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage,
-        MediaServerPageRequest, MediaServerSeason, MediaServerSeries, MediaServerStatus,
+        playlist_mapper::media_server_image_ref_to_internal_url, MediaServerEpisode, MediaServerLibrary,
+        MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
+        MediaServerSeries, MediaServerStatus,
     };
     use futures::{stream, StreamExt};
     use reqwest::header::{HeaderValue, AUTHORIZATION};
@@ -327,6 +381,75 @@ mod tests {
         let provider = classify_playback_origin(InputType::M3u, PlaylistItemType::Live, &input_name, "http://example.invalid/live")
             .expect("provider classifies");
         assert_eq!(provider, PlaybackOrigin::Provider);
+    }
+
+    #[test]
+    fn parse_media_server_image_ref_roundtrips_internal_urls() {
+        let emby = MediaServerImageRef::Emby {
+            input_name: "emby/input".into(),
+            server_id: "server/one+".into(),
+            item_id: "item?one".into(),
+            image_kind: "Primary".into(),
+            tag: Some("tag/one+?".into()),
+        };
+        assert_eq!(
+            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&emby)).expect("emby image ref parses"),
+            emby
+        );
+
+        let jellyfin = MediaServerImageRef::Jellyfin {
+            input_name: "jellyfin/input".into(),
+            server_id: "server/two+".into(),
+            item_id: "item?two".into(),
+            image_kind: "Backdrop".into(),
+            tag: Some("tag/two+?".into()),
+        };
+        assert_eq!(
+            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&jellyfin))
+                .expect("jellyfin image ref parses"),
+            jellyfin
+        );
+
+        let plex = MediaServerImageRef::Plex {
+            input_name: "plex/input".into(),
+            server_id: "server/three+".into(),
+            rating_key: "rating?three".into(),
+            image_path: "/library/metadata/1/thumb/2?X-Plex-Token=ignored+".into(),
+        };
+        assert_eq!(
+            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&plex)).expect("plex image ref parses"),
+            plex
+        );
+    }
+
+    #[test]
+    fn parse_media_server_image_ref_reports_missing_query_parts_as_not_found() {
+        let emby = parse_media_server_image_ref("media-server://image/emby/input/server/item")
+            .expect_err("emby image_kind is required");
+        assert_eq!(emby.kind, MediaServerErrorKind::MediaServerItemNotFound);
+
+        let jellyfin = parse_media_server_image_ref("media-server://image/jellyfin/input/server/item")
+            .expect_err("jellyfin image_kind is required");
+        assert_eq!(jellyfin.kind, MediaServerErrorKind::MediaServerItemNotFound);
+
+        let plex = parse_media_server_image_ref("media-server://image/plex/input/server/rating")
+            .expect_err("plex image_path is required");
+        assert_eq!(plex.kind, MediaServerErrorKind::MediaServerItemNotFound);
+    }
+
+    #[test]
+    fn parse_media_server_image_ref_rejects_invalid_url_shapes() {
+        let wrong_prefix = parse_media_server_image_ref("media-server://plex/input/server/rating")
+            .expect_err("image URLs require the image prefix");
+        assert_eq!(wrong_prefix.kind, MediaServerErrorKind::MediaServerStreamOpenFailed);
+
+        let too_few_parts = parse_media_server_image_ref("media-server://image/plex/input/server")
+            .expect_err("image URLs require enough path parts");
+        assert_eq!(too_few_parts.kind, MediaServerErrorKind::MediaServerStreamOpenFailed);
+
+        let unsupported = parse_media_server_image_ref("media-server://image/kodi/input/server/item?image_kind=Primary")
+            .expect_err("unsupported image schemes are rejected");
+        assert_eq!(unsupported.kind, MediaServerErrorKind::MediaServerStreamOpenFailed);
     }
 
     #[tokio::test]

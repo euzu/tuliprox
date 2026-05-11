@@ -10,59 +10,42 @@ use crate::{
         get_provider_id, obfuscate_text, Internable,
     },
 };
-use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Formatter, Write},
     str::FromStr,
     sync::Arc,
 };
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 // https://de.wikipedia.org/wiki/M3U
 // https://siptv.eu/howto/playlist.html
 
 pub type VirtualId = u32;
 
-#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, Display, EnumString, AsRefStr)]
 #[repr(u8)]
 pub enum XtreamCluster {
     #[default]
+    #[strum(serialize = "Live", serialize = "live")]
     Live = 1,
+
+    #[strum(serialize = "Video", serialize = "video", serialize = "vod", serialize = "movie")]
     Video = 2,
+
+    #[strum(serialize = "Series", serialize = "series")]
     Series = 3,
 }
 
 impl XtreamCluster {
-    pub const fn as_str(&self) -> &str {
-        match self {
-            Self::Live => "Live",
-            Self::Video => "Video",
-            Self::Series => "Series",
-        }
-    }
-    pub const fn as_stream_type(&self) -> &str {
+    pub fn as_str(&self) -> &str { self.as_ref() }
+
+    pub fn as_stream_type(&self) -> &str {
         match self {
             Self::Live => "live",
             Self::Video => "movie",
             Self::Series => "series",
         }
     }
-}
-
-impl FromStr for XtreamCluster {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "live" => Ok(XtreamCluster::Live),
-            "video" | "vod" | "movie" => Ok(XtreamCluster::Video),
-            "series" => Ok(XtreamCluster::Series),
-            _ => Err(TuliproxError::Config(format!("Invalid XtreamCluster: {s}"))),
-        }
-    }
-}
-
-impl Display for XtreamCluster {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.as_str()) }
 }
 
 impl TryFrom<PlaylistItemType> for XtreamCluster {
@@ -82,7 +65,7 @@ impl TryFrom<PlaylistItemType> for XtreamCluster {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, Sequence)]
+#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, EnumIter)]
 #[repr(u8)]
 pub enum PlaylistItemType {
     #[default]
@@ -688,7 +671,7 @@ impl XtreamMappingOptions {
 
     fn is_trusted_web_ui_resource_path(resource_url: &str) -> bool {
         const TRUSTED_WEB_UI_RESOURCE_PREFIXES: [&str; 1] = ["/api/v1/library/thumbnail/"];
-        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.contains(prefix))
+        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.starts_with(prefix))
     }
 
     fn build_reverse_proxy_base_url(
@@ -1047,6 +1030,7 @@ impl PlaylistItem {
                                 added: None,
                                 release_date: None,
                                 series_release_date: None,
+                                plot: None,
                                 tmdb: None,
                                 movie_image: "".intern(),
                                 container_extension: container_extension.intern(),
@@ -1455,6 +1439,17 @@ mod tests {
     fn get_resource_url_does_not_bypass_untrusted_root_relative_paths_for_web_ui_requests() {
         let options = sample_options();
         let resource_url = "/provider-controlled/poster.jpg";
+
+        assert_eq!(
+            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+        );
+    }
+
+    #[test]
+    fn get_resource_url_does_not_trust_absolute_urls_containing_internal_thumbnail_path() {
+        let options = sample_options();
+        let resource_url = "https://provider.example/api/v1/library/thumbnail/abc";
 
         assert_eq!(
             options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),

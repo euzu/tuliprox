@@ -33,7 +33,7 @@ pub fn TargetSort(props: &TargetSortProps) -> Html {
                     </div>
                     <div class="tp__target-sort__section tp__target-sort__row">
                         <span class="tp__target-sort__label">{ translator.t("LABEL.FIELD") }</span>
-                        <span>{ rule.field.as_str() }</span>
+                        <span>{ rule.field.to_string() }</span>
                     </div>
                     <div class="tp__target-sort__section tp__target-sort__row">
                         <span class="tp__target-sort__label">{ translator.t("LABEL.ORDER") }</span>

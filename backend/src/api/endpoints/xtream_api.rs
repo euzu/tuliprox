@@ -169,6 +169,10 @@ pub(in crate::api) fn get_xtream_player_api_stream_url(
     action_path: &str,
     fallback_url: &Arc<str>,
 ) -> Option<Arc<str>> {
+    if input.input_type.is_media_server() {
+        return (!fallback_url.is_empty()).then(|| fallback_url.clone());
+    }
+
     if let Some(input_user_info) = input.get_user_info() {
         let ctx = match context {
             ApiStreamContext::LiveAlt | ApiStreamContext::Live => {
@@ -1601,10 +1605,13 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{empty_stream_info_response, resolve_xtream_playback_extension, XtreamApiTimeShiftRequest};
-    use crate::api::model::UserApiRequest;
+    use super::{
+        empty_stream_info_response, get_xtream_player_api_stream_url, resolve_xtream_playback_extension,
+        ApiStreamContext, XtreamApiTimeShiftRequest,
+    };
+    use crate::{api::model::UserApiRequest, model::ConfigInput};
     use shared::{
-        model::{PlaylistItemType, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem},
+        model::{InputType, PlaylistItemType, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem},
         utils::Internable,
     };
     use std::sync::Arc;
@@ -1826,6 +1833,21 @@ mod tests {
         let pli = create_test_vod_item("provider://strong/movie/user/pass/813563.mp4", "mp4", PlaylistItemType::Video);
 
         assert_eq!(resolve_xtream_playback_extension(Some(".mkv"), &pli).as_deref(), Some(".mp4"));
+    }
+
+    #[test]
+    fn media_server_xtream_playback_uses_internal_stream_ref_even_with_direct_pms_url_credentials() {
+        let input = ConfigInput {
+            input_type: InputType::Plex,
+            url: "http://pms-user:pms-pass@pms.example.invalid:32400".to_string(),
+            ..ConfigInput::default()
+        };
+        let fallback = Arc::<str>::from("media-server://plex/server/rating?part_key=%2Flibrary%2Fparts%2Fredacted%2Ffile.mkv");
+
+        let resolved = get_xtream_player_api_stream_url(&input, ApiStreamContext::Movie, "813563.mkv", &fallback)
+            .expect("media-server fallback should be preserved");
+
+        assert_eq!(resolved, fallback);
     }
 
     #[test]

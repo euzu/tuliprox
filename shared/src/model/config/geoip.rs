@@ -1,6 +1,4 @@
-use crate::error::TuliproxError;
-use enum_iterator::Sequence;
-use std::fmt;
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 
 pub fn default_geoip_url() -> String {
     String::from(
@@ -8,32 +6,26 @@ pub fn default_geoip_url() -> String {
     )
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, Sequence)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Default,
+    EnumIter,
+    EnumString,
+    AsRefStr,
+    Display,
+)]
+#[strum(serialize_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum GeoIpUnavailablePolicy {
     #[default]
     Deny,
     Allow,
-}
-
-impl fmt::Display for GeoIpUnavailablePolicy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GeoIpUnavailablePolicy::Deny => write!(f, "deny"),
-            GeoIpUnavailablePolicy::Allow => write!(f, "allow"),
-        }
-    }
-}
-
-impl std::str::FromStr for GeoIpUnavailablePolicy {
-    type Err = TuliproxError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "deny" => Ok(GeoIpUnavailablePolicy::Deny),
-            "allow" => Ok(GeoIpUnavailablePolicy::Allow),
-            _ => Err(TuliproxError::Config(format!("Unknown GeoIpUnavailablePolicy {s}"))),
-        }
-    }
 }
 
 pub const fn is_default_unavailable_policy(policy: &GeoIpUnavailablePolicy) -> bool {

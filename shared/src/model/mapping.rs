@@ -3,13 +3,10 @@ use crate::{
     foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter, MapperScript},
     model::PatternTemplate,
 };
-use enum_iterator::Sequence;
 use log::trace;
-use std::{
-    fmt::Display,
-    str::FromStr,
-    sync::{atomic::AtomicU32, Arc},
-};
+use std::sync::{atomic::AtomicU32, Arc};
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
+
 pub const COUNTER_FIELDS: &[&str] = &["name", "title", "caption", "chno"];
 
 pub const MAPPER_FIELDS: &[&str] = &[
@@ -38,51 +35,27 @@ macro_rules! valid_property {
 }
 pub use valid_property;
 
-#[derive(Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    EnumIter,
+    EnumString,
+    AsRefStr,
+    Display,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum CounterModifier {
     #[default]
-    #[serde(rename = "assign")]
     Assign,
-    #[serde(rename = "suffix")]
     Suffix,
-    #[serde(rename = "prefix")]
     Prefix,
-}
-
-impl CounterModifier {
-    const ASSIGN: &'static str = "assign";
-    const SUFFIX: &'static str = "suffix";
-    const PREFIX: &'static str = "prefix";
-}
-
-impl Display for CounterModifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Assign => Self::ASSIGN,
-                Self::Suffix => Self::SUFFIX,
-                Self::Prefix => Self::PREFIX,
-            }
-        )
-    }
-}
-
-impl FromStr for CounterModifier {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq("assign") {
-            Ok(Self::Assign)
-        } else if s.eq("suffix") {
-            Ok(Self::Suffix)
-        } else if s.eq("prefix") {
-            Ok(Self::Prefix)
-        } else {
-            Err(TuliproxError::Config(format!("Unknown CounterModifier: {}", s)))
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
