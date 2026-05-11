@@ -3158,8 +3158,13 @@ pub async fn resource_response(
         return match open_media_server_image_resource(app_state, resource_url).await {
             Ok(response) => response,
             Err(err) => {
-                error!("Can't open media-server image: {err}");
-                StatusCode::BAD_GATEWAY.into_response()
+                let status = media_server_image_error_status(&err);
+                match status {
+                    StatusCode::BAD_REQUEST => warn!("Invalid media-server image resource URL: {err}"),
+                    StatusCode::NOT_FOUND => debug!("Media-server image resource was not found: {err}"),
+                    _ => error!("Can't open media-server image from upstream: {err}"),
+                }
+                status.into_response()
             }
         };
     }
@@ -3222,13 +3227,45 @@ async fn open_media_server_image_resource(
 
     let mut builder = Response::builder().status(response.status);
     for (key, value) in &response.headers {
-        builder = builder.header(key, value);
+        if !is_hop_by_hop_response_header(key) {
+            builder = builder.header(key, value);
+        }
     }
     let body = response.body.map_err(|err| StreamError::Stream(err.to_string()));
     builder.body(Body::from_stream(body)).map_err(|err| {
         MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
             .provider("media-server")
             .detail(format!("media-server image response build failed: {err}"))
+    })
+}
+
+fn media_server_image_error_status(err: &MediaServerError) -> StatusCode {
+    match err.kind {
+        MediaServerErrorKind::MediaServerItemNotFound | MediaServerErrorKind::NoDirectPlayableMediaServerSource => {
+            StatusCode::NOT_FOUND
+        }
+        MediaServerErrorKind::MediaServerStreamOpenFailed if is_media_server_image_validation_error(err) => {
+            StatusCode::BAD_REQUEST
+        }
+        MediaServerErrorKind::MediaServerStreamOpenFailed
+        | MediaServerErrorKind::MediaServerAuthDenied
+        | MediaServerErrorKind::MediaServerUnavailable
+        | MediaServerErrorKind::MediaServerLibraryUnavailable
+        | MediaServerErrorKind::MediaServerLibraryTypeUnsupported
+        | MediaServerErrorKind::MediaServerCatalogDecodeFailed
+        | MediaServerErrorKind::MediaServerCatalogPageStalled
+        | MediaServerErrorKind::MediaServerCatalogIncomplete
+        | MediaServerErrorKind::MediaServerRateLimited
+        | MediaServerErrorKind::MediaServerDiscoveryFailed => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn is_media_server_image_validation_error(err: &MediaServerError) -> bool {
+    err.detail_text().is_some_and(|detail| {
+        detail.contains("resource URL is not a media server image URL")
+            || detail.contains("media server image URL is missing required path parts")
+            || detail.contains("unsupported media server image URL scheme")
+            || detail.contains("media-server image input is not backed by a media-server input")
     })
 }
 
@@ -3645,6 +3682,21 @@ mod tests {
             assert!(is_hop_by_hop_response_header(&HeaderName::from_static(name)));
         }
         assert!(!is_hop_by_hop_response_header(&header::CONTENT_TYPE));
+    }
+
+    #[test]
+    fn media_server_image_error_status_classifies_client_and_upstream_failures() {
+        let parse_error = MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("media server image URL is missing required path parts");
+        assert_eq!(media_server_image_error_status(&parse_error), StatusCode::BAD_REQUEST);
+
+        let not_found = MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+            .detail("plex media-server image URL is missing image_path");
+        assert_eq!(media_server_image_error_status(&not_found), StatusCode::NOT_FOUND);
+
+        let upstream = MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("media-server image request failed");
+        assert_eq!(media_server_image_error_status(&upstream), StatusCode::BAD_GATEWAY);
     }
 
     #[test]

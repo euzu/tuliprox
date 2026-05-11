@@ -671,7 +671,7 @@ impl XtreamMappingOptions {
 
     fn is_trusted_web_ui_resource_path(resource_url: &str) -> bool {
         const TRUSTED_WEB_UI_RESOURCE_PREFIXES: [&str; 1] = ["/api/v1/library/thumbnail/"];
-        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.contains(prefix))
+        TRUSTED_WEB_UI_RESOURCE_PREFIXES.iter().any(|prefix| resource_url.starts_with(prefix))
     }
 
     fn build_reverse_proxy_base_url(
@@ -1439,6 +1439,17 @@ mod tests {
     fn get_resource_url_does_not_bypass_untrusted_root_relative_paths_for_web_ui_requests() {
         let options = sample_options();
         let resource_url = "/provider-controlled/poster.jpg";
+
+        assert_eq!(
+            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
+        );
+    }
+
+    #[test]
+    fn get_resource_url_does_not_trust_absolute_urls_containing_internal_thumbnail_path() {
+        let options = sample_options();
+        let resource_url = "https://provider.example/api/v1/library/thumbnail/abc";
 
         assert_eq!(
             options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),

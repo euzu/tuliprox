@@ -1008,7 +1008,8 @@ mod tests {
     #[test]
     fn geoip_unavailable_policy_roundtrips_through_string_representation() {
         for policy in GeoIpUnavailablePolicy::iter() {
-            let parsed = GeoIpUnavailablePolicy::from_str(policy.as_ref()).unwrap_or(GeoIpUnavailablePolicy::Deny);
+            let parsed =
+                GeoIpUnavailablePolicy::from_str(policy.as_ref()).expect("failed to parse GeoIpUnavailablePolicy");
             assert_eq!(parsed, policy);
         }
     }
