@@ -1,6 +1,10 @@
 use crate::api::model::UpdateTask;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::{MetadataResolver, MetadataStorage};
+use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
+use crate::media_enrichment::xtream::{
+    apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_title_candidates,
+};
 use crate::model::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget, MetadataUpdateConfig};
 use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
@@ -13,7 +17,6 @@ use crate::processing::processor::{
     ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
-use crate::ptt::ptt_parse_title;
 use crate::repository::persists_input_series_info;
 use crate::repository::{
     get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource, PlaylistSource,
@@ -551,7 +554,7 @@ async fn update_series_info_immediate(
     probe_settings: SeriesProbeSettings,
 ) -> Result<Option<SeriesStreamProperties>, TuliproxError> {
     let fetch_info = reasons.contains(ResolveReason::Info);
-    let resolve_tmdb = reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
+    let resolve_missing_facts = reasons.contains(ResolveReason::Tmdb) || reasons.contains(ResolveReason::Date);
 
     update_series_metadata(
         &ctx.config,
@@ -563,7 +566,7 @@ async fn update_series_info_immediate(
         Some(&pli.header.title),
         false, // save (we batch in caller)
         fetch_info,
-        resolve_tmdb,
+        resolve_missing_facts,
         reasons.contains(ResolveReason::Probe),
         probe_settings,
         db_query,
@@ -648,7 +651,7 @@ fn check_needs_probe(pli: &PlaylistItem, reasons: &mut ResolveReasonSet) {
 /// * `save` - If true, persists changes to the input database immediately (Instant strategy).
 ///   If false, returns the properties so the caller can batch persist them (Bundled strategy).
 /// * `fetch_info` - If true, fetches details from Provider API. If false, uses existing/dummy data.
-/// * `resolve_tmdb` - If true, resolves missing TMDB/date metadata from available titles.
+/// * `resolve_missing_facts` - If true, resolves missing TMDB/date facts from available titles.
 /// * `db_query` - Optional pre-opened DB handle to avoid re-opening file.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 pub async fn update_series_metadata(
@@ -661,7 +664,7 @@ pub async fn update_series_metadata(
     playlist_title: Option<&str>,
     save: bool,
     fetch_info: bool,
-    resolve_tmdb: bool,
+    resolve_missing_facts: bool,
     do_probe: bool,
     probe_settings: SeriesProbeSettings,
     db_query: Option<Arc<Mutex<BPlusTreeQuery<u32, XtreamPlaylistItem>>>>,
@@ -819,69 +822,78 @@ pub async fn update_series_metadata(
         shared::error::TuliproxError::Config(format!("No Series properties available after fallback creation for {display_id}"))
     })?;
 
-    let resolve_tmdb_enabled = input.has_flag(ConfigInputFlags::ResolveTmdb);
+    // Xtream's legacy ResolveTmdb input flag currently gates missing identity/temporal fact enrichment.
+    let missing_fact_policy =
+        MissingFactEnrichmentPolicy::fill_missing(resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb));
 
-    // 2. Resolve TMDB/Date if missing
-    if resolve_tmdb
-        && resolve_tmdb_enabled
-        && (properties.tmdb.is_none() || properties.release_date.is_none())
-        && !properties.name.is_empty()
+    // 2. Resolve missing TMDB/date facts if allowed for this input
+    let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
+    let has_title_candidate = title_candidate.is_some_and(|title| !title.is_empty()) || !properties.name.is_empty();
+
+    if missing_fact_policy.should_resolve_missing_facts(properties.tmdb.is_none(), properties.release_date.is_none())
+        && has_title_candidate
     {
-        let config = app_config.config.load();
-        let library_config = config.library.as_ref();
-        let metadata_update_config = config.metadata_update.as_ref();
-        let tmdb_storage = metadata_update_config
-            .filter(|cfg| cfg.tmdb.enabled)
-            .map(|cfg| MetadataStorage::new(std::path::PathBuf::from(&cfg.cache_path)));
-        let meta_resolver =
-            MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
-
-        let mut meta = None;
-        let mut tried_title = false;
-
         // Try extracting year locally first
-        if properties.release_date.is_none() {
-            let meta_parse = ptt_parse_title(&properties.name);
-            if let Some(year) = meta_parse.year {
-                properties.release_date = Some(format!("{year}-01-01").into());
-                properties_updated = true;
-                debug_if_enabled!("Parsed local year for Series '{}': {}", properties.name, year);
+        if missing_fact_policy.should_try_parsed_title_supplier(properties.release_date.is_none()) {
+            let local_patch = {
+                let candidates = [title_candidate, (!properties.name.is_empty()).then_some(properties.name.as_ref())];
+                series_fact_patch_from_title_candidates(&properties, candidates.into_iter().flatten())
+            };
+            if let Some((title, year, patch)) = local_patch {
+                debug_if_enabled!("Parsed local year for Series '{}': {}", title, year);
+                if apply_fact_patch_to_series(&mut properties, &patch) {
+                    properties_updated = true;
+                }
             }
         }
 
-        // 1. & 2. Playlist Title
-        let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
-        if let Some(title) = title_candidate {
-            if !title.is_empty() {
-                trace!("Resolving TMDB for Series using Playlist Title '{title}' (ID: {display_id})...");
-                meta = meta_resolver.resolve_from_title(title, properties.tmdb, false, resolve_tmdb_enabled).await;
-                tried_title = true;
-            }
-        }
+        if missing_fact_policy.should_try_tmdb_supplier(properties.tmdb.is_none(), properties.release_date.is_none()) {
+            let config = app_config.config.load();
+            let library_config = config.library.as_ref();
+            let metadata_update_config = config.metadata_update.as_ref();
+            let tmdb_storage = metadata_update_config
+                .filter(|cfg| cfg.tmdb.enabled)
+                .map(|cfg| MetadataStorage::new(std::path::PathBuf::from(&cfg.cache_path)));
+            let meta_resolver =
+                MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
 
-        // 3. API Name (fallback)
-        if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty() {
-            let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
-            if !tried_title || !title_already_tried {
-                debug!("Fallback to API Name '{}'...", properties.name);
-                meta = meta_resolver
-                    .resolve_from_title(&properties.name, properties.tmdb, false, resolve_tmdb_enabled)
-                    .await;
-            }
-        }
+            let mut meta = None;
+            let mut tried_title = false;
 
-        if let Some(m) = meta {
-            if properties.tmdb.is_none() {
-                properties.tmdb = m.tmdb_id();
-                properties_updated = true;
+            // 1. & 2. Playlist Title
+            if let Some(title) = title_candidate {
+                if !title.is_empty() {
+                    trace!("Resolving TMDB for Series using Playlist Title '{title}' (ID: {display_id})...");
+                    meta = meta_resolver
+                        .resolve_from_title(title, properties.tmdb, false, true)
+                        .await;
+                    tried_title = true;
+                }
             }
-            if properties.release_date.is_none() {
-                properties.release_date = m.year().map(|y| format!("{y}-01-01").into());
-                properties_updated = true;
+
+            // 3. API Name (fallback)
+            if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty() {
+                let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
+                if !tried_title || !title_already_tried {
+                    debug!("Fallback to API Name '{}'...", properties.name);
+                    meta = meta_resolver
+                        .resolve_from_title(
+                            &properties.name,
+                            properties.tmdb,
+                            false,
+                            true,
+                        )
+                        .await;
+                }
             }
-            if properties_updated {
-                let id_display = properties.tmdb.map_or("None".to_string(), |id| id.to_string());
-                debug_if_enabled!("Resolved TMDB for Series ID {}: {}", display_id, id_display);
+
+            if let Some(m) = meta {
+                let patch = series_fact_patch_from_metadata(&properties, &m);
+                if apply_fact_patch_to_series(&mut properties, &patch) {
+                    properties_updated = true;
+                    let id_display = properties.tmdb.map_or("None".to_string(), |id| id.to_string());
+                    debug_if_enabled!("Resolved TMDB for Series ID {}: {}", display_id, id_display);
+                }
             }
         }
     }
@@ -1067,7 +1079,7 @@ pub async fn update_series_metadata(
         out.store(probe_pending, Ordering::Relaxed);
     }
 
-    let probe_only_unresolved = do_probe && !fetch_info && !resolve_tmdb && !properties_updated && !fetched_new;
+    let probe_only_unresolved = do_probe && !fetch_info && !resolve_missing_facts && !properties_updated && !fetched_new;
     if probe_only_unresolved {
         if let Some(kind) = probe_failure {
             let err = match kind {
