@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum ActiveUserConnectionChange {
     Updated(StreamInfo),
-    Disconnected(SocketAddr),  // addr
+    Disconnected(SocketAddr), // addr
+    DisconnectedStream { addr: SocketAddr, uid: u32 },
     Connections(usize, usize), // user_count, connection_count
 }

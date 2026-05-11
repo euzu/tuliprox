@@ -40,7 +40,11 @@ fn find_stream_update_index(streams: &[StreamInfo], updated_stream: &StreamInfo)
         }
     }
 
-    streams.iter().position(|stream| stream.addr == updated_stream.addr)
+    if updated_stream.session_token.is_none() {
+        return streams.iter().position(|stream| stream.addr == updated_stream.addr);
+    }
+
+    None
 }
 
 fn dedupe_streams_by_identity(streams: &mut Vec<StreamInfo>) {
@@ -186,6 +190,9 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
         }
         ActiveUserConnectionChange::Disconnected(addr) => {
             server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr);
+        }
+        ActiveUserConnectionChange::DisconnectedStream { addr, uid } => {
+            server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr || stream_info.uid != uid);
         }
         ActiveUserConnectionChange::Connections(user_count, connections) => {
             server_status.active_users = user_count;
@@ -393,6 +400,14 @@ mod tests {
     }
 
     #[test]
+    fn test_find_stream_update_index_keeps_socket_bound_streams_with_same_addr_separate() {
+        let existing = test_stream(1, "127.0.0.1:1234", Some("tok-live"), PlaylistItemType::Live);
+        let updated = test_stream(2, "127.0.0.1:1234", Some("tok-live"), PlaylistItemType::Live);
+
+        assert_eq!(find_stream_update_index(&[existing], &updated), None);
+    }
+
+    #[test]
     fn test_dedupe_streams_by_identity_removes_duplicate_render_keys() {
         let mut streams = vec![
             test_stream(2, "127.0.0.1:1234", Some("tok-a"), PlaylistItemType::LiveHls),
@@ -446,6 +461,25 @@ mod tests {
         assert_eq!(status.active_user_streams, vec![other]);
         assert_eq!(status.active_users, 2);
         assert_eq!(status.active_user_connections, 2);
+    }
+
+    #[test]
+    fn test_disconnected_stream_removes_only_matching_stream_identity() {
+        let removed = test_stream(1, "127.0.0.1:1234", Some("tok-live-a"), PlaylistItemType::Live);
+        let kept = test_stream(2, "127.0.0.1:1234", Some("tok-live-b"), PlaylistItemType::Live);
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 2,
+            active_user_streams: vec![removed.clone(), kept.clone()],
+            ..Default::default()
+        };
+
+        apply_active_user_change(
+            &mut status,
+            ActiveUserConnectionChange::DisconnectedStream { addr: removed.addr, uid: removed.uid },
+        );
+
+        assert_eq!(status.active_user_streams, vec![kept]);
     }
 
     fn test_download(id: &str, status: TransferStatusDto, kind: TaskKindDto) -> FileDownloadDto {

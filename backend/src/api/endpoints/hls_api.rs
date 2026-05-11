@@ -2,7 +2,7 @@ use crate::{
     api::{
         api_utils::{
             admission_failure_response, connection_priority_for_kind,
-            create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
+            create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
             get_hls_session_ttl_secs, get_stream_alternative_url, is_seek_request, local_stream_response,
             try_option_bad_request, try_unwrap_body,
             HeaderFilter,
@@ -202,7 +202,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
             None => (url, None, None),
         }
     } else {
-        let user_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
+        let user_session_token =
+            create_playback_session_fingerprint(fingerprint, &user.username, virtual_id, PlaylistItemType::LiveHls, None);
         match app_state
             .active_provider
             .acquire_connection_with_grace_for_session(

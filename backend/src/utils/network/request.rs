@@ -357,18 +357,18 @@ pub fn preview_request_target_for_logging(url: &Url, provider: Option<&Arc<Confi
 pub fn preview_request_diagnostics_for_logging(url: &Url, provider: Option<&Arc<ConfigProvider>>) -> String {
     let target = preview_attempt_target(url, provider);
     let mut parts = vec![
-        format!("request_url={}", target.request_url),
-        format!("effective_url={}", target.effective_url),
+        format!("request_url={}", sanitize_sensitive_info(target.request_url.as_str())),
+        format!("effective_url={}", sanitize_sensitive_info(target.effective_url.as_str())),
     ];
 
     if let Some(host_header) = target.host_header.as_ref() {
-        parts.push(format!("host_header={host_header}"));
+        parts.push(format!("host_header={}", sanitize_sensitive_info(host_header)));
     }
     if let Some(connect_ip) = target.connect_ip {
-        parts.push(format!("connect_ip={connect_ip}"));
+        parts.push(format!("connect_ip={}", sanitize_sensitive_info(&connect_ip.to_string())));
     }
     if let Some(sni_host) = target.sni_host.as_ref() {
-        parts.push(format!("sni_host={sni_host}"));
+        parts.push(format!("sni_host={}", sanitize_sensitive_info(sni_host)));
     }
 
     parts.join(", ")
@@ -1931,8 +1931,25 @@ mod tests {
 
         assert_eq!(
             diagnostics,
-            "request_url=http://example.com:8080/stream, effective_url=http://203.0.113.10:8080/stream, host_header=example.com:8080, connect_ip=203.0.113.10"
+            "request_url=http://***/stream, effective_url=http://***/stream, host_header=example.com:8080, connect_ip=113.***"
         );
+    }
+
+    #[test]
+    fn test_preview_request_diagnostics_for_logging_sanitizes_each_stream_url() -> Result<(), url::ParseError> {
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let url = Url::parse("http://xxx-bldkde.net/live/MQ12FK/YH56CT/1092671.ts")?;
+
+        let diagnostics = preview_request_diagnostics_for_logging(&url, Some(&provider));
+
+        assert!(!diagnostics.contains("xxx-bldkde.net"));
+        assert!(!diagnostics.contains("MQ12FK"));
+        assert!(!diagnostics.contains("YH56CT"));
+        assert_eq!(
+            diagnostics,
+            "request_url=http://***/live/***1092671.ts, effective_url=http://***/live/***1092671.ts"
+        );
+        Ok(())
     }
 
     #[test]

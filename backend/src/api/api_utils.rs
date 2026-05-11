@@ -3387,6 +3387,18 @@ pub fn create_session_fingerprint(
     }
 }
 
+pub(crate) fn create_playback_session_fingerprint(
+    fingerprint: &Fingerprint,
+    username: &str,
+    virtual_id: u32,
+    item_type: PlaylistItemType,
+    extension: Option<&str>,
+) -> String {
+    let socket_bound =
+        is_socket_bound_playback_session(item_type, extension) || is_session_based_playback(item_type, extension);
+    create_session_fingerprint(fingerprint, username, virtual_id, socket_bound)
+}
+
 pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
     concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
 }
@@ -7369,6 +7381,25 @@ mod tests {
         assert_ne!(logical, socket_bound);
         assert!(logical.contains(&fingerprint.key));
         assert!(socket_bound.contains(&fingerprint.addr.to_string()));
+    }
+
+    #[test]
+    fn adaptive_playback_session_fingerprint_is_unique_per_initial_socket() {
+        let Some(first_addr) = "127.0.0.1:55177".parse().ok() else {
+            return;
+        };
+        let Some(second_addr) = "127.0.0.1:55178".parse().ok() else {
+            return;
+        };
+        let first = create_test_fingerprint(first_addr);
+        let second = Fingerprint::new(first.key.clone(), first.client_ip.clone(), second_addr);
+
+        let first_token = create_playback_session_fingerprint(&first, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
+        let second_token = create_playback_session_fingerprint(&second, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
+
+        assert_ne!(first_token, second_token);
+        assert!(first_token.contains(&first.addr.to_string()));
+        assert!(second_token.contains(&second.addr.to_string()));
     }
 
     #[tokio::test]

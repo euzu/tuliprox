@@ -169,6 +169,7 @@ struct ActiveClientStreamState {
     waker: Option<Arc<AtomicWaker>>,
     connection_manager: Arc<ConnectionManager>,
     fingerprint: Arc<Fingerprint>,
+    stream_uid: Option<u32>,
     provider_stopped: bool,
     user_stream_released: bool,
     /// Mirrors `user_stream_released` for the provider handle to guard against double-release
@@ -237,6 +238,7 @@ impl ActiveClientStreamState {
         self.user_stream_released = true;
         self.connection_manager.send_cleanup(CleanupEvent::ReleaseStream {
             addr: self.fingerprint.addr,
+            stream_uid: self.stream_uid,
             provider_end_reason: self.provider_end_reason.load(Ordering::Relaxed),
             reconnect_count: self.provider_reconnect_count.load(Ordering::Relaxed),
             provider_error_class: self.provider_error_class,
@@ -699,6 +701,7 @@ impl Drop for ActiveClientStream {
             self.state.provider_handle_released = true;
             self.state.connection_manager.send_cleanup(CleanupEvent::ReleaseStreamAndProviderHandle {
                 addr,
+                stream_uid: self.state.stream_uid,
                 handle: handle_for_cleanup,
                 provider_end_reason: self.state.provider_end_reason.load(Ordering::Relaxed),
                 reconnect_count: self.state.provider_reconnect_count.load(Ordering::Relaxed),
@@ -735,7 +738,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
 
     let virtual_id = stream_channel.virtual_id;
     let is_shared_source_stream = stream_channel.shared && stream_details.stream.is_some();
-    app_state
+    let registered_stream = app_state
         .connection_manager
         .update_connection(crate::api::model::ConnectionParams {
             meter_uid,
@@ -752,6 +755,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             session_token,
         })
         .await;
+    let stream_uid = registered_stream.as_ref().map(|stream| stream.uid);
     if let Some((_, _, _m_, Some(cvt))) = stream_details.stream_info.as_ref() {
         app_state.connection_manager.update_stream_detail(&fingerprint.addr, *cvt).await;
     }
@@ -899,6 +903,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         waker: Some(waker),
         connection_manager: Arc::clone(&app_state.connection_manager),
         fingerprint: Arc::new(fingerprint.clone()),
+        stream_uid,
         provider_stopped: false,
         user_stream_released: false,
         provider_handle_released: false,
@@ -1603,6 +1608,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 addr,
             )),
+            stream_uid: None,
             provider_stopped: true,
             user_stream_released: true,
             provider_handle_released: true,
@@ -2042,6 +2048,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 addr,
             )),
+            stream_uid: None,
             provider_stopped: false,
             user_stream_released: true,
             provider_handle_released: true,
