@@ -110,9 +110,14 @@ impl MediaServerHttpRequestBuilder {
     }
 
     pub async fn send(self) -> Result<reqwest::Response, MediaServerError> {
+        let detail = format!("request {} failed", self.safe_url);
+        self.send_with_error_detail(detail).await
+    }
+
+    pub async fn send_with_error_detail(self, detail: impl Into<String>) -> Result<reqwest::Response, MediaServerError> {
+        let detail = detail.into();
         self.builder.send().await.map_err(|err| {
-            MediaServerError::from_reqwest_error_with_fallback(&err, self.not_found_kind, self.fallback_kind)
-                .detail(format!("request {} failed", self.safe_url))
+            MediaServerError::from_reqwest_error_with_fallback(&err, self.not_found_kind, self.fallback_kind).detail(&detail)
         })
     }
 }

@@ -481,6 +481,7 @@ pub fn update_properties(
                added: None,
                release_date: None,
                series_release_date: None,
+               plot: None,
                tmdb: None,
                movie_image: "".into(),
                container_extension: "".into(),

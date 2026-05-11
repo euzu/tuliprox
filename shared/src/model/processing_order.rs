@@ -1,21 +1,16 @@
 use crate::error::TuliproxError;
-use enum_iterator::Sequence;
 use std::{fmt::Display, str::FromStr};
-
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+use strum_macros::AsRefStr;
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, AsRefStr)]
+#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum ProcessingOrder {
-    #[serde(rename = "frm")]
     #[default]
     Frm,
-    #[serde(rename = "fmr")]
     Fmr,
-    #[serde(rename = "rfm")]
     Rfm,
-    #[serde(rename = "rmf")]
     Rmf,
-    #[serde(rename = "mfr")]
     Mfr,
-    #[serde(rename = "mrf")]
     Mrf,
 }
 
