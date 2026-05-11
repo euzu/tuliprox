@@ -444,10 +444,10 @@ mod tests {
         let playlist = vec![PlaylistGroup {
             id: 1,
             title: "Original".intern(),
-            channels: vec![video_item("The Smashing Machine", Some(760329))],
+            channels: vec![video_item("The Smashing Machine", Some(760_329))],
             xtream_cluster: XtreamCluster::Video,
         }];
-        let trakt_items = vec![trakt_list_movie("The Smashing Machine", Some(2025), Some(760329), 1)];
+        let trakt_items = vec![trakt_list_movie("The Smashing Machine", Some(2025), Some(760_329), 1)];
         let a24_config = named_list_config("▸ A24", true);
         let renoir_config = named_list_config("▸ Cines Renoir", true);
 
@@ -602,6 +602,7 @@ mod tests {
                     container_extension: "mkv".intern(),
                     video: None,
                     audio: None,
+                    plot: None
                 }))),
                 ..PlaylistItemHeader::default()
             },
