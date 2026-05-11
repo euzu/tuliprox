@@ -6,7 +6,7 @@ use crate::{
         api_utils,
         api_utils::{
             admission_failure_response, create_api_proxy_user, create_catchup_session_key,
-            create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
+            create_playback_session_fingerprint, create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
             force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
             get_user_target_by_credentials, internal_server_error, is_seek_request, is_session_based_playback,
             is_stream_share_enabled, local_stream_response,
@@ -371,11 +371,12 @@ async fn xtream_player_api_stream(
     let session_key = if item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
-        create_session_fingerprint(
+        create_playback_session_fingerprint(
             fingerprint,
             &user.username,
             virtual_id,
-            crate::api::api_utils::is_socket_bound_playback_session(item_type, Some(playback_ext)),
+            item_type,
+            Some(playback_ext),
         )
     };
     let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
@@ -665,11 +666,12 @@ async fn xtream_player_api_stream_with_token(
             if playback_ext.is_empty() { requested_extension.as_deref() } else { Some(&*playback_ext) };
 
         let is_session_request = is_session_based_playback(pli.item_type, playback_ext);
-        let session_key = create_session_fingerprint(
+        let session_key = create_playback_session_fingerprint(
             fingerprint,
             "webui",
             virtual_id,
-            crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, playback_ext),
+            pli.item_type,
+            playback_ext,
         );
 
         // TODO how should we use fixed provider for hls in multi provider config?

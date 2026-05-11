@@ -20,7 +20,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{
-    sync::{mpsc, mpsc::Sender, Mutex, RwLock},
+    sync::{mpsc, mpsc::Sender, Mutex, Notify, RwLock},
     time::{sleep, Duration, Instant},
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_SHARED_BUFFER_SIZE_BYTES: usize = 1024 * 1024 * 12;
 const YIELD_COUNTER: usize = 64;
+const SHARED_BURST_BYTES_PER_BUFFER_SLOT: usize = 12 * 1024;
 
 struct ReceiverStreamWrapper<S> {
     stream: S,
@@ -64,10 +65,22 @@ fn convert_stream(stream: BoxStream<Bytes>) -> BoxStream<Result<Bytes, StreamErr
 
 type SubscriberId = SocketAddr;
 
+struct BufferedChunk {
+    sequence: u64,
+    bytes: Bytes,
+}
+
 struct BurstBuffer {
-    buffer: VecDeque<Bytes>,
+    buffer: VecDeque<BufferedChunk>,
     buffer_size: usize,
     current_bytes: usize,
+    next_sequence: u64,
+}
+
+struct BurstRead {
+    chunks: VecDeque<Bytes>,
+    next_sequence: u64,
+    skipped: u64,
 }
 
 #[allow(clippy::missing_fields_in_debug)]
@@ -82,22 +95,40 @@ impl Debug for BurstBuffer {
 
 impl BurstBuffer {
     pub fn new(buf_size: usize) -> Self {
-        Self { buffer: VecDeque::with_capacity(buf_size), buffer_size: buf_size, current_bytes: 0 }
+        Self { buffer: VecDeque::new(), buffer_size: buf_size, current_bytes: 0, next_sequence: 0 }
     }
 
-    pub fn snapshot(&self) -> VecDeque<Bytes> { self.buffer.iter().cloned().collect::<VecDeque<Bytes>>() }
+    pub fn snapshot(&self) -> (VecDeque<Bytes>, u64) {
+        (self.buffer.iter().map(|chunk| chunk.bytes.clone()).collect::<VecDeque<Bytes>>(), self.next_sequence)
+    }
+
+    pub fn read_from(&self, next_sequence: u64) -> BurstRead {
+        let earliest_sequence = self.buffer.front().map_or(self.next_sequence, |chunk| chunk.sequence);
+        let start_sequence = next_sequence.max(earliest_sequence);
+        let skipped = start_sequence.saturating_sub(next_sequence);
+        let chunks = self
+            .buffer
+            .iter()
+            .filter(|chunk| chunk.sequence >= start_sequence)
+            .map(|chunk| chunk.bytes.clone())
+            .collect::<VecDeque<Bytes>>();
+
+        BurstRead { chunks, next_sequence: self.next_sequence, skipped }
+    }
 
     pub fn push(&mut self, packet: Bytes) {
         while self.current_bytes + packet.len() > self.buffer_size {
             if let Some(popped) = self.buffer.pop_front() {
-                self.current_bytes -= popped.len();
+                self.current_bytes -= popped.bytes.len();
             } else {
                 self.current_bytes = 0;
                 break;
             }
         }
         self.current_bytes += packet.len();
-        self.buffer.push_back(packet);
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.buffer.push_back(BufferedChunk { sequence, bytes: packet });
     }
 }
 
@@ -128,9 +159,9 @@ pub struct SharedStreamState {
     low_priority_preempted: Option<crate::api::model::TransportStreamBuffer>,
     preempted_token: CancellationToken,
     subscribers: RwLock<HashMap<SubscriberId, CancellationToken>>,
-    broadcaster: tokio::sync::broadcast::Sender<Bytes>,
     stop_token: CancellationToken,
     burst_buffer: Arc<Mutex<BurstBuffer>>,
+    live_notification: Arc<Notify>,
     task_handles: RwLock<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -142,18 +173,19 @@ impl SharedStreamState {
         min_burst_buffer_size: usize,
         low_priority_preempted: Option<crate::api::model::TransportStreamBuffer>,
     ) -> Self {
-        let (broadcaster, _) = tokio::sync::broadcast::channel(buf_size);
-        let burst_buffer_size_in_bytes = min_burst_buffer_size.max(buf_size * 1024 * 12);
+        let base_channel_capacity = buf_size.max(CHANNEL_SIZE);
+        let burst_buffer_size_in_bytes = min_burst_buffer_size
+            .max(base_channel_capacity.saturating_mul(SHARED_BURST_BYTES_PER_BUFFER_SLOT));
         Self {
             headers,
-            buf_size,
+            buf_size: base_channel_capacity,
             provider_guard,
             low_priority_preempted,
             preempted_token: CancellationToken::new(),
             subscribers: RwLock::new(HashMap::new()),
-            broadcaster,
             stop_token: CancellationToken::new(),
             burst_buffer: Arc::new(Mutex::new(BurstBuffer::new(burst_buffer_size_in_bytes))),
+            live_notification: Arc::new(Notify::new()),
             task_handles: RwLock::new(Vec::new()),
         }
     }
@@ -165,7 +197,6 @@ impl SharedStreamState {
         manager: Arc<SharedStreamManager>,
     ) -> (BoxedProviderStream, Option<Arc<str>>) {
         let (client_tx, client_rx) = mpsc::channel(self.buf_size);
-        let mut broadcast_rx = self.broadcaster.subscribe();
         let cancel_token = CancellationToken::new();
 
         {
@@ -186,6 +217,7 @@ impl SharedStreamState {
         let client_tx_clone = client_tx.clone();
         let burst_buffer = Arc::clone(&self.burst_buffer);
         let burst_buffer_for_log = Arc::clone(&self.burst_buffer);
+        let live_notification = Arc::clone(&self.live_notification);
         let timeout_duration = Duration::from_secs(300);
         let mut last_active = Instant::now();
         let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
@@ -198,7 +230,7 @@ impl SharedStreamState {
         let yield_counter = YIELD_COUNTER;
 
         let handle = tokio::spawn(async move {
-            let snapshot = {
+            let (snapshot, mut next_sequence) = {
                 let buffer = burst_buffer.lock().await;
                 buffer.snapshot()
             };
@@ -218,6 +250,82 @@ impl SharedStreamState {
             let mut startup_stats_logged = false;
 
             loop {
+                // Pre-create the notified future before locking the buffer to avoid
+                // a race where notify_waiters() fires between lock release and await.
+                let notified_fut = live_notification.notified();
+
+                let read = {
+                    let buffer = burst_buffer.lock().await;
+                    buffer.read_from(next_sequence)
+                };
+                next_sequence = read.next_sequence;
+                if read.skipped > 0 {
+                    consecutive_lag_count = consecutive_lag_count.saturating_add(1);
+                    if last_lag_log.elapsed() > Duration::from_secs(5) {
+                        let buffered_bytes = {
+                            let buffer = burst_buffer_for_log.lock().await;
+                            buffer.current_bytes
+                        };
+                        warn!(
+                            "Shared stream client lagged behind {address}. Skipped {} messages \
+                             (buffered {buffered_bytes} bytes, yield counter {yield_counter}, \
+                             consecutive lags={consecutive_lag_count})",
+                            read.skipped
+                        );
+                        last_lag_log = Instant::now();
+                    }
+                } else if !read.chunks.is_empty() {
+                    consecutive_lag_count = 0;
+                }
+
+                if !read.chunks.is_empty() {
+                    for data in read.chunks {
+                        if cancel_token.is_cancelled() || client_tx_clone.is_closed() {
+                            manager.release_connection(&address, false).await;
+                            return;
+                        }
+
+                        let chunk_len = data.len();
+                        if let Err(err) = client_tx.send(data).await {
+                            debug!("Shared stream client send error: {address} {err}");
+                            manager.release_connection(&address, false).await;
+                            return;
+                        }
+                        if !first_live_chunk_logged {
+                            debug_if_enabled!(
+                                "Shared stream subscriber {} received first live chunk after {} ms",
+                                sanitize_sensitive_info(&address.to_string()),
+                                subscriber_started_at.elapsed().as_millis()
+                            );
+                            first_live_chunk_logged = true;
+                        }
+                        if !startup_stats_logged {
+                            startup_chunks_sent = startup_chunks_sent.saturating_add(1);
+                            startup_bytes_sent = startup_bytes_sent.saturating_add(chunk_len);
+                            if subscriber_started_at.elapsed() >= Duration::from_secs(5) {
+                                debug_if_enabled!(
+                                    "Shared stream subscriber {} startup throughput: chunks={} bytes={} over {} ms (queue_used={}/{})",
+                                    sanitize_sensitive_info(&address.to_string()),
+                                    startup_chunks_sent,
+                                    startup_bytes_sent,
+                                    subscriber_started_at.elapsed().as_millis(),
+                                    subscriber_buf_size.saturating_sub(client_tx_clone.capacity()),
+                                    subscriber_buf_size
+                                );
+                                startup_stats_logged = true;
+                            }
+                        }
+                        loop_cnt = loop_cnt.saturating_add(1);
+                        last_active = Instant::now();
+
+                        if loop_cnt >= yield_counter {
+                            tokio::task::yield_now().await;
+                            loop_cnt = 0;
+                        }
+                    }
+                    continue;
+                }
+
                 tokio::select! {
                     biased;
 
@@ -234,99 +342,33 @@ impl SharedStreamState {
                         }
                     }
 
-                    result = broadcast_rx.recv() => {
-                        match result {
-                            Ok(data) => {
-                                consecutive_lag_count = 0;
-                                if client_tx_clone.is_closed() {
-                                    continue;
-                                }
+                    () = notified_fut => {}
 
-                                let chunk_len = data.len();
-                                if let Err(err) = client_tx.send(data).await {
-                                    debug!("Shared stream client send error: {address} {err}");
+                    () = preempted_token.cancelled() => {
+                        if let Some(mut fallback) = low_priority_preempted {
+                            debug_if_enabled!(
+                                "Shared stream subscriber {} switching to low_priority_preempted fallback",
+                                sanitize_sensitive_info(&address.to_string())
+                            );
+                            loop {
+                                if cancel_token.is_cancelled() || client_tx_clone.is_closed() {
                                     break;
                                 }
-                                if !first_live_chunk_logged {
-                                    debug_if_enabled!(
-                                        "Shared stream subscriber {} received first live chunk after {} ms",
-                                        sanitize_sensitive_info(&address.to_string()),
-                                        subscriber_started_at.elapsed().as_millis()
-                                    );
-                                    first_live_chunk_logged = true;
-                                }
-                                if !startup_stats_logged {
-                                    startup_chunks_sent = startup_chunks_sent.saturating_add(1);
-                                    startup_bytes_sent = startup_bytes_sent.saturating_add(chunk_len);
-                                    if subscriber_started_at.elapsed() >= Duration::from_secs(5) {
-                                        debug_if_enabled!(
-                                            "Shared stream subscriber {} startup throughput: chunks={} bytes={} over {} ms (queue_used={}/{})",
-                                            sanitize_sensitive_info(&address.to_string()),
-                                            startup_chunks_sent,
-                                            startup_bytes_sent,
-                                            subscriber_started_at.elapsed().as_millis(),
-                                            subscriber_buf_size.saturating_sub(client_tx_clone.capacity()),
-                                            subscriber_buf_size
-                                        );
-                                        startup_stats_logged = true;
-                                    }
-                                }
-                                loop_cnt = loop_cnt.saturating_add(1);
-                                last_active = Instant::now();
 
-                                if loop_cnt >= yield_counter {
-                                    tokio::task::yield_now().await;
-                                    loop_cnt = 0;
-                                }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                                consecutive_lag_count = consecutive_lag_count.saturating_add(1);
-                                if last_lag_log.elapsed() > Duration::from_secs(5) {
-                                    let buffered_bytes = {
-                                        let buffer = burst_buffer_for_log.lock().await;
-                                        buffer.current_bytes
-                                    };
-                                    warn!(
-                                        "Shared stream client lagged behind {address}. Skipped {skipped} messages \
-                                         (buffered {buffered_bytes} bytes, yield counter {yield_counter}, \
-                                         consecutive lags={consecutive_lag_count})"
-                                    );
-                                    last_lag_log = Instant::now();
-                                }
-                                let backoff_ms = 50_u64
-                                    .saturating_mul(1_u64.checked_shl(consecutive_lag_count.min(5)).unwrap_or(u64::MAX))
-                                    .min(1_600);
-                                sleep(Duration::from_millis(backoff_ms)).await;
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                if preempted_token.is_cancelled() {
-                                    if let Some(mut fallback) = low_priority_preempted {
-                                        debug_if_enabled!(
-                                            "Shared stream subscriber {} switching to low_priority_preempted fallback",
+                                if let Some(chunk) = fallback.next_chunk() {
+                                    if let Err(err) = client_tx.send(chunk).await {
+                                        debug!(
+                                            "Shared stream fallback send error for {}: {err}",
                                             sanitize_sensitive_info(&address.to_string())
                                         );
-                                        loop {
-                                            if cancel_token.is_cancelled() || client_tx_clone.is_closed() {
-                                                break;
-                                            }
-
-                                            if let Some(chunk) = fallback.next_chunk() {
-                                                if let Err(err) = client_tx.send(chunk).await {
-                                                    debug!(
-                                                        "Shared stream fallback send error for {}: {err}",
-                                                        sanitize_sensitive_info(&address.to_string())
-                                                    );
-                                                    break;
-                                                }
-                                            } else {
-                                                break;
-                                            }
-                                        }
+                                        break;
                                     }
+                                } else {
+                                    break;
                                 }
-                                break;
                             }
                         }
+                        break;
                     }
                 }
             }
@@ -348,9 +390,9 @@ impl SharedStreamState {
     {
         let mut source_stream = Box::pin(bytes_stream);
         let streaming_url = stream_url.to_string();
-        let sender = self.broadcaster.clone();
         let stop_token = self.stop_token.clone();
         let burst_buffer = Arc::clone(&self.burst_buffer);
+        let live_notification = Arc::clone(&self.live_notification);
         let broadcast_started_at = Instant::now();
 
         tokio::spawn(async move {
@@ -409,29 +451,15 @@ impl SharedStreamState {
                                 }
                                 {
                                     let mut buffer = burst_buffer.lock().await;
-                                    buffer.push(data.clone());
+                                    buffer.push(data);
                                 }
+                                live_notification.notify_waiters();
 
-                                 if let Ok(clients) = sender.send(data) {
-                                     if clients == 0 {
-                                         debug_if_enabled!(
-                                             "No shared stream subscribers closing {}",
-                                             sanitize_sensitive_info(&streaming_url)
-                                         );
-                                         break;
-                                     }
-                                     counter = counter.saturating_add(1);
-                                     if counter >= YIELD_COUNTER {
-                                         tokio::task::yield_now().await;
-                                         counter = 0;
-                                     }
-                                 } else {
-                                     debug_if_enabled!(
-                                         "Shared stream send error,no subscribers closing {}",
-                                         sanitize_sensitive_info(&streaming_url)
-                                     );
-                                     break;
-                                 }
+                                counter = counter.saturating_add(1);
+                                if counter >= YIELD_COUNTER {
+                                    tokio::task::yield_now().await;
+                                    counter = 0;
+                                }
                             }
                             Some(Err(e)) => {
                                 trace!("Shared stream received error: {e:?}");
@@ -757,13 +785,14 @@ impl SharedStreamManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedStreamManager, SharedStreamState, CHANNEL_SIZE};
+    use super::{BurstBuffer, SharedStreamManager, SharedStreamState, CHANNEL_SIZE};
     use crate::{
         api::model::{ActiveProviderManager, EventManager},
         model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, SourcesConfig},
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
+    use bytes::Bytes;
     use futures::StreamExt;
     use shared::{
         model::{ConfigPaths, InputFetchMethod, InputType},
@@ -866,6 +895,44 @@ mod tests {
 
         let reg = shared_manager.shared_streams.read().await;
         assert!(reg.by_key.contains_key(stream_url));
+    }
+
+    #[test]
+    fn test_shared_state_channel_capacity_does_not_scale_with_burst_buffer_bytes() {
+        let min_burst_buffer_size = 12 * 1024 * 1024;
+        let state = SharedStreamState::new(Vec::new(), CHANNEL_SIZE, None, min_burst_buffer_size, None);
+
+        assert_eq!(state.buf_size, CHANNEL_SIZE);
+    }
+
+    #[test]
+    fn test_burst_buffer_eviction_is_byte_bounded() {
+        let mut buffer = BurstBuffer::new(10);
+        buffer.push(Bytes::from_static(b"12345"));
+        buffer.push(Bytes::from_static(b"67890"));
+        buffer.push(Bytes::from_static(b"abcde"));
+
+        let read = buffer.read_from(0);
+
+        assert_eq!(buffer.current_bytes, 10);
+        assert_eq!(read.skipped, 1);
+        assert_eq!(read.next_sequence, 3);
+        assert_eq!(read.chunks.len(), 2);
+    }
+
+    #[test]
+    fn test_burst_buffer_reads_clone_bytes_without_copying_payload() {
+        let mut buffer = BurstBuffer::new(1024);
+        let chunk = Bytes::from(vec![1_u8, 2, 3, 4]);
+        let ptr = chunk.as_ptr();
+        buffer.push(chunk);
+
+        let read = buffer.read_from(0);
+        let Some(read_chunk) = read.chunks.front() else {
+            panic!("expected one buffered chunk");
+        };
+
+        assert_eq!(read_chunk.as_ptr(), ptr);
     }
 
     #[tokio::test]

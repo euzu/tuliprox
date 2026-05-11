@@ -29,7 +29,7 @@ pub enum XtreamCluster {
     #[strum(serialize = "Live", serialize = "live")]
     Live = 1,
 
-    #[strum(serialize = "Video", serialize = "video", serialize = "vod", serialize = "movie")]
+    #[strum(serialize = "Video", serialize = "movie", serialize = "vod", serialize = "video")]
     Video = 2,
 
     #[strum(serialize = "Series", serialize = "series")]

@@ -2,7 +2,7 @@ use crate::{
     api::{
         api_utils::{
             admission_failure_response, create_catchup_session_key,
-            create_session_fingerprint, force_provider_stream_response, get_session_reservation_ttl_secs,
+            create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, is_seek_request, is_session_based_playback,
             is_stream_share_enabled, local_stream_response,
             redirect, redirect_response, resource_response,
@@ -220,11 +220,12 @@ async fn m3u_api_stream(
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
-        create_session_fingerprint(
+        create_playback_session_fingerprint(
             fingerprint,
             &user.username,
             virtual_id,
-            crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, Some(extension)),
+            pli.item_type,
+            Some(extension),
         )
     };
     let eviction_reentry_guard = if pli.item_type == PlaylistItemType::Catchup

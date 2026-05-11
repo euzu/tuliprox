@@ -46,6 +46,7 @@ $series-backdrop-mobile-height: 150px;
   border: 1px solid var(--border-color);
   border-radius: var(--border-radius);
   padding: var(--padding-small);
+  min-height: 3rem;
 
   &__loading {
     transform: translateY(-10px);
