@@ -385,7 +385,10 @@ async fn download_plex_media_server_playlist(
         Ok(client) => client,
         Err(error) => return (vec![], vec![TuliproxError::Download(error.to_string())]),
     };
-    let policy = MediaServerCatalogRefreshPolicy { page_size: usize::from(media_server.catalog.page_size) };
+    let policy = MediaServerCatalogRefreshPolicy {
+        page_size: usize::from(media_server.catalog.page_size),
+        request_delay_ms: media_server.catalog.request_delay_ms,
+    };
 
     match refresh_media_server_catalog_complete_before_publish(&plex_client, policy).await {
         Ok(snapshot) => (media_server_catalog_snapshot_to_playlist(&snapshot), vec![]),
@@ -449,7 +452,7 @@ async fn playlist_download_from_input(
         xtream_cache_candidates.extend(main_candidates);
 
         for cluster in xtream_cache_candidates {
-            if !input_cache::is_cache_valid(&status, &cluster.to_string(), cache_duration) {
+            if !input_cache::is_cache_valid(&status, cluster.as_ref(), cache_duration) {
                 xtream_clusters_to_download.push(cluster);
             }
         }
@@ -567,14 +570,14 @@ async fn playlist_download_from_input(
         if !xtream_clusters_to_download.is_empty() {
             let state = if xtream_error_count == 0 { ClusterState::Ok } else { ClusterState::Failed };
             for cluster in &xtream_clusters_to_download {
-                input_cache::update_cluster_status(&mut status, &cluster.to_string(), state.clone());
+                input_cache::update_cluster_status(&mut status, cluster.as_ref(), state.clone());
             }
             save_status = true;
         }
     } else if errors.is_empty() {
         if use_per_cluster_cache {
             for cluster in &xtream_clusters_to_download {
-                input_cache::update_cluster_status(&mut status, &cluster.to_string(), ClusterState::Ok);
+                input_cache::update_cluster_status(&mut status, cluster.as_ref(), ClusterState::Ok);
             }
             save_status = !xtream_clusters_to_download.is_empty();
         } else {
@@ -583,7 +586,7 @@ async fn playlist_download_from_input(
         }
     } else if use_per_cluster_cache {
         for cluster in &xtream_clusters_to_download {
-            input_cache::update_cluster_status(&mut status, &cluster.to_string(), ClusterState::Failed);
+            input_cache::update_cluster_status(&mut status, cluster.as_ref(), ClusterState::Failed);
         }
         save_status = !xtream_clusters_to_download.is_empty();
     } else {

@@ -1,7 +1,7 @@
 use crate::{error::TuliproxError, utils::Internable};
-use enum_iterator::Sequence;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, str::FromStr, sync::Arc};
+use strum_macros::EnumIter;
 
 const DASHBOARD: &str = "dashboard";
 const STATS: &str = "stats";
@@ -17,7 +17,7 @@ const RBAC: &str = "rbac";
 const SOURCE_EDITOR: &str = "source_editor";
 const STREAM_HISTORY: &str = "stream_history";
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Sequence)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, EnumIter)]
 pub enum ViewType {
     #[default]
     Dashboard,

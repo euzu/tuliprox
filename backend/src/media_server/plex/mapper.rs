@@ -1,11 +1,11 @@
 use crate::media_server::plex::dto::{PlexDirectoryDto, PlexGuidDto, PlexMediaDto, PlexSectionDto, PlexVideoDto};
 use crate::media_server::{
     MediaServerAudioTechnicalFacts, MediaServerDescriptiveFacts, MediaServerEpisode, MediaServerImageRef,
-    MediaServerLibrary, MediaServerLibraryKind, MediaServerLibraryRef, MediaServerMovie, MediaServerProviderIdHint,
+    MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerProviderIdHint,
     MediaServerSeason, MediaServerSeries, MediaServerStreamRef, MediaServerTechnicalFacts,
     MediaServerVideoTechnicalFacts,
 };
-use shared::model::{MediaServerLibraryKindDto, MediaServerLibrarySelectorDto};
+use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelector};
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -28,10 +28,10 @@ pub fn plex_section_to_library(
     })
 }
 
-pub fn plex_section_matches_selector(section: &PlexSectionDto, selector: &MediaServerLibrarySelectorDto) -> bool {
+pub fn plex_section_matches_selector(section: &PlexSectionDto, selector: &MediaServerLibrarySelector) -> bool {
     match selector {
-        MediaServerLibrarySelectorDto::Name(name) => matches_trimmed(section.title.as_deref(), name),
-        MediaServerLibrarySelectorDto::Detailed(details) => {
+        MediaServerLibrarySelector::Name(name) => matches_trimmed(section.title.as_deref(), name),
+        MediaServerLibrarySelector::Detailed(details) => {
             let identity_matches = details.key.as_deref().is_some_and(|key| matches_trimmed(section.key.as_deref(), key))
                 || details.id.as_deref().is_some_and(|id| matches_trimmed(section.key.as_deref(), id))
                 || details.name.as_deref().is_some_and(|name| matches_trimmed(section.title.as_deref(), name));
@@ -151,11 +151,12 @@ pub fn plex_video_to_episode(
     })
 }
 
-fn plex_section_kind_matches(section_type: Option<&str>, expected: MediaServerLibraryKindDto) -> bool {
+fn plex_section_kind_matches(section_type: Option<&str>, expected: MediaServerLibraryKind) -> bool {
     let kind = plex_library_kind(section_type);
     match expected {
-        MediaServerLibraryKindDto::Movies => matches!(kind, MediaServerLibraryKind::Movies),
-        MediaServerLibraryKindDto::TvShows => matches!(kind, MediaServerLibraryKind::TvShows),
+        MediaServerLibraryKind::Movies => matches!(kind, MediaServerLibraryKind::Movies),
+        MediaServerLibraryKind::TvShows => matches!(kind, MediaServerLibraryKind::TvShows),
+        MediaServerLibraryKind::Unsupported => false,
     }
 }
 

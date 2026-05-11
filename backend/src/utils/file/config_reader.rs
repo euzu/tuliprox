@@ -746,10 +746,7 @@ where
     });
 
     let mut serialized = String::new();
-    let options = serde_saphyr::SerializerOptions {
-        prefer_block_scalars: false,
-        ..Default::default()
-    };
+    let options = serde_saphyr::ser_options! {};
     serde_saphyr::to_fmt_writer_with_options(&mut serialized, &config, options)
         .map_err(|err| TuliproxError::Config(format!("Could not serialize config: {err}")))?;
 

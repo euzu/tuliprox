@@ -5,7 +5,7 @@ use log::warn;
 use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
-use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicyDto, MediaServerInputConfigDto, MediaServerLibrarySelectorDto, MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster};
+use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster};
 use shared::utils::{
     get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
     BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
@@ -104,10 +104,10 @@ static DEFAULT_CONFIG_INPUT_OPTIONS: LazyLock<ConfigInputOptions> =
 
 #[derive(Debug, Clone)]
 pub struct MediaServerInputConfig {
-    pub libraries: Vec<MediaServerLibrarySelectorDto>,
+    pub libraries: Vec<MediaServerLibrarySelector>,
     pub catalog: MediaServerCatalogConfigDto,
     pub playback: MediaServerPlaybackConfigDto,
-    pub image_policy: MediaServerImagePolicyDto,
+    pub image_policy: MediaServerImagePolicy,
     pub token: Option<String>,
     pub api_key: Option<String>,
     pub user_id: Option<String>,
@@ -537,7 +537,7 @@ impl ConfigInput {
                 self.name
             )));
         }
-        if media_server.libraries.iter().any(MediaServerLibrarySelectorDto::is_empty) {
+        if media_server.libraries.iter().any(MediaServerLibrarySelector::is_empty) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media_server library selectors must not be empty (input: {})",
                 self.name
@@ -567,15 +567,22 @@ impl ConfigInput {
                 }
             }
             InputType::Plex => {
-                if !media_server.has_any_plex_token() {
+                if trimmed_url.is_empty() {
+                    if !is_non_blank_optional_string(&media_server.account_token) {
+                        return Err(TuliproxError::ConfigInput(format!(
+                            "media-server input type plex without input.url requires media_server.account_token for MyPlex discovery (input: {})",
+                            self.name
+                        )));
+                    }
+                    if !media_server.has_plex_server_selector() {
+                        return Err(TuliproxError::ConfigInput(format!(
+                            "media-server input type plex requires a server selector such as media_server.server_id or media_server.server_name when input.url is omitted (input: {})",
+                            self.name
+                        )));
+                    }
+                } else if !is_non_blank_optional_string(&media_server.token) {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires media_server.account_token or media_server.token (input: {})",
-                        self.name
-                    )));
-                }
-                if trimmed_url.is_empty() && !media_server.has_plex_server_selector() {
-                    return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires a server selector such as media_server.server_id or media_server.server_name when input.url is omitted (input: {})",
+                        "media-server input type plex with input.url requires media_server.token for direct PMS access (input: {})",
                         self.name
                     )));
                 }
@@ -909,13 +916,13 @@ fn assemble_provider_url_at_index(
 mod tests {
     use super::*;
     use crate::model::ConfigProvider;
-    use shared::model::{ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelectorDto, ProviderUrlSelectionPolicy};
+    use shared::model::{ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector, ProviderUrlSelectionPolicy};
     use std::borrow::Cow;
     use std::sync::Arc;
 
     fn media_server_config_with_library() -> MediaServerInputConfig {
         MediaServerInputConfig::from(&MediaServerInputConfigDto {
-            libraries: vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())],
+            libraries: vec![MediaServerLibrarySelector::Name("Movies".to_string())],
             ..MediaServerInputConfigDto::default()
         })
     }
@@ -934,7 +941,7 @@ mod tests {
                 server_id: Some(" server ".to_string()),
                 server_name: Some(" server-name ".to_string()),
                 ..MediaServerInputConfigDto {
-                    libraries: vec![MediaServerLibrarySelectorDto::Name(" Movies ".to_string())],
+                    libraries: vec![MediaServerLibrarySelector::Name(" Movies ".to_string())],
                     ..MediaServerInputConfigDto::default()
                 }
             }),
@@ -944,7 +951,7 @@ mod tests {
         let input = ConfigInput::from(&dto);
         let media_server = input.media_server.expect("media_server config should map to runtime");
 
-        assert_eq!(media_server.libraries, vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())]);
+        assert_eq!(media_server.libraries, vec![MediaServerLibrarySelector::Name("Movies".to_string())]);
         assert_eq!(media_server.catalog.page_size, 100);
         assert!(media_server.playback.direct_play_only);
         assert!(!media_server.playback.allow_transcode);
@@ -988,6 +995,42 @@ mod tests {
         };
 
         input.prepare(&[]).expect("direct Plex URL should not require MyPlex server selector");
+    }
+
+    #[test]
+    fn prepare_rejects_plex_direct_url_without_server_token() {
+        let mut input = ConfigInput {
+            name: "plex_media_server".into(),
+            input_type: InputType::Plex,
+            url: "https://plex.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfig {
+                account_token: Some("account-token".to_string()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("direct Plex URL requires the PMS server token");
+        assert!(err.to_string().contains("requires media_server.token"));
+    }
+
+    #[test]
+    fn prepare_rejects_plex_discovery_without_account_token() {
+        let mut input = ConfigInput {
+            name: "plex_media_server".into(),
+            input_type: InputType::Plex,
+            media_server: Some(MediaServerInputConfig {
+                token: Some("server-token".to_string()),
+                server_id: Some("server".to_string()),
+                ..media_server_config_with_library()
+            }),
+            enabled: true,
+            ..Default::default()
+        };
+
+        let err = input.prepare(&[]).expect_err("Plex discovery requires the MyPlex account token");
+        assert!(err.to_string().contains("requires media_server.account_token"));
     }
 
     #[test]
@@ -1036,7 +1079,7 @@ mod tests {
             ..Default::default()
         };
         let err = plex.prepare(&[]).expect_err("blank plex token should be rejected");
-        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
+        assert!(err.to_string().contains("requires media_server.account_token"));
     }
 
     #[test]
@@ -1047,7 +1090,7 @@ mod tests {
             url: "https://media.example.invalid".to_string(),
             media_server: Some(MediaServerInputConfig {
                 token: Some("token".to_string()),
-                libraries: vec![MediaServerLibrarySelectorDto::Name("   ".to_string())],
+                libraries: vec![MediaServerLibrarySelector::Name("   ".to_string())],
                 ..media_server_config_with_library()
             }),
             enabled: true,

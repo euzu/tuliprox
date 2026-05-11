@@ -500,7 +500,7 @@ async fn persist_yaml_file<T: serde::Serialize>(
     payload: &T,
 ) -> Result<(), SetupPersistWriteError> {
     let mut content = String::new();
-    let options = serde_saphyr::SerializerOptions { prefer_block_scalars: false, ..Default::default() };
+    let options = serde_saphyr::ser_options! {};
     serde_saphyr::to_fmt_writer_with_options(&mut content, payload, options)
         .map_err(|err| SetupPersistWriteError::Serialize(err.to_string()))?;
     tokio::fs::write(file_path, content).await.map_err(SetupPersistWriteError::Io)

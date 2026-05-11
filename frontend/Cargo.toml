@@ -35,7 +35,8 @@ cron.workspace = true
 brotli.workspace = true
 fastrand.workspace = true
 indexmap.workspace = true
-enum-iterator.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.91"

@@ -18,6 +18,7 @@ use crate::{
 use shared::model::{
     view_type::ViewType, ContentSecurityPolicyConfigDto, StreamInfoConfigDto, WebAuthConfigDto, WebUiConfigDto,
 };
+use strum::IntoEnumIterator;
 use yew::prelude::*;
 
 // Labels
@@ -119,7 +120,7 @@ pub fn WebUiConfigView() -> Html {
         use_reducer(|| StreamInfoConfigFormState { form: StreamInfoConfigDto::default(), modified: false });
 
     let view_types = use_memo(webui_state.data().landing_page, |landing_page| {
-        enum_iterator::all::<ViewType>()
+        ViewType::iter()
             .collect::<Vec<_>>()
             .iter()
             .map(|view_type| DropDownOption {

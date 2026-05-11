@@ -7,27 +7,25 @@ use crate::{
         is_non_blank_optional_string, is_true,
     },
 };
-use enum_iterator::Sequence;
 use std::sync::Arc;
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
-pub enum MediaServerCatalogRefreshModeDto {
-    #[serde(rename = "manual")]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaServerCatalogRefreshMode {
     #[default]
     Manual,
-    #[serde(rename = "scheduled")]
     Scheduled,
 }
 
-pub fn is_default_media_server_catalog_refresh_mode(value: &MediaServerCatalogRefreshModeDto) -> bool {
-    *value == MediaServerCatalogRefreshModeDto::default()
+pub fn is_default_media_server_catalog_refresh_mode(value: &MediaServerCatalogRefreshMode) -> bool {
+    *value == MediaServerCatalogRefreshMode::default()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MediaServerCatalogConfigDto {
     #[serde(default, skip_serializing_if = "is_default_media_server_catalog_refresh_mode")]
-    pub refresh_mode: MediaServerCatalogRefreshModeDto,
+    pub refresh_mode: MediaServerCatalogRefreshMode,
     #[serde(default, skip_serializing_if = "is_false")]
     pub refresh_on_startup: bool,
     #[serde(
@@ -51,7 +49,7 @@ pub struct MediaServerCatalogConfigDto {
 impl Default for MediaServerCatalogConfigDto {
     fn default() -> Self {
         Self {
-            refresh_mode: MediaServerCatalogRefreshModeDto::default(),
+            refresh_mode: MediaServerCatalogRefreshMode::default(),
             refresh_on_startup: false,
             page_size: default_media_server_catalog_page_size(),
             request_delay_ms: default_media_server_catalog_request_delay_ms(),
@@ -75,24 +73,23 @@ impl MediaServerCatalogConfigDto {
     }
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
-pub enum MediaServerPlaybackInfoPolicyDto {
-    #[serde(rename = "on_demand")]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaServerPlaybackInfoPolicy {
     #[default]
     OnDemand,
-    #[serde(rename = "disabled")]
     Disabled,
 }
 
-pub fn is_default_media_server_playback_info_policy(value: &MediaServerPlaybackInfoPolicyDto) -> bool {
-    *value == MediaServerPlaybackInfoPolicyDto::default()
+pub fn is_default_media_server_playback_info_policy(value: &MediaServerPlaybackInfoPolicy) -> bool {
+    *value == MediaServerPlaybackInfoPolicy::default()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MediaServerPlaybackConfigDto {
     #[serde(default, skip_serializing_if = "is_default_media_server_playback_info_policy")]
-    pub playback_info_policy: MediaServerPlaybackInfoPolicyDto,
+    pub playback_info_policy: MediaServerPlaybackInfoPolicy,
     #[serde(default, skip_serializing_if = "is_false")]
     pub preflight_streams: bool,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
@@ -104,7 +101,7 @@ pub struct MediaServerPlaybackConfigDto {
 impl Default for MediaServerPlaybackConfigDto {
     fn default() -> Self {
         Self {
-            playback_info_policy: MediaServerPlaybackInfoPolicyDto::default(),
+            playback_info_policy: MediaServerPlaybackInfoPolicy::default(),
             preflight_streams: false,
             direct_play_only: default_as_true(),
             allow_transcode: false,
@@ -116,25 +113,25 @@ impl MediaServerPlaybackConfigDto {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
-pub enum MediaServerImagePolicyDto {
-    #[serde(rename = "proxy_on_demand")]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaServerImagePolicy {
     #[default]
     ProxyOnDemand,
-    #[serde(rename = "disabled")]
     Disabled,
 }
 
-pub fn is_default_media_server_image_policy(value: &MediaServerImagePolicyDto) -> bool {
-    *value == MediaServerImagePolicyDto::default()
+pub fn is_default_media_server_image_policy(value: &MediaServerImagePolicy) -> bool {
+    *value == MediaServerImagePolicy::default()
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq)]
-pub enum MediaServerLibraryKindDto {
-    #[serde(rename = "movies")]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaServerLibraryKind {
     Movies,
-    #[serde(rename = "tvshows", alias = "shows", alias = "series")]
+    #[serde(alias = "shows", alias = "series")]
     TvShows,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
@@ -155,7 +152,7 @@ pub struct MediaServerLibrarySelectorDetailsDto {
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<MediaServerLibraryKindDto>,
+    pub kind: Option<MediaServerLibraryKind>,
 }
 
 impl MediaServerLibrarySelectorDetailsDto {
@@ -175,12 +172,12 @@ impl MediaServerLibrarySelectorDetailsDto {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub enum MediaServerLibrarySelectorDto {
+pub enum MediaServerLibrarySelector {
     Name(String),
     Detailed(MediaServerLibrarySelectorDetailsDto),
 }
 
-impl MediaServerLibrarySelectorDto {
+impl MediaServerLibrarySelector {
     fn prepare(&mut self) {
         match self {
             Self::Name(name) => *name = name.trim().to_string(),
@@ -200,13 +197,13 @@ impl MediaServerLibrarySelectorDto {
 #[serde(deny_unknown_fields)]
 pub struct MediaServerInputConfigDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub libraries: Vec<MediaServerLibrarySelectorDto>,
+    pub libraries: Vec<MediaServerLibrarySelector>,
     #[serde(default, skip_serializing_if = "MediaServerCatalogConfigDto::is_default")]
     pub catalog: MediaServerCatalogConfigDto,
     #[serde(default, skip_serializing_if = "MediaServerPlaybackConfigDto::is_default")]
     pub playback: MediaServerPlaybackConfigDto,
     #[serde(default, skip_serializing_if = "is_default_media_server_image_policy")]
-    pub image_policy: MediaServerImagePolicyDto,
+    pub image_policy: MediaServerImagePolicy,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
@@ -231,7 +228,7 @@ impl Default for MediaServerInputConfigDto {
             libraries: Vec::new(),
             catalog: MediaServerCatalogConfigDto::default(),
             playback: MediaServerPlaybackConfigDto::default(),
-            image_policy: MediaServerImagePolicyDto::default(),
+            image_policy: MediaServerImagePolicy::default(),
             token: None,
             api_key: None,
             user_id: None,
@@ -262,7 +259,7 @@ impl MediaServerInputConfigDto {
         self.normalize();
         self.catalog.prepare(input_name)?;
 
-        if self.libraries.iter().any(MediaServerLibrarySelectorDto::is_empty) {
+        if self.libraries.iter().any(MediaServerLibrarySelector::is_empty) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media_server library selectors must not be empty (input: {input_name})"
             )));
@@ -309,7 +306,7 @@ mod tests {
 
     fn media_server_config_with_library() -> MediaServerInputConfigDto {
         MediaServerInputConfigDto {
-            libraries: vec![MediaServerLibrarySelectorDto::Name("Movies".to_string())],
+            libraries: vec![MediaServerLibrarySelector::Name("Movies".to_string())],
             ..MediaServerInputConfigDto::default()
         }
     }
@@ -341,7 +338,7 @@ mod tests {
             ..ConfigInputDto::default()
         };
         let err = prepare_dto(&mut plex).expect_err("blank plex token should be rejected");
-        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
+        assert!(err.to_string().contains("requires media_server.account_token"));
     }
 
     #[test]
@@ -374,7 +371,7 @@ mod tests {
         assert!(media_server.playback.direct_play_only);
         assert!(!media_server.playback.allow_transcode);
         assert!(!media_server.playback.preflight_streams);
-        assert_eq!(media_server.image_policy, MediaServerImagePolicyDto::ProxyOnDemand);
+        assert_eq!(media_server.image_policy, MediaServerImagePolicy::ProxyOnDemand);
         assert!(!media_server.allow_relay);
     }
 
@@ -386,9 +383,9 @@ mod tests {
 
         assert_eq!(
             media_server.libraries,
-            vec![MediaServerLibrarySelectorDto::Detailed(MediaServerLibrarySelectorDetailsDto {
+            vec![MediaServerLibrarySelector::Detailed(MediaServerLibrarySelectorDetailsDto {
                 key: Some("10".to_string()),
-                kind: Some(MediaServerLibraryKindDto::Movies),
+                kind: Some(MediaServerLibraryKind::Movies),
                 ..MediaServerLibrarySelectorDetailsDto::default()
             })]
         );
@@ -397,9 +394,9 @@ mod tests {
             .expect("numeric id selectors should deserialize as strings");
         assert_eq!(
             by_id.libraries,
-            vec![MediaServerLibrarySelectorDto::Detailed(MediaServerLibrarySelectorDetailsDto {
+            vec![MediaServerLibrarySelector::Detailed(MediaServerLibrarySelectorDetailsDto {
                 id: Some("42".to_string()),
-                kind: Some(MediaServerLibraryKindDto::TvShows),
+                kind: Some(MediaServerLibraryKind::TvShows),
                 ..MediaServerLibrarySelectorDetailsDto::default()
             })]
         );
@@ -473,7 +470,7 @@ mod tests {
             enabled: false,
             media_server: Some(MediaServerInputConfigDto {
                 token: Some(" token-value ".to_string()),
-                libraries: vec![MediaServerLibrarySelectorDto::Name("   ".to_string())],
+                libraries: vec![MediaServerLibrarySelector::Name("   ".to_string())],
                 catalog: MediaServerCatalogConfigDto { page_size: 0, ..MediaServerCatalogConfigDto::default() },
                 ..MediaServerInputConfigDto::default()
             }),
@@ -549,7 +546,7 @@ mod tests {
             ..ConfigInputDto::default()
         };
         let err = prepare_dto(&mut without_token).expect_err("plex token should be mandatory");
-        assert!(err.to_string().contains("requires media_server.account_token or media_server.token"));
+        assert!(err.to_string().contains("requires media_server.account_token"));
 
         let mut without_selector = ConfigInputDto {
             name: "plex_media_server".intern(),
@@ -596,6 +593,40 @@ mod tests {
 
         prepare_dto(&mut dto).expect("direct Plex URL should not require MyPlex server selector");
         assert_eq!(dto.input_type, InputType::Plex);
+    }
+
+    #[test]
+    fn prepare_rejects_plex_direct_url_without_server_token() {
+        let mut dto = ConfigInputDto {
+            name: "plex_media_server".intern(),
+            input_type: InputType::Plex,
+            url: "https://plex.example.invalid".to_string(),
+            media_server: Some(MediaServerInputConfigDto {
+                account_token: Some("account-token".to_string()),
+                ..media_server_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let err = prepare_dto(&mut dto).expect_err("direct Plex URL requires the PMS server token");
+        assert!(err.to_string().contains("requires media_server.token"));
+    }
+
+    #[test]
+    fn prepare_rejects_plex_discovery_without_account_token() {
+        let mut dto = ConfigInputDto {
+            name: "plex_media_server".intern(),
+            input_type: InputType::Plex,
+            media_server: Some(MediaServerInputConfigDto {
+                token: Some("server-token".to_string()),
+                server_id: Some("server".to_string()),
+                ..media_server_config_with_library()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let err = prepare_dto(&mut dto).expect_err("Plex discovery requires the MyPlex account token");
+        assert!(err.to_string().contains("requires media_server.account_token"));
     }
 
     #[test]

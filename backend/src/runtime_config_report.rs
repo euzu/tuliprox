@@ -187,10 +187,7 @@ fn serialize_report_value(value: &Value, format: RuntimeConfigReportFormat) -> R
             .map_err(|err| TuliproxError::Config(format!("Failed to serialize runtime config report as JSON: {err}"))),
         RuntimeConfigReportFormat::Yaml => {
             let mut serialized = String::new();
-            let options = serde_saphyr::SerializerOptions {
-                prefer_block_scalars: false,
-                ..Default::default()
-            };
+            let options = serde_saphyr::ser_options! {};
             serde_saphyr::to_fmt_writer_with_options(&mut serialized, value, options)
                 .map_err(|err| TuliproxError::Config(format!("Failed to serialize runtime config report as YAML: {err}")))?;
             Ok(serialized)

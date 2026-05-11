@@ -22,6 +22,7 @@ use shared::{
     utils::generate_random_string,
 };
 use std::{net::IpAddr, rc::Rc};
+use strum::IntoEnumIterator;
 use yew::prelude::*;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 1;
@@ -138,7 +139,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         use_reducer(|| UserFormState { form: ProxyUserCredentialsDto::default(), modified: false });
 
     let proxy_user_status = use_memo(form_state.data().status, |status| {
-        enum_iterator::all::<ProxyUserStatus>()
+        ProxyUserStatus::iter()
             .map(|s| DropDownOption {
                 id: s.to_string(),
                 label: html! { <UserStatus status={Some(s)} /> },

@@ -10,59 +10,42 @@ use crate::{
         get_provider_id, obfuscate_text, Internable,
     },
 };
-use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Formatter, Write},
     str::FromStr,
     sync::Arc,
 };
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 // https://de.wikipedia.org/wiki/M3U
 // https://siptv.eu/howto/playlist.html
 
 pub type VirtualId = u32;
 
-#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, Display, EnumString, AsRefStr)]
 #[repr(u8)]
 pub enum XtreamCluster {
     #[default]
+    #[strum(serialize = "Live", serialize = "live")]
     Live = 1,
+
+    #[strum(serialize = "Video", serialize = "video", serialize = "vod", serialize = "movie")]
     Video = 2,
+
+    #[strum(serialize = "Series", serialize = "series")]
     Series = 3,
 }
 
 impl XtreamCluster {
-    pub const fn as_str(&self) -> &str {
-        match self {
-            Self::Live => "Live",
-            Self::Video => "Video",
-            Self::Series => "Series",
-        }
-    }
-    pub const fn as_stream_type(&self) -> &str {
+    pub fn as_str(&self) -> &str { self.as_ref() }
+
+    pub fn as_stream_type(&self) -> &str {
         match self {
             Self::Live => "live",
             Self::Video => "movie",
             Self::Series => "series",
         }
     }
-}
-
-impl FromStr for XtreamCluster {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "live" => Ok(XtreamCluster::Live),
-            "video" | "vod" | "movie" => Ok(XtreamCluster::Video),
-            "series" => Ok(XtreamCluster::Series),
-            _ => Err(TuliproxError::Config(format!("Invalid XtreamCluster: {s}"))),
-        }
-    }
-}
-
-impl Display for XtreamCluster {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.as_str()) }
 }
 
 impl TryFrom<PlaylistItemType> for XtreamCluster {
@@ -82,7 +65,7 @@ impl TryFrom<PlaylistItemType> for XtreamCluster {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, Sequence)]
+#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, EnumIter)]
 #[repr(u8)]
 pub enum PlaylistItemType {
     #[default]

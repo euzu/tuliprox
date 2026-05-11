@@ -11,9 +11,13 @@ use crate::{
     },
     auth::Fingerprint,
     media_server::{
-        playback::{media_server_stream_response as open_media_server_proxy_stream_response, parse_media_server_stream_ref},
+        playback::{
+            media_server_image_response as open_media_server_proxy_image_response,
+            media_server_stream_response as open_media_server_proxy_stream_response,
+            parse_media_server_image_ref, parse_media_server_stream_ref,
+        },
         plex::client::PlexCatalogClient,
-        MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
+        MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
     model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
     utils::{
@@ -3150,6 +3154,15 @@ pub async fn resource_response(
     if resource_url.is_empty() {
         return StatusCode::NO_CONTENT.into_response();
     }
+    if resource_url.starts_with("media-server://image/") {
+        return match open_media_server_image_resource(app_state, resource_url).await {
+            Ok(response) => response,
+            Err(err) => {
+                error!("Can't open media-server image: {err}");
+                StatusCode::BAD_GATEWAY.into_response()
+            }
+        };
+    }
     let filter: HeaderFilter = Some(Box::new(|key| key != "if-none-match" && key != "if-modified-since"));
     let req_headers = get_headers_from_request(req_headers, &filter);
     if let Some(cache) = app_state.cache.load().as_ref() {
@@ -3175,6 +3188,56 @@ pub async fn resource_response(
     }
     error!("Url is malformed {}", sanitize_sensitive_info(resource_url));
     StatusCode::BAD_REQUEST.into_response()
+}
+
+async fn open_media_server_image_resource(
+    app_state: &Arc<AppState>,
+    resource_url: &str,
+) -> Result<Response<Body>, MediaServerError> {
+    let image_ref = parse_media_server_image_ref(resource_url)?;
+    let input_name = media_server_image_input_name(&image_ref);
+    let input = app_state.app_config.get_input_by_name(input_name).ok_or_else(|| {
+        MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+            .provider("media-server")
+            .detail("media-server image input was not found")
+    })?;
+    let http_client = MediaServerHttpClient::new(app_state.http_client.load().as_ref().clone());
+
+    let response = match input.input_type {
+        InputType::Plex => {
+            let client = PlexCatalogClient::from_input(&input, http_client)?;
+            open_media_server_proxy_image_response(&client, &image_ref).await?
+        }
+        InputType::Emby | InputType::Jellyfin => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("media-server image proxy is not implemented for this input type"));
+        }
+        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+                .provider("media-server")
+                .detail("media-server image input is not backed by a media-server input"));
+        }
+    };
+
+    let mut builder = Response::builder().status(response.status);
+    for (key, value) in &response.headers {
+        builder = builder.header(key, value);
+    }
+    let body = response.body.map_err(|err| StreamError::Stream(err.to_string()));
+    builder.body(Body::from_stream(body)).map_err(|err| {
+        MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .provider("media-server")
+            .detail(format!("media-server image response build failed: {err}"))
+    })
+}
+
+fn media_server_image_input_name(image_ref: &MediaServerImageRef) -> &Arc<str> {
+    match image_ref {
+        MediaServerImageRef::Emby { input_name, .. }
+        | MediaServerImageRef::Jellyfin { input_name, .. }
+        | MediaServerImageRef::Plex { input_name, .. } => input_name,
+    }
 }
 
 pub fn separate_number_and_remainder(input: &str) -> (&str, Option<&str>) {

@@ -8,12 +8,12 @@ use crate::{
         arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
         default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
         deserialize_timestamp, get_credentials_from_url_str, get_trimmed_string, is_blank_optional_string,
-        is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false, is_true,
-        is_zero_i16, is_zero_u16, parse_duration_seconds, parse_provider_scheme_url_parts, sanitize_sensitive_info,
-        serialize_option_vec_flow_map_items, trim_last_slash, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+        is_default_probe_delay_secs, is_default_probe_live_interval, is_default_resolve_delay_secs, is_false,
+        is_non_blank_optional_string, is_true, is_zero_i16, is_zero_u16, parse_duration_seconds,
+        parse_provider_scheme_url_parts, sanitize_sensitive_info, serialize_option_vec_flow_map_items, trim_last_slash,
+        Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
     },
 };
-use enum_iterator::Sequence;
 use log::warn;
 use std::{
     collections::{HashMap, HashSet},
@@ -22,6 +22,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 
 #[macro_export]
 macro_rules! apply_batch_aliases {
@@ -81,36 +82,35 @@ macro_rules! check_provider_scheme_url {
     };
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Default,
+    EnumIter,
+    Display,
+    EnumString,
+    AsRefStr,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum InputType {
-    #[serde(rename = "m3u")]
     #[default]
     M3u,
-    #[serde(rename = "xtream")]
     Xtream,
-    #[serde(rename = "m3u_batch")]
     M3uBatch,
-    #[serde(rename = "xtream_batch")]
     XtreamBatch,
-    #[serde(rename = "library")]
     Library,
-    #[serde(rename = "emby")]
     Emby,
-    #[serde(rename = "jellyfin")]
     Jellyfin,
-    #[serde(rename = "plex")]
     Plex,
 }
 
 impl InputType {
-    const M3U: &'static str = "m3u";
-    const XTREAM: &'static str = "xtream";
-    const M3U_BATCH: &'static str = "m3u_batch";
-    const XTREAM_BATCH: &'static str = "xtream_batch";
-    const LIBRARY: &'static str = "library";
-    const EMBY: &'static str = "emby";
-    const JELLYFIN: &'static str = "jellyfin";
-    const PLEX: &'static str = "plex";
     pub fn is_xtream(&self) -> bool { matches!(self, Self::Xtream | Self::XtreamBatch) }
     pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
     pub fn uses_standard_input_url(&self) -> bool {
@@ -121,52 +121,22 @@ impl InputType {
     pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
 }
 
-impl Display for InputType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::M3u => Self::M3U,
-                Self::Xtream => Self::XTREAM,
-                Self::M3uBatch => Self::M3U_BATCH,
-                Self::XtreamBatch => Self::XTREAM_BATCH,
-                Self::Library => Self::LIBRARY,
-                Self::Emby => Self::EMBY,
-                Self::Jellyfin => Self::JELLYFIN,
-                Self::Plex => Self::PLEX,
-            }
-        )
-    }
-}
-
-impl FromStr for InputType {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq(Self::M3U) {
-            Ok(Self::M3u)
-        } else if s.eq(Self::XTREAM) {
-            Ok(Self::Xtream)
-        } else if s.eq(Self::M3U_BATCH) {
-            Ok(Self::M3uBatch)
-        } else if s.eq(Self::XTREAM_BATCH) {
-            Ok(Self::XtreamBatch)
-        } else if s.eq(Self::LIBRARY) {
-            Ok(Self::Library)
-        } else if s.eq(Self::EMBY) {
-            Ok(Self::Emby)
-        } else if s.eq(Self::JELLYFIN) {
-            Ok(Self::Jellyfin)
-        } else if s.eq(Self::PLEX) {
-            Ok(Self::Plex)
-        } else {
-            Err(TuliproxError::ConfigInput(format!("Unknown InputType: {}", s)))
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    EnumIter,
+    PartialEq,
+    Eq,
+    Default,
+    Display,
+    EnumString,
+    AsRefStr,
+)]
+#[strum(serialize_all = "UPPERCASE")]
+#[serde(rename_all = "UPPERCASE")]
 pub enum InputFetchMethod {
     #[default]
     GET,
@@ -174,37 +144,7 @@ pub enum InputFetchMethod {
 }
 
 impl InputFetchMethod {
-    const GET_METHOD: &'static str = "GET";
-    const POST_METHOD: &'static str = "POST";
-
     pub fn is_default(value: &InputFetchMethod) -> bool { matches!(value, Self::GET) }
-}
-
-impl Display for InputFetchMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::GET => Self::GET_METHOD,
-                Self::POST => Self::POST_METHOD,
-            }
-        )
-    }
-}
-
-impl FromStr for InputFetchMethod {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        if s.eq(Self::GET_METHOD) {
-            Ok(Self::GET)
-        } else if s.eq(Self::POST_METHOD) {
-            Ok(Self::POST)
-        } else {
-            Err(TuliproxError::ConfigInput(format!("Unknown Fetch Method: {}", s)))
-        }
-    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -671,15 +611,22 @@ impl ConfigInputDto {
                 }
             }
             InputType::Plex => {
-                if !media_server.has_any_plex_token() {
+                if trimmed_url.is_empty() {
+                    if !is_non_blank_optional_string(&media_server.account_token) {
+                        return Err(TuliproxError::ConfigInput(format!(
+                            "media-server input type plex without input.url requires media_server.account_token for MyPlex discovery (input: {})",
+                            self.name
+                        )));
+                    }
+                    if !media_server.has_plex_server_selector() {
+                        return Err(TuliproxError::ConfigInput(format!(
+                            "media-server input type plex requires a server selector such as media_server.server_id or media_server.server_name when input.url is omitted (input: {})",
+                            self.name
+                        )));
+                    }
+                } else if !is_non_blank_optional_string(&media_server.token) {
                     return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires media_server.account_token or media_server.token (input: {})",
-                        self.name
-                    )));
-                }
-                if trimmed_url.is_empty() && !media_server.has_plex_server_selector() {
-                    return Err(TuliproxError::ConfigInput(format!(
-                        "media-server input type plex requires a server selector such as media_server.server_id or media_server.server_name when input.url is omitted (input: {})",
+                        "media-server input type plex with input.url requires media_server.token for direct PMS access (input: {})",
                         self.name
                     )));
                 }
@@ -998,49 +945,56 @@ pub fn is_default_dns_prefer(v: &DnsPrefer) -> bool { *v == DnsPrefer::default()
 pub fn is_default_on_resolve_error(v: &OnResolveErrorPolicy) -> bool { *v == OnResolveErrorPolicy::default() }
 pub fn is_default_on_connect_error(v: &OnConnectErrorPolicy) -> bool { *v == OnConnectErrorPolicy::default() }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, EnumString, AsRefStr, Display,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderUrlSelectionPolicy {
-    #[serde(rename = "resume_last_working")]
     #[default]
     ResumeLastWorking,
-    #[serde(rename = "restart_from_first")]
     RestartFromFirst,
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, EnumString, AsRefStr, Display,
+)]
+#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum DnsPrefer {
-    #[serde(rename = "ipv4")]
     Ipv4,
-    #[serde(rename = "ipv6")]
     Ipv6,
-    #[serde(rename = "system")]
     #[default]
     System,
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, EnumString, AsRefStr, Display)]
+#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum DnsScheme {
-    #[serde(rename = "http")]
     Http,
-    #[serde(rename = "https")]
     Https,
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, EnumString, AsRefStr, Display,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum OnResolveErrorPolicy {
-    #[serde(rename = "keep_last_good")]
     #[default]
     KeepLastGood,
-    #[serde(rename = "fallback_to_hostname")]
     FallbackToHostname,
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, EnumString, AsRefStr, Display,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum OnConnectErrorPolicy {
-    #[serde(rename = "try_next_ip")]
     #[default]
     TryNextIp,
-    #[serde(rename = "rotate_provider_url")]
     RotateProviderUrl,
 }
 
@@ -1301,7 +1255,7 @@ mod tests {
         let provider: ConfigProviderDto = serde_json::from_str(
             r#"{"name":"provider-a","urls":["http://primary.example.com"],"provider_url_selection_policy":"restart_from_first"}"#,
         )
-        .expect("provider dto should deserialize");
+            .expect("provider dto should deserialize");
 
         assert_eq!(provider.provider_url_selection_policy, ProviderUrlSelectionPolicy::RestartFromFirst);
     }

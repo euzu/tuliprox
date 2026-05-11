@@ -151,6 +151,59 @@ pub fn parse_media_server_stream_ref(input_name: &Arc<str>, item_url: &str) -> R
     }
 }
 
+pub fn parse_media_server_image_ref(resource_url: &str) -> Result<MediaServerImageRef, MediaServerError> {
+    let Some(rest) = resource_url.strip_prefix("media-server://image/") else {
+        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("resource URL is not a media server image URL"));
+    };
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let parts: Vec<String> = path.split('/').map(unescape_internal_url_component).collect();
+    if parts.len() < 4 {
+        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("media server image URL is missing required path parts"));
+    }
+
+    match parts[0].as_str() {
+        "emby" => Ok(MediaServerImageRef::Emby {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            server_id: Arc::<str>::from(parts[2].as_str()),
+            item_id: Arc::<str>::from(parts[3].as_str()),
+            image_kind: query_value(query, "image_kind")
+                .map(Arc::<str>::from)
+                .ok_or_else(|| {
+                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                        .detail("emby media-server image URL is missing image_kind")
+                })?,
+            tag: query_value(query, "tag").map(Arc::<str>::from),
+        }),
+        "jellyfin" => Ok(MediaServerImageRef::Jellyfin {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            server_id: Arc::<str>::from(parts[2].as_str()),
+            item_id: Arc::<str>::from(parts[3].as_str()),
+            image_kind: query_value(query, "image_kind")
+                .map(Arc::<str>::from)
+                .ok_or_else(|| {
+                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                        .detail("jellyfin media-server image URL is missing image_kind")
+                })?,
+            tag: query_value(query, "tag").map(Arc::<str>::from),
+        }),
+        "plex" => Ok(MediaServerImageRef::Plex {
+            input_name: Arc::<str>::from(parts[1].as_str()),
+            server_id: Arc::<str>::from(parts[2].as_str()),
+            rating_key: Arc::<str>::from(parts[3].as_str()),
+            image_path: query_value(query, "image_path")
+                .map(Arc::<str>::from)
+                .ok_or_else(|| {
+                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                        .detail("plex media-server image URL is missing image_path")
+                })?,
+        }),
+        _ => Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+            .detail("unsupported media server image URL scheme")),
+    }
+}
+
 fn query_value(query: &str, key: &str) -> Option<String> {
     url::form_urlencoded::parse(query.as_bytes())
         .find_map(|(name, value)| (name == key).then(|| value.into_owned()))

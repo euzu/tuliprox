@@ -1,6 +1,6 @@
 use crate::media_server::{
     MediaServerAudioTechnicalFacts, MediaServerCatalogSnapshot, MediaServerDescriptiveFacts, MediaServerEpisode,
-    MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason, MediaServerSeries, MediaServerStreamRef,
+    MediaServerImageRef, MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason, MediaServerSeries, MediaServerStreamRef,
     MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
 };
 use serde_json::{Map, Number, Value};
@@ -20,6 +20,7 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
     if !snapshot.movies.is_empty() {
         groups.push(PlaylistGroup {
             id: 1,
+            // TODO Presa  read from config like LibraryPlaylistConfig
             title: "Media Server Movies".intern(),
             channels: snapshot.movies.iter().map(media_server_movie_to_playlist_item).collect(),
             xtream_cluster: XtreamCluster::Video,
@@ -45,6 +46,7 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
     if !series_channels.is_empty() {
         groups.push(PlaylistGroup {
             id: next_group_id(groups.len()),
+            // TODO Presa  read from config like LibraryPlaylistConfig
             title: "Media Server Series".intern(),
             channels: series_channels,
             xtream_cluster: XtreamCluster::Series,
@@ -139,7 +141,8 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
     );
     let uuid = generate_provider_playlist_uuid(&movie.input_name, &stable_id, PlaylistItemType::Video);
     let release_date = movie.release_date.clone().or_else(|| release_date_from_year(movie.year));
-    let details = movie_details(movie, release_date);
+    let image_url = movie.image_ref.as_ref().map(media_server_image_ref_to_internal_url).map(Arc::<str>::from);
+    let details = movie_details(movie, release_date, image_url.clone());
     let rating = media_server_rating(movie.descriptive_facts.as_ref());
 
     PlaylistItem {
@@ -156,7 +159,7 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
             additional_properties: Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                 name: movie.title.clone(),
                 stream_id: 0,
-                stream_icon: "".intern(),
+                stream_icon: image_url.clone().unwrap_or_else(|| "".intern()),
                 direct_source: "".intern(),
                 category_id: 0,
                 custom_sid: None,
@@ -186,6 +189,7 @@ fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&
     let uuid = generate_provider_playlist_uuid(&series.input_name, &stable_id, PlaylistItemType::SeriesInfo);
     let release_date = series.release_date.clone().or_else(|| release_date_from_year(series.year));
     let rating = media_server_rating(series.descriptive_facts.as_ref()).unwrap_or_default();
+    let image_url = series.image_ref.as_ref().map(media_server_image_ref_to_internal_url).map(Arc::<str>::from);
 
     PlaylistItem {
         header: PlaylistItemHeader {
@@ -201,7 +205,7 @@ fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&
             additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
                 name: series.title.clone(),
                 series_id: 0,
-                cover: "".intern(),
+                cover: image_url.unwrap_or_else(|| "".intern()),
                 backdrop_path: None,
                 category_id: 0,
                 cast: joined_values(series.descriptive_facts.as_ref().map(|facts| facts.cast.as_slice()))
@@ -245,6 +249,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
     };
     let technical = episode.technical_facts.as_ref();
     let plot = episode.descriptive_facts.as_ref().and_then(|facts| facts.summary.clone());
+    let image_url = episode.image_ref.as_ref().map(media_server_image_ref_to_internal_url).map(Arc::<str>::from);
 
     PlaylistItem {
         header: PlaylistItemHeader {
@@ -267,7 +272,7 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
                 series_release_date: None,
                 plot,
                 tmdb: provider_tmdb_id(&episode.provider_hints),
-                movie_image: "".intern(),
+                movie_image: image_url.unwrap_or_else(|| "".intern()),
                 container_extension: media_server_container_extension(technical),
                 video: technical.and_then(media_server_video_json),
                 audio: technical.and_then(media_server_audio_json),
@@ -277,7 +282,11 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
     }
 }
 
-fn movie_details(movie: &MediaServerMovie, release_date: Option<Arc<str>>) -> Option<VideoStreamDetailProperties> {
+fn movie_details(
+    movie: &MediaServerMovie,
+    release_date: Option<Arc<str>>,
+    image_url: Option<Arc<str>>,
+) -> Option<VideoStreamDetailProperties> {
     let technical = movie.technical_facts.as_ref();
     let descriptive = movie.descriptive_facts.as_ref();
     let video = technical.and_then(media_server_video_json);
@@ -290,8 +299,8 @@ fn movie_details(movie: &MediaServerMovie, release_date: Option<Arc<str>>) -> Op
     let details = VideoStreamDetailProperties {
         kinopoisk_url: None,
         o_name: descriptive.and_then(|facts| facts.original_title.clone()),
-        cover_big: None,
-        movie_image: None,
+        cover_big: image_url.clone(),
+        movie_image: image_url,
         release_date,
         episode_run_time: technical.and_then(|facts| facts.duration_secs.map(|duration| duration / 60)),
         youtube_trailer: None,
@@ -503,6 +512,55 @@ pub fn media_server_stream_ref_to_internal_url(stream_ref: &MediaServerStreamRef
     }
 }
 
+pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -> String {
+    match image_ref {
+        MediaServerImageRef::Emby {
+            input_name,
+            server_id,
+            item_id,
+            image_kind,
+            tag,
+        } => format!(
+            "media-server://image/emby/{}/{}/{}?image_kind={}{}",
+            escape_internal_url_component(input_name),
+            escape_internal_url_component(server_id),
+            escape_internal_url_component(item_id),
+            escape_internal_url_component(image_kind),
+            tag.as_ref()
+                .map(|tag| format!("&tag={}", escape_internal_url_component(tag)))
+                .unwrap_or_default()
+        ),
+        MediaServerImageRef::Jellyfin {
+            input_name,
+            server_id,
+            item_id,
+            image_kind,
+            tag,
+        } => format!(
+            "media-server://image/jellyfin/{}/{}/{}?image_kind={}{}",
+            escape_internal_url_component(input_name),
+            escape_internal_url_component(server_id),
+            escape_internal_url_component(item_id),
+            escape_internal_url_component(image_kind),
+            tag.as_ref()
+                .map(|tag| format!("&tag={}", escape_internal_url_component(tag)))
+                .unwrap_or_default()
+        ),
+        MediaServerImageRef::Plex {
+            input_name,
+            server_id,
+            rating_key,
+            image_path,
+        } => format!(
+            "media-server://image/plex/{}/{}/{}?image_path={}",
+            escape_internal_url_component(input_name),
+            escape_internal_url_component(server_id),
+            escape_internal_url_component(rating_key),
+            escape_internal_url_component(image_path)
+        ),
+    }
+}
+
 fn escape_internal_url_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -638,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_media_server_series_and_seasons_as_catalog_anchors_without_image_projection() {
+    fn maps_media_server_series_and_seasons_as_catalog_anchors() {
         let groups = media_server_catalog_snapshot_to_playlist(&MediaServerCatalogSnapshot {
             series: vec![series()],
             seasons: vec![season()],
@@ -802,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_project_media_server_image_refs_without_image_resource_contract() {
+    fn projects_media_server_image_refs_as_internal_resource_urls() {
         let mut movie = movie();
         movie.image_ref = Some(MediaServerImageRef::Plex {
             input_name: "media_server".into(),
@@ -837,22 +895,37 @@ mod tests {
         let Some(StreamProperties::Video(video)) = &groups[0].channels[0].header.additional_properties else {
             panic!("expected video properties");
         };
-        assert_eq!(video.stream_icon.as_ref(), "");
+        assert_eq!(
+            video.stream_icon.as_ref(),
+            "media-server://image/plex/media_server/server%2Fone/rating?image_path=%2Flibrary%2Fmetadata%2Frating%2Fthumb%2Fredacted"
+        );
         let details = video.details.as_ref().expect("movie year should create details");
-        assert!(details.cover_big.is_none());
-        assert!(details.movie_image.is_none());
+        assert_eq!(
+            details.cover_big.as_deref(),
+            Some("media-server://image/plex/media_server/server%2Fone/rating?image_path=%2Flibrary%2Fmetadata%2Frating%2Fthumb%2Fredacted")
+        );
+        assert_eq!(
+            details.movie_image.as_deref(),
+            Some("media-server://image/plex/media_server/server%2Fone/rating?image_path=%2Flibrary%2Fmetadata%2Frating%2Fthumb%2Fredacted")
+        );
         assert!(details.backdrop_path.is_none());
 
         let Some(StreamProperties::Series(series)) = &groups[1].channels[0].header.additional_properties else {
             panic!("expected series properties");
         };
-        assert_eq!(series.cover.as_ref(), "");
+        assert_eq!(
+            series.cover.as_ref(),
+            "media-server://image/jellyfin/media_server/server/series?image_kind=Primary&tag=tag-redacted"
+        );
         assert!(series.backdrop_path.is_none());
 
         let Some(StreamProperties::Episode(episode)) = &groups[1].channels[1].header.additional_properties else {
             panic!("expected episode properties");
         };
-        assert_eq!(episode.movie_image.as_ref(), "");
+        assert_eq!(
+            episode.movie_image.as_ref(),
+            "media-server://image/emby/media_server/server/episode?image_kind=Primary&tag=tag-redacted"
+        );
     }
 
     #[test]
