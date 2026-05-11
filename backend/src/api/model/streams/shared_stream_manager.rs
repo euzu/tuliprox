@@ -250,6 +250,10 @@ impl SharedStreamState {
             let mut startup_stats_logged = false;
 
             loop {
+                // Pre-create the notified future before locking the buffer to avoid
+                // a race where notify_waiters() fires between lock release and await.
+                let notified_fut = live_notification.notified();
+
                 let read = {
                     let buffer = burst_buffer.lock().await;
                     buffer.read_from(next_sequence)
@@ -338,7 +342,7 @@ impl SharedStreamState {
                         }
                     }
 
-                    () = live_notification.notified() => {}
+                    () = notified_fut => {}
 
                     () = preempted_token.cancelled() => {
                         if let Some(mut fallback) = low_priority_preempted {

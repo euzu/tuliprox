@@ -739,6 +739,7 @@ impl ActiveUserManager {
             let username = user_connections
                 .key_by_addr
                 .get(addr)
+                .filter(|reg| !reg.username.is_empty())
                 .map(|reg| reg.username.clone())
                 .or_else(|| {
                     stream_uid.and_then(|uid| {
@@ -746,7 +747,7 @@ impl ActiveUserManager {
                             connection_data
                                 .streams
                                 .iter()
-                                .any(|stream| stream.uid == uid)
+                                .any(|stream| stream.uid == uid && stream.addr == *addr)
                                 .then(|| username.clone())
                         })
                     })
@@ -761,7 +762,9 @@ impl ActiveUserManager {
                 let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
                 if let Some(stream_idx) = connection_data.streams.iter().position(|stream| {
                     !stream.preserved
-                        && stream_uid.map_or(stream.addr == *addr, |uid| stream.uid == uid)
+                        && stream_uid.map_or(stream.addr == *addr, |uid| {
+                                                    stream.uid == uid && stream.addr == *addr
+                                                })
                 })
                 {
                     let migrated_addr = connection_data.streams[stream_idx]

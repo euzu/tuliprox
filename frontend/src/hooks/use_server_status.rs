@@ -41,7 +41,7 @@ fn find_stream_update_index(streams: &[StreamInfo], updated_stream: &StreamInfo)
     }
 
     if updated_stream.session_token.is_none() {
-        return streams.iter().position(|stream| stream.addr == updated_stream.addr);
+        return streams.iter().position(|stream| stream.addr == updated_stream.addr && stream.session_token.is_none());
     }
 
     None
