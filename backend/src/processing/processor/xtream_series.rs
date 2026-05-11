@@ -865,7 +865,7 @@ pub async fn update_series_metadata(
                 if !title.is_empty() {
                     trace!("Resolving TMDB for Series using Playlist Title '{title}' (ID: {display_id})...");
                     meta = meta_resolver
-                        .resolve_from_title(title, properties.tmdb, false, missing_fact_policy.tmdb_supplier_enabled())
+                        .resolve_from_title(title, properties.tmdb, false, true)
                         .await;
                     tried_title = true;
                 }
@@ -881,7 +881,7 @@ pub async fn update_series_metadata(
                             &properties.name,
                             properties.tmdb,
                             false,
-                            missing_fact_policy.tmdb_supplier_enabled(),
+                            true,
                         )
                         .await;
                 }

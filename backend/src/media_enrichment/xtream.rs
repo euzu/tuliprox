@@ -1,7 +1,7 @@
 use crate::{
     library::MediaMetadata,
     media_enrichment::{
-        facts::{build_missing_fact_patch, MediaFactPatch, MediaItemFacts, MediaItemKind},
+        facts::{build_missing_fact_patch, MediaFactPatch, MediaItemFacts},
         parsed_title::supplied_release_year_from_title,
         tmdb::supplied_facts_from_metadata,
     },
@@ -9,19 +9,64 @@ use crate::{
 use shared::model::{SeriesStreamProperties, VideoStreamDetailProperties, VideoStreamProperties};
 use std::sync::Arc;
 
+trait FactSource {
+    fn current_facts(&self) -> MediaItemFacts;
+}
+
+impl FactSource for VideoStreamProperties {
+    fn current_facts(&self) -> MediaItemFacts { video_current_facts(self) }
+}
+
+impl FactSource for SeriesStreamProperties {
+    fn current_facts(&self) -> MediaItemFacts { series_current_facts(self) }
+}
+
+fn fact_patch_from_metadata<S: FactSource>(properties: &S, metadata: &MediaMetadata) -> MediaFactPatch {
+    build_missing_fact_patch(&properties.current_facts(), &supplied_facts_from_metadata(metadata))
+}
+
+fn fact_patch_from_title<S: FactSource>(properties: &S, title: &str) -> Option<(u32, MediaFactPatch)> {
+    let current = properties.current_facts();
+    let (year, supplied) = supplied_release_year_from_title(current.kind, title)?;
+    Some((year, build_missing_fact_patch(&current, &supplied)))
+}
+
+fn fact_patch_from_title_candidates<'a, S, I>(properties: &S, titles: I) -> Option<(&'a str, u32, MediaFactPatch)>
+where
+    S: FactSource,
+    I: IntoIterator<Item = &'a str>,
+{
+    titles.into_iter().filter(|title| !title.is_empty()).find_map(|title| {
+        let (year, patch) = fact_patch_from_title(properties, title)?;
+        (!patch.is_empty()).then_some((title, year, patch))
+    })
+}
+
+pub fn distinct_non_empty_title_candidates<'a, I>(titles: I) -> Vec<&'a str>
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    let mut result = Vec::new();
+    for title in titles.into_iter().flatten().filter(|title| !title.is_empty()) {
+        if !result.contains(&title) {
+            result.push(title);
+        }
+    }
+    result
+}
+
 pub fn video_fact_patch_from_metadata(
     properties: &VideoStreamProperties,
     metadata: &MediaMetadata,
 ) -> MediaFactPatch {
-    build_missing_fact_patch(&video_current_facts(properties), &supplied_facts_from_metadata(metadata))
+    fact_patch_from_metadata(properties, metadata)
 }
 
 pub fn video_fact_patch_from_title(
     properties: &VideoStreamProperties,
     title: &str,
 ) -> Option<(u32, MediaFactPatch)> {
-    let (year, supplied) = supplied_release_year_from_title(MediaItemKind::Movie, title)?;
-    Some((year, build_missing_fact_patch(&video_current_facts(properties), &supplied)))
+    fact_patch_from_title(properties, title)
 }
 
 pub fn video_fact_patch_from_title_candidates<'a, I>(
@@ -31,25 +76,21 @@ pub fn video_fact_patch_from_title_candidates<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
-    titles.into_iter().filter(|title| !title.is_empty()).find_map(|title| {
-        let (year, patch) = video_fact_patch_from_title(properties, title)?;
-        (!patch.is_empty()).then_some((title, year, patch))
-    })
+    fact_patch_from_title_candidates(properties, titles)
 }
 
 pub fn series_fact_patch_from_metadata(
     properties: &SeriesStreamProperties,
     metadata: &MediaMetadata,
 ) -> MediaFactPatch {
-    build_missing_fact_patch(&series_current_facts(properties), &supplied_facts_from_metadata(metadata))
+    fact_patch_from_metadata(properties, metadata)
 }
 
 pub fn series_fact_patch_from_title(
     properties: &SeriesStreamProperties,
     title: &str,
 ) -> Option<(u32, MediaFactPatch)> {
-    let (year, supplied) = supplied_release_year_from_title(MediaItemKind::Series, title)?;
-    Some((year, build_missing_fact_patch(&series_current_facts(properties), &supplied)))
+    fact_patch_from_title(properties, title)
 }
 
 pub fn series_fact_patch_from_title_candidates<'a, I>(
@@ -59,10 +100,7 @@ pub fn series_fact_patch_from_title_candidates<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
-    titles.into_iter().filter(|title| !title.is_empty()).find_map(|title| {
-        let (year, patch) = series_fact_patch_from_title(properties, title)?;
-        (!patch.is_empty()).then_some((title, year, patch))
-    })
+    fact_patch_from_title_candidates(properties, titles)
 }
 
 pub fn apply_fact_patch_to_video(properties: &mut VideoStreamProperties, patch: &MediaFactPatch) -> bool {
@@ -76,14 +114,19 @@ pub fn apply_fact_patch_to_video(properties: &mut VideoStreamProperties, patch: 
     }
 
     if let Some(release_date) = patch.release_date.as_deref() {
-        if properties.details.is_none() {
-            properties.details = Some(VideoStreamDetailProperties::default());
-        }
-        if let Some(details) = properties.details.as_mut() {
-            if details.release_date.is_none() {
+        match properties.details.as_mut() {
+            Some(details) if details.release_date.is_none() => {
                 details.release_date = Some(Arc::<str>::from(release_date));
                 changed = true;
             }
+            None => {
+                properties.details = Some(VideoStreamDetailProperties {
+                    release_date: Some(Arc::<str>::from(release_date)),
+                    ..VideoStreamDetailProperties::default()
+                });
+                changed = true;
+            }
+            Some(_) => {}
         }
     }
 
@@ -113,12 +156,12 @@ pub fn apply_fact_patch_to_series(properties: &mut SeriesStreamProperties, patch
 fn video_current_facts(properties: &VideoStreamProperties) -> MediaItemFacts {
     MediaItemFacts::movie(
         properties.tmdb,
-        properties.details.as_ref().and_then(|details| details.release_date.as_ref()).map(ToString::to_string),
+        properties.details.as_ref().and_then(|details| details.release_date.as_ref()).map(Arc::clone),
     )
 }
 
 fn series_current_facts(properties: &SeriesStreamProperties) -> MediaItemFacts {
-    MediaItemFacts::series(properties.tmdb, properties.release_date.as_ref().map(ToString::to_string))
+    MediaItemFacts::series(properties.tmdb, properties.release_date.as_ref().map(Arc::clone))
 }
 
 #[cfg(test)]
@@ -170,6 +213,18 @@ mod tests {
         assert_eq!(year, 1999);
         assert_eq!(patch.release_date.as_deref(), Some("1999-01-01"));
         assert!(patch.tmdb_id.is_none());
+    }
+
+    #[test]
+    fn title_candidates_drop_empty_values_and_preserve_first_distinct_names() {
+        let candidates = distinct_non_empty_title_candidates([
+            Some(""),
+            Some("The Matrix 1999"),
+            Some("The Matrix 1999"),
+            Some("Matrix 1999"),
+        ]);
+
+        assert_eq!(candidates, vec!["The Matrix 1999", "Matrix 1999"]);
     }
 
     #[test]

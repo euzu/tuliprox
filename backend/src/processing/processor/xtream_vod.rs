@@ -1,9 +1,10 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
-use crate::library::{MetadataResolver, MetadataStorage};
+use crate::library::{MediaMetadata, MetadataResolver, MetadataStorage};
 use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
 use crate::media_enrichment::xtream::{
-    apply_fact_patch_to_video, video_fact_patch_from_metadata, video_fact_patch_from_title_candidates,
+    apply_fact_patch_to_video, distinct_non_empty_title_candidates, video_fact_patch_from_metadata,
+    video_fact_patch_from_title_candidates,
 };
 use crate::model::FetchedPlaylist;
 use crate::model::InputSource;
@@ -712,18 +713,17 @@ pub async fn update_vod_metadata(
     let missing_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_none();
 
     if missing_fact_policy.should_resolve_missing_facts(missing_tmdb, missing_date) {
-        let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
-
         // Try local parsing first
         if missing_fact_policy.should_try_parsed_title_supplier(missing_date) {
             let local_patch = {
                 let original_name_candidate = properties.details.as_ref().and_then(|d| d.o_name.as_deref());
-                let candidates = [
-                    title_candidate,
+                let candidates = distinct_non_empty_title_candidates([
+                    playlist_title,
+                    existing_item.as_ref().map(|i| i.title.as_ref()),
                     (!properties.name.is_empty()).then_some(properties.name.as_ref()),
                     original_name_candidate,
-                ];
-                video_fact_patch_from_title_candidates(&properties, candidates.into_iter().flatten())
+                ]);
+                video_fact_patch_from_title_candidates(&properties, candidates)
             };
             if let Some((title, year, patch)) = local_patch {
                 debug_if_enabled!("Parsed local year for '{}': {}", title, year);
@@ -746,50 +746,27 @@ pub async fn update_vod_metadata(
             let meta_resolver =
                 MetadataResolver::from_config(library_config, metadata_update_config, client.clone(), tmdb_storage);
 
-            let mut meta = None;
-            let mut tried_title = false;
+            let mut meta: Option<MediaMetadata> = None;
+            let original_name_candidate = properties.details.as_ref().and_then(|d| d.o_name.as_deref());
+            let candidates = distinct_non_empty_title_candidates([
+                playlist_title,
+                existing_item.as_ref().map(|i| i.title.as_ref()),
+                (!properties.name.is_empty()).then_some(properties.name.as_ref()),
+                original_name_candidate,
+            ]);
 
-            // 1. & 2. Playlist Title
-            if let Some(title) = title_candidate {
-                if !title.is_empty() {
+            for title in candidates {
+                if meta.as_ref().is_some_and(|m| m.tmdb_id().is_some()) {
+                    break;
+                }
+                if Some(title) == playlist_title || existing_item.as_ref().is_some_and(|item| item.title.as_ref() == title) {
                     debug!("Resolving TMDB for VOD using Playlist Title '{title}' (ID: {display_id})...");
-                    meta = meta_resolver
-                        .resolve_from_title(title, properties.tmdb, true, missing_fact_policy.tmdb_supplier_enabled())
-                        .await;
-                    tried_title = true;
-                }
-            }
-
-            // 3. API Name (fallback)
-            if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty()
-            {
-                let title_already_tried =
-                    if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
-
-                if !tried_title || !title_already_tried {
+                } else if title == properties.name.as_ref() {
                     trace!("Fallback to API Name '{}'...", properties.name);
-                    meta = meta_resolver
-                        .resolve_from_title(
-                            &properties.name,
-                            properties.tmdb,
-                            true,
-                            missing_fact_policy.tmdb_supplier_enabled(),
-                        )
-                        .await;
+                } else {
+                    trace!("Fallback to API Original Name '{title}'...");
                 }
-            }
-
-            // 4. API Original Name (fallback)
-            if meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none())) {
-                let original_name_candidate = properties.details.as_ref().and_then(|d| d.o_name.as_deref());
-                if let Some(o_name) = original_name_candidate {
-                    if !o_name.is_empty() && o_name != properties.name.as_ref() {
-                        trace!("Fallback to API Original Name '{o_name}'...");
-                        meta = meta_resolver
-                            .resolve_from_title(o_name, properties.tmdb, true, missing_fact_policy.tmdb_supplier_enabled())
-                            .await;
-                    }
-                }
+                meta = meta_resolver.resolve_from_title(title, properties.tmdb, true, true).await;
             }
 
             if let Some(m) = meta {

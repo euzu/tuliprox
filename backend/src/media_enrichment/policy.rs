@@ -8,6 +8,7 @@ pub struct MissingFactEnrichmentPolicy {
 
 impl MissingFactEnrichmentPolicy {
     /// Builds a missing-fact policy from an already translated boundary decision.
+    // TODO Presa this doesnt makes sense, why do we set all three booleans. This means we only need one
     pub fn fill_missing(enabled: bool) -> Self {
         Self {
             missing_facts_enabled: enabled,

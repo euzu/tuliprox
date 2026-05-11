@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaItemKind {
     Movie,
@@ -8,19 +10,19 @@ pub enum MediaItemKind {
 pub struct MediaItemFacts {
     pub kind: MediaItemKind,
     pub tmdb_id: Option<u32>,
-    pub release_date: Option<String>,
+    pub release_date: Option<Arc<str>>,
 }
 
 impl MediaItemFacts {
-    pub fn new(kind: MediaItemKind, tmdb_id: Option<u32>, release_date: Option<String>) -> Self {
+    pub fn new(kind: MediaItemKind, tmdb_id: Option<u32>, release_date: Option<Arc<str>>) -> Self {
         Self { kind, tmdb_id: valid_tmdb_id(tmdb_id), release_date }
     }
 
-    pub fn movie(tmdb_id: Option<u32>, release_date: Option<String>) -> Self {
+    pub fn movie(tmdb_id: Option<u32>, release_date: Option<Arc<str>>) -> Self {
         Self::new(MediaItemKind::Movie, tmdb_id, release_date)
     }
 
-    pub fn series(tmdb_id: Option<u32>, release_date: Option<String>) -> Self {
+    pub fn series(tmdb_id: Option<u32>, release_date: Option<Arc<str>>) -> Self {
         Self::new(MediaItemKind::Series, tmdb_id, release_date)
     }
 }
@@ -94,7 +96,7 @@ mod tests {
 
     #[test]
     fn missing_fact_patch_does_not_overwrite_current_facts() {
-        let current = MediaItemFacts::series(Some(1396), Some("2008-01-20".to_string()));
+        let current = MediaItemFacts::series(Some(1396), Some(Arc::<str>::from("2008-01-20")));
         let supplied = SuppliedMediaFacts::new(MediaItemKind::Series, Some(999), None, Some(2009));
 
         let patch = build_missing_fact_patch(&current, &supplied);
