@@ -38,6 +38,7 @@ mod web_ui;
 
 mod favourites;
 mod library;
+mod media_server_catalog;
 mod network_access;
 mod proxy_user_status;
 mod qos_aggregation;
@@ -59,6 +60,7 @@ pub use input::*;
 pub use ipcheck::*;
 pub use library::*;
 pub use log::*;
+pub use media_server_catalog::*;
 pub use messaging::*;
 pub use metadata_update::*;
 pub use network_access::*;

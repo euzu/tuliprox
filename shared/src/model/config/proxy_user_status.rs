@@ -1,10 +1,23 @@
-use crate::error::TuliproxError;
-use enum_iterator::Sequence;
-use std::{fmt::Display, str::FromStr};
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 
 #[derive(
-    Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize, Sequence, PartialEq, Eq, Ord, PartialOrd,
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    Ord,
+    PartialOrd,
+    EnumIter,
+    EnumString,
+    AsRefStr,
+    Display,
 )]
+#[strum(serialize_all = "PascalCase")]
+#[serde(rename_all = "PascalCase")]
 pub enum ProxyUserStatus {
     #[default]
     Active, // The account is in good standing and can stream content
@@ -13,46 +26,4 @@ pub enum ProxyUserStatus {
     Trial,  // The account is marked as a trial account.
     Disabled, // The account is inactive or deliberately disabled by the administrator.
     Pending,
-}
-
-impl ProxyUserStatus {
-    const ACTIVE: &'static str = "Active";
-    const EXPIRED: &'static str = "Expired";
-    const BANNED: &'static str = "Banned";
-    const TRIAL: &'static str = "Trial";
-    const DISABLED: &'static str = "Disabled";
-    const PENDING: &'static str = "Pending";
-}
-
-impl Display for ProxyUserStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Active => Self::ACTIVE,
-                Self::Expired => Self::EXPIRED,
-                Self::Banned => Self::BANNED,
-                Self::Trial => Self::TRIAL,
-                Self::Disabled => Self::DISABLED,
-                Self::Pending => Self::PENDING,
-            }
-        )
-    }
-}
-
-impl FromStr for ProxyUserStatus {
-    type Err = TuliproxError;
-
-    fn from_str(s: &str) -> Result<Self, TuliproxError> {
-        match s {
-            Self::ACTIVE => Ok(Self::Active),
-            Self::EXPIRED => Ok(Self::Expired),
-            Self::BANNED => Ok(Self::Banned),
-            Self::TRIAL => Ok(Self::Trial),
-            Self::DISABLED => Ok(Self::Disabled),
-            Self::PENDING => Ok(Self::Pending),
-            _ => Err(TuliproxError::Config(format!("Unknown ProxyUserStatus: {}", s))),
-        }
-    }
 }

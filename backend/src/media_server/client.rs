@@ -1,7 +1,8 @@
 use crate::media_server::{
     redaction::redact_media_server_text, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerImageRef,
     MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest,
-    MediaServerResourceResponse, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
+    MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus, MediaServerStreamRef,
+    MediaServerStreamResponse,
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -19,6 +20,18 @@ pub trait MediaServerCatalogClient: Send + Sync {
         library: &MediaServerLibraryRef,
         page: MediaServerPageRequest,
     ) -> Result<MediaServerPage<MediaServerMovie>, MediaServerError>;
+
+    async fn list_series(
+        &self,
+        library: &MediaServerLibraryRef,
+        page: MediaServerPageRequest,
+    ) -> Result<MediaServerPage<MediaServerSeries>, MediaServerError>;
+
+    async fn list_seasons(
+        &self,
+        library: &MediaServerLibraryRef,
+        page: MediaServerPageRequest,
+    ) -> Result<MediaServerPage<MediaServerSeason>, MediaServerError>;
 
     async fn list_episodes(
         &self,
@@ -97,9 +110,14 @@ impl MediaServerHttpRequestBuilder {
     }
 
     pub async fn send(self) -> Result<reqwest::Response, MediaServerError> {
+        let detail = format!("request {} failed", self.safe_url);
+        self.send_with_error_detail(detail).await
+    }
+
+    pub async fn send_with_error_detail(self, detail: impl Into<String>) -> Result<reqwest::Response, MediaServerError> {
+        let detail = detail.into();
         self.builder.send().await.map_err(|err| {
-            MediaServerError::from_reqwest_error_with_fallback(&err, self.not_found_kind, self.fallback_kind)
-                .detail(format!("request {} failed", self.safe_url))
+            MediaServerError::from_reqwest_error_with_fallback(&err, self.not_found_kind, self.fallback_kind).detail(&detail)
         })
     }
 }

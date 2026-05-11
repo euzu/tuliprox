@@ -8,6 +8,11 @@ use crate::{
         sync_panel_api_exp_dates,
     },
     messaging::send_message,
+    media_server::{
+        media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
+        MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
+    },
+    media_server::plex::client::PlexCatalogClient,
     model::{
         AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
         FetchedPlaylist, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
@@ -362,6 +367,35 @@ fn hybrid_has_m3u_staged_cluster(input: &ConfigInput, skip_cluster: &[XtreamClus
     })
 }
 
+async fn download_plex_media_server_playlist(
+    client: &reqwest::Client,
+    input: &ConfigInput,
+) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
+    let Some(media_server) = input.media_server.as_ref() else {
+        return (
+            vec![],
+            vec![TuliproxError::Download(format!(
+                "media-server input '{}' is missing media_server configuration",
+                input.name
+            ))],
+        );
+    };
+    let http_client = MediaServerHttpClient::new(client.clone());
+    let plex_client = match PlexCatalogClient::from_input(input, http_client) {
+        Ok(client) => client,
+        Err(error) => return (vec![], vec![TuliproxError::Download(error.to_string())]),
+    };
+    let policy = MediaServerCatalogRefreshPolicy {
+        page_size: usize::from(media_server.catalog.page_size),
+        request_delay_ms: media_server.catalog.request_delay_ms,
+    };
+
+    match refresh_media_server_catalog_complete_before_publish(&plex_client, policy).await {
+        Ok(snapshot) => (media_server_catalog_snapshot_to_playlist(&snapshot), vec![]),
+        Err(error) => (vec![], vec![TuliproxError::Download(error.to_string())]),
+    }
+}
+
 fn filter_skipped_clusters_from_source(
     source: Box<dyn PlaylistSource>,
     input: &ConfigInput,
@@ -418,7 +452,7 @@ async fn playlist_download_from_input(
         xtream_cache_candidates.extend(main_candidates);
 
         for cluster in xtream_cache_candidates {
-            if !input_cache::is_cache_valid(&status, &cluster.to_string(), cache_duration) {
+            if !input_cache::is_cache_valid(&status, cluster.as_ref(), cache_duration) {
                 xtream_clusters_to_download.push(cluster);
             }
         }
@@ -507,7 +541,11 @@ async fn playlist_download_from_input(
                 let (p, e) = library::download_library_playlist(client, app_config, input).await;
                 (p, e, false, 0, 0)
             }
-            InputType::Emby | InputType::Jellyfin | InputType::Plex => (
+            InputType::Plex => {
+                let (p, e) = download_plex_media_server_playlist(client, input).await;
+                (p, e, false, 0, 0)
+            }
+            InputType::Emby | InputType::Jellyfin => (
                 vec![],
                 vec![TuliproxError::Download(format!(
                     "media-server input '{}' is configured but catalog import is not implemented yet",
@@ -532,14 +570,14 @@ async fn playlist_download_from_input(
         if !xtream_clusters_to_download.is_empty() {
             let state = if xtream_error_count == 0 { ClusterState::Ok } else { ClusterState::Failed };
             for cluster in &xtream_clusters_to_download {
-                input_cache::update_cluster_status(&mut status, &cluster.to_string(), state.clone());
+                input_cache::update_cluster_status(&mut status, cluster.as_ref(), state.clone());
             }
             save_status = true;
         }
     } else if errors.is_empty() {
         if use_per_cluster_cache {
             for cluster in &xtream_clusters_to_download {
-                input_cache::update_cluster_status(&mut status, &cluster.to_string(), ClusterState::Ok);
+                input_cache::update_cluster_status(&mut status, cluster.as_ref(), ClusterState::Ok);
             }
             save_status = !xtream_clusters_to_download.is_empty();
         } else {
@@ -548,7 +586,7 @@ async fn playlist_download_from_input(
         }
     } else if use_per_cluster_cache {
         for cluster in &xtream_clusters_to_download {
-            input_cache::update_cluster_status(&mut status, &cluster.to_string(), ClusterState::Failed);
+            input_cache::update_cluster_status(&mut status, cluster.as_ref(), ClusterState::Failed);
         }
         save_status = !xtream_clusters_to_download.is_empty();
     } else {
@@ -1631,7 +1669,7 @@ mod tests {
     use super::*;
     use crate::model::StagedInput;
     use shared::foundation::{get_filter, ValueProvider};
-    use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType};
+    use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
     use shared::utils::Internable;
 
     fn item_with_props(props: StreamProperties) -> PlaylistItem {
@@ -1847,5 +1885,142 @@ mod tests {
 
         assert!(filter.filter(&vod_provider));
         assert!(!filter.filter(&live_provider));
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_preserves_non_zero_chno() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group A".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 10, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+            PlaylistGroup {
+                id: 2,
+                title: "Group C".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 1, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // Non-zero chno values must be preserved
+        assert_eq!(groups[0].channels[0].header.chno, 10);
+        assert_eq!(groups[1].channels[0].header.chno, 1);
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_assigns_zero_chno_only() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group A".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // All zero-chno channels should get assigned numbers starting at 1
+        assert_eq!(groups[0].channels[0].header.chno, 1);
+        assert_eq!(groups[0].channels[1].header.chno, 2);
+        assert_eq!(groups[0].channels[2].header.chno, 3);
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_skips_existing_nonzero_numbers() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group A".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 5, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 2, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // Existing non-zero numbers (2, 5) must be skipped when assigning new numbers
+        assert_eq!(groups[0].channels[0].header.chno, 5); // preserved
+        assert_eq!(groups[0].channels[2].header.chno, 2); // preserved
+        // B gets 1 (smallest available), D gets 3 (next available after 1 and existing 2)
+        assert_eq!(groups[0].channels[1].header.chno, 1);
+        assert_eq!(groups[0].channels[3].header.chno, 3);
+    }
+
+    #[test]
+    fn assign_channel_no_playlist_assigns_following_group_order() {
+        let mut groups = vec![
+            PlaylistGroup {
+                id: 1,
+                title: "Group 1".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() },
+                    },
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+            PlaylistGroup {
+                id: 2,
+                title: "Group 2".intern(),
+                channels: vec![
+                    PlaylistItem {
+                        header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() },
+                    },
+                ],
+                xtream_cluster: XtreamCluster::Live,
+            },
+        ];
+
+        assign_channel_no_playlist(&mut groups);
+
+        // Numbers should follow iteration order across groups: A=1, B=2, C=3
+        assert_eq!(groups[0].channels[0].header.chno, 1);
+        assert_eq!(groups[0].channels[1].header.chno, 2);
+        assert_eq!(groups[1].channels[0].header.chno, 3);
     }
 }

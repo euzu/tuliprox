@@ -1,7 +1,10 @@
+use shared::model::MediaServerLibraryKind;
 use crate::media_server::{
-    MediaServerEpisode, MediaServerLibrary, MediaServerLibraryKind, MediaServerCatalogClient, MediaServerError, MediaServerErrorKind,
-    MediaServerMovie, MediaServerPage, MediaServerPageRequest,
+    MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerLibrary,
+    MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
+    MediaServerSeries,
 };
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaServerCatalogCursor {
@@ -33,22 +36,27 @@ impl MediaServerCatalogCursor {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MediaServerCatalogRefreshPolicy {
     pub page_size: usize,
+    pub request_delay_ms: u64,
 }
 
 impl Default for MediaServerCatalogRefreshPolicy {
-    fn default() -> Self { Self { page_size: 100 } }
+    fn default() -> Self { Self { page_size: 100, request_delay_ms: 0 } }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaServerCatalogSnapshot {
     pub libraries: Vec<MediaServerLibrary>,
     pub movies: Vec<MediaServerMovie>,
+    pub series: Vec<MediaServerSeries>,
+    pub seasons: Vec<MediaServerSeason>,
     pub episodes: Vec<MediaServerEpisode>,
     pub unsupported_libraries: Vec<MediaServerLibrary>,
 }
 
 impl MediaServerCatalogSnapshot {
-    pub fn item_count(&self) -> usize { self.movies.len() + self.episodes.len() }
+    pub fn item_count(&self) -> usize {
+        self.movies.len() + self.series.len() + self.seasons.len() + self.episodes.len()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,10 +121,33 @@ where
                     let next_request = page.next_request();
                     snapshot.movies.extend(page.items);
                     let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
                     page_request = next;
                 }
             }
             MediaServerLibraryKind::TvShows => {
+                let mut page_request = MediaServerPageRequest::new(0, policy.page_size);
+                loop {
+                    let page = client.list_series(&library.reference, page_request).await?;
+                    validate_page_progress(&library, &page)?;
+                    let next_request = page.next_request();
+                    snapshot.series.extend(page.items);
+                    let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
+                    page_request = next;
+                }
+
+                let mut page_request = MediaServerPageRequest::new(0, policy.page_size);
+                loop {
+                    let page = client.list_seasons(&library.reference, page_request).await?;
+                    validate_page_progress(&library, &page)?;
+                    let next_request = page.next_request();
+                    snapshot.seasons.extend(page.items);
+                    let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
+                    page_request = next;
+                }
+
                 let mut page_request = MediaServerPageRequest::new(0, policy.page_size);
                 loop {
                     let page = client.list_episodes(&library.reference, page_request).await?;
@@ -124,6 +155,7 @@ where
                     let next_request = page.next_request();
                     snapshot.episodes.extend(page.items);
                     let Some(next) = next_request else { break };
+                    wait_before_next_catalog_page(policy).await;
                     page_request = next;
                 }
             }
@@ -132,6 +164,12 @@ where
     }
 
     Ok(snapshot)
+}
+
+async fn wait_before_next_catalog_page(policy: MediaServerCatalogRefreshPolicy) {
+    if policy.request_delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(policy.request_delay_ms)).await;
+    }
 }
 
 fn validate_page_progress<T>(library: &MediaServerLibrary, page: &MediaServerPage<T>) -> Result<(), MediaServerError> {
@@ -149,17 +187,24 @@ fn validate_page_progress<T>(library: &MediaServerLibrary, page: &MediaServerPag
 mod tests {
     use super::*;
     use crate::media_server::{
-        MediaServerImageRef, MediaServerLibraryRef, MediaServerKind, MediaServerProviderIdHint,
-        MediaServerResourceResponse, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
+        MediaServerDescriptiveFacts, MediaServerImageRef, MediaServerLibraryRef, MediaServerKind,
+        MediaServerProviderIdHint, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries,
+        MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
     };
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use reqwest::{header::HeaderMap, StatusCode};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Instant,
+    };
 
     #[derive(Default)]
     struct MockMediaServerCatalogClient {
         movie_pages: Mutex<Vec<Result<MediaServerPage<MediaServerMovie>, MediaServerError>>>,
+        movie_call_times: Mutex<Vec<Instant>>,
+        series_pages: Mutex<Vec<Result<MediaServerPage<MediaServerSeries>, MediaServerError>>>,
+        season_pages: Mutex<Vec<Result<MediaServerPage<MediaServerSeason>, MediaServerError>>>,
         episode_pages: Mutex<Vec<Result<MediaServerPage<MediaServerEpisode>, MediaServerError>>>,
         libraries: Vec<MediaServerLibrary>,
     }
@@ -188,7 +233,24 @@ mod tests {
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
         ) -> Result<MediaServerPage<MediaServerMovie>, MediaServerError> {
+            self.movie_call_times.lock().expect("lock").push(Instant::now());
             self.movie_pages.lock().expect("lock").remove(0)
+        }
+
+        async fn list_series(
+            &self,
+            _library: &MediaServerLibraryRef,
+            _page: MediaServerPageRequest,
+        ) -> Result<MediaServerPage<MediaServerSeries>, MediaServerError> {
+            self.series_pages.lock().expect("lock").remove(0)
+        }
+
+        async fn list_seasons(
+            &self,
+            _library: &MediaServerLibraryRef,
+            _page: MediaServerPageRequest,
+        ) -> Result<MediaServerPage<MediaServerSeason>, MediaServerError> {
+            self.season_pages.lock().expect("lock").remove(0)
         }
 
         async fn list_episodes(
@@ -239,6 +301,18 @@ mod tests {
         }
     }
 
+    fn tv_library() -> MediaServerLibrary {
+        MediaServerLibrary {
+            reference: MediaServerLibraryRef {
+                input_name: "media_server".into(),
+                server_id: "server".into(),
+                library_id: "shows".into(),
+            },
+            name: "Shows".into(),
+            kind: MediaServerLibraryKind::TvShows,
+        }
+    }
+
     fn unsupported_library() -> MediaServerLibrary {
         MediaServerLibrary { kind: MediaServerLibraryKind::Unsupported, name: "Music".into(), ..movie_library() }
     }
@@ -251,8 +325,77 @@ mod tests {
             item_id: Arc::<str>::from(id),
             title: Arc::<str>::from("Movie Redacted"),
             year: None,
+            release_date: None,
             source_version_hint: None,
             provider_hints: Vec::<MediaServerProviderIdHint>::new(),
+            descriptive_facts: None,
+            technical_facts: None,
+            stream_ref: None,
+            image_ref: None,
+        }
+    }
+
+    fn series(id: &str) -> MediaServerSeries {
+        MediaServerSeries {
+            input_name: "media_server".into(),
+            server_id: "server".into(),
+            library_id: "shows".into(),
+            item_id: Arc::<str>::from(id),
+            title: "Show Redacted".into(),
+            year: Some(2024),
+            release_date: None,
+            source_version_hint: Some("series-updated".into()),
+            provider_hints: vec![MediaServerProviderIdHint { namespace: "tmdb".into(), value: "123".into() }],
+            descriptive_facts: Some(MediaServerDescriptiveFacts {
+                summary: Some("series summary".into()),
+                genres: vec!["Drama".into()],
+                ..MediaServerDescriptiveFacts::default()
+            }),
+            child_count: Some(1),
+            episode_count: Some(2),
+            image_ref: None,
+        }
+    }
+
+    fn season(id: &str) -> MediaServerSeason {
+        MediaServerSeason {
+            input_name: "media_server".into(),
+            server_id: "server".into(),
+            library_id: "shows".into(),
+            item_id: Arc::<str>::from(id),
+            series_id: Some("series".into()),
+            series_title: Some("Show Redacted".into()),
+            title: "Season 1".into(),
+            season: Some(1),
+            year: None,
+            release_date: Some("2024-01-01".into()),
+            source_version_hint: None,
+            provider_hints: Vec::new(),
+            descriptive_facts: Some(MediaServerDescriptiveFacts {
+                summary: Some("season summary".into()),
+                ..MediaServerDescriptiveFacts::default()
+            }),
+            episode_count: Some(2),
+            image_ref: None,
+        }
+    }
+
+    fn episode(id: &str) -> MediaServerEpisode {
+        MediaServerEpisode {
+            input_name: "media_server".into(),
+            server_id: "server".into(),
+            library_id: "shows".into(),
+            item_id: Arc::<str>::from(id),
+            series_id: Some("series".into()),
+            series_title: Some("Show Redacted".into()),
+            title: "Episode Redacted".into(),
+            season: Some(1),
+            episode: Some(1),
+            release_date: None,
+            source_version_hint: None,
+            provider_hints: Vec::new(),
+            descriptive_facts: None,
+            technical_facts: None,
             stream_ref: None,
             image_ref: None,
         }
@@ -270,11 +413,32 @@ mod tests {
         ]);
 
         let outcome = cache
-            .refresh_or_retain(&client, MediaServerCatalogRefreshPolicy { page_size: 1 })
+            .refresh_or_retain(&client, MediaServerCatalogRefreshPolicy { page_size: 1, ..MediaServerCatalogRefreshPolicy::default() })
             .await;
 
         assert!(matches!(outcome, MediaServerCatalogRefreshOutcome::Retained { retained: true, .. }));
         assert_eq!(cache.trusted().expect("previous snapshot retained").movies[0].item_id.as_ref(), "old");
+    }
+
+    #[tokio::test]
+    async fn refresh_waits_configured_delay_between_catalog_pages() {
+        let client = MockMediaServerCatalogClient::with_libraries(vec![movie_library()]);
+        client.movie_pages.lock().expect("lock").extend([
+            Ok(MediaServerPage::new(MediaServerPageRequest::new(0, 1), Some(2), vec![movie("movie-1")])),
+            Ok(MediaServerPage::new(MediaServerPageRequest::new(1, 1), Some(2), vec![movie("movie-2")])),
+        ]);
+
+        let snapshot = refresh_media_server_catalog_complete_before_publish(
+            &client,
+            MediaServerCatalogRefreshPolicy { page_size: 1, request_delay_ms: 20 },
+        )
+        .await
+        .expect("catalog refresh succeeds");
+
+        let call_times = client.movie_call_times.lock().expect("lock");
+        assert_eq!(snapshot.movies.len(), 2);
+        assert_eq!(call_times.len(), 2);
+        assert!(call_times[1].duration_since(call_times[0]).as_millis() >= 15);
     }
 
     #[tokio::test]
@@ -291,6 +455,35 @@ mod tests {
             .expect_err("stalled page should fail");
 
         assert_eq!(error.kind, MediaServerErrorKind::MediaServerCatalogPageStalled);
+    }
+
+    #[tokio::test]
+    async fn tv_refresh_imports_series_seasons_and_flat_episodes_as_catalog_material() {
+        let client = MockMediaServerCatalogClient::with_libraries(vec![tv_library()]);
+        client.series_pages.lock().expect("lock").push(Ok(MediaServerPage::new(
+            MediaServerPageRequest::new(0, 100),
+            Some(1),
+            vec![series("series")],
+        )));
+        client.season_pages.lock().expect("lock").push(Ok(MediaServerPage::new(
+            MediaServerPageRequest::new(0, 100),
+            Some(1),
+            vec![season("season-1")],
+        )));
+        client.episode_pages.lock().expect("lock").push(Ok(MediaServerPage::new(
+            MediaServerPageRequest::new(0, 100),
+            Some(1),
+            vec![episode("episode-1")],
+        )));
+
+        let snapshot = refresh_media_server_catalog_complete_before_publish(&client, MediaServerCatalogRefreshPolicy::default())
+            .await
+            .expect("tv catalog should refresh");
+
+        assert_eq!(snapshot.series.len(), 1);
+        assert_eq!(snapshot.seasons.len(), 1);
+        assert_eq!(snapshot.episodes.len(), 1);
+        assert_eq!(snapshot.item_count(), 3);
     }
 
     #[tokio::test]

@@ -250,6 +250,7 @@ fn build_series_episode_playlist_item(
                 added: Some(episode.added.clone()),
                 release_date: Some(episode.release_date.clone()),
                 series_release_date: None,
+                plot: episode.plot.clone(),
                 tmdb: episode.tmdb,
                 movie_image: logo,
                 container_extension: container_extension.intern(),

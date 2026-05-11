@@ -317,6 +317,8 @@ pub struct EpisodeStreamProperties {
     pub release_date: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
     pub series_release_date: Option<Arc<str>>, // Global series release date
+    #[serde(default, deserialize_with = "deserialize_as_option_arc_str")]
+    pub plot: Option<Arc<str>>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub tmdb: Option<u32>,
     #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
@@ -915,6 +917,7 @@ impl EpisodeStreamProperties {
             release_date: Some(episode.release_date.clone()),
             // Inherit global release date from the Series object if available
             series_release_date: series.release_date.clone(),
+            plot: episode.plot.clone(),
             tmdb: episode.tmdb.or(series.tmdb),
             movie_image: episode.movie_image.clone(),
             container_extension: episode.container_extension.clone(),

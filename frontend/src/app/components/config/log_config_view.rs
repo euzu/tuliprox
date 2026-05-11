@@ -15,6 +15,7 @@ use crate::{
 };
 use shared::model::{LogConfigDto, RuntimeConfigReportFormat};
 use std::{rc::Rc, str::FromStr};
+use strum::IntoEnumIterator;
 use yew::prelude::*;
 
 const LABEL_LOG_LEVEL: &str = "LABEL.LOG_LEVEL";
@@ -45,11 +46,7 @@ pub fn LogConfigView() -> Html {
 
     let log_level_options = use_memo((), |_| LOG_LEVELS.iter().map(ToString::to_string).collect::<Vec<String>>());
     let runtime_report_format_options = use_memo((), |_| {
-        enum_iterator::all::<RuntimeConfigReportFormat>()
-            .collect::<Vec<_>>()
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<String>>()
+        RuntimeConfigReportFormat::iter().collect::<Vec<_>>().iter().map(ToString::to_string).collect::<Vec<String>>()
     });
 
     let form_state: UseReducerHandle<LogConfigFormState> =

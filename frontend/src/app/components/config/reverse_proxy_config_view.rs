@@ -21,7 +21,6 @@ use crate::{
     edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::{use_translation, YewI18n},
 };
-use enum_iterator::all;
 use shared::{
     model::{
         CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, QosAggregationConfigDto, RateLimitConfigDto,
@@ -31,7 +30,9 @@ use shared::{
     utils::{default_secret, format_float_localized},
 };
 use std::{rc::Rc, str::FromStr};
+use strum::IntoEnumIterator;
 use yew::prelude::*;
+
 const LABEL_CACHE: &str = "LABEL.CACHE";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SIZE: &str = "LABEL.SIZE";
@@ -219,7 +220,7 @@ generate_form_reducer!(
 );
 
 fn geoip_unavailable_policy_options() -> Rc<Vec<String>> {
-    Rc::new(all::<GeoIpUnavailablePolicy>().map(|policy| policy.to_string()).collect())
+    Rc::new(GeoIpUnavailablePolicy::iter().map(|policy| policy.to_string()).collect())
 }
 
 pub(crate) fn geoip_unavailable_policy_label(translate: &YewI18n, policy: GeoIpUnavailablePolicy) -> String {
@@ -1006,8 +1007,9 @@ mod tests {
 
     #[test]
     fn geoip_unavailable_policy_roundtrips_through_string_representation() {
-        for policy in all::<GeoIpUnavailablePolicy>() {
-            let parsed = GeoIpUnavailablePolicy::from_str(&policy.to_string()).unwrap_or(GeoIpUnavailablePolicy::Deny);
+        for policy in GeoIpUnavailablePolicy::iter() {
+            let parsed =
+                GeoIpUnavailablePolicy::from_str(policy.as_ref()).expect("failed to parse GeoIpUnavailablePolicy");
             assert_eq!(parsed, policy);
         }
     }

@@ -388,7 +388,7 @@
       "STRIP": "Terms to ignore during EPG Smart Matching (e.g. '4K', 'HD', 'HEVC')."
     },
     "EPG_SOURCE": {
-      "LOGO_OVERRIDE": "Overrides the channel logos provided by the EPG with the ones from the playlist or external mapping.",
+      "LOGO_OVERRIDE": "Replaces playlist/provider logos with icons from this XMLTV EPG source.",
       "PRIORITY": "Determines which EPG source is preferred if multiple sources provide data for the same channel.",
       "URL": "The URL of the XMLTV EPG file."
     },

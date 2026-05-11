@@ -102,10 +102,7 @@ impl From<&ApiProxyConfig> for ApiProxyConfigDto {
 
 fn serialize_api_proxy_config(config: &ApiProxyConfigDto) -> Result<String, String> {
     let mut serialized = String::new();
-    let options = serde_saphyr::SerializerOptions {
-        prefer_block_scalars: false,
-        ..Default::default()
-    };
+    let options = serde_saphyr::ser_options! {prefer_block_scalars: false};
     serde_saphyr::to_fmt_writer_with_options(&mut serialized, config, options)
         .map_err(|err| format!("Could not serialize api proxy config: {err}"))?;
     Ok(serialized)
