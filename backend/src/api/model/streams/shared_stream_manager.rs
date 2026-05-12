@@ -26,7 +26,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_SHARED_BUFFER_SIZE_BYTES: usize = 1024 * 1024 * 12;
+const DEFAULT_SHARED_BUFFER_SIZE_BYTES: usize = 1024 * 1024 * 96;
 const YIELD_COUNTER: usize = 64;
 const SHARED_BURST_BYTES_PER_BUFFER_SLOT: usize = 12 * 1024;
 

@@ -150,6 +150,7 @@ HLS is session-oriented:
 - reconnects during a running playback
 
 Tuliprox therefore treats HLS as one logical playback with many follow-up requests.
+Separate HLS playlist starts can still get separate session tokens, so two players behind the same IP/user-agent can watch the same channel independently.
 
 ### Catchup
 
@@ -165,11 +166,16 @@ Plain TS live is much stricter:
 
 - the first request is the actual playback start
 - a new parallel request is a new connection attempt
+- every active TS socket is counted separately when user limits are enabled
+- with `max_connections: 0`, the user-side limit does not block the same IP from opening the same or different TS streams
 - it may replace another stream if admission strategies allow that
+- provider capacity and shared-stream behavior still apply separately
 
 ### VOD / Series
 
 VOD and series can use reopen and range-style behavior, but they still do not have the same manifest/segment split as HLS.
+Tuliprox therefore treats follow-up range, seek, and reopen requests as the same logical playback when the session identity matches.
+They are provider-affine like HLS/catchup, but they are not plain TS socket-bound playback.
 
 ## 7. What happens when the user is already at the limit
 

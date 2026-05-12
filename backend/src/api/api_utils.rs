@@ -1127,35 +1127,18 @@ async fn activate_session_before_stream_open(
     let effective_request_class = if let Some(request_class) = request_class {
         if request_class == PlaybackRequestClass::FollowUp {
             // Re-read session under the guard to ensure the counted lease is still held.
-            // Only reclassify if the session was in a counted state that has since been
-            // released. Pending sessions were never counted (admission pending provider
-            // acquisition) — keep FollowUp so no spurious placeholder is created.
+            // If it is no longer counted, classify it from the current lifecycle so
+            // stale FollowUp requests cannot bypass admission.
             let current_session = app_state
                 .active_users
                 .get_and_update_user_session(&user.username, session_token)
                 .await;
-            match current_session.as_ref().map(|s| &s.lifecycle) {
-                // Session is gone (expired/removed) or was never in a counted state — reclassify
-                // so admission runs and creates a fresh placeholder.
-                None => classify_playback_request(PlaybackRequestFacts {
-                    item_type,
-                    existing_session: None,
-                    prepare_only: false,
-                    terminate: false,
-                }),
-                // Had a counted lease but lost it — need to reclassify to Activate.
-                Some(crate::api::model::PlaybackLifecycle::Active | crate::api::model::PlaybackLifecycle::GraceActive) => {
-                    classify_playback_request(PlaybackRequestFacts {
-                        item_type,
-                        existing_session: current_session.as_ref(),
-                        prepare_only: false,
-                        terminate: false,
-                    })
-                }
-                // Pending was never counted (waiting for provider slot); Prepared/Preserved hold
-                // no counted slot — caller-specified FollowUp is still valid, no reclassification.
-                _ => request_class,
-            }
+            classify_playback_request(PlaybackRequestFacts {
+                item_type,
+                existing_session: current_session.as_ref(),
+                prepare_only: false,
+                terminate: false,
+            })
         } else {
             request_class
         }
@@ -1326,16 +1309,34 @@ async fn activate_session_before_stream_open(
 }
 
 pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> String {
-    let Some(input_user_info) = input.get_user_info() else {
+    let matched_input = input.get_matched_config_by_url(stream_url);
+    let source_base_url: Cow<'_, str> = if let Some((base_url, _, _)) = matched_input {
+        Cow::Borrowed(base_url)
+    } else if let Some(input_user_info) = input.get_user_info() {
+        Cow::Owned(input_user_info.base_url)
+    } else {
         return stream_url.to_string();
     };
+    let source_username = matched_input.map_or(input.username.as_deref(), |(_, username, _)| username.map(String::as_str));
+    let source_password = matched_input.map_or(input.password.as_deref(), |(_, _, password)| password.map(String::as_str));
     let Some(alt_input_user_info) = alias_input.get_user_info() else {
         return stream_url.to_string();
     };
 
-    let modified = stream_url.replacen(&input_user_info.base_url, &alt_input_user_info.base_url, 1);
-    let modified = modified.replacen(&input_user_info.username, &alt_input_user_info.username, 1);
-    modified.replacen(&input_user_info.password, &alt_input_user_info.password, 1)
+    let mut modified = stream_url.replacen(source_base_url.as_ref(), &alt_input_user_info.base_url, 1);
+    if let Some(old_username) = source_username {
+        let new_username = alt_input_user_info.username.as_str();
+        modified = modified.replacen(old_username, new_username, 1);
+    }
+    if let Some(old_password) = source_password {
+        let new_password = alt_input_user_info.password.as_str();
+        modified = modified.replacen(old_password, new_password, 1);
+    }
+    modified
+}
+
+fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) -> bool {
+    provider_cfg.get_user_info().is_some_and(|user_info| stream_url.starts_with(&user_info.base_url))
 }
 
 pub(crate) fn resolve_redirect_location<'a>(
@@ -1464,10 +1465,11 @@ async fn resolve_streaming_strategy(
                 ProviderStreamState::Custom(stream)
             }
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
-                // force_stream_provider means we keep the url and the provider.
-                // If force_stream_provider or the input is the same as the config we don't need to get new url
-                let (selected_provider_name, url) = if forced_provider_allocated || provider_cfg.id == input.id {
-                    (input.name.clone(), stream_url.to_string())
+                // Keep the URL only when provider affinity requires it or the URL already targets the selected
+                // provider. Hot reload can leave old alias URLs in persisted playlists until the next processing run.
+                let keep_original_url = forced_provider_allocated || stream_url_matches_provider(stream_url, provider_cfg);
+                let (selected_provider_name, url) = if keep_original_url {
+                    (provider_cfg.name.clone(), stream_url.to_string())
                 } else {
                     (provider_cfg.name.clone(), get_stream_alternative_url(stream_url, input, provider_cfg))
                 };
@@ -2083,6 +2085,7 @@ pub async fn force_provider_stream_response(
         }
         app_state.active_users.update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr).await;
         stream_channel.shared = share_stream;
+        let socket_bound = user_session.socket_bound;
         let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -2091,6 +2094,7 @@ pub async fn force_provider_stream_response(
             connection_kind: user_session.connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
             fingerprint,
             stream_channel,
+            socket_bound,
             session_token: Some(&user_session.token),
             req_headers: ctx.req_headers,
             meter_uid: metering.meter_uid,
@@ -2168,6 +2172,8 @@ pub(crate) async fn stream_response(
 
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
+    let playback_extension = extract_extension_from_url(stream_url);
+    let socket_bound = is_socket_bound_playback_session(item_type, playback_extension.as_deref());
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
     let activation = activate_session_before_stream_open(
@@ -2183,7 +2189,7 @@ pub(crate) async fn stream_response(
             stream_url,
             connection_permission,
             connection_kind,
-            socket_bound: item_type.uses_socket_bound_session(),
+            socket_bound,
         },
         )
         .await;
@@ -2376,6 +2382,7 @@ pub(crate) async fn stream_response(
             connection_kind,
             fingerprint,
             stream_channel,
+            socket_bound,
             session_token: Some(session_token),
             req_headers,
             meter_uid: metering.meter_uid,
@@ -2485,7 +2492,7 @@ pub(crate) async fn stream_response(
                             addr: &fingerprint.addr,
                             connection_permission,
                             connection_kind: Some(connection_kind),
-                            socket_bound: item_type.uses_socket_bound_session(),
+                            socket_bound,
                         })
                         .await;
                     let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
@@ -2654,6 +2661,8 @@ async fn try_shared_stream_response_if_any(
             let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
 
             stream_details.provider_name = provider;
+            let socket_bound =
+                is_socket_bound_playback_session(stream_channel.item_type, extract_extension_from_url(stream_url).as_deref());
             if let Some(provider_name) = stream_details.provider_name.as_deref() {
                 let _ = app_state
                     .active_users
@@ -2666,7 +2675,7 @@ async fn try_shared_stream_response_if_any(
                         addr: &fingerprint.addr,
                         connection_permission: connect_permission,
                         connection_kind: Some(connection_kind),
-                        socket_bound: stream_channel.item_type.uses_socket_bound_session(),
+                        socket_bound,
                     })
                     .await;
             }
@@ -2686,6 +2695,7 @@ async fn try_shared_stream_response_if_any(
                 connection_kind,
                 fingerprint,
                 stream_channel,
+                socket_bound,
                 session_token: Some(session_token),
                 req_headers,
                 meter_uid: metering.meter_uid,
@@ -2855,6 +2865,7 @@ pub(crate) async fn local_stream_response(
     } else {
         stream
     };
+    let socket_bound = is_socket_bound_playback_session(pli.item_type, extract_extension_from_url(&pli.url).as_deref());
     let mut connection_kind = connection_kind;
     if let Some(session_token) = playback_session_token {
         let activation = activate_session_before_stream_open(
@@ -2870,7 +2881,7 @@ pub(crate) async fn local_stream_response(
                 stream_url: &pli.url,
                 connection_permission,
                 connection_kind,
-                socket_bound: pli.item_type.uses_socket_bound_session(),
+                socket_bound,
             },
         )
             .await;
@@ -2925,7 +2936,7 @@ pub(crate) async fn local_stream_response(
                 addr: &fingerprint.addr,
                 connection_permission,
                 connection_kind: Some(resolved_connection_kind),
-                socket_bound: pli.item_type.uses_socket_bound_session(),
+                socket_bound,
             })
             .await;
     }
@@ -2937,6 +2948,7 @@ pub(crate) async fn local_stream_response(
         connection_kind: resolved_connection_kind,
         fingerprint,
         stream_channel: pli.clone(),
+        socket_bound,
         session_token: playback_session_token,
         req_headers,
         meter_uid: 0,
@@ -3394,6 +3406,10 @@ pub(crate) fn create_playback_session_fingerprint(
     item_type: PlaylistItemType,
     extension: Option<&str>,
 ) -> String {
+    // This scopes the session identity, not the session address-tracking policy.
+    // Adaptive playlist starts need a per-initial-socket token so two players behind
+    // the same IP/UA can watch the same HLS/DASH stream independently. The created
+    // UserSession itself can still be non-socket-bound.
     let socket_bound =
         is_socket_bound_playback_session(item_type, extension) || is_session_based_playback(item_type, extension);
     create_session_fingerprint(fingerprint, username, virtual_id, socket_bound)
@@ -3877,6 +3893,44 @@ mod tests {
         app_state.active_provider.release_connection(&busy_addr).await;
         app_state.active_provider.release_connection(&strict_addr).await;
         app_state.active_provider.release_connection(&fallback_addr).await;
+    }
+
+    #[tokio::test]
+    async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_provider() {
+        let app_state = create_test_dual_provider_app_state();
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .sources
+            .load()
+            .get_input_by_name(&input_name)
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        let addr: SocketAddr = "127.0.0.1:55304".parse().unwrap_or_else(|_| unreachable!());
+
+        let strategy = resolve_streaming_strategy(
+            &app_state,
+            "http://provider-2.example/live/user2/pass2/100.ts",
+            &create_test_fingerprint(addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: None,
+                allow_forced_provider_fallback: false,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("live-session"),
+            },
+        )
+        .await;
+
+        let ProviderStreamState::Available(Some(provider), url) = strategy.provider_stream_state else {
+            panic!("request should allocate the main provider")
+        };
+        assert_eq!(provider.as_ref(), "provider_1");
+        assert_eq!(url.as_ref(), "http://provider-1.example/live/user1/pass1/100.ts");
+
+        app_state.active_provider.release_connection(&addr).await;
     }
 
     #[test]
@@ -4452,7 +4506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_session_before_stream_open_uses_precomputed_follow_up_request_class() {
+    async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_request_class() {
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
             metrics_enabled: true,
@@ -4514,8 +4568,8 @@ mod tests {
         assert_eq!(activation.admission.kind, Some(crate::api::model::ConnectionKind::Normal));
         assert_eq!(activation.grace_mode, None);
         assert!(
-            activation.placeholder_transition_version.is_none(),
-            "precomputed follow-up activation must not create a placeholder session"
+            activation.placeholder_transition_version.is_some(),
+            "precomputed FollowUp must be revalidated against the current uncounted lifecycle"
         );
     }
 
@@ -7391,7 +7445,7 @@ mod tests {
         let Some(second_addr) = "127.0.0.1:55178".parse().ok() else {
             return;
         };
-        let first = create_test_fingerprint(first_addr);
+        let first = Fingerprint::new("10.0.0.6|player".to_string(), "10.0.0.6".to_string(), first_addr);
         let second = Fingerprint::new(first.key.clone(), first.client_ip.clone(), second_addr);
 
         let first_token = create_playback_session_fingerprint(&first, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
@@ -7400,6 +7454,22 @@ mod tests {
         assert_ne!(first_token, second_token);
         assert!(first_token.contains(&first.addr.to_string()));
         assert!(second_token.contains(&second.addr.to_string()));
+    }
+
+    #[test]
+    fn playback_session_fingerprint_keeps_ts_socket_bound_but_vod_logical() {
+        let first_addr: SocketAddr = "127.0.0.1:55179".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: SocketAddr = "127.0.0.1:55180".parse().unwrap_or_else(|_| unreachable!());
+        let first = Fingerprint::new("10.0.0.7|player".to_string(), "10.0.0.7".to_string(), first_addr);
+        let second = Fingerprint::new(first.key.clone(), first.client_ip.clone(), second_addr);
+
+        let first_ts = create_playback_session_fingerprint(&first, "user1", 7003, PlaylistItemType::Live, None);
+        let second_ts = create_playback_session_fingerprint(&second, "user1", 7003, PlaylistItemType::Live, None);
+        let first_vod = create_playback_session_fingerprint(&first, "user1", 7003, PlaylistItemType::Video, None);
+        let second_vod = create_playback_session_fingerprint(&second, "user1", 7003, PlaylistItemType::Video, None);
+
+        assert_ne!(first_ts, second_ts, "plain TS live remains socket-bound");
+        assert_eq!(first_vod, second_vod, "VOD remains logical across reopen/seek sockets");
     }
 
     #[tokio::test]
