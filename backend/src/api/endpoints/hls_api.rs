@@ -178,7 +178,10 @@ pub(in crate::api) async fn handle_hls_stream_request(
         match provider_handle.as_ref().map(|handle| &handle.allocation) {
             Some(ProviderAllocation::Exhausted) => (url, None, provider_handle),
             Some(ProviderAllocation::Available(cfg) | ProviderAllocation::GracePeriod(cfg)) => {
-                let stream_url = get_stream_alternative_url(&url, input, cfg);
+                let Some(stream_url) = get_stream_alternative_url(&url, input, cfg) else {
+                    app_state.connection_manager.release_provider_handle(provider_handle).await;
+                    return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                };
                 let session_token = app_state
                     .active_users
                     .create_user_session(crate::api::model::CreateUserSessionParams {
@@ -218,7 +221,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
         {
             Some(provider_handle) => match provider_handle.allocation.get_provider_config() {
                 Some(provider_cfg) => {
-                    let stream_url = get_stream_alternative_url(&url, input, &provider_cfg);
+                    let Some(stream_url) = get_stream_alternative_url(&url, input, &provider_cfg) else {
+                        app_state
+                            .connection_manager
+                            .release_provider_handle(Some(provider_handle))
+                            .await;
+                        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    };
                     debug_if_enabled!(
                             "API endpoint [HLS] create_session_fingerprint user={} virtual_id={virtual_id} provider={} stream_url={}",
                             sanitize_sensitive_info(&user.username),
