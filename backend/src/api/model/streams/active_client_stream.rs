@@ -1055,6 +1055,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                 crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id }
                             } else {
                                 crate::api::api_utils::EvictionReentryGuard::Session(
+                                    // Defensive fallback: an empty token will not match any real session.
                                     session_token.as_deref().unwrap_or_default(),
                                 )
                             };

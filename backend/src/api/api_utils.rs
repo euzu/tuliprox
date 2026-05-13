@@ -47,8 +47,8 @@ use shared::{
     },
     utils::{
         bin_serialize, extract_extension_from_url, human_readable_kbps, is_sanitize_sensitive_info_enabled,
-        replace_url_extension, sanitize_sensitive_info, current_time_secs, trim_slash, Internable, CONTENT_TYPE_CBOR,
-        CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
+        replace_url_extension, sanitize_sensitive_info, current_time_secs, trim_slash, get_credentials_from_url, Internable,
+        CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
     },
 };
 use smallvec::SmallVec;
@@ -1309,21 +1309,14 @@ async fn activate_session_before_stream_open(
 }
 
 pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> String {
-    let matched_input = input.get_matched_config_by_url(stream_url);
-    let source_base_url: Cow<'_, str> = if let Some((base_url, _, _)) = matched_input {
-        Cow::Borrowed(base_url)
-    } else if let Some(input_user_info) = input.get_user_info() {
-        Cow::Owned(input_user_info.base_url)
-    } else {
+    let Some((source_base_url, source_username, source_password)) = input.get_matched_config_by_url(stream_url) else {
         return stream_url.to_string();
     };
-    let source_username = matched_input.map_or(input.username.as_deref(), |(_, username, _)| username.map(String::as_str));
-    let source_password = matched_input.map_or(input.password.as_deref(), |(_, _, password)| password.map(String::as_str));
     let Some(alt_input_user_info) = alias_input.get_user_info() else {
         return stream_url.to_string();
     };
 
-    let mut modified = stream_url.replacen(source_base_url.as_ref(), &alt_input_user_info.base_url, 1);
+    let mut modified = stream_url.replacen(source_base_url, &alt_input_user_info.base_url, 1);
     if let Some(old_username) = source_username {
         let new_username = alt_input_user_info.username.as_str();
         modified = modified.replacen(old_username, new_username, 1);
@@ -1336,7 +1329,49 @@ pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_i
 }
 
 fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) -> bool {
-    provider_cfg.get_user_info().is_some_and(|user_info| stream_url.starts_with(&user_info.base_url))
+    provider_cfg
+        .get_user_info()
+        .is_some_and(|user_info| stream_url_base_matches(stream_url, &user_info.base_url) && stream_url_account_matches(stream_url, &user_info))
+}
+
+fn stream_url_base_matches(stream_url: &str, base_url: &str) -> bool {
+    stream_url.strip_prefix(base_url).is_some_and(|remaining| {
+        remaining.is_empty() || remaining.starts_with(['/', '?', '#'])
+    })
+}
+
+fn stream_url_account_matches(stream_url: &str, user_info: &crate::model::InputUserInfo) -> bool {
+    let Ok(url) = Url::parse(stream_url) else {
+        return false;
+    };
+
+    let (url_username, url_password) = get_credentials_from_url(&url);
+    if let (Some(url_username), Some(url_password)) = (url_username.as_deref(), url_password.as_deref()) {
+        return url_username == user_info.username && url_password == user_info.password;
+    }
+
+    let mut has_query_username = false;
+    let mut has_query_password = false;
+    for (key, value) in url.query_pairs() {
+        if key.eq_ignore_ascii_case("username") {
+            has_query_username = value == user_info.username;
+        } else if key.eq_ignore_ascii_case("password") {
+            has_query_password = value == user_info.password;
+        }
+    }
+    if has_query_username || has_query_password {
+        return has_query_username && has_query_password;
+    }
+
+    let mut segments = url.path_segments().into_iter().flatten();
+    let first = segments.next();
+    let (username, password) = match first {
+        Some("live" | "movie" | "series") => (segments.next(), segments.next()),
+        Some(username) => (Some(username), segments.next()),
+        None => return false,
+    };
+
+    username == Some(user_info.username.as_str()) && password == Some(user_info.password.as_str())
 }
 
 pub(crate) fn resolve_redirect_location<'a>(
@@ -1378,7 +1413,7 @@ async fn get_redirect_alternative_url(
 ///
 /// - If no connections are available (`Exhausted`), it returns a custom stream indicating exhaustion.
 /// - If a connection is available or in a grace period, it constructs a streaming URL accordingly:
-///   - If the provider was forced or matches the input, the original URL is reused.
+///   - If the URL already targets the selected provider account, the original URL is reused.
 ///   - Otherwise, an alternative URL is generated based on the provider and input.
 ///
 /// The function returns:
@@ -1395,7 +1430,6 @@ async fn resolve_streaming_strategy(
     options: StreamingAcquireOptions<'_>,
 ) -> StreamingStrategy {
     // allocate a provider connection
-    let mut forced_provider_allocated = false;
     let provider_connection_handle = match options.force_provider {
         Some(provider) => {
             // First try to stay on the exact pinned provider account without over-allocating.
@@ -1411,7 +1445,6 @@ async fn resolve_streaming_strategy(
                 )
                 .await
             {
-                forced_provider_allocated = true;
                 Some(handle)
             } else if options.allow_forced_provider_fallback {
                 debug_if_enabled!(
@@ -1465,9 +1498,9 @@ async fn resolve_streaming_strategy(
                 ProviderStreamState::Custom(stream)
             }
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
-                // Keep the URL only when provider affinity requires it or the URL already targets the selected
-                // provider. Hot reload can leave old alias URLs in persisted playlists until the next processing run.
-                let keep_original_url = forced_provider_allocated || stream_url_matches_provider(stream_url, provider_cfg);
+                // Keep the URL only when it already targets the selected provider. Hot reload can leave old alias URLs
+                // in persisted playlists until the next processing run.
+                let keep_original_url = stream_url_matches_provider(stream_url, provider_cfg);
                 let (selected_provider_name, url) = if keep_original_url {
                     (provider_cfg.name.clone(), stream_url.to_string())
                 } else {
@@ -3625,7 +3658,8 @@ mod tests {
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
-            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
+            MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig,
+            ProviderConfigConnection, SharedStreamManager,
         },
         auth::Fingerprint,
         model::{
@@ -3647,7 +3681,23 @@ mod tests {
         utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
     };
     use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, RwLock};
+
+    fn test_runtime_provider(url: &str, username: &str, password: &str) -> Arc<RuntimeProviderConfig> {
+        let input = ConfigInput {
+            name: "provider".intern(),
+            url: url.to_string(),
+            username: Some(username.to_string()),
+            password: Some(password.to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        Arc::new(RuntimeProviderConfig::new(
+            &input,
+            Arc::new(RwLock::new(ProviderConfigConnection::default())),
+            Arc::new(|_, _| {}),
+        ))
+    }
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -3692,6 +3742,38 @@ mod tests {
                 .expect("provider url should resolve");
 
         assert_eq!(resolved, "https://provider.example/live/provider-user/provider-pass/33486.m3u8");
+    }
+
+    #[test]
+    fn stream_alternative_url_keeps_unmatched_urls_unchanged() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://source.example".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider("http://alias.example", "alias-user", "alias-pass");
+        let stream_url = "http://other.example/live/source-user/source-pass/123.ts";
+
+        let rewritten = get_stream_alternative_url(stream_url, &input, &alias);
+
+        assert_eq!(rewritten, stream_url);
+    }
+
+    #[test]
+    fn stream_url_matches_provider_requires_base_url_and_account_identity() {
+        let provider = test_runtime_provider("http://same.example", "selected-user", "selected-pass");
+
+        assert!(stream_url_matches_provider(
+            "http://same.example/live/selected-user/selected-pass/123.ts",
+            &provider
+        ));
+        assert!(!stream_url_matches_provider(
+            "http://same.example/live/other-user/other-pass/123.ts",
+            &provider
+        ));
     }
 
     #[test]
