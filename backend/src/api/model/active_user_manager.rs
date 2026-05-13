@@ -389,6 +389,14 @@ fn is_stable_session_stream(stream: &StreamInfo) -> bool {
         )
 }
 
+fn uses_session_reentry_guard(stream: &StreamInfo) -> bool {
+    stream.channel.item_type.requires_provider_affinity()
+        || matches!(
+            extract_extension_from_url(stream.channel.url.as_ref()).as_deref(),
+            Some(ext) if ext == HLS_EXT || ext == DASH_EXT
+        )
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RecentWinnerProtection {
     protected_addr: SocketAddr,
@@ -2857,10 +2865,11 @@ impl ActiveUserManager {
         let mut socket_guard_keys = Vec::new();
 
         for stream in connection_data.streams.iter().filter(|stream| stream.addr == *addr) {
-            if is_stable_session_stream(stream) {
-                if let Some(session_token) = stream.session_token.clone() {
-                    session_tokens.push(session_token);
-                }
+            if uses_session_reentry_guard(stream) && stream.session_token.is_some() {
+                let Some(session_token) = stream.session_token.clone() else {
+                    continue;
+                };
+                session_tokens.push(session_token);
             } else {
                 socket_guard_keys.push(create_socket_reentry_guard_key(
                     &username,
@@ -4986,6 +4995,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recently_evicted_vod_uses_session_reentry_guard() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let evicted_addr: SocketAddr = "127.0.0.1:55113".parse().unwrap();
+        let protected_addr: SocketAddr = "127.0.0.1:55114".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-vod-guard".to_string(), "127.0.0.1".to_string(), evicted_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("vod-guard-user");
+        user.max_connections = 1;
+        let mut channel = test_channel(2019);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = "http://localhost/movie.mkv".intern();
+
+        manager.add_connection(&evicted_addr).await;
+        manager.add_connection(&protected_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-guard-vod",
+                virtual_id: channel.virtual_id,
+                provider: "provider-a",
+                stream_url: channel.url.as_ref(),
+                addr: &evicted_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 19,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-guard-vod"),
+            })
+            .await;
+
+        manager
+            .mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10)
+            .await;
+
+        assert_eq!(
+            manager
+                .recently_evicted_session_protected_addr("tok-guard-vod")
+                .await,
+            Some(protected_addr)
+        );
+        let connections = manager.connections.read().await;
+        assert!(
+            connections.recent_socket_reentry_guards.is_empty(),
+            "provider-affine VOD must not be guarded by transient socket identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_affine_stream_without_session_token_uses_socket_reentry_fallback() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let evicted_addr: SocketAddr = "127.0.0.1:55115".parse().unwrap();
+        let protected_addr: SocketAddr = "127.0.0.1:55116".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-vod-no-token".to_string(), "127.0.0.1".to_string(), evicted_addr);
+        let mut channel = test_channel(2020);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = "http://localhost/movie-no-token.mkv".intern();
+
+        manager.add_connection(&evicted_addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 20,
+                meter_uid: 0,
+                username: "vod-no-token-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await;
+
+        manager
+            .mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10)
+            .await;
+
+        assert_eq!(
+            manager
+                .recent_socket_reentry_protected_addr("vod-no-token-user", "127.0.0.1", channel.virtual_id)
+                .await,
+            Some(protected_addr)
+        );
+    }
+
+    #[tokio::test]
     async fn test_reused_logical_stream_refreshes_normal_priority() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
@@ -5169,6 +5292,67 @@ mod tests {
         assert_eq!(streams.len(), 2);
         assert!(streams.iter().any(|stream| stream.uid == 31));
         assert!(streams.iter().any(|stream| stream.uid == 32));
+    }
+
+    #[tokio::test]
+    async fn unlimited_user_can_open_same_and_different_live_streams_from_same_ip() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let username = "unlimited-same-ip";
+        let client_ip = "10.9.0.1";
+        let addrs = [
+            "10.9.0.1:55101".parse::<SocketAddr>().unwrap(),
+            "10.9.0.1:55102".parse::<SocketAddr>().unwrap(),
+            "10.9.0.1:55103".parse::<SocketAddr>().unwrap(),
+        ];
+        let fingerprints = [
+            Fingerprint::new("fp-unlimited-1".to_string(), client_ip.to_string(), addrs[0]),
+            Fingerprint::new("fp-unlimited-2".to_string(), client_ip.to_string(), addrs[1]),
+            Fingerprint::new("fp-unlimited-3".to_string(), client_ip.to_string(), addrs[2]),
+        ];
+
+        for addr in addrs {
+            manager.add_connection(&addr).await;
+        }
+
+        for (idx, (fingerprint, virtual_id)) in fingerprints.iter().zip([4100, 4100, 4101]).enumerate() {
+            let token = format!("tok-unlimited-{idx}");
+            manager
+                .update_connection(ActiveUserConnectionParams {
+                    uid: 410 + u32::try_from(idx).unwrap_or_default(),
+                    meter_uid: 0,
+                    username,
+                    max_connections: 0,
+                    soft_connections: 0,
+                    connection_kind: ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint,
+                    provider: "provider-a".intern(),
+                    stream_channel: &test_channel(virtual_id),
+                    user_agent: Cow::Borrowed("ua"),
+                    session_token: Some(&token),
+                })
+                .await
+                .expect("unlimited stream should register");
+        }
+
+        assert_eq!(manager.user_connections(username).await, 3);
+        assert_eq!(manager.active_streams().await.len(), 3);
+        assert_eq!(
+            manager.connection_admission(username, 0, 0).await.permission,
+            UserConnectionPermission::Allowed
+        );
+        assert_eq!(
+            manager
+                .connection_admission_for_session(username, 0, 0, "tok-unlimited-new")
+                .await
+                .permission,
+            UserConnectionPermission::Allowed
+        );
     }
 
     #[tokio::test]

@@ -4,9 +4,10 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream, get_stream_response_with_headers,
-            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, ProviderAllocation, ProviderConfig,
-            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
-            StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, PendingProviderReason,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason, ProviderAllocation,
+            ProviderConfig, ProviderHandle, ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState,
+            SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream, UserApiRequest,
+            UserSession,
         },
     },
     auth::Fingerprint,
@@ -19,7 +20,7 @@ use crate::{
         plex::client::PlexCatalogClient,
         MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
-    model::{ConfigInput, ConfigTarget, ProxyUserCredentials},
+    model::{AppConfig, ConfigInput, ConfigTarget, ProxyUserCredentials},
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -47,8 +48,8 @@ use shared::{
     },
     utils::{
         bin_serialize, extract_extension_from_url, human_readable_kbps, is_sanitize_sensitive_info_enabled,
-        replace_url_extension, sanitize_sensitive_info, current_time_secs, trim_slash, Internable, CONTENT_TYPE_CBOR,
-        CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
+        replace_url_extension, sanitize_sensitive_info, current_time_secs, trim_slash, get_credentials_from_url, Internable,
+        CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
     },
 };
 use smallvec::SmallVec;
@@ -1127,35 +1128,18 @@ async fn activate_session_before_stream_open(
     let effective_request_class = if let Some(request_class) = request_class {
         if request_class == PlaybackRequestClass::FollowUp {
             // Re-read session under the guard to ensure the counted lease is still held.
-            // Only reclassify if the session was in a counted state that has since been
-            // released. Pending sessions were never counted (admission pending provider
-            // acquisition) — keep FollowUp so no spurious placeholder is created.
+            // If it is no longer counted, classify it from the current lifecycle so
+            // stale FollowUp requests cannot bypass admission.
             let current_session = app_state
                 .active_users
                 .get_and_update_user_session(&user.username, session_token)
                 .await;
-            match current_session.as_ref().map(|s| &s.lifecycle) {
-                // Session is gone (expired/removed) or was never in a counted state — reclassify
-                // so admission runs and creates a fresh placeholder.
-                None => classify_playback_request(PlaybackRequestFacts {
-                    item_type,
-                    existing_session: None,
-                    prepare_only: false,
-                    terminate: false,
-                }),
-                // Had a counted lease but lost it — need to reclassify to Activate.
-                Some(crate::api::model::PlaybackLifecycle::Active | crate::api::model::PlaybackLifecycle::GraceActive) => {
-                    classify_playback_request(PlaybackRequestFacts {
-                        item_type,
-                        existing_session: current_session.as_ref(),
-                        prepare_only: false,
-                        terminate: false,
-                    })
-                }
-                // Pending was never counted (waiting for provider slot); Prepared/Preserved hold
-                // no counted slot — caller-specified FollowUp is still valid, no reclassification.
-                _ => request_class,
-            }
+            classify_playback_request(PlaybackRequestFacts {
+                item_type,
+                existing_session: current_session.as_ref(),
+                prepare_only: false,
+                terminate: false,
+            })
         } else {
             request_class
         }
@@ -1325,17 +1309,244 @@ async fn activate_session_before_stream_open(
     }
 }
 
-pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> String {
-    let Some(input_user_info) = input.get_user_info() else {
-        return stream_url.to_string();
-    };
-    let Some(alt_input_user_info) = alias_input.get_user_info() else {
-        return stream_url.to_string();
+pub fn get_stream_alternative_url(stream_url: &str, input: &ConfigInput, alias_input: &Arc<ProviderConfig>) -> Option<String> {
+    let (source_base_url, source_username, source_password) = input.get_matched_config_by_url(stream_url)?;
+    let alt_input_user_info = alias_input.get_user_info()?;
+
+    let modified = stream_url.replacen(source_base_url, &alt_input_user_info.base_url, 1);
+    let mut url = Url::parse(&modified).ok()?;
+
+    if let (Some(old_username), Some(old_password)) = (source_username, source_password) {
+        let auth_updated = rewrite_url_auth_fields(
+            &mut url,
+            old_username,
+            old_password,
+            &alt_input_user_info.username,
+            &alt_input_user_info.password,
+        );
+        if !auth_updated {
+            return None;
+        }
+    }
+
+    Some(url.to_string())
+}
+
+fn rewrite_url_auth_fields(
+    url: &mut Url,
+    old_username: &str,
+    old_password: &str,
+    new_username: &str,
+    new_password: &str,
+) -> bool {
+    if rewrite_query_auth_fields(url, new_username, new_password) {
+        return true;
+    }
+
+    if url.username() == old_username && url.password() == Some(old_password) {
+        return url.set_username(new_username).is_ok() && url.set_password(Some(new_password)).is_ok();
+    }
+
+    rewrite_path_auth_fields(url, old_username, old_password, new_username, new_password)
+}
+
+fn rewrite_query_auth_fields(url: &mut Url, new_username: &str, new_password: &str) -> bool {
+    let mut has_username = false;
+    let mut has_password = false;
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| {
+            if key.eq_ignore_ascii_case("username") {
+                has_username = true;
+                (key.into_owned(), new_username.to_string())
+            } else if key.eq_ignore_ascii_case("password") {
+                has_password = true;
+                (key.into_owned(), new_password.to_string())
+            } else {
+                (key.into_owned(), value.into_owned())
+            }
+        })
+        .collect();
+
+    if !(has_username && has_password) {
+        return false;
+    }
+
+    url.query_pairs_mut().clear().extend_pairs(pairs.iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    true
+}
+
+fn rewrite_path_auth_fields(
+    url: &mut Url,
+    old_username: &str,
+    old_password: &str,
+    new_username: &str,
+    new_password: &str,
+) -> bool {
+    let Some(mut segments) = url
+        .path_segments()
+        .map(|segments| segments.map(ToOwned::to_owned).collect::<Vec<_>>())
+    else {
+        return false;
     };
 
-    let modified = stream_url.replacen(&input_user_info.base_url, &alt_input_user_info.base_url, 1);
-    let modified = modified.replacen(&input_user_info.username, &alt_input_user_info.username, 1);
-    modified.replacen(&input_user_info.password, &alt_input_user_info.password, 1)
+    let credential_index = if segments.len() >= 3
+        && matches!(segments.first().map(String::as_str), Some("live" | "movie" | "series"))
+        && segments.get(1).is_some_and(|segment| segment == old_username)
+        && segments.get(2).is_some_and(|segment| segment == old_password)
+    {
+        Some(1)
+    } else if segments.len() >= 2
+        && segments.first().is_some_and(|segment| segment == old_username)
+        && segments.get(1).is_some_and(|segment| segment == old_password)
+    {
+        Some(0)
+    } else {
+        None
+    };
+
+    let Some(credential_index) = credential_index else {
+        return false;
+    };
+
+    segments[credential_index] = new_username.to_string();
+    segments[credential_index + 1] = new_password.to_string();
+
+    let Ok(mut path_segments) = url.path_segments_mut() else {
+        return false;
+    };
+    path_segments.clear().extend(segments.iter().map(String::as_str));
+    true
+}
+
+fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) -> bool {
+    provider_cfg
+        .get_user_info()
+        .is_some_and(|user_info| stream_url_base_matches(stream_url, &user_info.base_url) && stream_url_account_matches(stream_url, &user_info))
+}
+
+fn stream_url_base_matches(stream_url: &str, base_url: &str) -> bool {
+    stream_url.strip_prefix(base_url).is_some_and(|remaining| {
+        remaining.is_empty() || remaining.starts_with(['/', '?', '#'])
+    })
+}
+
+fn stream_url_account_matches(stream_url: &str, user_info: &crate::model::InputUserInfo) -> bool {
+    let Ok(url) = Url::parse(stream_url) else {
+        return false;
+    };
+
+    let (url_username, url_password) = get_credentials_from_url(&url);
+    if let (Some(url_username), Some(url_password)) = (url_username.as_deref(), url_password.as_deref()) {
+        return url_username == user_info.username && url_password == user_info.password;
+    }
+
+    let mut has_query_username = false;
+    let mut has_query_password = false;
+    for (key, value) in url.query_pairs() {
+        if key.eq_ignore_ascii_case("username") {
+            has_query_username = value == user_info.username;
+        } else if key.eq_ignore_ascii_case("password") {
+            has_query_password = value == user_info.password;
+        }
+    }
+    if has_query_username || has_query_password {
+        return has_query_username && has_query_password;
+    }
+
+    let mut segments = url.path_segments().into_iter().flatten();
+    let first = segments.next();
+    let (username, password) = match first {
+        Some("live" | "movie" | "series") => (segments.next(), segments.next()),
+        Some(username) => (Some(username), segments.next()),
+        None => return false,
+    };
+
+    username == Some(user_info.username.as_str()) && password == Some(user_info.password.as_str())
+}
+
+fn select_provider_stream_url(
+    stream_url: &str,
+    input: &ConfigInput,
+    provider_cfg: &Arc<ProviderConfig>,
+) -> Option<(Arc<str>, String)> {
+    if stream_url_matches_provider(stream_url, provider_cfg) {
+        Some((provider_cfg.name.clone(), stream_url.to_string()))
+    } else {
+        get_stream_alternative_url(stream_url, input, provider_cfg).map(|url| (provider_cfg.name.clone(), url))
+    }
+}
+
+fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
+    ProviderStreamState::Custom(create_channel_unavailable_stream(
+        app_config,
+        &[],
+        StatusCode::SERVICE_UNAVAILABLE,
+    ))
+}
+
+async fn acquire_stream_provider_handle(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    fingerprint: &Fingerprint,
+    options: StreamingAcquireOptions<'_>,
+) -> Option<ProviderHandle> {
+    match options.force_provider {
+        Some(provider) => {
+            // First try to stay on the exact pinned provider account without over-allocating.
+            if let Some(handle) = app_state
+                .active_provider
+                .acquire_exact_connection_with_grace_for_session(
+                    provider,
+                    &fingerprint.addr,
+                    options.allow_provider_grace,
+                    options.user_priority,
+                    options.connection_kind,
+                    options.session_owner,
+                )
+                .await
+            {
+                Some(handle)
+            } else if options.allow_forced_provider_fallback {
+                debug_if_enabled!(
+                    "Pinned provider {} unavailable for {}; falling back to lineup allocation",
+                    sanitize_sensitive_info(provider),
+                    sanitize_sensitive_info(&fingerprint.addr.to_string())
+                );
+                app_state
+                    .active_provider
+                    .acquire_connection_with_grace_for_session(
+                        &input.name,
+                        &fingerprint.addr,
+                        options.allow_provider_grace,
+                        options.user_priority,
+                        options.connection_kind,
+                        options.session_owner,
+                    )
+                    .await
+            } else {
+                debug_if_enabled!(
+                    "Pinned provider {} unavailable for {}; strict provider affinity prevents fallback",
+                    sanitize_sensitive_info(provider),
+                    sanitize_sensitive_info(&fingerprint.addr.to_string())
+                );
+                None
+            }
+        }
+        None => {
+            app_state
+                .active_provider
+                .acquire_connection_with_grace_for_session(
+                    &input.name,
+                    &fingerprint.addr,
+                    options.allow_provider_grace,
+                    options.user_priority,
+                    options.connection_kind,
+                    options.session_owner,
+                )
+                .await
+        }
+    }
 }
 
 pub(crate) fn resolve_redirect_location<'a>(
@@ -1377,7 +1588,7 @@ async fn get_redirect_alternative_url(
 ///
 /// - If no connections are available (`Exhausted`), it returns a custom stream indicating exhaustion.
 /// - If a connection is available or in a grace period, it constructs a streaming URL accordingly:
-///   - If the provider was forced or matches the input, the original URL is reused.
+///   - If the URL already targets the selected provider account, the original URL is reused.
 ///   - Otherwise, an alternative URL is generated based on the provider and input.
 ///
 /// The function returns:
@@ -1394,69 +1605,12 @@ async fn resolve_streaming_strategy(
     options: StreamingAcquireOptions<'_>,
 ) -> StreamingStrategy {
     // allocate a provider connection
-    let mut forced_provider_allocated = false;
-    let provider_connection_handle = match options.force_provider {
-        Some(provider) => {
-            // First try to stay on the exact pinned provider account without over-allocating.
-            if let Some(handle) = app_state
-                .active_provider
-                .acquire_exact_connection_with_grace_for_session(
-                    provider,
-                    &fingerprint.addr,
-                    options.allow_provider_grace,
-                    options.user_priority,
-                    options.connection_kind,
-                    options.session_owner,
-                )
-                .await
-            {
-                forced_provider_allocated = true;
-                Some(handle)
-            } else if options.allow_forced_provider_fallback {
-                debug_if_enabled!(
-                    "Pinned provider {} unavailable for {}; falling back to lineup allocation",
-                    sanitize_sensitive_info(provider),
-                    sanitize_sensitive_info(&fingerprint.addr.to_string())
-                );
-                app_state
-                    .active_provider
-                    .acquire_connection_with_grace_for_session(
-                        &input.name,
-                        &fingerprint.addr,
-                        options.allow_provider_grace,
-                        options.user_priority,
-                        options.connection_kind,
-                        options.session_owner,
-                    )
-                    .await
-            } else {
-                debug_if_enabled!(
-                    "Pinned provider {} unavailable for {}; strict provider affinity prevents fallback",
-                    sanitize_sensitive_info(provider),
-                    sanitize_sensitive_info(&fingerprint.addr.to_string())
-                );
-                None
-            }
-        }
-        None => {
-            app_state
-                .active_provider
-                .acquire_connection_with_grace_for_session(
-                    &input.name,
-                    &fingerprint.addr,
-                    options.allow_provider_grace,
-                    options.user_priority,
-                    options.connection_kind,
-                    options.session_owner,
-                )
-                .await
-        }
-    };
+    let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, options).await;
 
     // panel_api provisioning/loading is handled later in the stream creation flow
 
-    let stream_response_params = if let Some(allocation) = provider_connection_handle.as_ref().map(|ph| &ph.allocation)
-    {
+    let mut release_failed_mapping = false;
+    let stream_response_params = if let Some(allocation) = provider_connection_handle.as_ref().map(|ph| &ph.allocation) {
         match allocation {
             ProviderAllocation::Exhausted => {
                 debug!("Provider {} is exhausted. No connections allowed.", input.name);
@@ -1464,29 +1618,35 @@ async fn resolve_streaming_strategy(
                 ProviderStreamState::Custom(stream)
             }
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
-                // force_stream_provider means we keep the url and the provider.
-                // If force_stream_provider or the input is the same as the config we don't need to get new url
-                let (selected_provider_name, url) = if forced_provider_allocated || provider_cfg.id == input.id {
-                    (input.name.clone(), stream_url.to_string())
-                } else {
-                    (provider_cfg.name.clone(), get_stream_alternative_url(stream_url, input, provider_cfg))
-                };
+                // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
+                // alias URLs in persisted playlists until the next processing run.
+                if let Some((selected_provider_name, url)) = select_provider_stream_url(stream_url, input, provider_cfg) {
+                    debug_if_enabled!(
+                        "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",
+                        sanitize_sensitive_info(&input.name),
+                        sanitize_sensitive_info(&provider_cfg.name),
+                        sanitize_sensitive_info(
+                            provider_cfg.get_user_info().as_ref().map_or_else(|| "?", |u| u.username.as_str())
+                        ),
+                        allocation.short_key(),
+                        sanitize_sensitive_info(resolve_request_url_for_logging(input, &url).as_ref())
+                    );
 
-                debug_if_enabled!(
-                    "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",
-                    sanitize_sensitive_info(&input.name),
-                    sanitize_sensitive_info(&provider_cfg.name),
-                    sanitize_sensitive_info(
-                        provider_cfg.get_user_info().as_ref().map_or_else(|| "?", |u| u.username.as_str())
-                    ),
-                    allocation.short_key(),
-                    sanitize_sensitive_info(resolve_request_url_for_logging(input, &url).as_ref())
-                );
-
-                if matches!(allocation, ProviderAllocation::Available(_)) {
-                    ProviderStreamState::Available(Some(selected_provider_name.intern()), url.intern())
+                    if matches!(allocation, ProviderAllocation::Available(_)) {
+                        ProviderStreamState::Available(Some(selected_provider_name.intern()), url.intern())
+                    } else {
+                        ProviderStreamState::GracePeriod(Some(selected_provider_name.intern()), url.intern())
+                    }
                 } else {
-                    ProviderStreamState::GracePeriod(Some(selected_provider_name.intern()), url.intern())
+                    debug_if_enabled!(
+                        "provider session rejected: input={} provider_cfg={} allocation={} stream_url={} reason=unmapped_provider_url",
+                        sanitize_sensitive_info(&input.name),
+                        sanitize_sensitive_info(&provider_cfg.name),
+                        allocation.short_key(),
+                        sanitize_sensitive_info(resolve_request_url_for_logging(input, stream_url).as_ref())
+                    );
+                    release_failed_mapping = true;
+                    create_unmapped_provider_stream(&app_state.app_config)
                 }
             }
         }
@@ -1495,6 +1655,12 @@ async fn resolve_streaming_strategy(
         let stream = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
         ProviderStreamState::Custom(stream)
     };
+
+    if release_failed_mapping {
+        if let Some(handle) = provider_connection_handle.take() {
+            app_state.connection_manager.release_provider_handle(Some(handle)).await;
+        }
+    }
 
     StreamingStrategy {
         provider_handle: provider_connection_handle,
@@ -1842,7 +2008,10 @@ where
                     return Some(StatusCode::BAD_REQUEST.into_response());
                 }
                 Some(url) => match app_state.active_provider.get_next_provider(&params.input.name).await {
-                    Some(provider_cfg) => get_stream_alternative_url(&url, params.input, &provider_cfg),
+                    Some(provider_cfg) => match get_stream_alternative_url(&url, params.input, &provider_cfg) {
+                        Some(stream_url) => stream_url,
+                        None => return Some(StatusCode::BAD_REQUEST.into_response()),
+                    },
                     None => url.to_string(),
                 },
             };
@@ -2083,6 +2252,7 @@ pub async fn force_provider_stream_response(
         }
         app_state.active_users.update_session_addr(&ctx.user.username, &user_session.token, &fingerprint.addr).await;
         stream_channel.shared = share_stream;
+        let socket_bound = user_session.socket_bound;
         let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
             stream_details,
             app_state,
@@ -2091,6 +2261,7 @@ pub async fn force_provider_stream_response(
             connection_kind: user_session.connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
             fingerprint,
             stream_channel,
+            socket_bound,
             session_token: Some(&user_session.token),
             req_headers: ctx.req_headers,
             meter_uid: metering.meter_uid,
@@ -2168,6 +2339,8 @@ pub(crate) async fn stream_response(
 
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
+    let playback_extension = extract_extension_from_url(stream_url);
+    let socket_bound = is_socket_bound_playback_session(item_type, playback_extension.as_deref());
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
     let activation = activate_session_before_stream_open(
@@ -2183,7 +2356,7 @@ pub(crate) async fn stream_response(
             stream_url,
             connection_permission,
             connection_kind,
-            socket_bound: item_type.uses_socket_bound_session(),
+            socket_bound,
         },
         )
         .await;
@@ -2376,6 +2549,7 @@ pub(crate) async fn stream_response(
             connection_kind,
             fingerprint,
             stream_channel,
+            socket_bound,
             session_token: Some(session_token),
             req_headers,
             meter_uid: metering.meter_uid,
@@ -2485,7 +2659,7 @@ pub(crate) async fn stream_response(
                             addr: &fingerprint.addr,
                             connection_permission,
                             connection_kind: Some(connection_kind),
-                            socket_bound: item_type.uses_socket_bound_session(),
+                            socket_bound,
                         })
                         .await;
                     let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
@@ -2654,6 +2828,8 @@ async fn try_shared_stream_response_if_any(
             let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
 
             stream_details.provider_name = provider;
+            let socket_bound =
+                is_socket_bound_playback_session(stream_channel.item_type, extract_extension_from_url(stream_url).as_deref());
             if let Some(provider_name) = stream_details.provider_name.as_deref() {
                 let _ = app_state
                     .active_users
@@ -2666,7 +2842,7 @@ async fn try_shared_stream_response_if_any(
                         addr: &fingerprint.addr,
                         connection_permission: connect_permission,
                         connection_kind: Some(connection_kind),
-                        socket_bound: stream_channel.item_type.uses_socket_bound_session(),
+                        socket_bound,
                     })
                     .await;
             }
@@ -2686,6 +2862,7 @@ async fn try_shared_stream_response_if_any(
                 connection_kind,
                 fingerprint,
                 stream_channel,
+                socket_bound,
                 session_token: Some(session_token),
                 req_headers,
                 meter_uid: metering.meter_uid,
@@ -2855,6 +3032,7 @@ pub(crate) async fn local_stream_response(
     } else {
         stream
     };
+    let socket_bound = is_socket_bound_playback_session(pli.item_type, extract_extension_from_url(&pli.url).as_deref());
     let mut connection_kind = connection_kind;
     if let Some(session_token) = playback_session_token {
         let activation = activate_session_before_stream_open(
@@ -2870,7 +3048,7 @@ pub(crate) async fn local_stream_response(
                 stream_url: &pli.url,
                 connection_permission,
                 connection_kind,
-                socket_bound: pli.item_type.uses_socket_bound_session(),
+                socket_bound,
             },
         )
             .await;
@@ -2925,7 +3103,7 @@ pub(crate) async fn local_stream_response(
                 addr: &fingerprint.addr,
                 connection_permission,
                 connection_kind: Some(resolved_connection_kind),
-                socket_bound: pli.item_type.uses_socket_bound_session(),
+                socket_bound,
             })
             .await;
     }
@@ -2937,6 +3115,7 @@ pub(crate) async fn local_stream_response(
         connection_kind: resolved_connection_kind,
         fingerprint,
         stream_channel: pli.clone(),
+        socket_bound,
         session_token: playback_session_token,
         req_headers,
         meter_uid: 0,
@@ -3394,6 +3573,10 @@ pub(crate) fn create_playback_session_fingerprint(
     item_type: PlaylistItemType,
     extension: Option<&str>,
 ) -> String {
+    // This scopes the session identity, not the session address-tracking policy.
+    // Adaptive playlist starts need a per-initial-socket token so two players behind
+    // the same IP/UA can watch the same HLS/DASH stream independently. The created
+    // UserSession itself can still be non-socket-bound.
     let socket_bound =
         is_socket_bound_playback_session(item_type, extension) || is_session_based_playback(item_type, extension);
     create_session_fingerprint(fingerprint, username, virtual_id, socket_bound)
@@ -3609,7 +3792,8 @@ mod tests {
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
-            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
+            MetadataUpdateManager, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig,
+            ProviderConfigConnection, SharedStreamManager,
         },
         auth::Fingerprint,
         model::{
@@ -3631,7 +3815,23 @@ mod tests {
         utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
     };
     use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, RwLock};
+
+    fn test_runtime_provider(url: &str, username: &str, password: &str) -> Arc<RuntimeProviderConfig> {
+        let input = ConfigInput {
+            name: "provider".intern(),
+            url: url.to_string(),
+            username: Some(username.to_string()),
+            password: Some(password.to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        Arc::new(RuntimeProviderConfig::new(
+            &input,
+            Arc::new(RwLock::new(ProviderConfigConnection::default())),
+            Arc::new(|_, _| {}),
+        ))
+    }
 
     #[tokio::test]
     async fn test_is_seek_request() {
@@ -3676,6 +3876,60 @@ mod tests {
                 .expect("provider url should resolve");
 
         assert_eq!(resolved, "https://provider.example/live/provider-user/provider-pass/33486.m3u8");
+    }
+
+    #[test]
+    fn stream_alternative_url_keeps_unmatched_urls_unchanged() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://source.example".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider("http://alias.example", "alias-user", "alias-pass");
+        let stream_url = "http://other.example/live/source-user/source-pass/123.ts";
+
+        let rewritten = get_stream_alternative_url(stream_url, &input, &alias);
+
+        assert_eq!(rewritten, None);
+    }
+
+    #[test]
+    fn stream_alternative_url_rewrites_only_query_auth_fields() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://source.example".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider("http://alias.example", "alias-user", "alias-pass");
+        let stream_url =
+            "http://source.example/player?token=source-user&username=source-user&password=source-pass";
+
+        let rewritten = get_stream_alternative_url(stream_url, &input, &alias);
+
+        assert_eq!(
+            rewritten,
+            Some("http://alias.example/player?token=source-user&username=alias-user&password=alias-pass".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_url_matches_provider_requires_base_url_and_account_identity() {
+        let provider = test_runtime_provider("http://same.example", "selected-user", "selected-pass");
+
+        assert!(stream_url_matches_provider(
+            "http://same.example/live/selected-user/selected-pass/123.ts",
+            &provider
+        ));
+        assert!(!stream_url_matches_provider(
+            "http://same.example/live/other-user/other-pass/123.ts",
+            &provider
+        ));
     }
 
     #[test]
@@ -3817,7 +4071,7 @@ mod tests {
         let busy_addr: SocketAddr = "127.0.0.1:55301".parse().unwrap_or_else(|_| unreachable!());
         let strict_addr: SocketAddr = "127.0.0.1:55302".parse().unwrap_or_else(|_| unreachable!());
         let fallback_addr: SocketAddr = "127.0.0.1:55303".parse().unwrap_or_else(|_| unreachable!());
-        let stream_url = "http://provider-1.example/movie/1.mkv";
+        let stream_url = "http://provider-1.example/movie/user1/pass1/1.mkv";
 
         let busy = app_state
             .active_provider
@@ -3877,6 +4131,79 @@ mod tests {
         app_state.active_provider.release_connection(&busy_addr).await;
         app_state.active_provider.release_connection(&strict_addr).await;
         app_state.active_provider.release_connection(&fallback_addr).await;
+    }
+
+    #[tokio::test]
+    async fn resolve_streaming_strategy_rewrites_stale_alias_url_to_selected_main_provider() {
+        let app_state = create_test_dual_provider_app_state();
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .sources
+            .load()
+            .get_input_by_name(&input_name)
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        let addr: SocketAddr = "127.0.0.1:55304".parse().unwrap_or_else(|_| unreachable!());
+
+        let strategy = resolve_streaming_strategy(
+            &app_state,
+            "http://provider-2.example/live/user2/pass2/100.ts",
+            &create_test_fingerprint(addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: None,
+                allow_forced_provider_fallback: false,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("live-session"),
+            },
+        )
+        .await;
+
+        let ProviderStreamState::Available(Some(provider), url) = strategy.provider_stream_state else {
+            panic!("request should allocate the main provider")
+        };
+        assert_eq!(provider.as_ref(), "provider_1");
+        assert_eq!(url.as_ref(), "http://provider-1.example/live/user1/pass1/100.ts");
+
+        app_state.active_provider.release_connection(&addr).await;
+    }
+
+    #[tokio::test]
+    async fn resolve_streaming_strategy_rejects_unmapped_provider_url() {
+        let app_state = create_test_dual_provider_app_state();
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .sources
+            .load()
+            .get_input_by_name(&input_name)
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        let addr: SocketAddr = "127.0.0.1:55305".parse().unwrap_or_else(|_| unreachable!());
+
+        let strategy = resolve_streaming_strategy(
+            &app_state,
+            "http://unmapped.example/live/user1/pass1/100.ts",
+            &create_test_fingerprint(addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: None,
+                allow_forced_provider_fallback: false,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("live-session"),
+            },
+        )
+        .await;
+
+        assert!(strategy.provider_handle.is_none());
+        assert!(matches!(strategy.provider_stream_state, ProviderStreamState::Custom(_)));
+
+        app_state.active_provider.release_connection(&addr).await;
     }
 
     #[test]
@@ -4452,7 +4779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_session_before_stream_open_uses_precomputed_follow_up_request_class() {
+    async fn activate_session_before_stream_open_revalidates_precomputed_follow_up_request_class() {
         let app_state = create_test_app_state_with_stream_config(crate::model::StreamConfig {
             retry: true,
             metrics_enabled: true,
@@ -4514,8 +4841,8 @@ mod tests {
         assert_eq!(activation.admission.kind, Some(crate::api::model::ConnectionKind::Normal));
         assert_eq!(activation.grace_mode, None);
         assert!(
-            activation.placeholder_transition_version.is_none(),
-            "precomputed follow-up activation must not create a placeholder session"
+            activation.placeholder_transition_version.is_some(),
+            "precomputed FollowUp must be revalidated against the current uncounted lifecycle"
         );
     }
 
@@ -7391,7 +7718,7 @@ mod tests {
         let Some(second_addr) = "127.0.0.1:55178".parse().ok() else {
             return;
         };
-        let first = create_test_fingerprint(first_addr);
+        let first = Fingerprint::new("10.0.0.6|player".to_string(), "10.0.0.6".to_string(), first_addr);
         let second = Fingerprint::new(first.key.clone(), first.client_ip.clone(), second_addr);
 
         let first_token = create_playback_session_fingerprint(&first, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
@@ -7400,6 +7727,22 @@ mod tests {
         assert_ne!(first_token, second_token);
         assert!(first_token.contains(&first.addr.to_string()));
         assert!(second_token.contains(&second.addr.to_string()));
+    }
+
+    #[test]
+    fn playback_session_fingerprint_keeps_ts_socket_bound_but_vod_logical() {
+        let first_addr: SocketAddr = "127.0.0.1:55179".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr: SocketAddr = "127.0.0.1:55180".parse().unwrap_or_else(|_| unreachable!());
+        let first = Fingerprint::new("10.0.0.7|player".to_string(), "10.0.0.7".to_string(), first_addr);
+        let second = Fingerprint::new(first.key.clone(), first.client_ip.clone(), second_addr);
+
+        let first_ts = create_playback_session_fingerprint(&first, "user1", 7003, PlaylistItemType::Live, None);
+        let second_ts = create_playback_session_fingerprint(&second, "user1", 7003, PlaylistItemType::Live, None);
+        let first_vod = create_playback_session_fingerprint(&first, "user1", 7003, PlaylistItemType::Video, None);
+        let second_vod = create_playback_session_fingerprint(&second, "user1", 7003, PlaylistItemType::Video, None);
+
+        assert_ne!(first_ts, second_ts, "plain TS live remains socket-bound");
+        assert_eq!(first_vod, second_vod, "VOD remains logical across reopen/seek sockets");
     }
 
     #[tokio::test]

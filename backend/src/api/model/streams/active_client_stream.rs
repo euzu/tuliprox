@@ -108,6 +108,7 @@ pub(crate) struct ActiveClientStreamParams<'a> {
     pub connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
     pub fingerprint: &'a Fingerprint,
     pub stream_channel: StreamChannel,
+    pub socket_bound: bool,
     pub session_token: Option<&'a str>,
     pub req_headers: &'a HeaderMap,
     pub meter_uid: u32,
@@ -722,6 +723,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         connection_kind,
         fingerprint,
         stream_channel,
+        socket_bound,
         session_token,
         req_headers,
         meter_uid,
@@ -834,7 +836,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         grace_active_version,
         grace_resolution_context: owned_grace_ctx,
         grace_kind: Some(connection_kind),
-        socket_bound: stream_channel.item_type.uses_socket_bound_session(),
+        socket_bound,
     });
 
     let cfg = &app_state.app_config;
@@ -1053,6 +1055,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                 crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id }
                             } else {
                                 crate::api::api_utils::EvictionReentryGuard::Session(
+                                    // Defensive fallback: an empty token will not match any real session.
                                     session_token.as_deref().unwrap_or_default(),
                                 )
                             };
@@ -1905,6 +1908,7 @@ mod tests {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
+            socket_bound: true,
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 0,
@@ -1979,6 +1983,7 @@ mod tests {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_shared_stream_channel(1, "http://provider-1.example/live/1"),
+            socket_bound: true,
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 0,
@@ -2459,6 +2464,7 @@ mod tests {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
+            socket_bound: true,
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 55,

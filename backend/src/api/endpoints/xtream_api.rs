@@ -309,7 +309,7 @@ async fn xtream_player_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, true);
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
         let user_session = app_state
             .active_users
             .get_and_update_user_session(&user.username, &playback_session_token)
@@ -322,9 +322,7 @@ async fn xtream_player_api_stream(
             user_session.as_ref(),
             playback_session_token.as_str(),
             false,
-            crate::api::api_utils::EvictionReentryGuard::SocketPlayback {
-                virtual_id: pli.virtual_id,
-            },
+            crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
             false,
             false,
         )
@@ -639,7 +637,7 @@ async fn xtream_player_api_stream_with_token(
         let user = create_api_proxy_user(app_state);
 
         if pli.item_type.is_local() {
-            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id, true);
+            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id, false);
             return local_stream_response(
                 fingerprint,
                 app_state,
