@@ -468,12 +468,33 @@ pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32
 }
 
 /// Sends a request with retry logic and optional provider failover support.
-#[allow(clippy::too_many_lines)]
 pub async fn send_with_retry_and_provider(
     app_config: &Arc<AppConfig>,
     url: &Url, // Used primarily for logging/context
     provider: Option<&Arc<ConfigProvider>>,
     allow_redirects: bool,
+    send: impl FnMut(&Url) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, std::io::Error> {
+    send_with_retry_and_provider_policy(app_config, url, provider, allow_redirects, true, send).await
+}
+
+/// Canonical retry and provider-failover entry point for outbound resource requests.
+///
+/// [`send_with_retry_and_provider`] is a thin wrapper that enables the standard retry policy. Retry attempt counts,
+/// backoff values, and failover redirect patterns are sourced from `AppConfig` (`reverse_proxy.resource_retry`). The
+/// `url` argument is used as the stable logging/context URL; callers should pass the original request target rather
+/// than an already-rotated provider URL.
+///
+/// When `retry_enabled` is `false`, this function forces `max_attempts` to 1, disables provider URL rotation for idle
+/// timeouts, retryable HTTP statuses, and connection/timeout errors, and skips the final fallback provider rotation
+/// after attempts are exhausted.
+#[allow(clippy::too_many_lines)]
+pub async fn send_with_retry_and_provider_policy(
+    app_config: &Arc<AppConfig>,
+    url: &Url, // Used primarily for logging/context
+    provider: Option<&Arc<ConfigProvider>>,
+    allow_redirects: bool,
+    retry_enabled: bool,
     mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
     let config = app_config.config.load();
@@ -487,6 +508,7 @@ pub async fn send_with_retry_and_provider(
             (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
         },
     );
+    let max_attempts = if retry_enabled { max_attempts } else { 1 };
     drop(config);
 
     let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
@@ -536,17 +558,19 @@ pub async fn send_with_retry_and_provider(
                         ));
                         // 1. Try Provider Failover first
                         let mut provider_failover_exhausted = false;
-                        if let Some(current_provider) = provider {
-                            if rotate_to_next_provider_url(
-                                current_provider.as_ref(),
-                                &mut provider_url_index,
-                                start_provider_index,
-                                "idle timeout",
-                            ) {
-                                continue 'provider_loop;
-                            }
+                        if retry_enabled {
+                            if let Some(current_provider) = provider {
+                                if rotate_to_next_provider_url(
+                                    current_provider.as_ref(),
+                                    &mut provider_url_index,
+                                    start_provider_index,
+                                    "idle timeout",
+                                ) {
+                                    continue 'provider_loop;
+                                }
                             provider_failover_exhausted =
                                 max_provider_attempts > 0 && provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index);
+                            }
                         }
 
                         // 2. If no provider or rotation failed, check if we can retry the same URL
@@ -596,11 +620,12 @@ pub async fn send_with_retry_and_provider(
                                 ));
 
                                 // Failover check: Should we switch to the next provider URL?
-                                let provider_failover_exhausted = (is_failover || should_trigger_failover(status))
+                                let provider_failover_exhausted = retry_enabled
+                                    && (is_failover || should_trigger_failover(status))
                                     && provider.is_some_and(|current_provider| {
                                         provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index)
                                     });
-                                if is_failover || should_trigger_failover(status) {
+                                if retry_enabled && (is_failover || should_trigger_failover(status)) {
                                     if let Some(current_provider) = provider {
                                         let reason = format!("status {}", format_http_status(status));
                                         if rotate_to_next_provider_url(
@@ -640,7 +665,8 @@ pub async fn send_with_retry_and_provider(
 
                             Err(err) => {
                                 // For DNS IP-connect policy, attempt next IP before provider URL rotation.
-                                if (err.is_timeout() || err.is_connect())
+                                if retry_enabled
+                                    && (err.is_timeout() || err.is_connect())
                                     && should_try_next_ip_on_connect_error(provider, &attempt_target, &mut attempted_dns_ips)
                                 {
                                     continue 'ip_loop;
@@ -653,11 +679,12 @@ pub async fn send_with_retry_and_provider(
                                 ));
 
                                 // Connection errors (Timeout/Connect) trigger failover if provider exists
-                                let provider_failover_exhausted = (err.is_timeout() || err.is_connect())
+                                let provider_failover_exhausted = retry_enabled
+                                    && (err.is_timeout() || err.is_connect())
                                     && provider.is_some_and(|current_provider| {
                                         provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index)
                                     });
-                                if err.is_timeout() || err.is_connect() {
+                                if retry_enabled && (err.is_timeout() || err.is_connect()) {
                                     if let Some(current_provider) = provider {
                                         if rotate_to_next_provider_url(
                                             current_provider.as_ref(),
@@ -697,24 +724,26 @@ pub async fn send_with_retry_and_provider(
         }
 
         // 2. If per-URL retries are exhausted, try next provider URL as a last resort
-        if let Some(current_provider) = provider {
-            if rotate_to_next_provider_url(
-                current_provider.as_ref(),
-                &mut provider_url_index,
-                start_provider_index,
-                "retries exhausted for current URL",
-            ) {
-                continue 'provider_loop;
-            }
-
-            if max_provider_attempts > 0 {
-                let last_failure = last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
-                log_provider_cycle_exhausted(
+        if retry_enabled {
+            if let Some(current_provider) = provider {
+                if rotate_to_next_provider_url(
                     current_provider.as_ref(),
+                    &mut provider_url_index,
                     start_provider_index,
-                    provider_url_index,
-                    last_failure,
-                );
+                    "retries exhausted for current URL",
+                ) {
+                    continue 'provider_loop;
+                }
+
+                if max_provider_attempts > 0 {
+                    let last_failure = last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
+                    log_provider_cycle_exhausted(
+                        current_provider.as_ref(),
+                        start_provider_index,
+                        provider_url_index,
+                        last_failure,
+                    );
+                }
             }
         }
 
@@ -1731,8 +1760,8 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 mod tests {
     use super::{
         next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
-        resolve_attempt_target, same_origin, send_with_retry_and_provider, should_try_next_ip_on_connect_error,
-        strip_sensitive_headers_for_cross_origin_redirect,
+        resolve_attempt_target, same_origin, send_with_retry_and_provider, send_with_retry_and_provider_policy,
+        should_try_next_ip_on_connect_error, strip_sensitive_headers_for_cross_origin_redirect,
     };
     use crate::{
         model::{AppConfig, Config, ConfigProvider, MediaToolCapabilities, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
@@ -2141,6 +2170,65 @@ mod tests {
 
         assert_eq!(second_body, "b");
         assert_eq!(accepted_b.load(Ordering::SeqCst), 2);
+
+        handle_b.abort();
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_policy_false_does_not_fail_over_provider_urls() {
+        let (addr_b, accepted_b, handle_b) = match start_plain_http_server_with_body(b"b").await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping send_with_retry_policy_false_does_not_fail_over_provider_urls: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to start test http server: {err}"),
+        };
+
+        let mut cfg = Config {
+            connect_timeout_secs: 1,
+            ..Config::default()
+        };
+        cfg.accept_insecure_ssl_certificates = true;
+        cfg.reverse_proxy = Some(ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: ResourceRetryConfig {
+                max_attempts: 3,
+                backoff_millis: 1,
+                ..ResourceRetryConfig::default()
+            },
+            disabled_header: None,
+            stream: None,
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+        });
+        let app_config = make_test_app_config(cfg);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_millis(200))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http client should build");
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "provider-a".into(),
+            urls: vec!["http://127.0.0.1:1".into(), format!("http://127.0.0.1:{}", addr_b.port()).into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
+            dns: None,
+        }));
+
+        let url = Url::parse("provider://provider-a/live").expect("provider url should parse");
+        let result = send_with_retry_and_provider_policy(&app_config, &url, Some(&provider), false, false, |resolved_url| {
+            client.get(resolved_url.clone())
+        })
+        .await;
+
+        assert!(result.is_err(), "retry disabled must not fail over to the second provider URL");
+        assert_eq!(accepted_b.load(Ordering::SeqCst), 0, "fallback provider URL must not be contacted");
+        assert_eq!(provider.get_current_index(), 0, "retry disabled must not advance provider URL selection");
 
         handle_b.abort();
     }
