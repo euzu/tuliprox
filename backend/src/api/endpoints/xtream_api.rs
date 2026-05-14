@@ -524,6 +524,11 @@ async fn xtream_player_api_stream(
 
     let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
 
+    let pinned_provider = user_session
+        .as_ref()
+        .filter(|_| item_type.requires_provider_affinity())
+        .map(|session| &session.provider);
+
     stream_response(
         fingerprint,
         app_state,
@@ -531,6 +536,7 @@ async fn xtream_player_api_stream(
         Some(request_class),
         stream_channel,
         &stream_url,
+        pinned_provider,
         req_headers,
         &input,
         &target,
@@ -709,6 +715,7 @@ async fn xtream_player_api_stream_with_token(
             None,
             pli.to_stream_channel(target.id),
             &stream_url,
+            None,
             req_headers,
             &input,
             &target,

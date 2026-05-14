@@ -142,21 +142,15 @@ pub(in crate::api) async fn handle_hls_stream_request(
 
     let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
     let (request_url, session_token, provider_handle) = if let Some(session) = user_session {
+        let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
         let provider_handle = if let Some(handle) = app_state
             .active_provider
-            .acquire_connection_with_grace_for_session(
-                &input.name,
+            .acquire_exact_connection_with_grace_for_session(
+                pinned_provider,
                 &fingerprint.addr,
                 false,
-                connection_priority_for_kind(
-                    user,
-                    session
-                        .connection_kind
-                        .unwrap_or(connection_kind),
-                ),
-                session
-                    .connection_kind
-                    .unwrap_or(connection_kind),
+                connection_priority_for_kind(user, session.connection_kind.unwrap_or(connection_kind)),
+                session.connection_kind.unwrap_or(connection_kind),
                 Some(session.token.as_str()),
             )
             .await

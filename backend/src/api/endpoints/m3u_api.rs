@@ -356,6 +356,11 @@ async fn m3u_api_stream(
         .into_response();
     }
 
+    let pinned_provider = user_session
+        .as_ref()
+        .filter(|_| pli.item_type.requires_provider_affinity())
+        .map(|session| &session.provider);
+
     stream_response(
         fingerprint,
         app_state,
@@ -363,6 +368,7 @@ async fn m3u_api_stream(
         Some(request_class),
         pli.to_stream_channel(target.id),
         &session_url,
+        pinned_provider,
         req_headers,
         &input,
         &target,

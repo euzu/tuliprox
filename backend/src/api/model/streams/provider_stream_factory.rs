@@ -4,22 +4,19 @@ use crate::{
             model::{
                 create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
             streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
-            AppState, BoxedProviderStream, CustomVideoStreamType, ProviderStreamFactoryResponse, StreamError,
+            AppState, CustomVideoStreamType, ProviderStreamFactoryResponse, StreamError,
         },
     },
     model::{ConfigProvider, ReverseProxyDisabledHeaderConfig},
     utils::{
         debug_if_enabled,
         request::{
-            classify_content_type, get_request_headers, preview_request_diagnostics_for_logging,
-            preview_request_target_for_logging, send_with_retry_and_provider, MimeCategory,
+            get_request_headers, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
+            send_with_retry_and_provider_policy,
         },
     },
 };
-use futures::{
-    stream::{self},
-    StreamExt, TryStreamExt,
-};
+use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
 use reqwest::{
     header::{HeaderMap, RANGE},
@@ -33,10 +30,7 @@ use shared::{
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -51,7 +45,8 @@ const ERR_MAX_RETRY_COUNT: u32 = 5;
 create_bitset!(
     u8,
     ProviderStreamFactoryFlags,
-    ReconnectEnabled,
+    RetryEnabled,
+    InitialRetryLoopEnabled,
     BufferEnabled,
     ShareStream,
     PipeStream,
@@ -67,7 +62,7 @@ pub struct ProviderStreamFactoryOptions {
     url: Url,
     headers: HeaderMap,
     default_user_agent: Option<axum::http::header::HeaderValue>,
-    range_bytes: Option<Arc<AtomicUsize>>,
+    range_start_bytes: Option<usize>,
     reconnect_flag: CancellationToken,
     provider: Option<Arc<ConfigProvider>>,
     username: Option<String>,
@@ -130,14 +125,17 @@ impl ProviderStreamFactoryOptions {
             })
             .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
         let url = (*stream_url).clone();
-        let range_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
-            requested_range.map(|v| Arc::new(AtomicUsize::new(v)))
+        let range_start_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
+            requested_range
         } else {
-            Some(Arc::new(AtomicUsize::new(requested_range.unwrap_or(0))))
+            Some(requested_range.unwrap_or(0))
         };
         let mut flags = ProviderStreamFactoryFlagsSet::new();
-        if stream_options.stream_retry && !item_type.is_live_adaptive() {
-            flags.set(ProviderStreamFactoryFlags::ReconnectEnabled);
+        if stream_options.stream_retry {
+            flags.set(ProviderStreamFactoryFlags::RetryEnabled);
+            if !item_type.is_live_adaptive() {
+                flags.set(ProviderStreamFactoryFlags::InitialRetryLoopEnabled);
+            }
         }
         if stream_options.pipe_provider_stream {
             flags.set(ProviderStreamFactoryFlags::PipeStream);
@@ -161,7 +159,7 @@ impl ProviderStreamFactoryOptions {
             url,
             headers,
             default_user_agent,
-            range_bytes,
+            range_start_bytes,
             provider: None,
             username: username.map(ToString::to_string),
             client_ip: client_ip.map(ToString::to_string),
@@ -197,18 +195,18 @@ impl ProviderStreamFactoryOptions {
     pub fn get_url_as_str(&self) -> &str { self.url.as_str() }
 
     #[inline]
-    pub fn should_reconnect(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::ReconnectEnabled) }
+    pub fn should_retry_provider_request(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::RetryEnabled) }
+
+    #[inline]
+    pub fn should_retry_initial_open_loop(&self) -> bool {
+        self.flags.contains(ProviderStreamFactoryFlags::InitialRetryLoopEnabled)
+    }
 
     #[inline]
     pub fn get_headers(&self) -> &HeaderMap { &self.headers }
 
     #[inline]
-    pub fn get_total_bytes_send(&self) -> Option<usize> {
-        self.range_bytes.as_ref().map(|atomic| atomic.load(Ordering::Acquire))
-    }
-
-    #[inline]
-    pub fn get_range_bytes_clone(&self) -> Option<Arc<AtomicUsize>> { self.range_bytes.clone() }
+    pub fn get_total_bytes_send(&self) -> Option<usize> { self.range_start_bytes }
 
     #[inline]
     pub fn should_continue(&self) -> bool { !self.reconnect_flag.is_cancelled() }
@@ -244,7 +242,6 @@ impl ProviderStreamFactoryOptions {
 
     fn get_connect_failure_stage(&self) -> Option<FailureStage> { self.connect_failure_stage }
 
-    fn clear_connect_failure_stage(&mut self) { self.connect_failure_stage = None; }
 }
 
 fn record_provider_open_failure(
@@ -496,11 +493,12 @@ async fn send_with_manual_redirects(
     let provider = stream_options.get_provider().cloned();
 
     loop {
-        let result = send_with_retry_and_provider(
+        let result = send_with_retry_and_provider_policy(
             &app_state.app_config,
             &current_url,
             provider.as_ref(),
             true,
+            stream_options.should_retry_provider_request(),
             |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url)).0,
         )
         .await;
@@ -563,10 +561,17 @@ async fn provider_stream_request(
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
 
-        send_with_retry_and_provider(&app_state.app_config, url, provider.as_ref(), false, |resolved_url| {
-            let (client, _partial_content) = prepare_client(request_client, stream_options, Some(resolved_url));
-            client
-        })
+        send_with_retry_and_provider_policy(
+            &app_state.app_config,
+            url,
+            provider.as_ref(),
+            false,
+            stream_options.should_retry_provider_request(),
+            |resolved_url| {
+                let (client, _partial_content) = prepare_client(request_client, stream_options, Some(resolved_url));
+                client
+            },
+        )
         .await
     };
     match response_result {
@@ -725,6 +730,9 @@ async fn get_provider_stream(
         if !stream_options.should_continue() || connect_err > ERR_MAX_RETRY_COUNT {
             break;
         }
+        if !stream_options.should_retry_initial_open_loop() {
+            break;
+        }
         if start.elapsed().as_secs() > RETRY_SECONDS {
             warn!(
                 "The stream could be unavailable. Giving up after {RETRY_SECONDS} seconds. {}",
@@ -758,7 +766,7 @@ pub async fn create_provider_stream(
     client: &reqwest::Client,
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
-    let client_stream_factory = |stream, reconnect_flag, range_cnt| {
+    let client_stream_factory = |stream, reconnect_flag| {
         let stream = if should_wrap_provider_stream_in_buffer(&stream_options) {
             BufferedStream::new(
                 stream,
@@ -770,7 +778,7 @@ pub async fn create_provider_stream(
         } else {
             stream
         };
-        ClientStream::new(stream, reconnect_flag, range_cnt, stream_options.get_url_as_str()).boxed()
+        ClientStream::new(stream, reconnect_flag, None, stream_options.get_url_as_str()).boxed()
     };
 
     match get_provider_stream(app_state, client, &stream_options).await {
@@ -788,112 +796,11 @@ pub async fn create_provider_stream(
                     record_provider_open_failure(app_state, &stream_options, reason, None, None);
                 }
             }
-            let is_media_stream_or_not_piped = if let Some((headers, _, _, _custom_video_type)) = &info {
-                // if it is piped or no video stream, then we don't reconnect
-                !stream_options.is_piped() && classify_content_type(headers) == MimeCategory::Video
-            } else {
-                !stream_options.is_piped() // don't know what it is but lets assume it is something
-            };
-
             let continue_signal = stream_options.get_reconnect_flag_clone();
-            if is_media_stream_or_not_piped && stream_options.should_reconnect() {
-                let continue_client_signal = continue_signal.clone();
-                let continue_streaming_signal = continue_client_signal.clone();
-                let mut stream_options_provider = stream_options.clone();
-                stream_options_provider.clear_connect_failure_stage();
-                let app_state_clone = Arc::clone(app_state);
-                let client = client.clone();
-                let unfold: BoxedProviderStream = stream::unfold((), move |()| {
-                    let client = client.clone();
-                    let stream_opts = stream_options_provider.clone();
-                    let continue_streaming = continue_streaming_signal.clone();
-                    let app_state_clone = Arc::clone(&app_state_clone);
-                    async move {
-                        if continue_streaming.is_cancelled() {
-                            app_state_clone.connection_manager.release_provider_connection(&stream_opts.addr).await;
-                            None
-                        } else {
-                            match get_provider_stream(&app_state_clone, &client, &stream_opts).await {
-                                Ok(Some((stream, info))) => {
-                                    // If we reconnected with a byte offset and the provider responded
-                                    // 200 OK instead of 206 Partial Content, the stream would restart
-                                    // from byte 0, producing a corrupt video.  Cancel the reconnect
-                                    // to avoid silently delivering corrupt data to the client.
-                                    if let Some((_, status, _, _)) = &info {
-                                        let current_pos = stream_opts.get_total_bytes_send().unwrap_or(0);
-                                        if current_pos > 0 && *status != StatusCode::PARTIAL_CONTENT {
-                                            warn!(
-                                                "Reconnect aborted: provider ignored Range request \
-                                                 (responded {status} instead of 206). URL: {}",
-                                                sanitize_sensitive_info(stream_opts.get_log_url().as_ref())
-                                            );
-                                            continue_streaming.cancel();
-                                            return None;
-                                        }
-                                    }
-                                    Some((stream, ()))
-                                }
-                                Ok(None) => {
-                                    app_state_clone
-                                        .connection_manager
-                                        .release_provider_connection(&stream_opts.addr)
-                                        .await;
-                                    continue_streaming.cancel();
-                                    if let (Some(boxed_provider_stream), _response_info) =
-                                        create_channel_unavailable_stream(
-                                            &app_state_clone.app_config,
-                                            &get_response_headers(stream_opts.get_headers()),
-                                            StatusCode::SERVICE_UNAVAILABLE,
-                                        )
-                                    {
-                                        return Some((boxed_provider_stream, ()));
-                                    }
-                                    None
-                                }
-                                Err(failure) => {
-                                    app_state_clone
-                                        .connection_manager
-                                        .release_provider_connection(&stream_opts.addr)
-                                        .await;
-                                    continue_streaming.cancel();
-                                    let status = failure.status();
-                                    if let (Some(boxed_provider_stream), _response_info) =
-                                        create_channel_unavailable_stream(
-                                            &app_state_clone.app_config,
-                                            &get_response_headers(stream_opts.get_headers()),
-                                            status,
-                                        )
-                                    {
-                                        return Some((boxed_provider_stream, ()));
-                                    }
-                                    None
-                                }
-                            }
-                        }
-                    }
-                })
-                .flatten()
-                .boxed();
-                Some((
-                    client_stream_factory(
-                        init_stream.chain(unfold).boxed(),
-                        continue_client_signal.clone(),
-                        stream_options.get_range_bytes_clone(),
-                    )
-                    .boxed(),
-                    info,
-                ))
-            } else {
-                Some((
-                    client_stream_factory(
-                        init_stream.boxed(),
-                        continue_signal.clone(),
-                        stream_options.get_range_bytes_clone(),
-                    )
-                    .boxed(),
-                    info,
-                ))
-            }
+            Some((
+                client_stream_factory(init_stream.boxed(), continue_signal.clone()).boxed(),
+                info,
+            ))
         }
         Ok(None) => None,
         Err(failure) => {
@@ -1018,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_stream_factory_options_disables_reconnect_for_live_adaptive_streams() {
+    fn test_provider_stream_factory_options_keeps_initial_retry_for_live_adaptive_streams() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/segment.ts").unwrap();
         let req_headers = HeaderMap::new();
@@ -1057,8 +964,10 @@ mod tests {
             connect_failure_stage: None,
         });
 
-        assert!(!hls_options.should_reconnect());
-        assert!(!dash_options.should_reconnect());
+        assert!(hls_options.should_retry_provider_request());
+        assert!(dash_options.should_retry_provider_request());
+        assert!(!hls_options.should_retry_initial_open_loop());
+        assert!(!dash_options.should_retry_initial_open_loop());
     }
 
     #[test]

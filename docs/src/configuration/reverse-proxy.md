@@ -115,7 +115,7 @@ reverse_proxy:
 
 | Parameter | Type | Default | Technical Impact & Background |
 | :--- | :--- | :--- | :--- |
-| `retry` | Bool | `true` | **Background:** If the upstream provider unexpectedly drops the connection or a TCP network timeout occurs, Tuliprox immediately opens a new connection to the provider and seamless pipes the new bytes to the end-client. |
+| `retry` | Bool | `true` | Retries connecting to the upstream provider during the initial stream open when the provider returns a transient failure or no usable stream. Once a stream has started, Tuliprox does not transparently replace that live upstream inside the same client response. |
 | `buffer.enabled` | Bool | `false` | Enables an asynchronous ring-buffer in RAM between the provider download stream and the client upload stream. Necessary if the provider stream is faster than the consumer can process. |
 | `buffer.size` | Int | `0` | The size of the buffer in *Chunks* (1 Chunk = 8192 Bytes). A value of `1024` equals approximately 8 Megabytes of RAM per active stream. |
 | `throttle_kbps` | Int | `0` | **Background:** Some players download VODs (Movies) at maximum line speed ("Bursting"). Providers often view this as abuse or scraping and will ban the IP. By throttling (e.g., to `12500` kbps), you force the download into a constant, inconspicuous flow. Supports units like `KB/s`, `MB/s`, `kbps`, `Mibps`. |
@@ -131,8 +131,20 @@ reverse_proxy:
 
 Tuliprox handles streams differently based on these settings:
 
-* **Option A:** Both `retry: false` and `buffer.enabled: false` ➔ The provider stream is piped directly to the client with minimal overhead.
-* **Option B:** Either `retry: true` or `buffer.enabled: true` ➔ Tuliprox uses complex stream handling with a higher memory footprint to ensure stability.
+* **Option A:** Both `retry: false` and `buffer.enabled: false` ➔ The provider stream is piped directly to the client with  
+  minimal overhead.
+* **Option B:** `retry: true` retries transient failures while opening the provider stream. `buffer.enabled: true` adds  
+  buffered streaming with a higher memory footprint.
+
+Stream-type provider behavior:
+
+* Plain TS live is socket/request oriented. A new TS reconnect is a new provider allocation and may use another provider  
+  account if the selected account is unavailable.
+* Initial stream-open retries may also rotate configured provider URLs/accounts when failover is enabled.
+* HLS, DASH, VOD, series, and catchup are provider-affine after a session exists. Follow-up segment, seek, range, or  
+  reopen requests must stay on the provider account pinned in that session; if that account is unavailable, Tuliprox  
+  fails the follow-up instead of silently migrating it.
+* `retry: false` disables stream-open retry/failover for stream requests.
 
 #### Ring-Buffer Calculation
 
