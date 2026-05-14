@@ -159,7 +159,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         } else {
             debug_if_enabled!(
                 "HLS pinned provider {} unavailable for {}; aborting allocation to prevent mid-session migration",
-                sanitize_sensitive_info(&session.provider),
+                sanitize_sensitive_info(pinned_provider),
                 sanitize_sensitive_info(&fingerprint.addr.to_string())
             );
             None

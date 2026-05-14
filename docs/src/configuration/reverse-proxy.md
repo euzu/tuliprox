@@ -138,7 +138,7 @@ Tuliprox handles streams differently based on these settings:
 
 Stream-type provider behavior:
 
-* Plain TS live is socket/request oriented. A new TS reconnect is a new provider allocation and may use another provider  
+* Plain TS live is socket/request-oriented. A new TS reconnect is a new provider allocation and may use another provider
   account if the selected account is unavailable.
 * Initial stream-open retries may also rotate configured provider URLs/accounts when failover is enabled.
 * HLS, DASH, VOD, series, and catchup are provider-affine after a session exists. Follow-up segment, seek, range, or  

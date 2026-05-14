@@ -478,6 +478,16 @@ pub async fn send_with_retry_and_provider(
     send_with_retry_and_provider_policy(app_config, url, provider, allow_redirects, true, send).await
 }
 
+/// Canonical retry and provider-failover entry point for outbound resource requests.
+///
+/// [`send_with_retry_and_provider`] is a thin wrapper that enables the standard retry policy. Retry attempt counts,
+/// backoff values, and failover redirect patterns are sourced from `AppConfig` (`reverse_proxy.resource_retry`). The
+/// `url` argument is used as the stable logging/context URL; callers should pass the original request target rather
+/// than an already-rotated provider URL.
+///
+/// When `retry_enabled` is `false`, this function forces `max_attempts` to 1, disables provider URL rotation for idle
+/// timeouts, retryable HTTP statuses, and connection/timeout errors, and skips the final fallback provider rotation
+/// after attempts are exhausted.
 #[allow(clippy::too_many_lines)]
 pub async fn send_with_retry_and_provider_policy(
     app_config: &Arc<AppConfig>,
@@ -716,24 +726,24 @@ pub async fn send_with_retry_and_provider_policy(
         // 2. If per-URL retries are exhausted, try next provider URL as a last resort
         if retry_enabled {
             if let Some(current_provider) = provider {
-            if rotate_to_next_provider_url(
-                current_provider.as_ref(),
-                &mut provider_url_index,
-                start_provider_index,
-                "retries exhausted for current URL",
-            ) {
-                continue 'provider_loop;
-            }
-
-            if max_provider_attempts > 0 {
-                let last_failure = last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
-                log_provider_cycle_exhausted(
+                if rotate_to_next_provider_url(
                     current_provider.as_ref(),
+                    &mut provider_url_index,
                     start_provider_index,
-                    provider_url_index,
-                    last_failure,
-                );
-            }
+                    "retries exhausted for current URL",
+                ) {
+                    continue 'provider_loop;
+                }
+
+                if max_provider_attempts > 0 {
+                    let last_failure = last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
+                    log_provider_cycle_exhausted(
+                        current_provider.as_ref(),
+                        start_provider_index,
+                        provider_url_index,
+                        last_failure,
+                    );
+                }
             }
         }
 
@@ -2203,13 +2213,9 @@ mod tests {
             .timeout(Duration::from_secs(2))
             .build()
             .expect("http client should build");
-        let dead_addr = SocketAddr::from(([127, 0, 0, 1], 1));
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "provider-a".into(),
-            urls: vec![
-                format!("http://127.0.0.1:{}", dead_addr.port()).into(),
-                format!("http://127.0.0.1:{}", addr_b.port()).into(),
-            ],
+            urls: vec!["http://127.0.0.1:1".into(), format!("http://127.0.0.1:{}", addr_b.port()).into()],
             provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
             dns: None,
         }));

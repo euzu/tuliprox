@@ -206,7 +206,7 @@ impl ProviderStreamFactoryOptions {
     pub fn get_headers(&self) -> &HeaderMap { &self.headers }
 
     #[inline]
-    pub fn get_total_bytes_send(&self) -> Option<usize> { self.range_start_bytes }
+    pub fn get_range_start_bytes(&self) -> Option<usize> { self.range_start_bytes }
 
     #[inline]
     pub fn should_continue(&self) -> bool { !self.reconnect_flag.is_cancelled() }
@@ -378,7 +378,7 @@ fn prepare_client(
 ) -> (reqwest::RequestBuilder, bool) {
     let original_url = stream_options.get_url();
     let url = url_override.unwrap_or(original_url);
-    let range_start = stream_options.get_total_bytes_send();
+    let range_start = stream_options.get_range_start_bytes();
     let original_headers = stream_options.get_headers();
 
     if log_enabled!(log::Level::Debug) {
@@ -766,21 +766,6 @@ pub async fn create_provider_stream(
     client: &reqwest::Client,
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
-    let client_stream_factory = |stream, reconnect_flag| {
-        let stream = if should_wrap_provider_stream_in_buffer(&stream_options) {
-            BufferedStream::new(
-                stream,
-                stream_options.get_buffer_size(),
-                stream_options.get_reconnect_flag_clone(),
-                stream_options.get_url_as_str(),
-            )
-            .boxed()
-        } else {
-            stream
-        };
-        ClientStream::new(stream, reconnect_flag, None, stream_options.get_url_as_str()).boxed()
-    };
-
     match get_provider_stream(app_state, client, &stream_options).await {
         Ok(Some((init_stream, info))) => {
             if let Some((_headers, _status, _response_url, Some(custom_video_type))) = &info {
@@ -797,10 +782,19 @@ pub async fn create_provider_stream(
                 }
             }
             let continue_signal = stream_options.get_reconnect_flag_clone();
-            Some((
-                client_stream_factory(init_stream.boxed(), continue_signal.clone()).boxed(),
-                info,
-            ))
+            let stream = init_stream.boxed();
+            let stream = if should_wrap_provider_stream_in_buffer(&stream_options) {
+                BufferedStream::new(
+                    stream,
+                    stream_options.get_buffer_size(),
+                    stream_options.get_reconnect_flag_clone(),
+                    stream_options.get_url_as_str(),
+                )
+                .boxed()
+            } else {
+                stream
+            };
+            Some((ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str()).boxed(), info))
         }
         Ok(None) => None,
         Err(failure) => {
@@ -860,7 +854,7 @@ mod tests {
             connect_failure_stage: None,
         });
         assert!(!options.was_range_requested());
-        assert_eq!(options.get_total_bytes_send(), Some(0)); // Should track even if not requested
+        assert_eq!(options.get_range_start_bytes(), Some(0)); // Should track range start even if not requested
 
         // Case 2: VOD, range requested
         req_headers.insert("Range", "bytes=100-".parse().unwrap());
@@ -880,7 +874,7 @@ mod tests {
             connect_failure_stage: None,
         });
         assert!(options.was_range_requested());
-        assert_eq!(options.get_total_bytes_send(), Some(100));
+        assert_eq!(options.get_range_start_bytes(), Some(100));
 
         // Case 3: Live, no initial range requested
         let req_headers = HeaderMap::new();
@@ -900,7 +894,7 @@ mod tests {
             connect_failure_stage: None,
         });
         assert!(!options.was_range_requested());
-        assert_eq!(options.get_total_bytes_send(), None); // Should NOT track
+        assert_eq!(options.get_range_start_bytes(), None); // Should NOT track range start
 
         // Case 4: Live, range requested (should be stripped)
         let mut req_headers = HeaderMap::new();
@@ -921,7 +915,7 @@ mod tests {
             connect_failure_stage: None,
         });
         assert!(!options.was_range_requested()); // Stripped by filter
-        assert_eq!(options.get_total_bytes_send(), None);
+        assert_eq!(options.get_range_start_bytes(), None);
     }
 
     #[test]
