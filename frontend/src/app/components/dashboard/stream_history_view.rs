@@ -65,8 +65,9 @@ fn today_start_ts() -> i64 {
     today.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp()).unwrap_or(0)
 }
 
-fn ts_to_date_str(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0).map_or_else(String::new, |dt| dt.format("%Y-%m-%d").to_string())
+use chrono::{Local, TimeZone, Utc};
+pub fn format_ts(ts: u64) -> String {
+    chrono::DateTime::from_timestamp(ts as i64, 0).map_or_else(|| ts.to_string(),|dt| {dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()},)
 }
 
 fn optional_record_text_str(value: Option<&str>) -> &str { value.unwrap_or("-") }
