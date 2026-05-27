@@ -252,7 +252,7 @@ fn RecordDialogContent(props: &RecordDialogContentProps) -> Html {
                 <div class="tp__input-wrapper">
                     <input
                         type="number"
-                        min="-127"
+                        min="-128"
                         max="127"
                         step="1"
                         value={(*priority_state).clone()}
