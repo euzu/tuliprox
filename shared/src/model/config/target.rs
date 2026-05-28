@@ -260,7 +260,6 @@ impl ConfigTargetDto {
         let mut m3u_cnt = 0;
         let mut xtream_cnt = 0;
         let mut strm_cnt = 0;
-        let mut strm_needs_xtream = false;
         let mut hdhr_cnt = 0;
         let mut hdhomerun_needs_m3u = false;
         let mut hdhomerun_needs_xtream = false;
@@ -302,11 +301,6 @@ impl ConfigTargetDto {
                     }
                     if let Some(username) = &mut strm_output.username {
                         *username = username.trim().to_string();
-                    }
-                    let has_username = strm_output.username.as_ref().is_some_and(|u| !u.is_empty());
-
-                    if has_username {
-                        strm_needs_xtream = true;
                     }
                     // if strm_export_styles.contains(&strm_output.style) {
                     //     return Err(TuliproxError::ConfigTarget(format!("strm outputs with same export style are not allowed: {}", self.name)));
@@ -370,9 +364,9 @@ impl ConfigTargetDto {
             return Err(TuliproxError::ConfigTarget(format!("Multiple output formats with same type : {}", self.name)));
         }
 
-        if strm_cnt > 0 && strm_needs_xtream && xtream_cnt == 0 {
+        if strm_cnt > 0 && xtream_cnt == 0 && m3u_cnt == 0 {
             return Err(TuliproxError::ConfigTarget(format!(
-                "strm output with a username is only permitted when used in combination with xtream output: {}",
+                "strm output is only permitted when used in combination with xtream or m3u output: {}",
                 self.name
             )));
         }
@@ -432,5 +426,60 @@ impl ConfigTargetDto {
             }
             Err(err) => Err(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigTargetDto, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto};
+
+    fn target_with_outputs(output: Vec<TargetOutputDto>) -> ConfigTargetDto {
+        ConfigTargetDto {
+            name: "target".to_string(),
+            filter: "Group ~ \".*\"".to_string(),
+            output,
+            ..ConfigTargetDto::default()
+        }
+    }
+
+    fn strm_with_username() -> TargetOutputDto {
+        TargetOutputDto::Strm(StrmTargetOutputDto {
+            directory: "/tmp/strm".to_string(),
+            username: Some("alice".to_string()),
+            ..StrmTargetOutputDto::default()
+        })
+    }
+
+    fn strm_without_username() -> TargetOutputDto {
+        TargetOutputDto::Strm(StrmTargetOutputDto {
+            directory: "/tmp/strm".to_string(),
+            ..StrmTargetOutputDto::default()
+        })
+    }
+
+    #[test]
+    fn strm_with_username_is_allowed_with_m3u_output() {
+        let mut target =
+            target_with_outputs(vec![TargetOutputDto::M3u(M3uTargetOutputDto::default()), strm_with_username()]);
+
+        assert!(target.prepare(1, None, None).is_ok());
+    }
+
+    #[test]
+    fn strm_with_username_requires_m3u_or_xtream_output() {
+        let mut target = target_with_outputs(vec![strm_with_username()]);
+
+        let err = target.prepare(1, None, None).expect_err("STRM username without stream output should fail");
+
+        assert!(err.to_string().contains("xtream or m3u output"));
+    }
+
+    #[test]
+    fn strm_without_username_requires_m3u_or_xtream_output() {
+        let mut target = target_with_outputs(vec![strm_without_username()]);
+
+        let err = target.prepare(1, None, None).expect_err("STRM without stream output should fail");
+
+        assert!(err.to_string().contains("xtream or m3u output"));
     }
 }
