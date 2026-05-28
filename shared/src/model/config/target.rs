@@ -431,7 +431,7 @@ impl ConfigTargetDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigTargetDto, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto};
+    use super::{ConfigTargetDto, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto};
 
     fn target_with_outputs(output: Vec<TargetOutputDto>) -> ConfigTargetDto {
         ConfigTargetDto {
@@ -457,10 +457,27 @@ mod tests {
         })
     }
 
+    fn xtream_output() -> TargetOutputDto { TargetOutputDto::Xtream(XtreamTargetOutputDto::default()) }
+
     #[test]
     fn strm_with_username_is_allowed_with_m3u_output() {
         let mut target =
             target_with_outputs(vec![TargetOutputDto::M3u(M3uTargetOutputDto::default()), strm_with_username()]);
+
+        assert!(target.prepare(1, None, None).is_ok());
+    }
+
+    #[test]
+    fn strm_with_username_is_allowed_with_xtream_output() {
+        let mut target = target_with_outputs(vec![xtream_output(), strm_with_username()]);
+
+        assert!(target.prepare(1, None, None).is_ok());
+    }
+
+    #[test]
+    fn strm_without_username_is_allowed_with_m3u_output() {
+        let mut target =
+            target_with_outputs(vec![TargetOutputDto::M3u(M3uTargetOutputDto::default()), strm_without_username()]);
 
         assert!(target.prepare(1, None, None).is_ok());
     }
