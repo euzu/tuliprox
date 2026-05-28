@@ -21,7 +21,7 @@ use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -577,16 +577,13 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
 
     match input.get_download_input_type() {
         InputType::Xtream | InputType::XtreamBatch => {
+            let clusters_to_load = clusters.unwrap_or(&XTREAM_CLUSTER);
             if disk_based_processing {
-                Ok(PlaylistSource::xtream_disk(
+                let source = PlaylistSource::xtream_disk(
                     XtreamDiskPlaylistSource::new(app_config, &storage_path).await,
-                ))
+                );
+                Ok(PlaylistSource::filtered(source, skipped_clusters(clusters_to_load)))
             } else {
-                let clusters_to_load = if let Some(c) = clusters {
-                    c
-                } else {
-                    &XTREAM_CLUSTER
-                };
                 let groups = load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await?;
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
@@ -626,6 +623,14 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
             }
         }
     }
+}
+
+fn skipped_clusters(clusters_to_load: &[XtreamCluster]) -> HashSet<XtreamCluster> {
+    XTREAM_CLUSTER
+        .iter()
+        .copied()
+        .filter(|cluster| !clusters_to_load.contains(cluster))
+        .collect()
 }
 
 pub fn get_input_m3u_playlist_file_path(storage_path: &Path, input_name: &Arc<str>) -> PathBuf {
@@ -670,7 +675,7 @@ mod tests {
         assign_local_series_info_episode_key, assign_media_server_series_info_episode,
         get_input_media_server_playlist_file_path, materialize_media_server_series_info_episodes,
         rewrite_local_series_info_episode_virtual_id, rewrite_series_episode_parent_virtual_ids,
-        rewrite_series_info_episode_virtual_id, LocalEpisodeKey, ProviderEpisodeKey,
+        rewrite_series_info_episode_virtual_id, skipped_clusters, LocalEpisodeKey, ProviderEpisodeKey,
     };
     use crate::repository::{BPlusTreeQuery, TargetIdMapping, VirtualIdRecord};
     use shared::model::{
@@ -688,6 +693,14 @@ mod tests {
         let path = get_input_media_server_playlist_file_path(dir.path(), &"Media Server Input".intern());
 
         assert!(path.ends_with("media_server_Media_Server_Input.db"));
+    }
+
+    #[test]
+    fn skipped_clusters_converts_loaded_clusters_to_exclusions() {
+        let skipped = skipped_clusters(&[XtreamCluster::Live, XtreamCluster::Series]);
+
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped.contains(&XtreamCluster::Video));
     }
 
     fn make_local_series_info(series_uuid: &str, episodes: Vec<(u32, &str, &str)>) -> PlaylistItem {

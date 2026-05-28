@@ -29,6 +29,7 @@ use crate::{
     BUILD_TIMESTAMP,
 };
 use arc_swap::ArcSwapOption;
+use tokio::sync::RwLock;
 use axum::{
     body::Body,
     http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
@@ -62,10 +63,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
-    sync::Mutex,
-};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use url::Url;
 
@@ -3179,7 +3177,7 @@ pub fn get_headers_from_request(req_headers: &HeaderMap, filter: &HeaderFilter) 
 fn get_add_cache_content(
     res_url: &str,
     mime_type: Option<String>,
-    cache: &Arc<ArcSwapOption<Mutex<LRUResourceCache>>>,
+    cache: &Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
 ) -> Arc<dyn Fn(usize) + Send + Sync> {
     let resource_url = String::from(res_url);
     let cache = Arc::clone(cache);
@@ -3190,7 +3188,7 @@ fn get_add_cache_content(
         let cache = Arc::clone(&cache);
         tokio::spawn(async move {
             if let Some(cache) = cache.load().as_ref() {
-                let _ = cache.lock().await.add_content(&res_url, mime_type, size);
+                let _ = cache.write().await.add_content(&res_url, mime_type, size);
             }
         });
     });
@@ -3246,7 +3244,7 @@ async fn build_resource_stream_response(
     if can_cache {
         debug!("Caching eligible resource stream {sanitized_resource_url}");
         let cache_resource_path = if let Some(cache) = app_state.cache.load().as_ref() {
-            Some(cache.lock().await.store_path(resource_url, mime_type.as_deref()))
+            Some(cache.write().await.store_path(resource_url, mime_type.as_deref()))
         } else {
             None
         };
@@ -3351,8 +3349,12 @@ pub async fn resource_response(
     let filter: HeaderFilter = Some(Box::new(|key| key != "if-none-match" && key != "if-modified-since"));
     let req_headers = get_headers_from_request(req_headers, &filter);
     if let Some(cache) = app_state.cache.load().as_ref() {
-        let mut guard = cache.lock().await;
-        if let Some((resource_path, mime_type)) = guard.get_content(resource_url) {
+        let cache_hit = {
+            let mut guard = cache.write().await;
+            guard.get_content(resource_url)
+        };
+
+        if let Some((resource_path, mime_type)) = cache_hit {
             trace_if_enabled!("Responding resource from cache {}", sanitize_sensitive_info(resource_url));
             return serve_file(
                 &resource_path,

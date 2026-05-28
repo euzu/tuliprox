@@ -1043,7 +1043,7 @@ fn execute_pipe<'a>(
     fpl: &mut FetchedPlaylist<'a>,
     duplicates: &mut HashSet<UUIDType>,
     consume_source: bool,
-) -> FetchedPlaylist<'a> {
+) -> Result<FetchedPlaylist<'a>, TuliproxError> {
     let source = if consume_source {
         if fpl.is_memory() {
             MemoryPlaylistSource::new(fpl.source.take_groups()).into_source()
@@ -1051,7 +1051,7 @@ fn execute_pipe<'a>(
             std::mem::replace(&mut fpl.source, MemoryPlaylistSource::default().into_source())
         }
     } else {
-        fpl.clone_source()
+        fpl.clone_source()?
     };
 
     let mut new_fpl = FetchedPlaylist { input: fpl.input, source, epg: fpl.epg.clone() };
@@ -1068,7 +1068,7 @@ fn execute_pipe<'a>(
     if !new_fpl.is_memory() {
         new_fpl.source = MemoryPlaylistSource::new(new_fpl.source.take_groups()).into_source();
     }
-    new_fpl
+    Ok(new_fpl)
 }
 
 // This method is needed, because of duplicate group names in different inputs.
@@ -1122,7 +1122,8 @@ async fn process_playlist_for_target(
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source);
+        let mut processed_fpl =
+            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source).map_err(|err| vec![err])?;
         log_memory_snapshot(
             format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str(),
         );
