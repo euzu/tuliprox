@@ -1,4 +1,3 @@
-use super::filtered_playlist_source::FilteredPlaylistSource;
 use crate::{
     api::{
         model::{
@@ -66,12 +65,23 @@ use tokio::{
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 
+fn join_arc_strs(values: &[Arc<str>], separator: &str) -> String {
+    let mut result = String::new();
+    for value in values {
+        if !result.is_empty() {
+            result.push_str(separator);
+        }
+        result.push_str(value.as_ref());
+    }
+    result
+}
+
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
     let provider = ValueProvider { pli, match_as_ascii };
     filter.filter(&provider)
 }
 
-pub fn apply_filter_to_source(source: &mut dyn PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
+pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
     let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     for pli in source.into_items() {
         if is_valid(&pli, filter, false) {
@@ -100,7 +110,7 @@ pub fn apply_filter_to_source(source: &mut dyn PlaylistSource, filter: &Filter) 
     }
 }
 
-fn filter_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
+fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
     apply_filter_to_source(source, &target.filter)
 }
 
@@ -152,14 +162,13 @@ fn exec_rename(pli: &mut PlaylistItem, rename: Option<&Vec<ConfigRename>>) {
                 if log_enabled!(log::Level::Debug) && *value != *cap {
                     trace_if_enabled!("Renamed {}={value} to {cap}", &r.field);
                 }
-                let value = cap.into_owned();
-                set_field_value(result, r.field, value);
+                set_field_value(result, r.field, cap.as_ref());
             }
         }
     }
 }
 
-fn rename_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
+fn rename_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
     match &target.rename {
         Some(renames) if !renames.is_empty() => {
             let mut groups: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
@@ -233,7 +242,7 @@ fn map_channel_and_flatten(channel: PlaylistItem, mapping: &Mapping) -> Vec<Play
     result
 }
 
-fn map_playlist(source: &mut dyn PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
+fn map_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
     let valid_mappings = mappings.iter().filter(|m| m.mapper.as_ref().is_some_and(|v| !v.is_empty()));
@@ -396,17 +405,14 @@ async fn download_plex_media_server_playlist(
     }
 }
 
-fn filter_skipped_clusters_from_source(
-    source: Box<dyn PlaylistSource>,
-    input: &ConfigInput,
-) -> Box<dyn PlaylistSource> {
+fn filter_skipped_clusters_from_source(source: PlaylistSource, input: &ConfigInput) -> PlaylistSource {
     let skip_clusters = collect_effective_skip_clusters(input);
     if skip_clusters.is_empty() {
         return source;
     }
 
     let skip_set: HashSet<XtreamCluster> = skip_clusters.into_iter().collect();
-    Box::new(FilteredPlaylistSource::new(source, skip_set))
+    PlaylistSource::filtered(source, skip_set)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -679,7 +685,7 @@ async fn process_source(
         if !disabled_inputs.is_empty() && !source_downloaded {
             warn!(
                 "Source at index {source_idx} has no enabled inputs for the given targets. Disabled: {}",
-                disabled_inputs.iter().map(std::convert::AsRef::as_ref).collect::<Vec<&str>>().join(", ")
+                join_arc_strs(&disabled_inputs, ", ")
             );
         }
         if source_downloaded {
@@ -687,7 +693,7 @@ async fn process_source(
                 debug!("Source at index {source_idx} is empty");
                 errors.push(TuliproxError::RepositoryPlaylist(format!(
                     "Source at index {source_idx} is empty: {}",
-                    source.inputs.iter().map(Clone::clone).collect::<Vec<Arc<str>>>().join(", ")
+                    join_arc_strs(&source.inputs, ", ")
                 )));
             } else {
                 debug_if_enabled!(
@@ -768,17 +774,17 @@ async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &
 async fn load_cached_input_playlist(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
-) -> (Box<dyn PlaylistSource>, Option<TuliproxError>) {
+) -> (PlaylistSource, Option<TuliproxError>) {
     match load_input_playlist(ctx, input, None).await {
         Ok(pl_source) => (pl_source, None),
-        Err(err) => (MemoryPlaylistSource::default().boxed(), Some(err)),
+        Err(err) => (MemoryPlaylistSource::default().into_source(), Some(err)),
     }
 }
 
 async fn download_input(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
-) -> (Vec<TuliproxError>, Box<dyn PlaylistSource>, Option<TuliproxError>) {
+) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>) {
     // Coordination Logic
     let need_download = !ctx.is_input_downloaded(&input.name).await;
     // Keep this lock for the whole critical section (download + persist/load + mark processed)
@@ -806,7 +812,7 @@ async fn download_input(
         PlaylistDownloadResult::new(vec![], vec![], true, false)
     };
 
-    let mut preloaded_playlist: Option<(Box<dyn PlaylistSource>, Option<TuliproxError>)> = None;
+    let mut preloaded_playlist: Option<(PlaylistSource, Option<TuliproxError>)> = None;
     if playlist_download_result.was_cached {
         let (cached_playlist, cached_error) = load_cached_input_playlist(ctx, input).await;
         // Defensive fallback: if cache metadata says "valid" but persisted data is unreadable,
@@ -852,12 +858,12 @@ async fn download_input(
     } else if playlist_download_result.was_cached || playlist_download_result.persisted {
         match load_input_playlist(ctx, input, None).await {
             Ok(pl_source) => (pl_source, None),
-            Err(e) => (MemoryPlaylistSource::default().boxed(), Some(e)),
+            Err(e) => (MemoryPlaylistSource::default().into_source(), Some(e)),
         }
     } else {
         debug!("Persisting input '{}' playlist", input.name);
         let (pl, err) = persist_input_playlist(&ctx.config, input, playlist_download_result.downloaded_playlist).await;
-        (MemoryPlaylistSource::new(pl).boxed(), err)
+        (MemoryPlaylistSource::new(pl).into_source(), err)
     };
 
     let playlist = filter_skipped_clusters_from_source(playlist, input);
@@ -1018,7 +1024,7 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
     }
 }
 
-pub type ProcessingPipe = Vec<fn(source: &mut dyn PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>>>;
+pub type ProcessingPipe = Vec<fn(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>>>;
 
 fn get_processing_pipe(target: &ConfigTarget) -> ProcessingPipe {
     match &target.processing_order {
@@ -1040,9 +1046,9 @@ fn execute_pipe<'a>(
 ) -> FetchedPlaylist<'a> {
     let source = if consume_source {
         if fpl.is_memory() {
-            MemoryPlaylistSource::new(fpl.source.take_groups()).boxed()
+            MemoryPlaylistSource::new(fpl.source.take_groups()).into_source()
         } else {
-            std::mem::replace(&mut fpl.source, MemoryPlaylistSource::default().boxed())
+            std::mem::replace(&mut fpl.source, MemoryPlaylistSource::default().into_source())
         }
     } else {
         fpl.clone_source()
@@ -1054,13 +1060,13 @@ fn execute_pipe<'a>(
     }
 
     for f in pipe {
-        if let Some(groups) = f(new_fpl.source.as_mut(), target) {
-            new_fpl.source = MemoryPlaylistSource::new(groups).boxed();
+        if let Some(groups) = f(&mut new_fpl.source, target) {
+            new_fpl.source = MemoryPlaylistSource::new(groups).into_source();
         }
     }
     // Ensure source is memory-based for downstream mutable processing (VOD/series resolution)
     if !new_fpl.is_memory() {
-        new_fpl.source = MemoryPlaylistSource::new(new_fpl.source.take_groups()).boxed();
+        new_fpl.source = MemoryPlaylistSource::new(new_fpl.source.take_groups()).into_source();
     }
     new_fpl
 }
@@ -1830,7 +1836,7 @@ mod tests {
             },
         ];
 
-        let source = MemoryPlaylistSource::new(groups).boxed();
+        let source = MemoryPlaylistSource::new(groups).into_source();
         let input = ConfigInput {
             name: "skip_live".intern(),
             input_type: InputType::Xtream,

@@ -57,7 +57,7 @@ async fn m3u_api(
             try_unwrap_body!(builder.body(axum::body::Body::from_stream(content_stream)))
         }
         Err(err) => {
-            error!("{}", sanitize_sensitive_info(err.to_string().as_str()));
+            error!("{}", sanitize_sensitive_info(&err.to_string()));
             axum::http::StatusCode::NO_CONTENT.into_response()
         }
     }
@@ -424,7 +424,7 @@ async fn m3u_api_resource(
     let m3u_item = match m3u_get_item_for_stream_id(m3u_stream_id, &app_state, &target).await {
         Ok(item) => item,
         Err(err) => {
-            error!("Failed to get m3u url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+            error!("Failed to get m3u url: {}", sanitize_sensitive_info(&err.to_string()));
             return axum::http::StatusCode::NOT_FOUND.into_response();
         }
     };
@@ -446,7 +446,7 @@ async fn m3u_api_resource(
                         redirect(redirect_url.as_ref()).into_response()
                     }
                     Err(err) => {
-                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                         axum::http::StatusCode::BAD_REQUEST.into_response()
                     }
                 }

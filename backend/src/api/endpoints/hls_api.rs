@@ -310,7 +310,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             hls_response(hls_content).into_response()
         }
         Err(err) => {
-            error!("Failed to download m3u8 {}", sanitize_sensitive_info(err.to_string().as_str()));
+            error!("Failed to download m3u8 {}", sanitize_sensitive_info(&err.to_string()));
             if let Some(session_token) = session_token.as_deref() {
                 terminate_failed_hls_manifest_session(app_state, &user.username, session_token).await;
             }

@@ -545,7 +545,7 @@ pub async fn send_with_retry_and_provider_policy(
                 let request_builder = send(&attempt_target.request_url);
                 let (base_client, request_result) = request_builder.build_split();
                 let mut request = request_result.map_err(|err| {
-                    string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(err.to_string().as_str())))
+                    string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(&err.to_string())))
                 })?;
                 apply_attempt_to_request(&mut request, &attempt_target)?;
 
@@ -675,7 +675,7 @@ pub async fn send_with_retry_and_provider_policy(
                                 last_provider_failure = Some(format!(
                                     "connection error while trying {}: {}",
                                     sanitize_sensitive_info(attempt_target.request_url.as_str()),
-                                    sanitize_sensitive_info(err.to_string().as_str())
+                                    sanitize_sensitive_info(&err.to_string())
                                 ));
 
                                 // Connection errors (Timeout/Connect) trigger failover if provider exists
@@ -715,7 +715,7 @@ pub async fn send_with_retry_and_provider_policy(
                                     }
                                 }
 
-                                return Err(string_to_io_error(format!("Request error: {}", sanitize_sensitive_info(err.to_string().as_str()))));
+                                return Err(string_to_io_error(format!("Request error: {}", sanitize_sensitive_info(&err.to_string()))));
                             }
                         }
                     }
@@ -750,7 +750,7 @@ pub async fn send_with_retry_and_provider_policy(
         break;
     }
 
-    Err(string_to_io_error("All attempts and providers exhausted".to_string()))
+    Err(string_to_io_error("All attempts and providers exhausted"))
 }
 
 fn is_failover_redirect(url: &Url, patterns: &[Arc<Regex>]) -> bool {
@@ -792,13 +792,13 @@ pub async fn get_input_epg_content_as_file(
                     "can't download input {} epg url: {}  => {}",
                     input.name,
                     sanitize_sensitive_info(url_str),
-                    sanitize_sensitive_info(e.to_string().as_str())
+                    sanitize_sensitive_info(&e.to_string())
                 );
                 Err(TuliproxError::RepositoryNetwork(format!(
                     "can't download input {} epg url: {}  => {}",
                     input.name,
                     sanitize_sensitive_info(url_str),
-                    sanitize_sensitive_info(e.to_string().as_str())
+                    sanitize_sensitive_info(&e.to_string())
                 )))
             }
         }
@@ -856,12 +856,12 @@ pub async fn get_input_text_content(
                 error!(
                     "Failed to download input '{}': {}",
                     input.name,
-                    sanitize_sensitive_info(e.to_string().as_str())
+                    sanitize_sensitive_info(&e.to_string())
                 );
                 Err(TuliproxError::RepositoryNetwork(format!(
                     "Failed to download input '{}': {}",
                     input.name,
-                    sanitize_sensitive_info(e.to_string().as_str())
+                    sanitize_sensitive_info(&e.to_string())
                 )))
             }
         }
@@ -920,12 +920,12 @@ pub async fn get_input_text_content_as_stream(
                 error!(
                     "Failed to download input '{}': {}",
                     input.name,
-                    sanitize_sensitive_info(e.to_string().as_str())
+                    sanitize_sensitive_info(&e.to_string())
                 );
                 Err(TuliproxError::RepositoryNetwork(format!(
                     "Failed to download input '{}': {}",
                     input.name,
-                    sanitize_sensitive_info(e.to_string().as_str())
+                    sanitize_sensitive_info(&e.to_string())
                 )))
             }
         }
@@ -1604,7 +1604,7 @@ pub async fn get_input_json_content(
         Err(e) => Err(TuliproxError::RepositoryNetwork(format!(
             "can't download input {input} => {sanitized}",
             input = input.name,
-            sanitized = sanitize_sensitive_info(e.to_string().as_str())
+            sanitized = sanitize_sensitive_info(&e.to_string())
         ))),
     }
 }
@@ -1633,7 +1633,7 @@ pub async fn get_input_json_content_as_stream(
         Err(e) => Err(TuliproxError::RepositoryNetwork(format!(
             "can't download input {input} => {sanitized}",
             input = input.name,
-            sanitized = sanitize_sensitive_info(e.to_string().as_str())
+            sanitized = sanitize_sensitive_info(&e.to_string())
         ))),
     }
 }

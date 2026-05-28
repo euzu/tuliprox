@@ -48,6 +48,13 @@ macro_rules! write_if_some {
 }
 
 pub fn display_vec<T: Display>(vec: &[T]) -> String {
-    let inner = vec.iter().map(|item| format!("{item}")).collect::<Vec<_>>().join(", ");
-    format!("[{inner}]")
+    let mut result = String::from("[");
+    for (idx, item) in vec.iter().enumerate() {
+        if idx > 0 {
+            result.push_str(", ");
+        }
+        result.push_str(&item.to_string());
+    }
+    result.push(']');
+    result
 }

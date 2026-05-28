@@ -1979,7 +1979,7 @@ where
             let redirect_url = match resolve_redirect_location(Some(params.input), &redirect_url) {
                 Ok(url) => url,
                 Err(err) => {
-                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                     return Some(StatusCode::BAD_REQUEST.into_response());
                 }
             };
@@ -2018,7 +2018,7 @@ where
             let stream_url = match resolve_redirect_location(Some(params.input), &stream_url) {
                 Ok(url) => url,
                 Err(err) => {
-                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                     return Some(StatusCode::BAD_REQUEST.into_response());
                 }
             };

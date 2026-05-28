@@ -122,7 +122,7 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
     }
 }
 
-pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: String) -> bool {
+pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: &str) -> bool {
     let header = &mut pli.header;
     match field {
         ItemField::Group => header.group = value.intern(),

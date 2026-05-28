@@ -6,7 +6,7 @@ use crate::repository::PlaylistSource;
 
 pub struct FetchedPlaylist<'a> {
     pub input: &'a ConfigInput,
-    pub source: Box<dyn PlaylistSource>,
+    pub source: PlaylistSource,
     pub epg: Option<TVGuide>,
 }
 
@@ -54,8 +54,5 @@ impl FetchedPlaylist<'_> {
         self.source.deduplicate(duplicates);
     }
 
-    pub fn clone_source(&self) -> Box<dyn PlaylistSource> {
-        self.source.clone_box()
-    }
+    pub fn clone_source(&self) -> PlaylistSource { self.source.clone_source() }
 }
-

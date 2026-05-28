@@ -225,7 +225,7 @@ async fn playlist_update(
             }
         }
         Err(err) => {
-            error!("Failed playlist update {}", sanitize_sensitive_info(err.to_string().as_str()));
+            error!("Failed playlist update {}", sanitize_sensitive_info(&err.to_string()));
             (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
         }
     }
@@ -404,7 +404,7 @@ async fn playlist_epg(
                     }
                     Ok(None) => return axum::http::StatusCode::NO_CONTENT.into_response(),
                     Err(err) => {
-                        error!("Failed to load input EPG for '{}': {}", input.name, sanitize_sensitive_info(err.to_string().as_str()));
+                        error!("Failed to load input EPG for '{}': {}", input.name, sanitize_sensitive_info(&err.to_string()));
                         return (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                             axum::Json(serde_json::json!({"error": "Failed to load EPG"})),
@@ -436,7 +436,7 @@ async fn playlist_epg(
                     return json_or_bin_response(accept.as_deref(), &epg).into_response();
                 }
                 Err(err) => {
-                    error!("Failed to load custom EPG: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    error!("Failed to load custom EPG: {}", sanitize_sensitive_info(&err.to_string()));
                     return (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                         axum::Json(serde_json::json!({"error": "Failed to load EPG"})),

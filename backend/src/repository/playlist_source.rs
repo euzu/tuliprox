@@ -14,7 +14,7 @@ use std::sync::Arc;
 use shared::model::UUIDType;
 use shared::utils::Internable;
 
-pub trait PlaylistSource: Send + Sync {
+trait PlaylistSourceOps: Send + Sync {
     fn is_memory(&self) -> bool;
     fn get_channel_count(&mut self) -> usize;
     fn get_group_count(&mut self) -> usize;
@@ -28,16 +28,356 @@ pub trait PlaylistSource: Send + Sync {
     fn get_missing_series_info_count(&mut self) -> usize;
     fn deduplicate(&mut self, duplicates: &mut HashSet<UUIDType>);
     fn take_groups(&mut self) -> Vec<PlaylistGroup>;
-    fn clone_box(&self) -> Box<dyn PlaylistSource>;
+    fn clone_source(&self) -> PlaylistSource;
     fn release_resources(&mut self, cluster: XtreamCluster);
     fn obtain_resources(&mut self) -> BoxFuture<'_, ()>;
     fn sort_by_provider_ordinal(&mut self);
 }
 
+pub struct PlaylistSource {
+    kind: PlaylistSourceKind,
+    skip_set: Option<Arc<HashSet<XtreamCluster>>>,
+}
+
+enum PlaylistSourceKind {
+    Empty(EmptyPlaylistSource),
+    XtreamDisk(Box<XtreamDiskPlaylistSource>),
+    M3uDisk(Box<M3uDiskPlaylistSource>),
+    LocalLibraryDisk(Box<LocalLibraryDiskPlaylistSource>),
+    MediaServerDisk(Box<MediaServerDiskPlaylistSource>),
+    Memory(MemoryPlaylistSource),
+}
+
+impl Default for PlaylistSource {
+    fn default() -> Self { Self::new(PlaylistSourceKind::Empty(EmptyPlaylistSource::default())) }
+}
+
+impl PlaylistSource {
+    fn new(kind: PlaylistSourceKind) -> Self { Self { kind, skip_set: None } }
+
+    pub fn xtream_disk(source: XtreamDiskPlaylistSource) -> Self { Self::new(PlaylistSourceKind::XtreamDisk(Box::new(source))) }
+
+    pub fn m3u_disk(source: M3uDiskPlaylistSource) -> Self { Self::new(PlaylistSourceKind::M3uDisk(Box::new(source))) }
+
+    pub fn local_library_disk(source: LocalLibraryDiskPlaylistSource) -> Self {
+        Self::new(PlaylistSourceKind::LocalLibraryDisk(Box::new(source)))
+    }
+
+    pub fn media_server_disk(source: MediaServerDiskPlaylistSource) -> Self {
+        Self::new(PlaylistSourceKind::MediaServerDisk(Box::new(source)))
+    }
+
+    pub fn memory(source: MemoryPlaylistSource) -> Self { Self::new(PlaylistSourceKind::Memory(source)) }
+
+    pub fn filtered(mut inner: Self, skip_set: HashSet<XtreamCluster>) -> Self {
+        if skip_set.is_empty() {
+            return inner;
+        }
+
+        if let Some(existing) = &inner.skip_set {
+            let mut merged = HashSet::with_capacity(existing.len() + skip_set.len());
+            merged.extend(existing.iter().copied());
+            merged.extend(skip_set);
+            inner.skip_set = Some(Arc::new(merged));
+        } else {
+            inner.skip_set = Some(Arc::new(skip_set));
+        }
+
+        inner
+    }
+
+    pub fn is_memory(&self) -> bool {
+        match &self.kind {
+            PlaylistSourceKind::Empty(source) => source.is_memory(),
+            PlaylistSourceKind::XtreamDisk(source) => source.is_memory(),
+            PlaylistSourceKind::M3uDisk(source) => source.is_memory(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.is_memory(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.is_memory(),
+            PlaylistSourceKind::Memory(source) => source.is_memory(),
+        }
+    }
+
+    pub fn get_channel_count(&mut self) -> usize {
+        if self.skip_set.is_some() {
+            return self
+                .items()
+                .count();
+        }
+
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.get_channel_count(),
+            PlaylistSourceKind::XtreamDisk(source) => source.get_channel_count(),
+            PlaylistSourceKind::M3uDisk(source) => source.get_channel_count(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.get_channel_count(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.get_channel_count(),
+            PlaylistSourceKind::Memory(source) => source.get_channel_count(),
+        }
+    }
+
+    pub fn get_group_count(&mut self) -> usize {
+        if let Some(skip_set) = self.skip_set.clone() {
+            let mut groups = HashSet::<(XtreamCluster, Arc<str>)>::new();
+            for item in self
+                .items()
+                .filter(move |item| !skip_set.contains(&item.as_ref().header.xtream_cluster))
+            {
+                let pli = item.as_ref();
+                groups.insert((pli.header.xtream_cluster, Arc::clone(&pli.header.group)));
+            }
+            return groups.len();
+        }
+
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.get_group_count(),
+            PlaylistSourceKind::XtreamDisk(source) => source.get_group_count(),
+            PlaylistSourceKind::M3uDisk(source) => source.get_group_count(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.get_group_count(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.get_group_count(),
+            PlaylistSourceKind::Memory(source) => source.get_group_count(),
+        }
+    }
+
+    pub fn is_empty(&mut self) -> bool {
+        if self.skip_set.is_some() {
+            return self.get_channel_count() == 0;
+        }
+
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.is_empty(),
+            PlaylistSourceKind::XtreamDisk(source) => source.is_empty(),
+            PlaylistSourceKind::M3uDisk(source) => source.is_empty(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.is_empty(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.is_empty(),
+            PlaylistSourceKind::Memory(source) => source.is_empty(),
+        }
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    pub fn into_items(&mut self) -> Box<dyn Iterator<Item = PlaylistItem> + Send + '_> {
+        let iter = match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.into_items(),
+            PlaylistSourceKind::XtreamDisk(source) => source.into_items(),
+            PlaylistSourceKind::M3uDisk(source) => source.into_items(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.into_items(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.into_items(),
+            PlaylistSourceKind::Memory(source) => source.into_items(),
+        };
+
+        if let Some(skip_set) = self.skip_set.clone() {
+            Box::new(iter.filter(move |item| !skip_set.contains(&item.header.xtream_cluster)))
+        } else {
+            iter
+        }
+    }
+
+    pub fn items_mut(&mut self) -> Box<dyn Iterator<Item = &mut PlaylistItem> + Send + '_> {
+        let iter = match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.items_mut(),
+            PlaylistSourceKind::XtreamDisk(source) => source.items_mut(),
+            PlaylistSourceKind::M3uDisk(source) => source.items_mut(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.items_mut(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.items_mut(),
+            PlaylistSourceKind::Memory(source) => source.items_mut(),
+        };
+
+        if let Some(skip_set) = self.skip_set.clone() {
+            Box::new(iter.filter_map(move |item| {
+                if skip_set.contains(&item.header.xtream_cluster) {
+                    None
+                } else {
+                    Some(item)
+                }
+            }))
+        } else {
+            iter
+        }
+    }
+
+    pub fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item = Cow<'a, PlaylistItem>> + Send + 'a> {
+        let iter = match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.items(),
+            PlaylistSourceKind::XtreamDisk(source) => source.items(),
+            PlaylistSourceKind::M3uDisk(source) => source.items(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.items(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.items(),
+            PlaylistSourceKind::Memory(source) => source.items(),
+        };
+
+        if let Some(skip_set) = self.skip_set.clone() {
+            Box::new(iter.filter(move |item| !skip_set.contains(&item.as_ref().header.xtream_cluster)))
+        } else {
+            iter
+        }
+    }
+
+    pub fn update_playlist<'a>(&'a mut self, plg: &'a PlaylistGroup) -> BoxFuture<'a, ()> {
+        if self
+            .skip_set
+            .as_ref()
+            .is_some_and(|skip_set| skip_set.contains(&plg.xtream_cluster))
+        {
+            return Box::pin(async move {});
+        }
+
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.update_playlist(plg),
+            PlaylistSourceKind::XtreamDisk(source) => source.update_playlist(plg),
+            PlaylistSourceKind::M3uDisk(source) => source.update_playlist(plg),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.update_playlist(plg),
+            PlaylistSourceKind::MediaServerDisk(source) => source.update_playlist(plg),
+            PlaylistSourceKind::Memory(source) => source.update_playlist(plg),
+        }
+    }
+
+    pub fn get_missing_vod_info_count(&mut self) -> usize {
+        if let Some(skip_set) = self.skip_set.clone() {
+            return self
+                .items()
+                .filter(move |item| !skip_set.contains(&item.as_ref().header.xtream_cluster))
+                .filter(|item| {
+                    let pli = item.as_ref();
+                    pli.header.xtream_cluster == XtreamCluster::Video
+                        && pli.header.item_type == PlaylistItemType::Video
+                        && !pli.has_details()
+                })
+                .count();
+        }
+
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.get_missing_vod_info_count(),
+            PlaylistSourceKind::XtreamDisk(source) => source.get_missing_vod_info_count(),
+            PlaylistSourceKind::M3uDisk(source) => source.get_missing_vod_info_count(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.get_missing_vod_info_count(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.get_missing_vod_info_count(),
+            PlaylistSourceKind::Memory(source) => source.get_missing_vod_info_count(),
+        }
+    }
+
+    pub fn get_missing_series_info_count(&mut self) -> usize {
+        if let Some(skip_set) = self.skip_set.clone() {
+            return self
+                .items()
+                .filter(move |item| !skip_set.contains(&item.as_ref().header.xtream_cluster))
+                .filter(|item| {
+                    let pli = item.as_ref();
+                    pli.header.xtream_cluster == XtreamCluster::Series
+                        && pli.header.item_type == PlaylistItemType::SeriesInfo
+                        && pli.header.id.parse::<u32>().is_ok_and(|id| id > 0)
+                        && !pli.has_details()
+                })
+                .count();
+        }
+
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.get_missing_series_info_count(),
+            PlaylistSourceKind::XtreamDisk(source) => source.get_missing_series_info_count(),
+            PlaylistSourceKind::M3uDisk(source) => source.get_missing_series_info_count(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.get_missing_series_info_count(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.get_missing_series_info_count(),
+            PlaylistSourceKind::Memory(source) => source.get_missing_series_info_count(),
+        }
+    }
+
+    pub fn deduplicate(&mut self, duplicates: &mut HashSet<UUIDType>) {
+        if self.skip_set.is_some() && self.is_memory() {
+            let mut memory = MemoryPlaylistSource::new(self.take_groups()).into_source();
+            memory.deduplicate(duplicates);
+            *self = memory;
+            return;
+        }
+
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.deduplicate(duplicates),
+            PlaylistSourceKind::XtreamDisk(source) => source.deduplicate(duplicates),
+            PlaylistSourceKind::M3uDisk(source) => source.deduplicate(duplicates),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.deduplicate(duplicates),
+            PlaylistSourceKind::MediaServerDisk(source) => source.deduplicate(duplicates),
+            PlaylistSourceKind::Memory(source) => source.deduplicate(duplicates),
+        }
+    }
+
+    pub fn take_groups(&mut self) -> Vec<PlaylistGroup> {
+        let groups = match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.take_groups(),
+            PlaylistSourceKind::XtreamDisk(source) => source.take_groups(),
+            PlaylistSourceKind::M3uDisk(source) => source.take_groups(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.take_groups(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.take_groups(),
+            PlaylistSourceKind::Memory(source) => source.take_groups(),
+        };
+
+        if let Some(skip_set) = self.skip_set.clone() {
+            groups.into_iter().filter_map(|group| filter_group(&skip_set, group)).collect()
+        } else {
+            groups
+        }
+    }
+
+    pub fn clone_source(&self) -> Self {
+        let mut cloned = match &self.kind {
+            PlaylistSourceKind::Empty(source) => source.clone_source(),
+            PlaylistSourceKind::XtreamDisk(source) => source.clone_source(),
+            PlaylistSourceKind::M3uDisk(source) => source.clone_source(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.clone_source(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.clone_source(),
+            PlaylistSourceKind::Memory(source) => source.clone_source(),
+        };
+        cloned.skip_set.clone_from(&self.skip_set);
+        cloned
+    }
+
+    pub fn release_resources(&mut self, cluster: XtreamCluster) {
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.release_resources(cluster),
+            PlaylistSourceKind::XtreamDisk(source) => source.release_resources(cluster),
+            PlaylistSourceKind::M3uDisk(source) => source.release_resources(cluster),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.release_resources(cluster),
+            PlaylistSourceKind::MediaServerDisk(source) => source.release_resources(cluster),
+            PlaylistSourceKind::Memory(source) => source.release_resources(cluster),
+        }
+    }
+
+    pub fn obtain_resources(&mut self) -> BoxFuture<'_, ()> {
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.obtain_resources(),
+            PlaylistSourceKind::XtreamDisk(source) => source.obtain_resources(),
+            PlaylistSourceKind::M3uDisk(source) => source.obtain_resources(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.obtain_resources(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.obtain_resources(),
+            PlaylistSourceKind::Memory(source) => source.obtain_resources(),
+        }
+    }
+
+    pub fn sort_by_provider_ordinal(&mut self) {
+        match &mut self.kind {
+            PlaylistSourceKind::Empty(source) => source.sort_by_provider_ordinal(),
+            PlaylistSourceKind::XtreamDisk(source) => source.sort_by_provider_ordinal(),
+            PlaylistSourceKind::M3uDisk(source) => source.sort_by_provider_ordinal(),
+            PlaylistSourceKind::LocalLibraryDisk(source) => source.sort_by_provider_ordinal(),
+            PlaylistSourceKind::MediaServerDisk(source) => source.sort_by_provider_ordinal(),
+            PlaylistSourceKind::Memory(source) => source.sort_by_provider_ordinal(),
+        }
+    }
+}
+
+fn filter_group(skip_set: &HashSet<XtreamCluster>, mut group: PlaylistGroup) -> Option<PlaylistGroup> {
+    if skip_set.contains(&group.xtream_cluster) {
+        return None;
+    }
+    group
+        .channels
+        .retain(|item| !skip_set.contains(&item.header.xtream_cluster));
+    if group.channels.is_empty() {
+        None
+    } else {
+        Some(group)
+    }
+}
+
 #[derive(Default)]
 pub struct EmptyPlaylistSource {}
 
-impl PlaylistSource for EmptyPlaylistSource {
+impl PlaylistSourceOps for EmptyPlaylistSource {
     fn is_memory(&self) -> bool { true }
     fn get_channel_count(&mut self) -> usize { 0 }
     fn get_group_count(&mut self) -> usize { 0 }
@@ -50,7 +390,9 @@ impl PlaylistSource for EmptyPlaylistSource {
     fn get_missing_series_info_count(&mut self) -> usize { 0 }
     fn deduplicate(&mut self, _duplicates: &mut HashSet<UUIDType>) { /* noop */ }
     fn take_groups(&mut self) -> Vec<PlaylistGroup> { vec![] }
-    fn clone_box(&self) -> Box<dyn PlaylistSource> { Box::new(EmptyPlaylistSource::default()) }
+    fn clone_source(&self) -> PlaylistSource {
+        PlaylistSource::new(PlaylistSourceKind::Empty(EmptyPlaylistSource::default()))
+    }
     fn release_resources(&mut self, _cluster: XtreamCluster) { /* noop */ }
     fn obtain_resources(&mut self) -> BoxFuture<'_, ()> { Box::pin(async move {}) }
     fn sort_by_provider_ordinal(&mut self) { /* noop */ }
@@ -97,7 +439,7 @@ impl XtreamDiskPlaylistSource {
     }
 }
 
-impl PlaylistSource for XtreamDiskPlaylistSource {
+impl PlaylistSourceOps for XtreamDiskPlaylistSource {
     fn is_memory(&self) -> bool { false }
 
     fn get_channel_count(&mut self) -> usize {
@@ -224,12 +566,12 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
         groups
     }
 
-    fn clone_box(&self) -> Box<dyn PlaylistSource> {
+    fn clone_source(&self) -> PlaylistSource {
         let live = self.live.as_ref().and_then(|(query, guard)| {
             match query.try_clone() {
                 Ok(q) => Some((q, Arc::clone(guard))),
                 Err(err) => {
-                    warn!("PlaylistSource::clone_box failed to clone live query: {err}");
+                    warn!("PlaylistSource::clone_source failed to clone live query: {err}");
                     None
                 }
             }
@@ -238,7 +580,7 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
             match query.try_clone() {
                 Ok(q) => Some((q, Arc::clone(guard))),
                 Err(err) => {
-                    warn!("PlaylistSource::clone_box failed to clone vod query: {err}");
+                    warn!("PlaylistSource::clone_source failed to clone vod query: {err}");
                     None
                 }
             }
@@ -247,13 +589,13 @@ impl PlaylistSource for XtreamDiskPlaylistSource {
             match query.try_clone() {
                 Ok(q) => Some((q, Arc::clone(guard))),
                 Err(err) => {
-                    warn!("PlaylistSource::clone_box failed to clone series query: {err}");
+                    warn!("PlaylistSource::clone_source failed to clone series query: {err}");
                     None
                 }
             }
         });
 
-        Box::new(Self {
+        PlaylistSource::xtream_disk(Self {
             app_config: Arc::clone(&self.app_config),
             storage_path: self.storage_path.clone(),
             live,
@@ -312,7 +654,7 @@ macro_rules! impl_single_file_disk_source {
             }
         }
 
-        impl PlaylistSource for [<$name DiskPlaylistSource>] {
+        impl PlaylistSourceOps for [<$name DiskPlaylistSource>] {
 
             fn get_channel_count(&mut self) -> usize { self.playlist.as_mut().map_or(0usize, |t: &mut BPlusTreeQuery<$key_type, $entry_type>| t.len().unwrap_or(0usize)) }
 
@@ -391,13 +733,13 @@ macro_rules! impl_single_file_disk_source {
                     vec![]
                 }
             }
-            fn clone_box(&self) -> Box<dyn PlaylistSource> {
+            fn clone_source(&self) -> PlaylistSource {
                 let playlist = self.playlist.as_ref().and_then(|query| {
                     match query.try_clone() {
                         Ok(cloned_query) => Some(cloned_query),
                         Err(err) => {
                             warn!(
-                                "PlaylistSource::clone_box failed to clone {} disk query {}: {err}",
+                                "PlaylistSource::clone_source failed to clone {} disk query {}: {err}",
                                 stringify!($name),
                                 self.file_path.display()
                             );
@@ -406,7 +748,7 @@ macro_rules! impl_single_file_disk_source {
                     }
                 });
 
-                Box::new(Self {
+                PlaylistSource::[<$name:snake _disk>](Self {
                     app_config: Arc::clone(&self.app_config),
                     file_path: self.file_path.clone(),
                     playlist,
@@ -447,9 +789,7 @@ impl MemoryPlaylistSource {
         Self { playlist: Arc::new(groups) }
     }
 
-    pub fn boxed(self) -> Box<dyn PlaylistSource> {
-        Box::new(self)
-    }
+    pub fn into_source(self) -> PlaylistSource { PlaylistSource::memory(self) }
 }
 
 impl Default for MemoryPlaylistSource {
@@ -458,7 +798,7 @@ impl Default for MemoryPlaylistSource {
     }
 }
 
-impl PlaylistSource for MemoryPlaylistSource {
+impl PlaylistSourceOps for MemoryPlaylistSource {
     fn is_memory(&self) -> bool { true }
     fn get_channel_count(&mut self) -> usize { self.playlist.iter().map(|group| group.channels.len()).sum() }
     fn get_group_count(&mut self) -> usize { self.playlist.len() }
@@ -523,8 +863,8 @@ impl PlaylistSource for MemoryPlaylistSource {
     fn take_groups(&mut self) -> Vec<PlaylistGroup> {
         std::mem::take(Arc::make_mut(&mut self.playlist))
     }
-    fn clone_box(&self) -> Box<dyn PlaylistSource> {
-        Box::new(MemoryPlaylistSource { playlist: Arc::clone(&self.playlist) })
+    fn clone_source(&self) -> PlaylistSource {
+        PlaylistSource::memory(MemoryPlaylistSource { playlist: Arc::clone(&self.playlist) })
     }
     fn release_resources(&mut self, _cluster: XtreamCluster) { /* noop */ }
     fn obtain_resources(&mut self) -> BoxFuture<'_, ()> { Box::pin(async move {}) }
@@ -578,16 +918,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::{MemoryPlaylistSource, PlaylistGroup, PlaylistItem, PlaylistSource, XtreamCluster};
-    use shared::model::PlaylistItemHeader;
+    use shared::model::{PlaylistItemHeader, PlaylistItemType};
     use shared::utils::Internable;
+    use std::collections::HashSet;
 
     fn make_item(title: &str, group: &str, category_id: u32) -> PlaylistItem {
         PlaylistItem {
             header: PlaylistItemHeader {
+                id: title.intern(),
                 title: title.intern(),
                 group: group.intern(),
                 category_id,
                 xtream_cluster: XtreamCluster::Series,
+                item_type: PlaylistItemType::SeriesInfo,
+                url: format!("http://example.test/{title}").intern(),
+                input_name: "test-input".intern(),
                 ..Default::default()
             },
         }
@@ -607,7 +952,7 @@ mod tests {
             channels: vec![make_item("target-item", "B-Series", 22)],
             xtream_cluster: XtreamCluster::Series,
         };
-        let mut source = MemoryPlaylistSource::new(vec![first_group, target_group]);
+        let mut source = MemoryPlaylistSource::new(vec![first_group, target_group]).into_source();
 
         // Simulates a mapped delta group whose local pipeline id restarted at 1.
         let incoming = PlaylistGroup {
@@ -624,5 +969,127 @@ mod tests {
         assert_eq!(groups[0].channels.len(), 1);
         assert_eq!(groups[1].title.as_ref(), "B-Series");
         assert_eq!(groups[1].channels.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cloned_memory_source_is_copy_on_write() {
+        let group = PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![make_item("original", "Series", 1)],
+            xtream_cluster: XtreamCluster::Series,
+        };
+        let source = MemoryPlaylistSource::new(vec![group]).into_source();
+        let mut original = source.clone_source();
+        let mut cloned = source.clone_source();
+
+        let incoming = PlaylistGroup {
+            id: 1,
+            title: "Series".intern(),
+            channels: vec![make_item("new", "Series", 1)],
+            xtream_cluster: XtreamCluster::Series,
+        };
+        cloned.update_playlist(&incoming).await;
+
+        assert_eq!(original.get_channel_count(), 1);
+        assert_eq!(cloned.get_channel_count(), 2);
+    }
+
+    fn make_cluster_item(title: &str, cluster: XtreamCluster) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                id: title.intern(),
+                title: title.intern(),
+                group: format!("{cluster:?}").intern(),
+                xtream_cluster: cluster,
+                item_type: PlaylistItemType::from(cluster),
+                url: format!("http://example.test/{title}").intern(),
+                input_name: "test-input".intern(),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn make_cluster_group(title: &str, cluster: XtreamCluster, channels: Vec<PlaylistItem>) -> PlaylistGroup {
+        PlaylistGroup {
+            id: cluster as u32,
+            title: title.intern(),
+            channels,
+            xtream_cluster: cluster,
+        }
+    }
+
+    fn filtered_source(skip_cluster: XtreamCluster) -> PlaylistSource {
+        let groups = vec![
+            make_cluster_group("Live", XtreamCluster::Live, vec![make_cluster_item("live-1", XtreamCluster::Live)]),
+            make_cluster_group(
+                "Video",
+                XtreamCluster::Video,
+                vec![make_cluster_item("video-1", XtreamCluster::Video)],
+            ),
+            make_cluster_group(
+                "Series",
+                XtreamCluster::Series,
+                vec![make_cluster_item("series-1", XtreamCluster::Series)],
+            ),
+        ];
+        PlaylistSource::filtered(
+            MemoryPlaylistSource::new(groups).into_source(),
+            HashSet::from([skip_cluster]),
+        )
+    }
+
+    #[test]
+    fn filtered_source_excludes_skipped_cluster_from_counts_and_items() {
+        let mut source = filtered_source(XtreamCluster::Video);
+
+        assert_eq!(source.get_channel_count(), 2);
+        assert_eq!(source.get_group_count(), 2);
+        assert_eq!(
+            source
+                .items()
+                .map(|item| item.as_ref().header.xtream_cluster)
+                .collect::<Vec<_>>(),
+            vec![XtreamCluster::Live, XtreamCluster::Series]
+        );
+    }
+
+    #[test]
+    fn filtered_source_excludes_skipped_cluster_when_taking_groups() {
+        let mut source = filtered_source(XtreamCluster::Video);
+
+        let groups = source.take_groups();
+
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|group| group.xtream_cluster != XtreamCluster::Video));
+    }
+
+    #[test]
+    fn filtered_source_deduplicates_visible_memory_items_only() {
+        let duplicated_live = make_cluster_item("same-live", XtreamCluster::Live);
+        let groups = vec![
+            make_cluster_group(
+                "Live",
+                XtreamCluster::Live,
+                vec![duplicated_live.clone(), duplicated_live],
+            ),
+            make_cluster_group(
+                "Video",
+                XtreamCluster::Video,
+                vec![make_cluster_item("video-1", XtreamCluster::Video)],
+            ),
+        ];
+        let mut source = PlaylistSource::filtered(
+            MemoryPlaylistSource::new(groups).into_source(),
+            HashSet::from([XtreamCluster::Video]),
+        );
+        let mut duplicates = HashSet::new();
+
+        source.deduplicate(&mut duplicates);
+
+        let groups = source.take_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].channels.len(), 1);
+        assert_eq!(groups[0].xtream_cluster, XtreamCluster::Live);
     }
 }

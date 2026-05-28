@@ -568,7 +568,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
     }
 }
 
-pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<Box<dyn PlaylistSource>, TuliproxError> {
+pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<PlaylistSource, TuliproxError> {
     let app_config = &ctx.config;
     let cfg = app_config.config.load();
     let storage_path = get_input_storage_path(&input.name, &cfg.storage_dir).await
@@ -578,7 +578,9 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
     match input.get_download_input_type() {
         InputType::Xtream | InputType::XtreamBatch => {
             if disk_based_processing {
-                Ok(Box::new(XtreamDiskPlaylistSource::new(app_config, &storage_path).await))
+                Ok(PlaylistSource::xtream_disk(
+                    XtreamDiskPlaylistSource::new(app_config, &storage_path).await,
+                ))
             } else {
                 let clusters_to_load = if let Some(c) = clusters {
                     c
@@ -586,35 +588,41 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                     &XTREAM_CLUSTER
                 };
                 let groups = load_input_xtream_playlist(app_config, &storage_path, clusters_to_load).await?;
-                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+                Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
         InputType::M3u | InputType::M3uBatch => {
             // Load M3U
             let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
-                Ok(Box::new(M3uDiskPlaylistSource::new(app_config, &file_path).await))
+                Ok(PlaylistSource::m3u_disk(
+                    M3uDiskPlaylistSource::new(app_config, &file_path).await,
+                ))
             } else {
                 let groups = load_input_m3u_playlist(app_config, &file_path).await?;
-                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+                Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
         InputType::Library => {
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
-                Ok(Box::new(LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await))
+                Ok(PlaylistSource::local_library_disk(
+                    LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await,
+                ))
             } else {
                 let groups = load_input_local_library_playlist(app_config, &file_path).await?;
-                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+                Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
         InputType::Emby | InputType::Jellyfin | InputType::Plex => {
             let file_path = get_input_media_server_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
-                Ok(Box::new(MediaServerDiskPlaylistSource::new(app_config, &file_path).await))
+                Ok(PlaylistSource::media_server_disk(
+                    MediaServerDiskPlaylistSource::new(app_config, &file_path).await,
+                ))
             } else {
                 let groups = load_input_media_server_playlist(app_config, &file_path).await?;
-                Ok(Box::new(MemoryPlaylistSource::new(groups)))
+                Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
     }
