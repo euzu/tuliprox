@@ -629,7 +629,7 @@ fn parse_season_field(s: &str) -> Option<(u32, String)> {
 
     let season: u32 = parts.next()?.parse().ok()?;
 
-    let kind = parts.collect::<Vec<_>>().join("_");
+    let kind = join_parts(parts, '_');
     if kind.is_empty() {
         return None;
     }
@@ -648,12 +648,23 @@ fn parse_season_episode_field(s: &str) -> Option<(u32, u32, String)> {
     let season: u32 = parts.next()?.parse().ok()?;
     let episode: u32 = parts.next()?.parse().ok()?;
 
-    let kind = parts.collect::<Vec<_>>().join("_");
+    let kind = join_parts(parts, '_');
     if kind.is_empty() {
         return None;
     }
 
     Some((season, episode, kind))
+}
+
+fn join_parts<'a>(parts: impl Iterator<Item = &'a str>, separator: char) -> String {
+    let mut result = String::new();
+    for part in parts {
+        if !result.is_empty() {
+            result.push(separator);
+        }
+        result.push_str(part);
+    }
+    result
 }
 
 impl VideoStreamProperties {

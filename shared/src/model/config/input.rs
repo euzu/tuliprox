@@ -71,7 +71,7 @@ macro_rules! check_provider_scheme_url {
                     return Err(TuliproxError::ConfigInput(format!(
                         "Malformed provider URL {}: {}",
                         sanitize_sensitive_info(&$url),
-                        sanitize_sensitive_info(err.to_string().as_str())
+                        sanitize_sensitive_info(&err.to_string())
                     )));
                 }
             };

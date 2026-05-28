@@ -281,4 +281,6 @@ where
 
 pub fn str_to_io_error(err: &str) -> std::io::Error { std::io::Error::other(sanitize_sensitive_info(err)) }
 
-pub fn string_to_io_error(err: String) -> std::io::Error { std::io::Error::other(sanitize_sensitive_info(&err)) }
+pub fn string_to_io_error(err: impl AsRef<str>) -> std::io::Error {
+    std::io::Error::other(sanitize_sensitive_info(err.as_ref()))
+}

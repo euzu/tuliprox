@@ -1,3 +1,5 @@
+use crate::utils::join_non_empty_parts;
+
 pub fn resolve_field_id(field_id: &Option<String>, name: &str, label: &str) -> String {
     let candidate = field_id
         .as_ref()
@@ -28,13 +30,11 @@ pub fn resolve_field_id(field_id: &Option<String>, name: &str, label: &str) -> S
 }
 
 fn normalize_upper_snake(raw: &str) -> String {
-    raw.chars()
+    let normalized = raw
+        .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_uppercase() } else { '_' })
-        .collect::<String>()
-        .split('_')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
+        .collect::<String>();
+    join_non_empty_parts(normalized.split('_'), "_")
 }
 
 fn to_upper_snake_case(raw: &str) -> String {
@@ -63,7 +63,7 @@ fn to_upper_snake_case(raw: &str) -> String {
         }
     }
 
-    result.split('_').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("_")
+    join_non_empty_parts(result.split('_'), "_")
 }
 
 fn strip_ref_prefix(type_name: &str) -> &str {

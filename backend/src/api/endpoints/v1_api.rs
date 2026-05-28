@@ -42,7 +42,7 @@ async fn create_ipinfo_check(app_state: &Arc<AppState>) -> Option<(Option<String
 pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
     let cache = match app_state.cache.load().as_ref().as_ref() {
         None => None,
-        Some(lock) => Some(lock.lock().await.get_size_text()),
+        Some(lock) => Some(lock.read().await.get_size_text()),
     };
     let (active_users, active_user_connections, active_user_streams) = {
         let active_user = &app_state.active_users;

@@ -68,12 +68,19 @@ pub fn parse_to_kbps(input: &str) -> Result<u64, String> {
         }
     }
 
-    u64::from_str(speed_str).map_err(|_| {
-        format!(
-            "Invalid speed: {speed_str}, supported units are {}",
-            units.iter().map(|p| p.0).collect::<Vec<_>>().join(",")
-        )
-    })
+    u64::from_str(speed_str)
+        .map_err(|_| format!("Invalid speed: {speed_str}, supported units are {}", join_unit_names(units)))
+}
+
+fn join_unit_names(units: &[(&str, u64)]) -> String {
+    let mut result = String::new();
+    for (idx, (unit, _)) in units.iter().enumerate() {
+        if idx > 0 {
+            result.push(',');
+        }
+        result.push_str(unit);
+    }
+    result
 }
 
 pub fn human_readable_kbps(kbps: u64) -> String {

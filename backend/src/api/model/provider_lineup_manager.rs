@@ -983,11 +983,12 @@ mod tests {
         model::{InputFetchMethod, InputType},
         utils::Internable,
     };
-    use std::{sync::atomic::AtomicU16, thread};
+    use std::sync::atomic::AtomicU16;
+    use tokio::time::{sleep, Duration};
 
     macro_rules! should_available {
         ($lineup:expr, $provider_id:expr, $grace_period_timeout_secs: expr) => {
-            thread::sleep(std::time::Duration::from_millis(200));
+            sleep(Duration::from_millis(200)).await;
             match $lineup.acquire(true, $grace_period_timeout_secs).await {
                 ProviderAllocation::Exhausted => assert!(false, "Should available and not exhausted"),
                 ProviderAllocation::Available(provider) => assert_eq!(provider.id, $provider_id),
@@ -999,7 +1000,7 @@ mod tests {
     }
     macro_rules! should_grace_period {
         ($lineup:expr, $provider_id:expr, $grace_period_timeout_secs: expr) => {
-            thread::sleep(std::time::Duration::from_millis(200));
+            sleep(Duration::from_millis(200)).await;
             match $lineup.acquire(true, $grace_period_timeout_secs).await {
                 ProviderAllocation::Exhausted => assert!(false, "Should grace period and not exhausted"),
                 ProviderAllocation::Available(provider) => {
@@ -1012,7 +1013,7 @@ mod tests {
 
     macro_rules! should_exhausted {
         ($lineup:expr, $grace_period_timeout_secs: expr) => {
-            thread::sleep(std::time::Duration::from_millis(200));
+            sleep(Duration::from_millis(200)).await;
             match $lineup.acquire(true, $grace_period_timeout_secs).await {
                 ProviderAllocation::Exhausted => {}
                 ProviderAllocation::Available(provider) => {

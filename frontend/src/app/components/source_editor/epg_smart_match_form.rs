@@ -46,10 +46,16 @@ impl From<EpgSmartMatchConfigDto> for EpgSmartMatchFormData {
             EpgNamePrefix::Suffix(v) => (NAME_PREFIX_MODE_SUFFIX.to_string(), Some(v)),
             EpgNamePrefix::Prefix(v) => (NAME_PREFIX_MODE_PREFIX.to_string(), Some(v)),
         };
-        let separator = value
-            .name_prefix_separator
-            .as_ref()
-            .map(|chars| chars.iter().map(char::to_string).collect::<Vec<_>>().join(","));
+        let separator = value.name_prefix_separator.as_ref().map(|chars| {
+            let mut result = String::new();
+            for ch in chars {
+                if !result.is_empty() {
+                    result.push(',');
+                }
+                result.push(*ch);
+            }
+            result
+        });
         Self {
             enabled: value.enabled,
             normalize_regex: value.normalize_regex,

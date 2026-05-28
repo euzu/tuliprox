@@ -3346,6 +3346,25 @@ where
     /// Returns the filepath this query was opened from.
     pub fn filepath(&self) -> &Path { &self.filepath }
 
+    #[cfg(test)]
+    pub(crate) fn clone_error_fixture() -> Self {
+        Self {
+            file: None,
+            mmap: None,
+            filepath: PathBuf::new(),
+            file_identity: None,
+            has_tombstones: false,
+            buffer: vec![0u8; PAGE_SIZE_USIZE],
+            cache: SplitNodeCache::new(),
+            node_cache: SplitNodeCache::new(),
+            last_refresh_at: Instant::now(),
+            refresh_interval: QUERY_REFRESH_INTERVAL,
+            root_offset: 0,
+            _marker_k: PhantomData,
+            _marker_v: PhantomData,
+        }
+    }
+
     /// Force a header/root refresh, bypassing the automatic refresh throttle.
     pub fn refresh(&mut self) -> io::Result<()> { self.refresh_root_offset() }
 

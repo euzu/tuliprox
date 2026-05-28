@@ -109,7 +109,7 @@ fn resolve_effective_source_url<'a>(
                     "Failed to resolve provider URL '{}' for input '{}': {}",
                     sanitize_sensitive_info(&m3u_pli.url),
                     m3u_pli.input_name,
-                    sanitize_sensitive_info(err.to_string().as_str())
+                    sanitize_sensitive_info(&err.to_string())
                 );
                 Cow::Borrowed(m3u_pli.url.as_ref())
             }
