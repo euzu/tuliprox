@@ -2,8 +2,9 @@ use crate::{
     create_bitset,
     error::TuliproxError,
     model::{
-        xtream_const, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
-        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
+        xtream_const, CatchupAttribute, CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions,
+        EpisodeStreamProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties,
+        XtreamInfoDocument,
     },
     utils::{
         arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_runtime_playlist_uuid,
@@ -499,10 +500,53 @@ pub struct M3uPlaylistItem {
     pub t_stream_url: Arc<str>,
     #[serde(skip)]
     pub t_resource_url: Option<String>,
+    #[serde(skip)]
+    pub t_catchup_source: Option<Arc<str>>,
+    #[serde(skip)]
+    pub t_catchup_mode: Option<Arc<str>>,
     #[serde(default)]
     pub source_ordinal: u32,
     #[serde(default)]
     pub additional_properties: Option<StreamProperties>,
+}
+
+fn write_m3u_attr(line: &mut String, name: &str, value: &str) { let _ = write!(line, " {name}=\"{value}\""); }
+
+fn append_catchup_attribute(line: &mut String, name: &str, value: Option<&Arc<str>>) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        write_m3u_attr(line, name, value);
+    }
+}
+
+fn append_extra_catchup_attributes(line: &mut String, attributes: &[CatchupAttribute]) {
+    for attribute in attributes {
+        if !attribute.name.is_empty() && !attribute.value.is_empty() {
+            write_m3u_attr(line, attribute.name.as_ref(), attribute.value.as_ref());
+        }
+    }
+}
+
+fn append_m3u_catchup_attributes(
+    line: &mut String,
+    catchup: &CatchupProperties,
+    rewritten_mode: Option<&Arc<str>>,
+    rewritten_source: Option<&Arc<str>>,
+) {
+    if let Some(mode) = rewritten_mode.filter(|mode| !mode.is_empty()) {
+        write_m3u_attr(line, "catchup", mode.as_ref());
+    } else {
+        append_catchup_attribute(line, "catchup", catchup.mode.as_ref());
+    }
+    append_catchup_attribute(line, "catchup-days", catchup.days.as_ref());
+    if let Some(source) = rewritten_source.filter(|source| !source.is_empty()) {
+        write_m3u_attr(line, "catchup-source", source.as_ref());
+    } else {
+        append_catchup_attribute(line, "catchup-source", catchup.source.as_ref());
+    }
+    append_catchup_attribute(line, "catchup-time", catchup.time.as_ref());
+    append_catchup_attribute(line, "catchup-correction", catchup.correction.as_ref());
+    append_catchup_attribute(line, "catchup-type", catchup.catchup_type.as_ref());
+    append_extra_catchup_attributes(line, &catchup.extra_attributes);
 }
 
 impl M3uPlaylistItem {
@@ -535,6 +579,16 @@ impl M3uPlaylistItem {
             (audio_track, "audio-track"),
             (time_shift, "timeshift"),
             (rec, "tvg-rec"););
+        if let Some(StreamProperties::Live(live)) = self.additional_properties.as_ref() {
+            if let Some(catchup) = live.catchup.as_ref() {
+                append_m3u_catchup_attributes(
+                    &mut line,
+                    catchup,
+                    self.t_catchup_mode.as_ref(),
+                    self.t_catchup_source.as_ref(),
+                );
+            }
+        }
 
         let url = if self.t_stream_url.is_empty() { &self.url } else { &self.t_stream_url };
         let _ = write!(&mut line, ",{}\n{}", self.title, url);
@@ -1132,6 +1186,8 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             item_type: header.item_type,
             t_stream_url: Arc::clone(&header.url),
             t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
             source_ordinal: header.source_ordinal,
             additional_properties: header.additional_properties.clone(),
         }
@@ -1314,7 +1370,10 @@ impl PlaylistGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaylistItemType, XtreamCluster, XtreamMappingFlags};
+    use crate::model::{
+        CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistItemType, StreamProperties, XtreamCluster,
+        XtreamMappingFlags,
+    };
 
     fn sample_options() -> XtreamMappingOptions {
         XtreamMappingOptions {
@@ -1495,6 +1554,8 @@ mod tests {
             item_type: PlaylistItemType::Live,
             t_stream_url: "".intern(),
             t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
         };
@@ -1524,6 +1585,8 @@ mod tests {
             item_type: PlaylistItemType::Live,
             t_stream_url: "".intern(),
             t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
         };
@@ -1553,11 +1616,100 @@ mod tests {
             item_type: PlaylistItemType::Live,
             t_stream_url: "".intern(),
             t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
         };
 
         let output = item.to_m3u(None, false);
         assert!(!output.contains("tvg-chno"), "M3U output must not contain tvg-chno when chno is 0");
+    }
+
+    #[test]
+    fn m3u_to_m3u_preserves_catchup_attributes() {
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("channel1".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                catchup: Some(CatchupProperties {
+                    mode: Some("append".intern()),
+                    days: Some("7".intern()),
+                    source: Some("?offset=-${offset}&utcstart=${timestamp}".intern()),
+                    correction: Some("-2.0".intern()),
+                    catchup_type: Some("xc".intern()),
+                    extra_attributes: vec![CatchupAttribute { name: "catchup-extra".intern(), value: "keep".intern() }],
+                    ..CatchupProperties::default()
+                }),
+                ..LiveStreamProperties::default()
+            }))),
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"catchup="append""#));
+        assert!(output.contains(r#"catchup-days="7""#));
+        assert!(output.contains(r#"catchup-source="?offset=-${offset}&utcstart=${timestamp}""#));
+        assert!(output.contains(r#"catchup-correction="-2.0""#));
+        assert!(output.contains(r#"catchup-type="xc""#));
+        assert!(output.contains(r#"catchup-extra="keep""#));
+    }
+
+    #[test]
+    fn m3u_to_m3u_uses_rewritten_catchup_mode_and_source() {
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("channel1".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: Some("http://proxy.example/m3u-catchup/token?v0={utc}".intern()),
+            t_catchup_mode: Some("default".intern()),
+            source_ordinal: 0,
+            additional_properties: Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                catchup: Some(CatchupProperties {
+                    mode: Some("append".intern()),
+                    source: Some("?offset=-${offset}".intern()),
+                    ..CatchupProperties::default()
+                }),
+                ..LiveStreamProperties::default()
+            }))),
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"catchup="default""#));
+        assert!(output.contains(r#"catchup-source="http://proxy.example/m3u-catchup/token?v0={utc}""#));
+        assert!(!output.contains(r#"catchup-source="?offset=-${offset}""#));
     }
 }

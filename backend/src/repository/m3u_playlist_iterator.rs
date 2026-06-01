@@ -5,11 +5,12 @@ use crate::repository::storage_const;
 use crate::repository::user_get_bouquet_filter;
 use crate::repository::{ensure_target_storage_path, get_file_path_for_db_index};
 use crate::repository::{open_playlist_reader, LockedReceiverStream};
+use crate::utils::build_m3u_catchup_rewrite;
 use futures::Stream;
 use log::error;
 use shared::create_bitset;
 use shared::error::TuliproxError;
-use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, TargetType, XtreamCluster};
+use shared::model::{ConfigTargetOptions, M3uPlaylistItem, PlaylistItemType, ProxyType, StreamProperties, TargetType, XtreamCluster};
 use shared::utils::{extract_extension_from_url, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -123,6 +124,8 @@ fn apply_rewrite(
     base_url: &str,
     username: &str,
     password: &str,
+    target_id: u16,
+    encrypt_secret: &[u8; 16],
     input_by_name: &HashMap<Arc<str>, Arc<crate::model::ConfigInput>>,
     target_options: Option<&ConfigTargetOptions>,
     flags: M3uPlaylistIteratorFlagsSet,
@@ -134,6 +137,29 @@ fn apply_rewrite(
         if is_redirect { flags.contains(M3uPlaylistIteratorFlags::MaskRedirectUrl) } else { true };
 
     let effective_source_url = resolve_effective_source_url(&m3u_pli, input_by_name);
+    let catchup_rewrite = if should_rewrite_urls {
+        if let Some(StreamProperties::Live(live)) = m3u_pli.additional_properties.as_ref() {
+            if let Some(catchup) = live.catchup.as_ref() {
+                build_m3u_catchup_rewrite(
+                    encrypt_secret,
+                    base_url,
+                    username,
+                    target_id,
+                    m3u_pli.virtual_id,
+                    effective_source_url.as_ref(),
+                    catchup,
+                )
+                .ok()
+                .flatten()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     if should_rewrite_urls {
         let stream_url = build_rewritten_url(
@@ -169,6 +195,11 @@ fn apply_rewrite(
             Cow::Owned(url) => url.intern(),
         };
         m3u_pli.t_resource_url = None;
+    }
+
+    if let Some(rewrite) = catchup_rewrite {
+        m3u_pli.t_catchup_mode = Some(rewrite.mode);
+        m3u_pli.t_catchup_source = Some(rewrite.source);
     }
 
     m3u_pli
@@ -207,8 +238,10 @@ impl M3uPlaylistIterator {
         }
 
         let base_url = cfg.get_user_server_info(user).map(|si| si.get_base_url()).unwrap_or_default();
+        let encrypt_secret = cfg.get_reverse_proxy_rewrite_secret().unwrap_or(cfg.encrypt_secret);
         let username = user.username.clone();
         let password = user.password.clone();
+        let target_id = target.id;
         let proxy_type = user.proxy;
         let output_clusters = user.output_clusters;
         let target_options = target.options.clone();
@@ -265,6 +298,8 @@ impl M3uPlaylistIterator {
                     &base_url,
                     &username,
                     &password,
+                    target_id,
+                    &encrypt_secret,
                     &input_by_name,
                     target_options.as_ref(),
                     flags,
@@ -394,6 +429,8 @@ mod tests {
             item_type: PlaylistItemType::Live,
             t_stream_url: "".intern(),
             t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
         }
@@ -408,6 +445,8 @@ mod tests {
             "https://example.com",
             "user",
             "pass",
+            1,
+            &[7u8; 16],
             &input_by_name,
             None,
             M3uPlaylistIteratorFlagsSet::new(),
@@ -425,6 +464,8 @@ mod tests {
             "https://example.com",
             "user",
             "pass",
+            1,
+            &[7u8; 16],
             &input_by_name,
             None,
             M3uPlaylistIteratorFlagsSet::new(),
@@ -442,6 +483,8 @@ mod tests {
             "https://example.com",
             "user",
             "pass",
+            1,
+            &[7u8; 16],
             &input_by_name,
             None,
             M3uPlaylistIteratorFlagsSet::new(),
@@ -463,6 +506,8 @@ mod tests {
             "https://example.com",
             "user",
             "pass",
+            1,
+            &[7u8; 16],
             &input_by_name,
             None,
             flags,

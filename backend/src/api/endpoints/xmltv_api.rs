@@ -292,6 +292,9 @@ async fn serve_epg_with_rewrites(
                         format_xmltv_time_utc(user_stop, &epg_processing_options.time_shift).as_str(),
                     ));
                     elem.push_attribute(("channel", channel.id.as_ref()));
+                    if let Some(catchup_id) = programme.catchup_id.as_ref() {
+                        elem.push_attribute(("catchup-id", catchup_id.as_ref()));
+                    }
                     continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
 
                     if let Some(title) = &programme.title {
@@ -845,13 +848,28 @@ mod tests {
             encrypt_secret: [0; 16],
         };
         let programmes = vec![
-            EpgProgramme::new_all(now - 7_300, now - 100, "channel-1".intern(), Some("Shifted Into Window".intern()), None),
-            EpgProgramme::new_all(now + 60, now + 600, "channel-1".intern(), Some("Already In Window".intern()), None),
+            EpgProgramme::new_all(
+                now - 7_300,
+                now - 100,
+                "channel-1".intern(),
+                Some("Shifted Into Window".intern()),
+                None,
+                None,
+            ),
+            EpgProgramme::new_all(
+                now + 60,
+                now + 600,
+                "channel-1".intern(),
+                Some("Already In Window".intern()),
+                None,
+                None,
+            ),
             EpgProgramme::new_all(
                 window_end + 60,
                 window_end + 600,
                 "channel-1".intern(),
                 Some("Still Outside Window".intern()),
+                None,
                 None,
             ),
         ];

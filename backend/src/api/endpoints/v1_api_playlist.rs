@@ -915,6 +915,7 @@ mod tests {
                 "demo.channel".intern(),
                 Some("Low Show".intern()),
                 None,
+                None,
             )],
         };
         let high_priority = EpgChannel {
@@ -927,6 +928,7 @@ mod tests {
                 "demo.channel".intern(),
                 Some("High Show".intern()),
                 None,
+                None,
             )],
         };
         let same_priority = EpgChannel {
@@ -934,8 +936,8 @@ mod tests {
             title: Some("Same".intern()),
             icon: Some("http://same/icon.png".intern()),
             programmes: vec![
-                EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("Duplicate".intern()), None),
-                EpgProgramme::new_all(50, 60, "demo.channel".intern(), Some("Second Show".intern()), None),
+                EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("Duplicate".intern()), None, None),
+                EpgProgramme::new_all(50, 60, "demo.channel".intern(), Some("Second Show".intern()), None, None),
             ],
         };
 
