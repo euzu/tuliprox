@@ -435,8 +435,8 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
     process_header_internal(input_name, video_suffixes, content, url, None)
 }
 
-fn parse_extm3u_catchup_correction(line: &str) -> Option<Arc<str>> {
-    let mut it = line.chars();
+fn parse_extm3u_catchup_correction(attributes: &str) -> Option<Arc<str>> {
+    let mut it = attributes.chars();
     let mut stack = String::with_capacity(32);
     while let Some(chr) = it.next() {
         if chr.is_whitespace() {
@@ -449,10 +449,10 @@ fn parse_extm3u_catchup_correction(line: &str) -> Option<Arc<str>> {
             stack.clear();
             continue;
         }
-        let token_name = stack[tok_start..].to_owned();
+        let is_catchup_correction = stack[tok_start..].eq_ignore_ascii_case("catchup-correction");
         stack.clear();
         let val_off = token_value(&mut stack, &mut it);
-        if token_name.eq_ignore_ascii_case("catchup-correction") && stack.len() > val_off {
+        if is_catchup_correction && stack.len() > val_off {
             return Some(stack[val_off..].intern());
         }
         stack.clear();
@@ -462,7 +462,7 @@ fn parse_extm3u_catchup_correction(line: &str) -> Option<Arc<str>> {
 
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
     let mut header: Option<String> = None;
-    let mut group: Option<String> = None;
+    let mut group: Option<Arc<str>> = None;
     let mut default_catchup_correction: Option<Arc<str>> = None;
     let input_name = &input.name;
 
@@ -471,26 +471,28 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
             config.extensions.iter().map(Clone::clone).collect::<Vec<String>>()
         }
         None => default_supported_video_extensions()
-    };
+        };
     let mut lines = tokio::io::BufReader::new(lines).lines();
     let mut ord_counter: u32 = 1;
     while let Ok(Some(line)) = lines.next_line().await {
-        if line.starts_with("#EXTINF") {
-            header = Some(line);
+        let bytes = line.as_bytes();
+        if let Some(b'#') = bytes.first().copied() {
+            if bytes.starts_with(b"#EXTINF") {
+                header = Some(line);
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("#EXTM3U") {
+                default_catchup_correction = parse_extm3u_catchup_correction(rest);
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("#EXTGRP:") {
+                group = Some(rest.intern());
+                continue;
+            }
             continue;
         }
-        if line.starts_with("#EXTM3U") {
-            default_catchup_correction = parse_extm3u_catchup_correction(&line);
-            continue;
-        }
-        if line.starts_with("#EXTGRP") {
-            group = Some(String::from(&line[8..]));
-            continue;
-        }
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some(header_value) = header {
+        let group_value = group.take();
+        if let Some(header_value) = header.take() {
             let mut item = PlaylistItem {
                 header: process_header_internal(
                     input_name,
@@ -503,18 +505,15 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
             let header = &mut item.header;
             header.source_ordinal = ord_counter;
             ord_counter += 1;
-                if header.group.is_empty() {
-                    if let Some(group_value) = group {
-                        header.group = group_value.intern();
-                    } else {
-                        let group = get_title_group(&header.title);
-                        header.group = group;
-                    }
+            if header.group.is_empty() {
+                if let Some(group_value) = group_value {
+                    header.group = group_value;
+                } else {
+                    header.group = get_title_group(&header.title);
                 }
-                visit(item);
+            }
+            visit(item);
         }
-        header = None;
-        group = None;
     }
 }
 
@@ -546,11 +545,34 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
 
 #[cfg(test)]
 mod test {
+    use crate::model::{Config, ConfigInput};
+    use crate::utils::request::DynReader;
     use shared::{
         model::StreamProperties,
         utils::Internable,
     };
     use crate::processing::parser::m3u::{classify_token, process_header, M3uToken};
+    use tokio::io::AsyncWriteExt;
+
+    fn make_reader(content: &str) -> DynReader {
+        let (mut writer, reader) = tokio::io::duplex(content.len().max(4096));
+        let bytes = content.as_bytes().to_vec();
+        tokio::spawn(async move {
+            writer.write_all(&bytes).await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+        Box::pin(reader)
+    }
+
+    fn test_input() -> ConfigInput {
+        ConfigInput {
+            name: "input".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..ConfigInput::default()
+        }
+    }
 
     #[test]
     fn test_classify_token_length_dispatch_keeps_expected_mapping() {
@@ -770,4 +792,28 @@ mod test {
         let catchup = live_props.catchup.expect("catchup should be parsed");
         assert_eq!(catchup.correction.as_deref(), Some("-2.0"));
     }
+
+    #[test]
+    fn parse_extm3u_header_catchup_correction_from_attribute_tail() {
+        let correction = super::parse_extm3u_catchup_correction(r#" catchup-correction="-2.0""#);
+
+        assert_eq!(correction.as_deref(), Some("-2.0"));
+    }
+
+    #[tokio::test]
+    async fn consume_m3u_applies_extgrp_to_following_item() {
+        let content = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1,Channel 1\n",
+            "#EXTGRP:Sports\n",
+            "http://provider.example/live/user/pass/1.ts\n",
+        );
+        let mut items = Vec::new();
+
+        super::consume_m3u(&Config::default(), &test_input(), make_reader(content), |item| items.push(item)).await;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].header.group.as_ref(), "Sports");
+    }
+
 }

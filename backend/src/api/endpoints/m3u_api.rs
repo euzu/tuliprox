@@ -401,6 +401,10 @@ fn resolve_loaded_m3u_catchup(
     Ok((catchup_item, resolved.discriminator))
 }
 
+fn resolved_m3u_item_is_allowed(user: &ProxyUserCredentials, item_type: PlaylistItemType) -> bool {
+    user.allows_item_type(item_type)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn m3u_api_stream(
     user: Arc<ProxyUserCredentials>,
@@ -427,15 +431,6 @@ async fn m3u_api_stream(
         format!("Failed to read m3u item for stream id {req_virtual_id}")
     );
 
-    if !user.allows_item_type(pli.item_type) {
-        return crate::api::model::create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
-        )
-        .into_response();
-    }
-
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
         true,
@@ -452,6 +447,14 @@ async fn m3u_api_stream(
     } else {
         (pli, None)
     };
+    if !resolved_m3u_item_is_allowed(user.as_ref(), resolved_pli.item_type) {
+        return crate::api::model::create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
+    }
 
     m3u_api_stream_loaded(
         user,
@@ -504,9 +507,6 @@ async fn m3u_api_catchup(
         true,
         format!("Failed to read m3u item for stream id {virtual_id}")
     );
-    if !user.allows_item_type(pli.item_type) {
-        return axum::http::StatusCode::FORBIDDEN.into_response();
-    }
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
         true,
@@ -519,6 +519,9 @@ async fn m3u_api_catchup(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
     };
+    if !resolved_m3u_item_is_allowed(user.as_ref(), resolved_pli.item_type) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
 
     m3u_api_stream_loaded(
         user,
@@ -689,7 +692,10 @@ pub fn m3u_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
+    use super::resolved_m3u_item_is_allowed;
     use crate::api::model::UserApiRequest;
+    use crate::model::ProxyUserCredentials;
+    use shared::model::{ClusterFlags, PlaylistItemType};
 
     #[test]
     fn post_query_only_request_prefers_query_when_form_is_missing() {
@@ -724,5 +730,13 @@ mod tests {
 
         assert_eq!(api_req.username, "query-user");
         assert_eq!(api_req.content_type, "query-type");
+    }
+
+    #[test]
+    fn resolved_catchup_item_requires_rechecked_permissions() {
+        let mut user = ProxyUserCredentials::default();
+        user.output_clusters = ClusterFlags::Live;
+
+        assert!(!resolved_m3u_item_is_allowed(&user, PlaylistItemType::Catchup));
     }
 }

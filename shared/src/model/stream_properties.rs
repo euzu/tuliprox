@@ -397,6 +397,7 @@ impl StreamProperties {
                     || live.audio.is_some()
                     || live.last_probed_timestamp.is_some()
                     || live.last_success_timestamp.is_some()
+                    || live.catchup.is_some()
             }
             StreamProperties::Episode(_) => false,
         }
@@ -1126,5 +1127,15 @@ mod tests {
     fn normalize_episode_title_keeps_existing_episode_code() {
         let normalized = normalize_episode_title(&"S01E02".into(), &"Example Show".into(), 1, 2);
         assert_eq!(normalized.as_ref(), "S01E02");
+    }
+
+    #[test]
+    fn live_catchup_only_counts_as_details() {
+        let props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            catchup: Some(CatchupProperties { mode: Some("append".into()), ..CatchupProperties::default() }),
+            ..LiveStreamProperties::default()
+        }));
+
+        assert!(props.has_details());
     }
 }
