@@ -11,6 +11,44 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CatchupAttribute {
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub name: Arc<str>,
+    #[serde(default, deserialize_with = "arc_str_none_default_on_null")]
+    pub value: Arc<str>,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CatchupProperties {
+    #[serde(default, with = "arc_str_option_serde")]
+    pub mode: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub days: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub source: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub time: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub correction: Option<Arc<str>>,
+    #[serde(default, with = "arc_str_option_serde")]
+    pub catchup_type: Option<Arc<str>>,
+    #[serde(default)]
+    pub extra_attributes: Vec<CatchupAttribute>,
+}
+
+impl CatchupProperties {
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none()
+            && self.days.is_none()
+            && self.source.is_none()
+            && self.time.is_none()
+            && self.correction.is_none()
+            && self.catchup_type.is_none()
+            && self.extra_attributes.is_empty()
+    }
+}
+
 fn format_episode_code(season: u32, episode: u32) -> Option<String> {
     match (season, episode) {
         (0, 0) => None,
@@ -83,6 +121,8 @@ pub struct LiveStreamProperties {
     pub last_probed_timestamp: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_number_from_string")]
     pub last_success_timestamp: Option<i64>,
+    #[serde(default)]
+    pub catchup: Option<CatchupProperties>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -371,6 +411,9 @@ impl StreamProperties {
                     .filter(|epg_id| !epg_id.trim().is_empty())
                     .map(|epg_id| epg_id.to_lowercase().intern())
                     .or(live.epg_channel_id.clone());
+                if live.catchup.as_ref().is_some_and(CatchupProperties::is_empty) {
+                    live.catchup = None;
+                }
             }
             StreamProperties::Video(_) => {}
             StreamProperties::Series(_) => {}

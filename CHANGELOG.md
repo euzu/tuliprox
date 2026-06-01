@@ -10,6 +10,20 @@
 
 ## 🌟 New Features
 
+- **M3U Catchup / Archive Preservation And Proxying**:
+  - Tuliprox now preserves standard M3U catchup/archive attributes during M3U import and export.
+  - Supported preserved attributes include:
+    - `catchup`
+    - `catchup-days`
+    - `catchup-source`
+    - `catchup-time`
+    - `catchup-correction`
+    - `catchup-type`
+    - additional unknown `catchup-*` attributes
+  - M3U catchup metadata is now stored under live stream properties and survives playlist rewrite/output generation.
+  - XMLTV `catchup-id` is now imported, merged and exported alongside programme data.
+  - Reverse-proxied M3U outputs can now expose local Tuliprox catchup/archive URLs instead of leaking provider archive URLs.
+
 - **Per-User Output Clusters**: API proxy users can now be restricted to specific clusters on their assigned target via
   `output_clusters`.
   - Supported values: `live`, `vod`, `series`.

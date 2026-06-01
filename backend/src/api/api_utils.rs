@@ -3589,6 +3589,24 @@ pub fn create_catchup_session_key(fingerprint: &Fingerprint, username: &str, vir
     concat_string!("catchup|", &fingerprint.key, "|", username, "|", &virtual_id.to_string(), "|session")
 }
 
+pub fn create_m3u_catchup_session_key(
+    fingerprint: &Fingerprint,
+    username: &str,
+    virtual_id: u32,
+    archive_discriminator: &str,
+) -> String {
+    concat_string!(
+        "m3u-catchup|",
+        &fingerprint.key,
+        "|",
+        username,
+        "|",
+        &virtual_id.to_string(),
+        "|",
+        archive_discriminator
+    )
+}
+
 pub(crate) fn is_session_based_playback(item_type: PlaylistItemType, extension: Option<&str>) -> bool {
     item_type.is_live_adaptive() || matches!(extension, Some(ext) if ext == HLS_EXT || ext == DASH_EXT)
 }

@@ -224,7 +224,11 @@ impl LRUResourceCache {
             if let Some((file, _mime_type, size, _gen)) = self.cache.remove(&oldest_key) {
                 self.current_size -= size;
                 if let Err(err) = fs::remove_file(&file) {
-                    error!("Failed to delete cached file {} {err}", file.to_string_lossy());
+                    if err.kind() == std::io::ErrorKind::NotFound {
+                        debug!("Cached file already deleted: {}", file.to_string_lossy());
+                    } else {
+                        error!("Failed to delete cached file {} {err}", file.to_string_lossy());
+                    }
                 } else {
                     debug!("Removed file from cache: {}", file.to_string_lossy());
                 }
