@@ -10,6 +10,13 @@
 
 ## 🌟 New Features
 
+- **Recoverable Error Boundary**:
+  - Added an `ErrorBoundary` component that wraps each main view (dashboard, stats, streams, downloads, users,
+    sources, playlists, EPG, RBAC, config) and the API-user playlist, so a recoverable failure shows a fallback with
+    a retry button instead of leaving the section blank — and a failure in one view no longer affects the others.
+  - Descendants can report a recoverable error through the boundary's context handle; retrying re-mounts the
+    protected subtree so the user can recover without reloading the whole app.
+
 - **Runtime-Discovered UI Languages With RTL Support**:
   - The frontend now reads the available UI languages at runtime from an `assets/i18n/index.json` manifest, so adding a
     language only requires shipping a `<code>.json` locale file and adding an entry to the manifest — no code change.

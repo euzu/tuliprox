@@ -2,9 +2,10 @@ use crate::{
     app::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, map_sources_to_playlist_rows, theme::Theme, AppIcon,
-            DashboardView, DownloadsView, EpgView, IconButton, LanguagePicker, NoAccess, Panel, ParticleFlowBackground,
-            PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor,
-            StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
+            DashboardView, DownloadsView, EpgView, ErrorBoundary, IconButton, LanguagePicker, NoAccess, Panel,
+            ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup,
+            Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView,
+            WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -295,7 +296,11 @@ pub fn Home() -> Html {
                               if setup_mode {
                                   html! { <Setup/> }
                               } else {
-                                  html! { <ConfigView/> }
+                                  html! {
+                                      <ErrorBoundary name={translate.t("LABEL.CONFIG")}>
+                                          <ConfigView/>
+                                      </ErrorBoundary>
+                                  }
                               }
                           }
                        </Panel>
@@ -307,61 +312,85 @@ pub fn Home() -> Html {
                                 html! {
                                     <>
                                        <Panel class="tp__full-width" value={ViewType::Dashboard.intern()} active={view_page.clone()}>
-                                        <DashboardView/>
+                                        <ErrorBoundary name={translate.t("LABEL.DASHBOARD")}>
+                                          <DashboardView/>
+                                        </ErrorBoundary>
                                        </Panel>
                                        { html_if!(can_read_system_status, {
                                        <Panel class="tp__full-width" value={ViewType::Stats.intern()} active={view_page.clone()}>
-                                        <StatsView show_streams={!show_streams_page}/>
+                                        <ErrorBoundary name={translate.t("LABEL.STATS")}>
+                                          <StatsView show_streams={!show_streams_page}/>
+                                        </ErrorBoundary>
                                        </Panel>
                                        })}
                                         { html_if!(show_streams_page && can_read_system_status, {
                                                    <Panel class="tp__full-width" value={ViewType::Streams.intern()} active={view_page.clone()}>
-                                              <StreamsView embedded={false}/>
+                                              <ErrorBoundary name={translate.t("LABEL.STREAMS")}>
+                                                <StreamsView embedded={false}/>
+                                              </ErrorBoundary>
                                             </Panel>
                                         })}
                                        { html_if!(can_read_downloads, {
                                        <Panel class="tp__full-width" value={ViewType::Downloads.intern()} active={view_page.clone()}>
-                                         <DownloadsView/>
+                                         <ErrorBoundary name={translate.t("LABEL.DOWNLOADS")}>
+                                           <DownloadsView/>
+                                         </ErrorBoundary>
                                        </Panel>
                                        })}
                                         { html_if!(can_read_system_status, {
                                             <Panel class="tp__full-width" value={ViewType::StreamHistory.intern()} active={view_page.clone()}>
-                                                <StreamHistoryView/>
+                                                <ErrorBoundary name={translate.t("LABEL.STREAM_HISTORY")}>
+                                                  <StreamHistoryView/>
+                                                </ErrorBoundary>
                                             </Panel>
                                         })}
                                        { html_if!(can_read_users, {
                                        <Panel class="tp__full-width" value={ViewType::Users.intern()} active={view_page.clone()}>
-                                          <UserlistView/>
+                                          <ErrorBoundary name={translate.t("LABEL.USER")}>
+                                            <UserlistView/>
+                                          </ErrorBoundary>
                                        </Panel>
                                        })}
                                        { html_if!(can_read_sources, {
                                        <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
-                                          <SourceEditor/>
+                                          <ErrorBoundary name={translate.t("LABEL.SOURCE_EDITOR")}>
+                                            <SourceEditor/>
+                                          </ErrorBoundary>
                                        </Panel>
                                        })}
                                        { html_if!(can_write_playlist, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistUpdate.intern()} active={view_page.clone()}>
-                                         <PlaylistUpdateView/>
+                                         <ErrorBoundary name={translate.t("LABEL.UPDATE")}>
+                                           <PlaylistUpdateView/>
+                                         </ErrorBoundary>
                                        </Panel>
                                        })}
                                        { html_if!(can_read_playlist, {
                                        <>
                                        <Panel class="tp__full-width" value={ViewType::PlaylistSettings.intern()} active={view_page.clone()}>
-                                         <PlaylistSettingsView/>
+                                         <ErrorBoundary name={translate.t("LABEL.PLAYLIST")}>
+                                           <PlaylistSettingsView/>
+                                         </ErrorBoundary>
                                        </Panel>
                                        <Panel class="tp__full-width" value={ViewType::PlaylistExplorer.intern()} active={view_page.clone()}>
-                                         <PlaylistExplorerView/>
+                                         <ErrorBoundary name={translate.t("LABEL.PLAYLIST_VIEWER")}>
+                                           <PlaylistExplorerView/>
+                                         </ErrorBoundary>
                                        </Panel>
                                        </>
                                        })}
                                        { html_if!(can_read_epg, {
                                        <Panel class="tp__full-width" value={ViewType::PlaylistEpg.intern()} active={view_page.clone()}>
-                                         <EpgView/>
+                                         <ErrorBoundary name={translate.t("LABEL.PLAYLIST_EPG")}>
+                                           <EpgView/>
+                                         </ErrorBoundary>
                                        </Panel>
                                        })}
                                        { html_if!(is_admin, {
                                            <Panel class="tp__full-width" value={ViewType::Rbac.intern()} active={view_page}>
-                                               <RbacView />
+                                               <ErrorBoundary name={translate.t("LABEL.RBAC")}>
+                                                 <RbacView />
+                                               </ErrorBoundary>
                                            </Panel>
                                        })}
                                     </>
