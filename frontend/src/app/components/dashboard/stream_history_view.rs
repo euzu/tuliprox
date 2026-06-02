@@ -1,11 +1,11 @@
 use crate::{
     app::components::{
         Country, DateInput, DropDownOption, PagedTable, RevealContent, Search, TabItem, TabSet, Table, TableDefinition,
-        TextButton,
+        TextButton, PAGE_SIZES, TP_PAGE_SIZE_KEY,
     },
     hooks::use_service_context,
     i18n::use_translation,
-    utils::{format_bytes, format_duration, format_ts},
+    utils::{format_bytes, format_duration, format_ts, get_local_storage_item, set_local_storage_item},
 };
 use futures::join;
 use shared::{
@@ -201,7 +201,12 @@ pub fn StreamHistoryView() -> Html {
     let to_date = use_state(|| Some(today_start_ts()));
     let paged_response = use_state(|| None::<PagedResponseDto<StreamHistoryRecordDto>>);
     let page = use_state(|| 1u32);
-    let page_size = use_state(default_page_size);
+    let page_size = use_state(|| {
+        get_local_storage_item(TP_PAGE_SIZE_KEY)
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|size| PAGE_SIZES.contains(size))
+            .unwrap_or_else(default_page_size)
+    });
     let summaries = use_state(Vec::<StreamHistoryProviderSummaryDto>::new);
     let qos_snapshots = use_state(Vec::<QosSnapshotRecordDto>::new);
     let selected_qos_snapshot = use_state(|| None::<QosSnapshotRecordDto>);
@@ -391,6 +396,7 @@ pub fn StreamHistoryView() -> Html {
         Callback::from(move |new_size: u16| {
             page.set(1);
             page_size.set(new_size);
+            set_local_storage_item(TP_PAGE_SIZE_KEY, &new_size.to_string());
             fetch_history_page(1, new_size, (*search_filter).clone());
         })
     };

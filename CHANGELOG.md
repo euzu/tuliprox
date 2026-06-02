@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Persisted UI Preferences**:
+  - The sidebar collapsed/expanded state and the stream-history table page size are now remembered across sessions
+    (the active theme was already persisted), so the UI restores your last layout on reload.
+
 - **Explicit Button Type On Shared Controls**:
   - The shared `IconButton` and `TextButton` primitives now render with `type="button"`, preventing accidental
     form submission when used inside forms.

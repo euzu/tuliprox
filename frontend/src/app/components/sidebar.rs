@@ -3,7 +3,7 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
     model::ViewType,
-    utils::html_if,
+    utils::{get_local_storage_item, html_if, set_local_storage_item},
 };
 use shared::model::permission::Permission;
 use std::str::FromStr;
@@ -13,6 +13,7 @@ use yew::prelude::*;
 use yew_hooks::use_mount;
 
 const MOBILE_BREAKPOINT_PX: f64 = 780.0;
+const TP_SIDEBAR_COLLAPSED_KEY: &str = "tp-sidebar-collapsed";
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CollapseState {
@@ -44,7 +45,11 @@ fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();
-    let collapsed = use_state(|| CollapseState::AutoExpanded);
+    let collapsed = use_state(|| match get_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY).as_deref() {
+        Some("collapsed") => CollapseState::ManualCollapsed,
+        Some("expanded") => CollapseState::ManualExpanded,
+        _ => CollapseState::AutoExpanded,
+    });
     let is_mobile = use_state(|| false);
     let active_menu = use_state(|| props.active_page);
 
@@ -67,6 +72,11 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
                 CollapseState::AutoExpanded | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
             };
+            let stored = match next {
+                CollapseState::ManualCollapsed => "collapsed",
+                _ => "expanded",
+            };
+            set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, stored);
             collapsed.set(next);
         })
     };

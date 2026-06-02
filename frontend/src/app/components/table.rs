@@ -214,6 +214,9 @@ mod tests {
 /// Page size options for paged tables.
 pub const PAGE_SIZES: &[u16] = &[25, 50, 100, 200];
 
+/// localStorage key used to remember the last selected table page size.
+pub const TP_PAGE_SIZE_KEY: &str = "tp-table-page-size";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaginationItem {
     Page(u32),
