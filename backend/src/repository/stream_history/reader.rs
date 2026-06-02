@@ -23,10 +23,8 @@ pub struct StreamHistoryFileReader<R: Read> {
     file_path: String,
 }
 
-impl StreamHistoryFileReader<BufReader<File>> {
-    pub fn from_pending(path: &Path, time_range: Option<(u64, u64)>) -> io::Result<(Self, FileHeaderBody)> {
-        let file = File::open(path)?;
-        let mut reader = BufReader::new(file);
+impl<R: Read> StreamHistoryFileReader<R> {
+    fn new_with_header(mut reader: R, time_range: Option<(u64, u64)>, file_path: String) -> io::Result<(Self, FileHeaderBody)> {
         read_and_verify_file_magic(&mut reader)?;
         let header: FileHeaderBody = read_framed(&mut reader)?;
         Ok((Self {
@@ -36,8 +34,15 @@ impl StreamHistoryFileReader<BufReader<File>> {
             payload_buf: Vec::new(),
             payload_offset: 0,
             done: false,
-            file_path: path.display().to_string(),
+            file_path,
         }, header))
+    }
+}
+
+impl StreamHistoryFileReader<BufReader<File>> {
+    pub fn from_pending(path: &Path, time_range: Option<(u64, u64)>) -> io::Result<(Self, FileHeaderBody)> {
+        let file = File::open(path)?;
+        Self::new_with_header(BufReader::new(file), time_range, path.display().to_string())
     }
 }
 
@@ -45,18 +50,7 @@ impl StreamHistoryFileReader<BufReader<FrameDecoder<File>>> {
     pub fn from_archive(path: &Path, time_range: Option<(u64, u64)>) -> io::Result<(Self, FileHeaderBody)> {
         let file = File::open(path)?;
         let decoder = FrameDecoder::new(file);
-        let mut reader = BufReader::new(decoder);
-        read_and_verify_file_magic(&mut reader)?;
-        let header: FileHeaderBody = read_framed(&mut reader)?;
-        Ok((Self {
-            reader,
-            time_range,
-            current_block_remaining: 0,
-            payload_buf: Vec::new(),
-            payload_offset: 0,
-            done: false,
-            file_path: path.display().to_string(),
-        }, header))
+        Self::new_with_header(BufReader::new(decoder), time_range, path.display().to_string())
     }
 }
 
@@ -440,66 +434,21 @@ mod tests {
     use crate::repository::stream_history::storage::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
-    use shared::model::StreamHistoryEventType;
+
     use shared::utils::Internable;
     use crate::model::{RECORD_SCHEMA_VERSION};
 
     fn make_test_record(ts: u64, username: &str) -> StreamHistoryRecord {
-        StreamHistoryRecord {
-            schema_version: RECORD_SCHEMA_VERSION,
-            event_type: StreamHistoryEventType::Connect,
-            event_ts_utc: ts,
-            partition_day_utc: "2026-03-22".to_string(),
-            session_id: 1,
-            source_addr: None,
-            api_username: Some(username.to_string()),
-            provider_name: None,
-            provider_username: None,
-            input_name: Some("input".intern()),
-            virtual_id: None,
-            item_type: None,
-            title: None,
-            group: None,
-            country: None,
-            user_agent: None,
-            shared: None,
-            shared_joined_existing: None,
-            shared_stream_id: None,
-            provider_id: None,
-            cluster: None,
-            container: None,
-            stream_url_hash: None,
-            stream_identity_key: None,
-            video_codec: None,
-            audio_codec: None,
-            audio_channels: None,
-            resolution: None,
-            fps: None,
-            connect_ts_utc: None,
-            disconnect_ts_utc: None,
-            session_duration: None,
-            bytes_sent: None,
-            first_byte_latency_ms: None,
-            provider_reconnect_count: None,
-            failure_stage: None,
-            provider_http_status: None,
-            provider_error_class: None,
-            connect_failure_reason: None,
-            disconnect_reason: None,
-            previous_session_id: None,
-            target_name: None,
-        }
+        let mut r = crate::repository::stream_history::tests::make_base_test_record();
+        r.event_ts_utc = ts;
+        r.api_username = Some(username.to_string());
+        r.input_name = Some("input".intern());
+        r
     }
 
     /// Helper: write a valid pending file with given records into a temp file
-    #[allow(clippy::cast_possible_truncation)]
-    fn write_test_pending_file(records: &[StreamHistoryRecord]) -> NamedTempFile {
-        let tmp = NamedTempFile::new().unwrap();
-        let mut f = tmp.as_file().try_clone().unwrap();
-
-        // Write file header
-        write_file_magic(&mut f).unwrap();
-        let header = FileHeaderBody {
+    fn make_test_file_header() -> FileHeaderBody {
+        FileHeaderBody {
             container_format_version: CONTAINER_FORMAT_VERSION,
             record_schema_version: RECORD_SCHEMA_VERSION,
             source_kind: "stream_history".to_string(),
@@ -515,7 +464,17 @@ mod tests {
             total_record_count: None,
             min_event_ts_utc: None,
             max_event_ts_utc: None,
-        };
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn write_test_pending_file(records: &[StreamHistoryRecord]) -> NamedTempFile {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut f = tmp.as_file().try_clone().unwrap();
+
+        // Write file header
+        write_file_magic(&mut f).unwrap();
+        let header = make_test_file_header();
         write_framed(&mut f, &header).unwrap();
 
         if !records.is_empty() {
@@ -599,23 +558,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         let mut f = tmp.as_file().try_clone().unwrap();
         write_file_magic(&mut f).unwrap();
-        let header = FileHeaderBody {
-            container_format_version: CONTAINER_FORMAT_VERSION,
-            record_schema_version: RECORD_SCHEMA_VERSION,
-            source_kind: "stream_history".to_string(),
-            created_at_ts_utc: 0,
-            partition_day_ts_utc: "2026-03-22".to_string(),
-            writer_instance_id: 1,
-            host_id: None,
-            compression_kind: CompressionKind::None,
-            finalized: false,
-            record_encoding_kind: RecordEncodingKind::MessagePackNamed,
-            finalized_at_ts_utc: None,
-            total_block_count: None,
-            total_record_count: None,
-            min_event_ts_utc: None,
-            max_event_ts_utc: None,
-        };
+        let header = make_test_file_header();
         write_framed(&mut f, &header).unwrap();
         // Write block magic but truncate before block header
         write_block_magic(&mut f).unwrap();
@@ -639,23 +582,7 @@ mod tests {
 
         // Write valid header
         write_file_magic(&mut f).unwrap();
-        let header = FileHeaderBody {
-            container_format_version: CONTAINER_FORMAT_VERSION,
-            record_schema_version: RECORD_SCHEMA_VERSION,
-            source_kind: "stream_history".to_string(),
-            created_at_ts_utc: 0,
-            partition_day_ts_utc: "2026-03-22".to_string(),
-            writer_instance_id: 1,
-            host_id: None,
-            compression_kind: CompressionKind::None,
-            finalized: false,
-            record_encoding_kind: RecordEncodingKind::MessagePackNamed,
-            finalized_at_ts_utc: None,
-            total_block_count: None,
-            total_record_count: None,
-            min_event_ts_utc: None,
-            max_event_ts_utc: None,
-        };
+        let header = make_test_file_header();
         write_framed(&mut f, &header).unwrap();
 
         // Write a bad block with huge payload_len but only write a small amount

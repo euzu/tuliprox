@@ -89,9 +89,8 @@ mod tests {
         assert_eq!(json, "\"waiting_for_capacity\"");
     }
 
-    #[test]
-    fn transfer_task_round_trips() {
-        let task = TransferTaskDto {
+    fn make_test_task() -> TransferTaskDto {
+        TransferTaskDto {
             id: "abc".to_string(),
             title: "Example".to_string(),
             kind: TaskKindDto::Download,
@@ -104,7 +103,12 @@ mod tests {
             scheduled_start_at: None,
             duration_secs: None,
             error: None,
-        };
+        }
+    }
+
+    #[test]
+    fn transfer_task_round_trips() {
+        let task = make_test_task();
 
         let json = serde_json::to_string(&task).expect("serialize");
         let decoded: TransferTaskDto = serde_json::from_str(&json).expect("deserialize");
@@ -114,18 +118,14 @@ mod tests {
     #[test]
     fn transfers_response_round_trips() {
         let task = TransferTaskDto {
-            id: "abc".to_string(),
-            title: "Example".to_string(),
             kind: TaskKindDto::Recording,
             priority: TaskPriorityDto::Normal,
             status: TransferStatusDto::Scheduled,
-            retry_attempts: 0,
             downloaded_bytes: 0,
             total_bytes: None,
-            next_retry_at: None,
             scheduled_start_at: Some(1_700_000_000),
             duration_secs: Some(5400),
-            error: None,
+            ..make_test_task()
         };
         let response = TransfersResponse { queue: vec![task.clone()], finished: Vec::new(), active: vec![task] };
 
@@ -138,18 +138,14 @@ mod tests {
     fn transfers_delta_snapshot_reset_round_trips() {
         let response = TransfersResponse {
             queue: vec![TransferTaskDto {
-                id: "abc".to_string(),
-                title: "Example".to_string(),
                 kind: TaskKindDto::Recording,
                 priority: TaskPriorityDto::Normal,
                 status: TransferStatusDto::Scheduled,
-                retry_attempts: 0,
                 downloaded_bytes: 0,
                 total_bytes: None,
-                next_retry_at: None,
                 scheduled_start_at: Some(1_700_000_000),
                 duration_secs: Some(5400),
-                error: None,
+                ..make_test_task()
             }],
             finished: Vec::new(),
             active: Vec::new(),
@@ -164,18 +160,11 @@ mod tests {
     #[test]
     fn transfers_delta_active_patched_round_trips() {
         let task = TransferTaskDto {
-            id: "abc".to_string(),
-            title: "Example".to_string(),
-            kind: TaskKindDto::Download,
-            priority: TaskPriorityDto::Background,
             status: TransferStatusDto::Running,
             retry_attempts: 2,
-            downloaded_bytes: 123,
-            total_bytes: Some(456),
             next_retry_at: Some(1_700_000_100),
-            scheduled_start_at: None,
-            duration_secs: None,
             error: Some("temporary".to_string()),
+            ..make_test_task()
         };
 
         let delta = TransfersDelta::ActivePatched(task.clone());
@@ -187,18 +176,10 @@ mod tests {
     #[test]
     fn transfers_delta_queue_replaced_round_trips() {
         let task = TransferTaskDto {
-            id: "abc".to_string(),
             title: "Queued".to_string(),
-            kind: TaskKindDto::Download,
-            priority: TaskPriorityDto::Background,
-            status: TransferStatusDto::Queued,
-            retry_attempts: 0,
             downloaded_bytes: 0,
             total_bytes: None,
-            next_retry_at: None,
-            scheduled_start_at: None,
-            duration_secs: None,
-            error: None,
+            ..make_test_task()
         };
 
         let delta = TransfersDelta::QueueReplaced { queue: vec![task.clone()] };

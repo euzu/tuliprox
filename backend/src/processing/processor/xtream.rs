@@ -146,25 +146,18 @@ pub async fn update_live_stream_metadata(
     let is_remote_probe = reqwest::Url::parse(probe_url_cow.as_ref())
         .ok()
         .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+    let probe_params = crate::utils::ffmpeg::ProbeParams {
+        url: probe_url_cow.as_ref(),
+        user_agent: user_agent.as_deref(),
+        analyze_duration,
+        probe_size,
+        timeout_secs: ffprobe_timeout,
+    };
     let probe_result = if is_remote_probe {
-        FfmpegExecutor::new().probe_remote_url(
-            client,
-            probe_url_cow.as_ref(),
-            user_agent.as_deref(),
-            analyze_duration,
-            probe_size,
-            ffprobe_timeout,
-        )
+        FfmpegExecutor::new().probe_remote_url(client, &probe_params)
         .await
     } else {
-        FfmpegExecutor::new().probe_url(
-            probe_url_cow.as_ref(),
-            user_agent.as_deref(),
-            analyze_duration,
-            probe_size,
-            ffprobe_timeout,
-            config.proxy.as_ref(),
-        )
+        FfmpegExecutor::new().probe_url(&probe_params, config.proxy.as_ref())
         .await
     };
     match probe_result {

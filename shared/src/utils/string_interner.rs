@@ -78,42 +78,33 @@ impl Internable for i64 {
     fn intern(self) -> Arc<str> { intern_string(self.to_string()) }
 }
 
+macro_rules! intern_impl {
+    ($s:expr, $create:expr) => {{
+        if let Ok(guard) = INTERNER.read() {
+            if let Some(existing) = guard.get($s) {
+                return Arc::clone(existing);
+            }
+        }
+        if let Ok(mut guard) = INTERNER.write() {
+            if let Some(existing) = guard.get($s) {
+                return Arc::clone(existing);
+            }
+            let arc: Arc<str> = $create;
+            guard.insert(Arc::clone(&arc));
+            return arc;
+        }
+        $create
+    }};
+}
+
 /// Interns a string slice.
 fn intern_str(s: &str) -> Arc<str> {
-    if let Ok(guard) = INTERNER.read() {
-        if let Some(existing) = guard.get(s) {
-            return Arc::clone(existing);
-        }
-        drop(guard);
-    }
-    if let Ok(mut guard) = INTERNER.write() {
-        if let Some(existing) = guard.get(s) {
-            return Arc::clone(existing);
-        }
-        let arc: Arc<str> = Arc::from(s);
-        guard.insert(Arc::clone(&arc));
-        return arc;
-    }
-    Arc::from(s)
+    intern_impl!(s, Arc::from(s))
 }
 
 /// Interns an owned string.
 fn intern_string(s: String) -> Arc<str> {
-    if let Ok(guard) = INTERNER.read() {
-        if let Some(existing) = guard.get(s.as_str()) {
-            return Arc::clone(existing);
-        }
-        drop(guard);
-    }
-    if let Ok(mut guard) = INTERNER.write() {
-        if let Some(existing) = guard.get(s.as_str()) {
-            return Arc::clone(existing);
-        }
-        let arc: Arc<str> = Arc::from(s);
-        guard.insert(Arc::clone(&arc));
-        return arc;
-    }
-    Arc::from(s)
+    intern_impl!(s.as_str(), Arc::from(s))
 }
 
 /// Returns the current number of strings held in the interning pool.

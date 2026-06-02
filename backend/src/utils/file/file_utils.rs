@@ -382,6 +382,20 @@ where
     Ok(())
 }
 
+pub fn collect_yaml_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = vec![];
+    let mut visit = |entry: &std::fs::DirEntry, metadata: &std::fs::Metadata| {
+        if metadata.is_file() {
+            let file_path = entry.path();
+            if file_path.extension().is_some_and(|ext| ext == "yml") {
+                files.push(file_path);
+            }
+        }
+    };
+    traverse_dir(path, &mut visit)?;
+    Ok(files)
+}
+
 pub fn prepare_file_path(persist: Option<&str>, storage_dir: &str, action: &str) -> Option<PathBuf> {
     let persist_file: Option<PathBuf> =
         persist.map(|persist_path| prepare_persist_path(persist_path, action));

@@ -303,34 +303,35 @@ pub struct StreamInfo {
     pub previous_session_id: Option<u64>,
 }
 
+pub struct StreamInfoParams<'a> {
+    pub uid: u32,
+    pub meter_uid: u32,
+    pub username: &'a str,
+    pub addr: &'a SocketAddr,
+    pub client_ip: &'a str,
+    pub provider: Arc<str>,
+    pub stream_channel: StreamChannel,
+    pub user_agent: String,
+    pub country_code: Option<String>,
+    pub session_token: Option<&'a str>,
+}
+
 impl StreamInfo {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        uid: u32,
-        meter_uid: u32,
-        username: &str,
-        addr: &SocketAddr,
-        client_ip: &str,
-        provider: Arc<str>,
-        stream_channel: StreamChannel,
-        user_agent: String,
-        country_code: Option<String>,
-        session_token: Option<&str>,
-    ) -> Self {
+    pub fn new(params: StreamInfoParams<'_>) -> Self {
         let now = current_time_secs();
         Self {
-            uid,
-            meter_uid,
-            username: username.to_string(),
-            channel: stream_channel,
-            provider,
-            addr: *addr,
-            client_ip: client_ip.to_string(),
-            user_agent,
+            uid: params.uid,
+            meter_uid: params.meter_uid,
+            username: params.username.to_string(),
+            channel: params.stream_channel,
+            provider: params.provider,
+            addr: *params.addr,
+            client_ip: params.client_ip.to_string(),
+            user_agent: params.user_agent,
             ts: now,
             started_at: now,
-            country_code,
-            session_token: session_token.map(|token| token.to_string()),
+            country_code: params.country_code,
+            session_token: params.session_token.map(|token| token.to_string()),
             preserved: false,
             previous_session_id: None,
         }

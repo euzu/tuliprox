@@ -367,7 +367,7 @@ async fn save_config_api_proxy_config(
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_API_PROXY_REVISION, &updated_revision)
 }
 
-async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
+async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<PermissionSet>) -> axum::response::Response {
     let (config_file_path, sources_file_path, api_proxy_file_path) = {
         let paths = app_state.app_config.paths.load();
         (
@@ -412,6 +412,9 @@ async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc
                 error!("Failed to prepare users: {err}");
                 internal_server_error!()
             } else {
+                if let Some(permissions) = permissions {
+                    filter_app_config_by_permissions(&mut app_config, permissions);
+                }
                 let response = axum::response::Json(app_config).into_response();
                 let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
                 let response = response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
@@ -423,6 +426,10 @@ async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc
             internal_server_error!()
         }
     }
+}
+
+async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
+    get_config_common(&app_state, None).await
 }
 
 async fn config(
@@ -439,62 +446,7 @@ async fn config(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    let (config_file_path, sources_file_path, api_proxy_file_path) = {
-        let paths = app_state.app_config.paths.load();
-        (
-            paths.config_file_path.clone(),
-            paths.sources_file_path.clone(),
-            paths.api_proxy_file_path.clone(),
-        )
-    };
-
-    let main_revision = match read_file_revision(&config_file_path).await {
-        Ok(revision) => revision,
-        Err(err) => {
-            error!("Failed to read revision for config.yml '{config_file_path}': {err}");
-            return internal_server_error!();
-        }
-    };
-    let sources_revision = match read_file_revision(&sources_file_path).await {
-        Ok(revision) => revision,
-        Err(err) => {
-            error!("Failed to read revision for source.yml '{sources_file_path}': {err}");
-            return internal_server_error!();
-        }
-    };
-    let api_proxy_revision = match read_file_revision(&api_proxy_file_path).await {
-        Ok(revision) => revision,
-        Err(err) => {
-            error!("Failed to read revision for api-proxy.yml '{api_proxy_file_path}': {err}");
-            return internal_server_error!();
-        }
-    };
-
-    let read_result = {
-        let paths = app_state.app_config.paths.load();
-        utils::read_app_config_dto(&paths, true, false).await
-    };
-    match read_result {
-        Ok(mut app_config) => {
-            if let Err(err) = prepare_sources_batch(&mut app_config.sources, false).await {
-                error!("Failed to prepare sources batch: {err}");
-                internal_server_error!()
-            } else if let Err(err) = prepare_users(&mut app_config, &app_state.app_config).await {
-                error!("Failed to prepare users: {err}");
-                internal_server_error!()
-            } else {
-                filter_app_config_by_permissions(&mut app_config, permissions);
-                let response = axum::response::Json(app_config).into_response();
-                let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
-                let response = response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
-                response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &api_proxy_revision)
-            }
-        }
-        Err(err) => {
-            error!("Failed to read config files: {err}");
-            internal_server_error!()
-        }
-    }
+    get_config_common(&app_state, Some(permissions)).await
 }
 
 async fn get_config_api_proxy_config(
@@ -731,6 +683,26 @@ mod tests {
         assert!(result.is_none(), "exact revision match should be accepted");
     }
 
+    fn make_test_api_proxy() -> ApiProxyConfigDto {
+        ApiProxyConfigDto {
+            server: vec![ApiProxyServerInfoDto {
+                name: String::from("main"),
+                protocol: String::from("http"),
+                host: String::from("localhost"),
+                port: None,
+                timezone: String::from("UTC"),
+                message: String::from("hello"),
+                path: None,
+            }],
+            user: vec![TargetUserDto {
+                target: String::from("target-a"),
+                credentials: vec![],
+            }],
+            use_user_db: true,
+            auth_error_status: 401,
+        }
+    }
+
     #[test]
     fn filter_app_config_clears_unauthorized_sections() {
         let permissions: PermissionSet = Permission::ConfigRead.into();
@@ -747,23 +719,7 @@ mod tests {
             },
             mappings: None,
             templates: Some(TemplateDefinitionDto::default()),
-            api_proxy: Some(ApiProxyConfigDto {
-                server: vec![ApiProxyServerInfoDto {
-                    name: String::from("main"),
-                    protocol: String::from("http"),
-                    host: String::from("localhost"),
-                    port: None,
-                    timezone: String::from("UTC"),
-                    message: String::from("hello"),
-                    path: None,
-                }],
-                user: vec![TargetUserDto {
-                    target: String::from("target-a"),
-                    credentials: vec![],
-                }],
-                use_user_db: true,
-                auth_error_status: 401,
-            }),
+            api_proxy: Some(make_test_api_proxy()),
         };
 
         filter_app_config_by_permissions(&mut app_config, permissions);
@@ -781,23 +737,7 @@ mod tests {
     #[test]
     fn filter_api_proxy_keeps_user_section_only_with_user_read() {
         let permissions: PermissionSet = Permission::UserRead.into();
-        let mut api_proxy = ApiProxyConfigDto {
-            server: vec![ApiProxyServerInfoDto {
-                name: String::from("main"),
-                protocol: String::from("http"),
-                host: String::from("localhost"),
-                port: None,
-                timezone: String::from("UTC"),
-                message: String::from("hello"),
-                path: None,
-            }],
-            user: vec![TargetUserDto {
-                target: String::from("target-a"),
-                credentials: vec![],
-            }],
-            use_user_db: true,
-            auth_error_status: 401,
-        };
+        let mut api_proxy = make_test_api_proxy();
 
         filter_api_proxy_by_permissions(&mut api_proxy, permissions);
 

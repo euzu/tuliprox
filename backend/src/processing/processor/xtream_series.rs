@@ -1001,24 +1001,23 @@ pub async fn update_series_metadata(
                             let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
                                 .ok()
                                 .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                            let probe_params = crate::utils::ffmpeg::ProbeParams {
+                                url: probe_url.as_ref(),
+                                user_agent: user_agent.as_deref(),
+                                analyze_duration: probe_settings.analyze_duration_micros,
+                                probe_size: probe_settings.probe_size_bytes,
+                                timeout_secs: probe_settings.timeout_secs,
+                            };
                             let probe_result = if is_remote_probe {
                                 FfmpegExecutor::new().probe_remote_seekable_url_with_cancel(
                                     client,
-                                    probe_url.as_ref(),
-                                    user_agent.as_deref(),
-                                    probe_settings.analyze_duration_micros,
-                                    probe_settings.probe_size_bytes,
-                                    probe_settings.timeout_secs,
+                                    &probe_params,
                                     cancel_token,
                                 )
                                 .await
                             } else {
                                 FfmpegExecutor::new().probe_url_with_cancel(
-                                    probe_url.as_ref(),
-                                    user_agent.as_deref(),
-                                    probe_settings.analyze_duration_micros,
-                                    probe_settings.probe_size_bytes,
-                                    probe_settings.timeout_secs,
+                                    &probe_params,
                                     config.proxy.as_ref(),
                                     cancel_token,
                                 )

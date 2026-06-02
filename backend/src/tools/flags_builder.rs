@@ -193,37 +193,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::utils::{country_code_to_index, flags::FlagFileHeader, index_to_country_code, FlagsLoader};
-
-    #[test]
-    fn test_country_code_encoding() {
-        assert_eq!(country_code_to_index("AA"), Some(0));
-        assert_eq!(country_code_to_index("AB"), Some(1));
-        assert_eq!(country_code_to_index("BA"), Some(26));
-        assert_eq!(country_code_to_index("ZZ"), Some(675));
-        assert_eq!(country_code_to_index("A"), None);
-        assert_eq!(country_code_to_index("AAA"), None);
-        assert_eq!(country_code_to_index("A1"), None);
-        assert_eq!(country_code_to_index("1A"), None);
-    }
-
-    #[test]
-    fn test_index_to_country_code() {
-        assert_eq!(index_to_country_code(0), Some("AA".to_string()));
-        assert_eq!(index_to_country_code(1), Some("AB".to_string()));
-        assert_eq!(index_to_country_code(26), Some("BA".to_string()));
-        assert_eq!(index_to_country_code(675), Some("ZZ".to_string()));
-        assert_eq!(index_to_country_code(676), None);
-    }
-
-    #[test]
-    fn test_round_trip() {
-        for code in ["AA", "DE", "US", "ZZ", "AB", "ZY"] {
-            let index = country_code_to_index(code).unwrap();
-            let decoded = index_to_country_code(index).unwrap();
-            assert_eq!(decoded, code);
-        }
-    }
+    use shared::utils::{flags::FlagFileHeader, FlagsLoader};
 
     #[test]
     fn test_build_flags() {

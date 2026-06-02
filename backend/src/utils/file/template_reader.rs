@@ -1,4 +1,3 @@
-use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
 use log::{debug, warn};
 use shared::error::TuliproxError;
@@ -69,16 +68,8 @@ fn read_templates_from_directory(
     path: &Path,
     resolve_env: bool,
 ) -> Result<Option<(Vec<PathBuf>, TemplateDefinitionDto)>, TuliproxError> {
-    let mut files = vec![];
-    let mut visit = |entry: &std::fs::DirEntry, metadata: &std::fs::Metadata| {
-        if metadata.is_file() {
-            let file_path = entry.path();
-            if file_path.extension().is_some_and(|ext| ext == "yml") {
-                files.push(file_path);
-            }
-        }
-    };
-    traverse_dir(path, &mut visit).map_err(|err| TuliproxError::Config(format!("Failed to read templates {err}")))?;
+    let mut files = crate::utils::collect_yaml_files(path)
+        .map_err(|err| TuliproxError::Config(format!("Failed to read templates {err}")))?;
 
     files.sort();
 

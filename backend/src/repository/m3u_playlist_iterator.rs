@@ -25,11 +25,14 @@ pub struct M3uPlaylistIterator {
     inner: LockedReceiverStream<(M3uPlaylistItem, bool)>,
 }
 
-#[allow(clippy::too_many_arguments)]
+struct UrlRewriteContext<'a> {
+    base_url: &'a str,
+    username: &'a str,
+    password: &'a str,
+}
+
 fn build_rewritten_url(
-    base_url: &str,
-    username: &str,
-    password: &str,
+    ctx: &UrlRewriteContext<'_>,
     source_url: &str,
     m3u_pli: &M3uPlaylistItem,
     typed: bool,
@@ -54,7 +57,7 @@ fn build_rewritten_url(
         ""
     };
 
-    let mut cap = base_url.len() + prefix_path.len() + username.len() + password.len() + 32; // separators and id
+    let mut cap = ctx.base_url.len() + prefix_path.len() + ctx.username.len() + ctx.password.len() + 32; // separators and id
     if typed {
         cap += stream_type.len() + 1;
     }
@@ -62,14 +65,14 @@ fn build_rewritten_url(
     let rewritten_url = if typed {
         shared::concat_string!(
             cap = cap;
-            base_url, "/", prefix_path, "/", stream_type, "/",
-            username, "/", password, "/", &m3u_pli.virtual_id.to_string()
+            ctx.base_url, "/", prefix_path, "/", stream_type, "/",
+            ctx.username, "/", ctx.password, "/", &m3u_pli.virtual_id.to_string()
         )
     } else {
         shared::concat_string!(
             cap = cap;
-            base_url, "/", prefix_path, "/",
-            username, "/", password, "/", &m3u_pli.virtual_id.to_string()
+            ctx.base_url, "/", prefix_path, "/",
+            ctx.username, "/", ctx.password, "/", &m3u_pli.virtual_id.to_string()
         )
     };
 
@@ -117,12 +120,9 @@ fn resolve_effective_source_url<'a>(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn apply_rewrite(
     mut m3u_pli: M3uPlaylistItem,
-    base_url: &str,
-    username: &str,
-    password: &str,
+    ctx: &UrlRewriteContext<'_>,
     input_by_name: &HashMap<Arc<str>, Arc<crate::model::ConfigInput>>,
     target_options: Option<&ConfigTargetOptions>,
     flags: M3uPlaylistIteratorFlagsSet,
@@ -137,9 +137,7 @@ fn apply_rewrite(
 
     if should_rewrite_urls {
         let stream_url = build_rewritten_url(
-            base_url,
-            username,
-            password,
+            ctx,
             effective_source_url.as_ref(),
             &m3u_pli,
             flags.contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
@@ -149,9 +147,7 @@ fn apply_rewrite(
         let resource_url = if flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
             let source_url = if m3u_pli.logo.is_empty() { m3u_pli.logo_small.as_ref() } else { m3u_pli.logo.as_ref() };
             Some(build_rewritten_url(
-                base_url,
-                username,
-                password,
+                ctx,
                 source_url,
                 &m3u_pli,
                 false,
@@ -260,11 +256,15 @@ impl M3uPlaylistIterator {
                     }
                 }
 
+                let rewrite_ctx = UrlRewriteContext {
+                    base_url: &base_url,
+                    username: &username,
+                    password: &password,
+                };
+
                 let item = apply_rewrite(
                     item,
-                    &base_url,
-                    &username,
-                    &password,
+                    &rewrite_ctx,
                     &input_by_name,
                     target_options.as_ref(),
                     flags,

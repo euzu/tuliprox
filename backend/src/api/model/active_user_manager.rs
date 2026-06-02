@@ -522,6 +522,17 @@ impl SocketRegistration {
     }
 }
 
+struct UserSessionParams<'a> {
+    session_token: &'a str,
+    virtual_id: u32,
+    provider: &'a str,
+    stream_url: &'a str,
+    addr: &'a SocketAddr,
+    connection_permission: UserConnectionPermission,
+    connection_kind: Option<ConnectionKind>,
+    socket_bound: bool,
+}
+
 pub struct ActiveUserManager {
     grace_period_millis: AtomicU64,
     grace_period_timeout_secs: AtomicU64,
@@ -1483,18 +1494,18 @@ impl ActiveUserManager {
                 let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
                 let country_code = self.lookup_country(&fingerprint.client_ip);
 
-                let mut stream_info = StreamInfo::new(
+                let mut stream_info = StreamInfo::new(shared::model::StreamInfoParams {
                     uid,
                     meter_uid,
                     username,
-                    &fingerprint.addr,
-                    &fingerprint.client_ip,
+                    addr: &fingerprint.addr,
+                    client_ip: &fingerprint.client_ip,
                     provider,
-                    stream_channel.clone(),
-                    user_agent_string,
+                    stream_channel: stream_channel.clone(),
+                    user_agent: user_agent_string,
                     country_code,
                     session_token,
-                );
+                });
 
                 if let Some(token) = session_token {
                     if let Some(session) = connection_data.sessions.iter().find(|s| s.token == token) {
@@ -1567,31 +1578,21 @@ impl ActiveUserManager {
     }
 
 
-    #[allow(clippy::too_many_arguments)]
-    fn new_user_session(
-        session_token: &str,
-        virtual_id: u32,
-        provider: &str,
-        stream_url: &str,
-        addr: &SocketAddr,
-        connection_permission: UserConnectionPermission,
-        connection_kind: Option<ConnectionKind>,
-        socket_bound: bool,
-    ) -> UserSession {
+    fn new_user_session(params: &UserSessionParams<'_>) -> UserSession {
         let now = current_time_secs();
         UserSession {
-            token: session_token.to_string(),
+            token: params.session_token.to_string(),
             transition_version: 1,
-            virtual_id,
-            provider: provider.intern(),
-            stream_url: stream_url.intern(),
-            addr: *addr,
-            socket_bound,
-            active_addrs: vec![*addr],
+            virtual_id: params.virtual_id,
+            provider: params.provider.intern(),
+            stream_url: params.stream_url.intern(),
+            addr: *params.addr,
+            socket_bound: params.socket_bound,
+            active_addrs: vec![*params.addr],
             ts: now,
             started_at: now,
-            permission: connection_permission,
-            connection_kind,
+            permission: params.connection_permission,
+            connection_kind: params.connection_kind,
             lifecycle: PlaybackLifecycle::Prepared,
         }
     }
@@ -1821,7 +1822,7 @@ impl ActiveUserManager {
             return version;
         }
 
-        let session = Self::new_user_session(
+        let session = Self::new_user_session(&UserSessionParams {
             session_token,
             virtual_id,
             provider,
@@ -1830,7 +1831,7 @@ impl ActiveUserManager {
             connection_permission,
             connection_kind,
             socket_bound,
-        );
+        });
         let version = session.transition_version;
         connection_data.add_session(session);
         let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
@@ -1939,7 +1940,7 @@ impl ActiveUserManager {
             debug_if_enabled!("Creating first session for user {username} {}", sanitize_sensitive_info(stream_url));
             let mut data = UserConnectionData::new(0, user.max_connections, user.soft_connections);
             let session =
-                Self::new_user_session(
+                Self::new_user_session(&UserSessionParams {
                     session_token,
                     virtual_id,
                     provider,
@@ -1948,7 +1949,7 @@ impl ActiveUserManager {
                     connection_permission,
                     connection_kind,
                     socket_bound,
-                );
+                });
             data.add_session(session);
             data
         });
@@ -2005,7 +2006,7 @@ impl ActiveUserManager {
             user.username,
             sanitize_sensitive_info(stream_url)
         );
-        let session = Self::new_user_session(
+        let session = Self::new_user_session(&UserSessionParams {
             session_token,
             virtual_id,
             provider,
@@ -2014,7 +2015,7 @@ impl ActiveUserManager {
             connection_permission,
             connection_kind,
             socket_bound,
-        );
+        });
         let token = session.token.clone();
         connection_data.add_session(session);
         let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
@@ -7845,9 +7846,14 @@ mod tests {
             data.increment_kind(ConnectionKind::Normal);
 
             // Add a stream whose session_token doesn't match any counted session
-            let orphan_stream = StreamInfo::new(
-                903, 0, &user.username, &addr, "127.0.0.1", "provider-a".intern(),
-                StreamChannel {
+            let orphan_stream = StreamInfo::new(shared::model::StreamInfoParams {
+                uid: 903,
+                meter_uid: 0,
+                username: &user.username,
+                addr: &addr,
+                client_ip: "127.0.0.1",
+                provider: "provider-a".intern(),
+                stream_channel: StreamChannel {
                     target_id: 1, virtual_id: 9003, provider_id: 1,
                     input_name: "provider-a".intern(), item_type: PlaylistItemType::Live,
                     cluster: XtreamCluster::Live, group: "g".intern(), title: "t".intern(),
@@ -7855,8 +7861,10 @@ mod tests {
                     shared: false, shared_joined_existing: None, shared_stream_id: None, technical: None,
                     epg_channel_id: None,
                 },
-                "ua".to_string(), None, Some("tok-orphan"),
-            );
+                user_agent: "ua".to_string(),
+                country_code: None,
+                session_token: Some("tok-orphan"),
+            });
             data.streams.push(orphan_stream);
             data.stream_kinds.insert(903, ConnectionKind::Normal);
         }

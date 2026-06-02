@@ -494,50 +494,18 @@ mod tests {
     }
 
     fn make_record(session_id: u64, event_type: StreamHistoryEventType) -> StreamHistoryRecord {
-        StreamHistoryRecord {
-            schema_version: RECORD_SCHEMA_VERSION,
-            event_type,
-            event_ts_utc: now_utc_secs(),
-            partition_day_utc: current_utc_day(),
-            session_id,
-            source_addr: None,
-            api_username: Some("user1".to_string()),
-            provider_name: Some("acme".intern()),
-            provider_username: None,
-            input_name: Some("input".intern()),
-            virtual_id: Some(1),
-            item_type: Some(PlaylistItemType::Live),
-            title: Some("Test Channel".to_string()),
-            group: None,
-            country: None,
-            user_agent: None,
-            shared: None,
-            shared_joined_existing: None,
-            shared_stream_id: None,
-            provider_id: None,
-            cluster: None,
-            container: None,
-            stream_url_hash: None,
-            stream_identity_key: None,
-            video_codec: None,
-            audio_codec: None,
-            audio_channels: None,
-            resolution: None,
-            fps: None,
-            connect_ts_utc: None,
-            disconnect_ts_utc: None,
-            session_duration: None,
-            bytes_sent: None,
-            first_byte_latency_ms: None,
-            provider_reconnect_count: None,
-            failure_stage: None,
-            provider_http_status: None,
-            provider_error_class: None,
-            connect_failure_reason: None,
-            disconnect_reason: None,
-            previous_session_id: None,
-            target_name: None,
-        }
+        let mut r = crate::repository::stream_history::tests::make_base_test_record();
+        r.event_type = event_type;
+        r.event_ts_utc = now_utc_secs();
+        r.partition_day_utc = current_utc_day();
+        r.session_id = session_id;
+        r.api_username = Some("user1".to_string());
+        r.provider_name = Some("acme".intern());
+        r.input_name = Some("input".intern());
+        r.virtual_id = Some(1);
+        r.item_type = Some(PlaylistItemType::Live);
+        r.title = Some("Test Channel".to_string());
+        r
     }
 
     #[tokio::test]
