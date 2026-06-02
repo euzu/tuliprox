@@ -8,4 +8,17 @@
   border-radius: var(--border-radius);
   position: relative;
   gap: var(--gap-default);
+
+  @media (prefers-reduced-motion: no-preference) {
+    transition:
+      transform 200ms ease,
+      box-shadow 200ms ease,
+      border-color 200ms ease;
+  }
+
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px var(--theme-palette-neutral-surface-660, rgba(0, 0, 0, 0.25));
+    border-color: var(--active-color, var(--border-color));
+  }
 }
