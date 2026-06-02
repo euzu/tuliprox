@@ -10,6 +10,9 @@
 
 ## 🌟 New Features
 
+- **Popup Menu Keyboard Dismissal**:
+  - Popup menus now close when pressing `Escape`, in addition to clicking outside, improving keyboard accessibility.
+
 - **Recoverable Error Boundary**:
   - Added an `ErrorBoundary` component that wraps each main view (dashboard, stats, streams, downloads, users,
     sources, playlists, EPG, RBAC, config) and the API-user playlist, so a recoverable failure shows a fallback with
