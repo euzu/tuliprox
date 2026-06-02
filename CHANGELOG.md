@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Explicit Button Type On Shared Controls**:
+  - The shared `IconButton` and `TextButton` primitives now render with `type="button"`, preventing accidental
+    form submission when used inside forms.
+
 - **Descriptive Image Alt Text**:
   - Logo images on the login screen and sidebar now use the configured app title for their alt text, and playlist
     channel logos use the channel title, improving screen-reader accessibility.
