@@ -1,7 +1,7 @@
 use crate::{
     api::{
         api_utils::{
-            admission_failure_response, create_catchup_session_key,
+            admission_failure_response, create_m3u_catchup_session_key,
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, is_seek_request, is_session_based_playback,
             is_stream_share_enabled, local_stream_response,
@@ -19,17 +19,19 @@ use crate::{
     auth::Fingerprint,
     model::{ConfigTarget, ProxyUserCredentials},
     repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const},
-    utils::debug_if_enabled,
+    utils::{debug_if_enabled, decode_m3u_catchup_token, has_m3u_catchup_marker, resolve_m3u_catchup_url, M3uCatchupToken, PROVIDER_SCHEME_PREFIX},
 };
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures::StreamExt;
 use log::{debug, error};
+use shared::error::TuliproxError;
 use shared::model::ConnectFailureReason;
 use shared::{
     model::{FieldGetAccessor, PlaylistEntry, PlaylistItemType, TargetType, UserConnectionPermission, XtreamCluster},
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
+use std::borrow::Cow;
 use std::sync::Arc;
 use crate::auth::{check_network_access_only, resolve_api_user_context, ApiUserAuthError};
 
@@ -57,7 +59,7 @@ async fn m3u_api(
             try_unwrap_body!(builder.body(axum::body::Body::from_stream(content_stream)))
         }
         Err(err) => {
-            error!("{}", sanitize_sensitive_info(err.to_string().as_str()));
+            error!("{}", sanitize_sensitive_info(&err.to_string()));
             axum::http::StatusCode::NO_CONTENT.into_response()
         }
     }
@@ -114,50 +116,29 @@ async fn m3u_api_post(
     m3u_api(user, target, &app_state, &api_req.content_type).await.into_response()
 }
 
-#[allow(clippy::too_many_lines)]
-async fn m3u_api_stream(
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn m3u_api_stream_loaded(
     user: Arc<ProxyUserCredentials>,
     target: Arc<ConfigTarget>,
     fingerprint: &Fingerprint,
     req_headers: &axum::http::HeaderMap,
     app_state: &Arc<AppState>,
-    stream_req: ApiStreamRequest<'_>,
+    pli: shared::model::M3uPlaylistItem,
+    input: Arc<crate::model::ConfigInput>,
+    stream_ext: Option<&str>,
+    archive_discriminator: Option<&str>,
 ) -> impl IntoResponse + Send {
-    let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
-
     let target_name = &target.name;
     if !target.has_output(TargetType::M3u) {
         debug!("Target has no m3u playlist {target_name}");
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
-    let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let pli = try_result_not_found!(
-        m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await,
-        true,
-        format!("Failed to read m3u item for stream id {req_virtual_id}")
-    );
-
-    if !user.allows_item_type(pli.item_type) {
-        return crate::api::model::create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
-        )
-        .into_response();
-    }
     let virtual_id = pli.virtual_id;
 
     if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
-
-    let input = try_option_bad_request!(
-        app_state.app_config.get_input_by_name(&pli.input_name),
-        true,
-        format!("Can't find input {} for target {target_name}, stream_id {virtual_id}", pli.input_name)
-    );
 
     if user.permission_denied(app_state) {
         return admission_failure_response(
@@ -211,12 +192,18 @@ async fn m3u_api_stream(
     let cluster = XtreamCluster::try_from(pli.item_type).unwrap_or(XtreamCluster::Live);
 
     debug_if_enabled!(
-        "ID chain for m3u endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
-        stream_req.stream_id);
+        "M3U playback for virtual_id={virtual_id}, item_type={}",
+        pli.item_type
+    );
     let extracted_ext = extract_extension_from_url(&pli.url).unwrap_or_default();
     let extension = stream_ext.unwrap_or(extracted_ext.as_str());
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
-        create_catchup_session_key(fingerprint, &user.username, virtual_id)
+        create_m3u_catchup_session_key(
+            fingerprint,
+            &user.username,
+            virtual_id,
+            archive_discriminator.unwrap_or("live"),
+        )
     } else {
         create_playback_session_fingerprint(
             fingerprint,
@@ -382,6 +369,175 @@ async fn m3u_api_stream(
     .into_response()
 }
 
+fn resolve_effective_source_url<'a>(
+    item: &'a shared::model::M3uPlaylistItem,
+    input: &'a crate::model::ConfigInput,
+) -> Result<Cow<'a, str>, TuliproxError> {
+    if !item.url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return Ok(Cow::Borrowed(item.url.as_ref()));
+    }
+    input.resolve_url(&item.url)
+}
+
+fn resolve_loaded_m3u_catchup(
+    pli: &shared::model::M3uPlaylistItem,
+    input: &crate::model::ConfigInput,
+    raw_query: Option<&str>,
+) -> Result<(shared::model::M3uPlaylistItem, String), TuliproxError> {
+    let Some(shared::model::StreamProperties::Live(live)) = pli.additional_properties.as_ref() else {
+        return Err(TuliproxError::RepositoryM3u("M3U catchup requested for non-live stream".to_string()));
+    };
+    let Some(catchup) = live.catchup.as_ref() else {
+        return Err(TuliproxError::RepositoryM3u("M3U catchup metadata missing".to_string()));
+    };
+    let source_url = resolve_effective_source_url(pli, input)?;
+    let Some(resolved) = resolve_m3u_catchup_url(source_url.as_ref(), catchup, raw_query)? else {
+        return Err(TuliproxError::RepositoryM3u("M3U catchup mode cannot be proxied".to_string()));
+    };
+
+    let mut catchup_item = pli.clone();
+    catchup_item.item_type = PlaylistItemType::Catchup;
+    catchup_item.url = resolved.url.into();
+    Ok((catchup_item, resolved.discriminator))
+}
+
+fn resolved_m3u_item_is_allowed(user: &ProxyUserCredentials, item_type: PlaylistItemType) -> bool {
+    user.allows_item_type(item_type)
+}
+
+#[allow(clippy::too_many_lines)]
+async fn m3u_api_stream(
+    user: Arc<ProxyUserCredentials>,
+    target: Arc<ConfigTarget>,
+    fingerprint: &Fingerprint,
+    req_headers: &axum::http::HeaderMap,
+    app_state: &Arc<AppState>,
+    stream_req: ApiStreamRequest<'_>,
+    raw_query: Option<&str>,
+) -> impl IntoResponse + Send {
+    let _user_guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
+
+    let target_name = &target.name;
+    if !target.has_output(TargetType::M3u) {
+        debug!("Target has no m3u playlist {target_name}");
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
+    let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
+    let pli = try_result_not_found!(
+        m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await,
+        true,
+        format!("Failed to read m3u item for stream id {req_virtual_id}")
+    );
+
+    let input = try_option_bad_request!(
+        app_state.app_config.get_input_by_name(&pli.input_name),
+        true,
+        format!("Can't find input {} for target {target_name}, stream_id {}", pli.input_name, pli.virtual_id)
+    );
+    let (resolved_pli, archive_discriminator) = if has_m3u_catchup_marker(raw_query) {
+        match resolve_loaded_m3u_catchup(&pli, &input, raw_query) {
+            Ok((item, discriminator)) => (item, Some(discriminator)),
+            Err(err) => {
+                debug!("Failed to resolve M3U catchup request: {}", sanitize_sensitive_info(&err.to_string()));
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            }
+        }
+    } else {
+        (pli, None)
+    };
+    if !resolved_m3u_item_is_allowed(user.as_ref(), resolved_pli.item_type) {
+        return crate::api::model::create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
+    }
+
+    m3u_api_stream_loaded(
+        user,
+        target,
+        fingerprint,
+        req_headers,
+        app_state,
+        resolved_pli,
+        input,
+        stream_ext,
+        archive_discriminator.as_deref(),
+    )
+    .await
+    .into_response()
+}
+
+async fn m3u_api_catchup(
+    fingerprint: Fingerprint,
+    req_headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    let secret = app_state.get_encrypt_secret();
+    let decoded = match decode_m3u_catchup_token(&secret, &token) {
+        Ok(decoded) => decoded,
+        Err(err) => {
+            debug!("Invalid M3U catchup token: {err}");
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+    let M3uCatchupToken { username, target_id, virtual_id } = decoded;
+
+    let Some((user, target)) = app_state.app_config.get_target_for_username(&username) else {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    };
+    if target.id != target_id {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    if let Err(err) = check_network_access_only(&user, &fingerprint, &app_state) {
+        return err.into_player_response(app_state.app_config.get_auth_error_status());
+    }
+    if user.permission_denied(&app_state) || !target.has_output(TargetType::M3u) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    let _user_guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
+
+    let pli = try_result_not_found!(
+        m3u_get_item_for_stream_id(virtual_id, &app_state, &target).await,
+        true,
+        format!("Failed to read m3u item for stream id {virtual_id}")
+    );
+    let input = try_option_bad_request!(
+        app_state.app_config.get_input_by_name(&pli.input_name),
+        true,
+        format!("Can't find input {} for target {}, stream_id {virtual_id}", pli.input_name, target.name)
+    );
+    let (resolved_pli, archive_discriminator) = match resolve_loaded_m3u_catchup(&pli, &input, raw_query.as_deref()) {
+        Ok(result) => result,
+        Err(err) => {
+            debug!("Failed to resolve M3U catchup token request: {}", sanitize_sensitive_info(&err.to_string()));
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+    if !resolved_m3u_item_is_allowed(user.as_ref(), resolved_pli.item_type) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    m3u_api_stream_loaded(
+        user,
+        target,
+        &fingerprint,
+        &req_headers,
+        &app_state,
+        resolved_pli,
+        input,
+        None,
+        Some(&archive_discriminator),
+    )
+    .await
+    .into_response()
+}
+
 fn m3u_api_resource_auth(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
@@ -424,7 +580,7 @@ async fn m3u_api_resource(
     let m3u_item = match m3u_get_item_for_stream_id(m3u_stream_id, &app_state, &target).await {
         Ok(item) => item,
         Err(err) => {
-            error!("Failed to get m3u url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+            error!("Failed to get m3u url: {}", sanitize_sensitive_info(&err.to_string()));
             return axum::http::StatusCode::NOT_FOUND.into_response();
         }
     };
@@ -446,7 +602,7 @@ async fn m3u_api_resource(
                         redirect(redirect_url.as_ref()).into_response()
                     }
                     Err(err) => {
-                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                         axum::http::StatusCode::BAD_REQUEST.into_response()
                     }
                 }
@@ -462,6 +618,7 @@ macro_rules! create_m3u_api_stream {
         async fn $fn_name(
             fingerprint: Fingerprint,
             req_headers: axum::http::HeaderMap,
+            axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
             axum::extract::Query(api_req): axum::extract::Query<UserApiRequest>,
             axum::extract::Path((username, password, stream_id)): axum::extract::Path<(String, String, String)>,
             axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
@@ -477,6 +634,7 @@ macro_rules! create_m3u_api_stream {
                         &req_headers,
                         &app_state,
                         stream_req,
+                        raw_query.as_deref(),
                     )
                     .await
                     .into_response()
@@ -515,6 +673,7 @@ macro_rules! register_m3u_api_routes {
 pub fn m3u_api_register() -> axum::Router<Arc<AppState>> {
     let mut router = axum::Router::new();
     router = register_m3u_api_routes!(router, ["get.php", "apiget", "m3u"]);
+    router = router.route("/m3u-catchup/{token}", axum::routing::get(m3u_api_catchup));
     router = register_m3u_api_stream!(
         router,
         [
@@ -533,7 +692,10 @@ pub fn m3u_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
+    use super::resolved_m3u_item_is_allowed;
     use crate::api::model::UserApiRequest;
+    use crate::model::ProxyUserCredentials;
+    use shared::model::{ClusterFlags, PlaylistItemType};
 
     #[test]
     fn post_query_only_request_prefers_query_when_form_is_missing() {
@@ -568,5 +730,13 @@ mod tests {
 
         assert_eq!(api_req.username, "query-user");
         assert_eq!(api_req.content_type, "query-type");
+    }
+
+    #[test]
+    fn resolved_catchup_item_requires_rechecked_permissions() {
+        let mut user = ProxyUserCredentials::default();
+        user.output_clusters = ClusterFlags::Live;
+
+        assert!(!resolved_m3u_item_is_allowed(&user, PlaylistItemType::Catchup));
     }
 }

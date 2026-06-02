@@ -509,7 +509,7 @@ async fn send_with_manual_redirects(
                 // send_with_retry_and_provider already applies provider failover policy.
                 // Do not rotate again here, otherwise non-failover errors (e.g. auth) may
                 // incorrectly switch provider URLs.
-                debug!("Manual redirect failed: {}", sanitize_sensitive_info(e.to_string().as_str()));
+                debug!("Manual redirect failed: {}", sanitize_sensitive_info(&e.to_string()));
                 return Err(e);
             }
         };
@@ -662,7 +662,7 @@ async fn provider_stream_request(
             let diagnostics = preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
             debug!(
                 "Provider request failed: {}, {}",
-                sanitize_sensitive_info(err.to_string().as_str()),
+                sanitize_sensitive_info(&err.to_string()),
                 sanitize_sensitive_info(&diagnostics)
             );
             Err(ProviderStreamRequestFailure::Status {

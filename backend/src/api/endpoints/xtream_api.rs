@@ -777,7 +777,7 @@ async fn xtream_player_api_resource(
                         redirect(redirect_url.as_ref()).into_response()
                     }
                     Err(err) => {
-                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                         axum::http::StatusCode::BAD_REQUEST.into_response()
                     }
                 }
@@ -1017,7 +1017,7 @@ pub async fn xtream_get_stream_info_response(
                     return match api_utils::resolve_redirect_location(Some(&input), &info_url) {
                         Ok(redirect_url) => redirect(redirect_url.as_ref()).into_response(),
                         Err(err) => {
-                            error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                            error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                             axum::http::StatusCode::BAD_REQUEST.into_response()
                         }
                     };
@@ -1108,7 +1108,7 @@ async fn xtream_get_short_epg(
                             return match api_utils::resolve_redirect_location(Some(&input), &info_url) {
                                 Ok(redirect_url) => redirect(redirect_url.as_ref()).into_response(),
                                 Err(err) => {
-                                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                                     axum::http::StatusCode::BAD_REQUEST.into_response()
                                 }
                             };
@@ -1132,7 +1132,7 @@ async fn xtream_get_short_epg(
                             )
                                 .into_response(),
                             Err(err) => {
-                                error!("Failed to download epg {}", sanitize_sensitive_info(err.to_string().as_str()));
+                                error!("Failed to download epg {}", sanitize_sensitive_info(&err.to_string()));
                                 axum::Json(json!(ShortEpgResultDto::default())).into_response()
                             }
                         };

@@ -4,7 +4,10 @@ use crate::{
         StrmTargetOutput,
     },
     repository::{storage::ensure_target_storage_path, storage_const},
-    utils::{async_file_reader, async_file_writer, normalize_string_path, truncate_filename, IO_BUFFER_SIZE},
+    utils::{
+        async_file_reader, async_file_writer, encode_provider_resolve_playlist_item_token, normalize_string_path,
+        truncate_filename, IO_BUFFER_SIZE, ProviderResolvePlaylistItemToken, PROVIDER_RESOLVE_ROUTE_PREFIX,
+    },
 };
 use chrono::Datelike;
 use filetime::{set_file_times, FileTime};
@@ -13,13 +16,13 @@ use serde::Serialize;
 use shared::{
     error::TuliproxError,
     model::{
-        ClusterFlags, MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle,
-        UUIDType,
+        MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType,
+        XtreamCluster,
     },
     utils::{
-        arc_str_option_serde, arc_str_serde, clean_playlist_title, extract_extension_from_url, hash_bytes,
-        hash_string_as_hex, is_blank_optional_arc_str, sanitize_sensitive_info, truncate_string, ExportStyleConfig,
-        CONSTANTS, PROVIDER_SCHEME_PREFIX,
+        arc_str_option_serde, arc_str_serde, clean_playlist_title, hash_bytes, hash_string_as_hex,
+        is_blank_optional_arc_str, sanitize_sensitive_info, truncate_string, ExportStyleConfig, CONSTANTS,
+        PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{
@@ -781,7 +784,8 @@ pub async fn write_strm_playlist(
         return Err(TuliproxError::Config(format!("Failed to get file path for {}", target_output.directory)));
     };
 
-    let user_and_server_info = get_credentials_and_server_info(app_config, target_output.username.as_deref());
+    let user_and_server_info =
+        get_credentials_and_server_info(app_config, target_output.username.as_deref()).map_err(TuliproxError::Config)?;
     let normalized_dir = normalize_string_path(&target_output.directory);
     let strm_file_prefix = hash_string_as_hex(&normalized_dir);
     let strm_index_path =
@@ -805,7 +809,6 @@ pub async fn write_strm_playlist(
 
     prepare_strm_output_directory(&root_path).await?;
 
-    let target_force_redirect = target.options.as_ref().and_then(|o| o.force_redirect.as_ref());
     let mut input_by_name: HashMap<Arc<str>, Option<Arc<ConfigInput>>> = HashMap::new();
 
     let strm_files = prepare_strm_files(new_playlist, target_output);
@@ -830,7 +833,7 @@ pub async fn write_strm_playlist(
         let url = match resolve_strm_file_url(
             app_config,
             &mut input_by_name,
-            target_force_redirect,
+            target,
             user_and_server_info.as_ref(),
             &strm_file.strm_info,
         ) {
@@ -986,11 +989,20 @@ async fn has_strm_file_same_hash(file_path: &PathBuf, content_hash: UUIDType) ->
 fn get_credentials_and_server_info(
     cfg: &AppConfig,
     username: Option<&str>,
-) -> Option<(Arc<ProxyUserCredentials>, ApiProxyServerInfo)> {
-    let username = username?;
-    let credentials = cfg.get_user_credentials(username)?;
-    let server_info = cfg.get_user_server_info(credentials.as_ref())?;
-    Some((credentials, server_info))
+) -> Result<Option<(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>, String> {
+    let Some(username) = username else {
+        return Ok(None);
+    };
+    let credentials = cfg.get_user_credentials(username).ok_or_else(|| {
+        format!("STRM output references user '{}' but no matching API proxy user exists", sanitize_sensitive_info(username))
+    })?;
+    let server_info = cfg.get_user_server_info(credentials.as_ref()).ok_or_else(|| {
+        format!(
+            "STRM output references user '{}' but no API proxy server info is configured",
+            sanitize_sensitive_info(username)
+        )
+    })?;
+    Ok(Some((credentials, server_info)))
 }
 
 async fn read_strm_file_index(strm_file_index_path: &Path) -> std::io::Result<HashSet<String>> {
@@ -1007,7 +1019,7 @@ async fn read_strm_file_index(strm_file_index_path: &Path) -> std::io::Result<Ha
 fn resolve_strm_file_url(
     app_config: &AppConfig,
     input_by_name: &mut HashMap<Arc<str>, Option<Arc<ConfigInput>>>,
-    target_force_redirect: Option<&ClusterFlags>,
+    target: &ConfigTarget,
     user_and_server_info: Option<&(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>,
     str_item_info: &StrmItemInfo,
 ) -> Result<Arc<str>, String> {
@@ -1020,7 +1032,8 @@ fn resolve_strm_file_url(
         None
     };
 
-    get_strm_url(target_force_redirect, user_and_server_info, input.as_deref(), str_item_info)
+    let resolve_secret = app_config.get_reverse_proxy_rewrite_secret().unwrap_or(app_config.encrypt_secret);
+    get_strm_url(&resolve_secret, target.id, user_and_server_info, input.as_deref(), str_item_info)
 }
 
 fn get_target_strm_file_path(
@@ -1069,8 +1082,36 @@ fn resolve_strm_source_url(input: Option<&ConfigInput>, str_item_info: &StrmItem
     })
 }
 
+fn build_provider_resolve_url(
+    secret: &[u8; 16],
+    server_info: &ApiProxyServerInfo,
+    user: &ProxyUserCredentials,
+    target_id: u16,
+    str_item_info: &StrmItemInfo,
+) -> Result<String, String> {
+    let cluster = XtreamCluster::try_from(str_item_info.item_type).map_err(|err| {
+        format!(
+            "Failed to determine STRM provider resolve cluster for item '{}': {err}",
+            sanitize_sensitive_info(&str_item_info.title)
+        )
+    })?;
+    let token = encode_provider_resolve_playlist_item_token(
+        secret,
+        &ProviderResolvePlaylistItemToken {
+            username: user.username.clone(),
+            target_id,
+            virtual_id: str_item_info.virtual_id,
+            cluster,
+        },
+    )
+    .map_err(|err| format!("Failed to create STRM provider resolve token: {err}"))?;
+
+    Ok(format!("{}{PROVIDER_RESOLVE_ROUTE_PREFIX}/{token}", server_info.get_base_url()))
+}
+
 fn get_strm_url(
-    target_force_redirect: Option<&ClusterFlags>,
+    resolve_secret: &[u8; 16],
+    target_id: u16,
     user_and_server_info: Option<&(Arc<ProxyUserCredentials>, ApiProxyServerInfo)>,
     input: Option<&ConfigInput>,
     str_item_info: &StrmItemInfo,
@@ -1079,34 +1120,7 @@ fn get_strm_url(
         return resolve_strm_source_url(input, str_item_info);
     };
 
-    let redirect = user.proxy.is_redirect(str_item_info.item_type)
-        || target_force_redirect.is_some_and(|f| f.has_cluster(str_item_info.item_type));
-    if redirect {
-        return Ok(Arc::clone(&str_item_info.url));
-    }
-
-    if let Some(stream_type) = match str_item_info.item_type {
-        PlaylistItemType::Live => Some("live"),
-        PlaylistItemType::Series
-        | PlaylistItemType::SeriesInfo
-        | PlaylistItemType::LocalSeries
-        | PlaylistItemType::LocalSeriesInfo => Some("series"),
-        PlaylistItemType::Video | PlaylistItemType::LocalVideo => Some("movie"),
-        _ => None,
-    } {
-        let url = &str_item_info.url;
-        let ext = extract_extension_from_url(url).unwrap_or_default();
-        Ok(format!(
-            "{}/{stream_type}/{}/{}/{}{ext}",
-            server_info.get_base_url(),
-            user.as_ref().username,
-            user.as_ref().password,
-            str_item_info.virtual_id
-        )
-        .into())
-    } else {
-        Ok(Arc::clone(&str_item_info.url))
-    }
+    build_provider_resolve_url(resolve_secret, server_info, user.as_ref(), target_id, str_item_info).map(Arc::from)
 }
 
 // /////////////////////////////////////////////
@@ -1219,9 +1233,21 @@ async fn remove_empty_dirs(root_path: PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_strm_source_url, strip_tmdb_markers, strm_contains_tmdb_marker, StrmItemInfo};
-    use crate::model::{ConfigInput, ConfigProvider};
-    use shared::model::{ConfigProviderDto, InputType, PlaylistItemType, ProviderUrlSelectionPolicy};
+    use super::{
+        build_provider_resolve_url, get_credentials_and_server_info, resolve_strm_source_url, strip_tmdb_markers,
+        strm_contains_tmdb_marker, StrmItemInfo,
+    };
+    use crate::{
+        model::{
+            ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigProvider,
+            MediaToolCapabilities, ProxyUserCredentials, SourcesConfig, TargetUser,
+        },
+        utils::FileLockManager,
+        utils::{decode_provider_resolve_token, ProviderResolveToken, PROVIDER_RESOLVE_ROUTE_PREFIX},
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::model::ConfigPaths;
+    use shared::model::{ConfigProviderDto, InputType, PlaylistItemType, ProviderUrlSelectionPolicy, ProxyType};
     use std::{collections::HashMap, sync::Arc};
 
     fn make_strm_item(url: &str, input_name: &str) -> StrmItemInfo {
@@ -1258,6 +1284,57 @@ mod tests {
             url: "http://input.example.com".to_string(),
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
+        }
+    }
+
+    fn make_server_info() -> ApiProxyServerInfo {
+        ApiProxyServerInfo {
+            name: "default".to_string(),
+            protocol: "http".to_string(),
+            host: "proxy.example.com".to_string(),
+            port: None,
+            timezone: "UTC".to_string(),
+            message: String::new(),
+            path: None,
+        }
+    }
+
+    fn make_user(proxy: ProxyType) -> ProxyUserCredentials {
+        let mut user = ProxyUserCredentials::default();
+        user.username = "alice".to_string();
+        user.password = "secret".to_string();
+        user.proxy = proxy;
+        user
+    }
+
+    fn empty_paths() -> ConfigPaths {
+        ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        }
+    }
+
+    fn test_app_config(api_proxy: Option<ApiProxyConfig>) -> AppConfig {
+        AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::new(api_proxy.map(Arc::new))),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(empty_paths())),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
         }
     }
 
@@ -1321,5 +1398,48 @@ mod tests {
         let err = resolve_strm_source_url(None, &strm_item).err();
 
         assert!(err.is_some_and(|message| message.contains("source input is missing")));
+    }
+
+    #[test]
+    fn provider_resolve_url_contains_compact_playlist_item_token() {
+        let secret = [5u8; 16];
+        let strm_item = make_strm_item("provider://myprovider/live/1.ts", "input-a");
+        let user = make_user(ProxyType::Reverse(None));
+        let server_info = make_server_info();
+
+        let url = build_provider_resolve_url(&secret, &server_info, &user, 17, &strm_item).unwrap();
+
+        let prefix = format!("http://proxy.example.com{PROVIDER_RESOLVE_ROUTE_PREFIX}/");
+        assert!(url.starts_with(&prefix));
+        let token = &url[prefix.len()..];
+        assert!(token.len() < 100, "token too long: {}", token.len());
+        let decoded = decode_provider_resolve_token(&secret, token).unwrap();
+        let ProviderResolveToken::PlaylistItem(decoded) = decoded;
+        assert_eq!(decoded.username, "alice");
+        assert_eq!(decoded.target_id, 17);
+        assert_eq!(decoded.virtual_id, 1);
+    }
+
+    #[test]
+    fn explicit_strm_username_fails_when_user_is_missing() {
+        let app_config = test_app_config(None);
+
+        let result = get_credentials_and_server_info(&app_config, Some("missing"));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn explicit_strm_username_fails_when_server_is_missing() {
+        let user = Arc::new(make_user(ProxyType::Reverse(None)));
+        let app_config = test_app_config(Some(ApiProxyConfig {
+            user: vec![TargetUser { target: "target".to_string(), credentials: vec![user] }],
+            server: Vec::new(),
+            ..Default::default()
+        }));
+
+        let result = get_credentials_and_server_info(&app_config, Some("alice"));
+
+        assert!(result.is_err());
     }
 }

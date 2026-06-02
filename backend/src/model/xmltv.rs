@@ -216,19 +216,22 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                         let mut start = None;
                         let mut stop = None;
                         let mut channel = None;
+                        let mut catchup_id = None;
                         current_programme = None;
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
                                 b"start" => start = get_attr_value(&attr),
                                 b"stop" => stop = get_attr_value(&attr),
                                 b"channel" => channel = get_attr_value(&attr),
+                                b"catchup-id" => catchup_id = get_attr_value(&attr),
                                 _ => {}
                             }
                         }
                         if let (Some(pstart), Some(pstop), Some(pchannel)) = (start, stop, channel) {
                             if let (Some(start_time), Some(stop_time)) = (parse_xmltv_time(&pstart), parse_xmltv_time(&pstop)) {
                                 if stop_time >= threshold_ts {
-                                    let epg_programme = EpgProgramme::new(start_time, stop_time, pchannel);
+                                    let mut epg_programme = EpgProgramme::new(start_time, stop_time, pchannel);
+                                    epg_programme.catchup_id = catchup_id;
                                     current_programme = Some(epg_programme);
                                 }
                             }

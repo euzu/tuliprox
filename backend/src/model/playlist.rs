@@ -1,12 +1,13 @@
-use std::collections::HashSet;
 use crate::model::{ConfigInput, TVGuide};
-use shared::model::{PlaylistGroup, PlaylistItem};
-use shared::model::UUIDType;
 use crate::repository::PlaylistSource;
+use shared::error::TuliproxError;
+use shared::model::UUIDType;
+use shared::model::{PlaylistGroup, PlaylistItem};
+use std::collections::HashSet;
 
 pub struct FetchedPlaylist<'a> {
     pub input: &'a ConfigInput,
-    pub source: Box<dyn PlaylistSource>,
+    pub source: PlaylistSource,
     pub epg: Option<TVGuide>,
 }
 
@@ -54,8 +55,5 @@ impl FetchedPlaylist<'_> {
         self.source.deduplicate(duplicates);
     }
 
-    pub fn clone_source(&self) -> Box<dyn PlaylistSource> {
-        self.source.clone_box()
-    }
+    pub fn clone_source(&self) -> Result<PlaylistSource, TuliproxError> { self.source.clone_source() }
 }
-

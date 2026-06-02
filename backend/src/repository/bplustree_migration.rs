@@ -833,8 +833,87 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmp_serde::{from_slice, to_vec};
+    use serde::Serialize;
+    use shared::model::{EpgProgramme, LiveStreamProperties};
     use std::io::Read;
     use tempfile::tempdir;
+
+    #[derive(Serialize)]
+    struct LegacyLiveStreamProperties {
+        name: String,
+        category_id: u32,
+        stream_id: u32,
+        stream_icon: String,
+        direct_source: String,
+        custom_sid: Option<String>,
+        added: Option<String>,
+        stream_type: Option<String>,
+        epg_channel_id: Option<String>,
+        tv_archive: Option<i32>,
+        tv_archive_duration: Option<i32>,
+        is_adult: i32,
+        video: Option<String>,
+        audio: Option<String>,
+        last_probed_timestamp: Option<i64>,
+        last_success_timestamp: Option<i64>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyEpgProgramme {
+        start: i64,
+        stop: i64,
+        title: Option<String>,
+        desc: Option<String>,
+    }
+
+    #[test]
+    fn live_stream_properties_accept_legacy_messagepack_without_catchup_field() {
+        let encoded = to_vec(&LegacyLiveStreamProperties {
+            name: "Channel 7".to_string(),
+            category_id: 0,
+            stream_id: 7,
+            stream_icon: String::new(),
+            direct_source: String::new(),
+            custom_sid: None,
+            added: None,
+            stream_type: None,
+            epg_channel_id: Some("channel.7".to_string()),
+            tv_archive: Some(1),
+            tv_archive_duration: Some(7),
+            is_adult: 0,
+            video: None,
+            audio: None,
+            last_probed_timestamp: Some(100),
+            last_success_timestamp: Some(200),
+        })
+        .expect("legacy live properties should encode");
+
+        let decoded: LiveStreamProperties = from_slice(&encoded).expect("legacy live properties should decode");
+        assert_eq!(decoded.stream_id, 7);
+        assert_eq!(decoded.name.as_ref(), "Channel 7");
+        assert_eq!(decoded.tv_archive, Some(1));
+        assert_eq!(decoded.tv_archive_duration, Some(7));
+        assert!(decoded.catchup.is_none());
+    }
+
+    #[test]
+    fn epg_programme_accepts_legacy_messagepack_without_catchup_id_field() {
+        let encoded = to_vec(&LegacyEpgProgramme {
+            start: 100,
+            stop: 200,
+            title: Some("Programme".to_string()),
+            desc: Some("Description".to_string()),
+        })
+        .expect("legacy programme should encode");
+
+        let decoded: EpgProgramme = from_slice(&encoded).expect("legacy programme should decode");
+        assert_eq!(decoded.start, 100);
+        assert_eq!(decoded.stop, 200);
+        assert_eq!(decoded.title.as_deref(), Some("Programme"));
+        assert_eq!(decoded.desc.as_deref(), Some("Description"));
+        assert!(decoded.catchup_id.is_none());
+    }
 
     fn test_roots_fingerprint(roots: &[PathBuf]) -> String {
         let resolved = BPlusTreeStartupMigrator::resolve_scan_roots(roots);

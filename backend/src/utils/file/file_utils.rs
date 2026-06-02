@@ -260,7 +260,8 @@ pub async fn persist_file(persist_file: Option<PathBuf>, text: &str) {
 
 pub fn prepare_persist_path(file_name: &str, date_prefix: &str) -> PathBuf {
     let now = chrono::Local::now();
-    let persist_filename = file_name.replace("{}", format!("{date_prefix}{}", now.format("%Y%m%d_%H%M%S").to_string().as_str()).as_str());
+    let timestamp = format!("{date_prefix}{}", now.format("%Y%m%d_%H%M%S"));
+    let persist_filename = file_name.replace("{}", &timestamp);
     std::path::PathBuf::from(persist_filename)
 }
 

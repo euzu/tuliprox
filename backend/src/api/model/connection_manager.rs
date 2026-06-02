@@ -223,13 +223,10 @@ impl SocketActivityTracker {
 fn lock_socket_activity_pending(
     pending: &Mutex<HashMap<SocketAddr, SocketActivityEvent>>,
 ) -> MutexGuard<'_, HashMap<SocketAddr, SocketActivityEvent>> {
-    match pending.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            warn!("Socket activity state was poisoned, continuing with recovered state");
-            poisoned.into_inner()
-        }
-    }
+    pending.lock().unwrap_or_else(|poisoned| {
+        warn!("Socket activity state was poisoned, continuing with recovered state");
+        poisoned.into_inner()
+    })
 }
 
 struct CleanupWorkerDeps {

@@ -1,6 +1,9 @@
 use crate::model::{Config, ConfigInput};
 use crate::utils::request::DynReader;
-use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
+use shared::model::{
+    CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
+    PlaylistItemType, StreamProperties, XtreamCluster,
+};
 use shared::utils::{default_supported_video_extensions, extract_id_from_url, extract_numeric_id_from_url, Internable};
 use std::borrow::BorrowMut;
 use std::sync::Arc;
@@ -129,37 +132,24 @@ enum M3uToken {
     AudioTrack,
     TimeShift,
     TvgRec,
+    Catchup,
+    CatchupDays,
+    CatchupSource,
+    CatchupTime,
+    CatchupCorrection,
+    CatchupType,
+    CatchupExtra,
     PossibleId,
     Unknown,
 }
 
-fn classify_token(t: &str) -> M3uToken {
-    if t.eq_ignore_ascii_case("xui-id") || t.eq_ignore_ascii_case("cuid") {
-        M3uToken::ProviderId
-    } else if t.eq_ignore_ascii_case("tvg-chno") {
-        M3uToken::TvgChno
-    } else if t.eq_ignore_ascii_case("group-title") {
-        M3uToken::GroupTitle
-    } else if t.eq_ignore_ascii_case("tvg-id") {
-        M3uToken::TvgId
-    } else if t.eq_ignore_ascii_case("tvg-name") {
-        M3uToken::TvgName
-    } else if t.eq_ignore_ascii_case("tvg-logo") {
-        M3uToken::TvgLogo
-    } else if t.eq_ignore_ascii_case("tvg-logo-small") {
-        M3uToken::TvgLogoSmall
-    } else if t.eq_ignore_ascii_case("parent-code") {
-        M3uToken::ParentCode
-    } else if t.eq_ignore_ascii_case("audio-track") {
-        M3uToken::AudioTrack
-    } else if t.eq_ignore_ascii_case("timeshift") {
-        M3uToken::TimeShift
-    } else if t.eq_ignore_ascii_case("tvg-rec") {
-        M3uToken::TvgRec
-    } else if t.eq_ignore_ascii_case("id") ||
-        (t.len() > 2
-        && !t.as_bytes()[..3].eq_ignore_ascii_case(b"tvg")
-        && t.as_bytes()[t.len() - 2..].eq_ignore_ascii_case(b"id"))
+#[inline]
+fn eq_ascii(bytes: &[u8], expected: &[u8]) -> bool { bytes.eq_ignore_ascii_case(expected) }
+
+#[inline]
+fn classify_possible_id(bytes: &[u8]) -> M3uToken {
+    if eq_ascii(bytes, b"id")
+        || (bytes.len() > 2 && !eq_ascii(&bytes[..3], b"tvg") && eq_ascii(&bytes[bytes.len() - 2..], b"id"))
     {
         M3uToken::PossibleId
     } else {
@@ -167,7 +157,166 @@ fn classify_token(t: &str) -> M3uToken {
     }
 }
 
-fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &str, url: String) -> PlaylistItemHeader {
+fn classify_token(t: &str) -> M3uToken {
+    let bytes = t.as_bytes();
+
+    match bytes.len() {
+        2 => classify_possible_id(bytes),
+        4 => {
+            if eq_ascii(bytes, b"cuid") {
+                M3uToken::ProviderId
+            } else {
+                M3uToken::Unknown
+            }
+        }
+        6 => {
+            if eq_ascii(bytes, b"xui-id") {
+                M3uToken::ProviderId
+            } else if eq_ascii(bytes, b"tvg-id") {
+                M3uToken::TvgId
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        7 => {
+            if eq_ascii(bytes, b"tvg-rec") {
+                M3uToken::TvgRec
+            } else if eq_ascii(bytes, b"catchup") {
+                M3uToken::Catchup
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        8 => {
+            if eq_ascii(bytes, b"tvg-chno") {
+                M3uToken::TvgChno
+            } else if eq_ascii(bytes, b"tvg-name") {
+                M3uToken::TvgName
+            } else if eq_ascii(bytes, b"tvg-logo") {
+                M3uToken::TvgLogo
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        9 => {
+            if eq_ascii(bytes, b"timeshift") {
+                M3uToken::TimeShift
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        10 => {
+            if eq_ascii(bytes, b"catchup-id") {
+                M3uToken::CatchupExtra
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        11 => {
+            if eq_ascii(bytes, b"group-title") {
+                M3uToken::GroupTitle
+            } else if eq_ascii(bytes, b"parent-code") {
+                M3uToken::ParentCode
+            } else if eq_ascii(bytes, b"audio-track") {
+                M3uToken::AudioTrack
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        12 => {
+            if eq_ascii(bytes, b"catchup-days") {
+                M3uToken::CatchupDays
+            } else if eq_ascii(bytes, b"catchup-type") {
+                M3uToken::CatchupType
+            } else if eq_ascii(bytes, b"catchup-time") {
+                M3uToken::CatchupTime
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        14 => {
+            if eq_ascii(bytes, b"tvg-logo-small") {
+                M3uToken::TvgLogoSmall
+            } else if eq_ascii(bytes, b"catchup-source") {
+                M3uToken::CatchupSource
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        18 => {
+            if eq_ascii(bytes, b"catchup-correction") {
+                M3uToken::CatchupCorrection
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+        _ => {
+            if bytes.len() > 8 && eq_ascii(&bytes[..8], b"catchup-") {
+                M3uToken::CatchupExtra
+            } else {
+                classify_possible_id(bytes)
+            }
+        }
+    }
+}
+
+fn ensure_live_stream_properties(header: &mut PlaylistItemHeader) -> &mut LiveStreamProperties {
+    if !matches!(header.additional_properties.as_ref(), Some(StreamProperties::Live(_))) {
+        header.additional_properties = Some(StreamProperties::Live(Box::default()));
+    }
+
+    let Some(StreamProperties::Live(live)) = header.additional_properties.as_mut() else {
+        unreachable!("additional_properties just initialized as live");
+    };
+
+    if live.name.is_empty() {
+        if !header.name.is_empty() {
+            live.name.clone_from(&header.name);
+        } else if !header.title.is_empty() {
+            live.name.clone_from(&header.title);
+        }
+    }
+    if live.epg_channel_id.is_none() {
+        live.epg_channel_id.clone_from(&header.epg_channel_id);
+    }
+
+    live
+}
+
+fn apply_catchup_properties(header: &mut PlaylistItemHeader, mut catchup: CatchupProperties, default_correction: Option<&Arc<str>>) {
+    let has_capability = catchup.mode.is_some()
+        || catchup.days.is_some()
+        || catchup.source.is_some()
+        || catchup.time.is_some()
+        || catchup.catchup_type.is_some()
+        || !catchup.extra_attributes.is_empty();
+
+    if !has_capability {
+        return;
+    }
+
+    if catchup.correction.is_none() {
+        catchup.correction = default_correction.cloned();
+    }
+
+    let live = ensure_live_stream_properties(header);
+    live.tv_archive = Some(1);
+    live.tv_archive_duration = catchup
+        .days
+        .as_deref()
+        .and_then(|days| days.trim().parse::<i32>().ok())
+        .or(live.tv_archive_duration);
+    live.catchup = Some(catchup);
+}
+
+#[allow(clippy::too_many_lines)]
+fn process_header_internal(
+    input_name: &Arc<str>,
+    video_suffixes: &[String],
+    content: &str,
+    url: String,
+    default_catchup_correction: Option<&Arc<str>>,
+) -> PlaylistItemHeader {
     let url_types = if video_suffixes.iter().any(|suffix| url.ends_with(suffix)) {
         // TODO find Series based on group or configured names
         Some((XtreamCluster::Video, PlaylistItemType::Video))
@@ -184,6 +333,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
     if is_extinf {
         let mut provider_id = None::<String>;
         let mut fallback_id = None::<String>;
+        let mut catchup = CatchupProperties::default();
         let mut c = skip_digit(&mut it);
         while let Some(chr) = c {
             match chr {
@@ -198,6 +348,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                     stack.push(chr);
                     if token_till(&mut stack, &mut it, '=', true).is_some() {
                         let token = classify_token(&stack[tok_start..]);
+                        let token_name = stack[tok_start..].to_owned();
                         stack.clear();
                         let val_off = token_value(&mut stack, &mut it);
                         match token {
@@ -214,6 +365,22 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
                             M3uToken::AudioTrack => plih.audio_track = stack[val_off..].intern(),
                             M3uToken::TimeShift => plih.time_shift = stack[val_off..].intern(),
                             M3uToken::TvgRec => plih.rec = stack[val_off..].intern(),
+                            M3uToken::Catchup if stack.len() > val_off => catchup.mode = Some(stack[val_off..].intern()),
+                            M3uToken::CatchupDays if stack.len() > val_off => catchup.days = Some(stack[val_off..].intern()),
+                            M3uToken::CatchupSource if stack.len() > val_off => {
+                                catchup.source = Some(stack[val_off..].intern());
+                            }
+                            M3uToken::CatchupTime if stack.len() > val_off => catchup.time = Some(stack[val_off..].intern()),
+                            M3uToken::CatchupCorrection if stack.len() > val_off => {
+                                catchup.correction = Some(stack[val_off..].intern());
+                            }
+                            M3uToken::CatchupType if stack.len() > val_off => {
+                                catchup.catchup_type = Some(stack[val_off..].intern());
+                            }
+                            M3uToken::CatchupExtra if stack.len() > val_off => catchup.extra_attributes.push(CatchupAttribute {
+                                name: token_name.intern(),
+                                value: stack[val_off..].intern(),
+                            }),
                             // Unknown panel-specific ID fields (e.g. "stream-id", "channel-uid")
                             M3uToken::PossibleId
                                 if fallback_id.is_none()
@@ -241,6 +408,7 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
         } else {
             plih.id = extract_id_from_url(&plih.url).intern();
         }
+        apply_catchup_properties(&mut plih, catchup, default_catchup_correction);
     }
     if let Some((url_cluster, url_item_type)) = url_types {
         plih.xtream_cluster = url_cluster;
@@ -262,9 +430,40 @@ fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &st
     plih
 }
 
+#[cfg(test)]
+fn process_header(input_name: &Arc<str>, video_suffixes: &[String], content: &str, url: String) -> PlaylistItemHeader {
+    process_header_internal(input_name, video_suffixes, content, url, None)
+}
+
+fn parse_extm3u_catchup_correction(attributes: &str) -> Option<Arc<str>> {
+    let mut it = attributes.chars();
+    let mut stack = String::with_capacity(32);
+    while let Some(chr) = it.next() {
+        if chr.is_whitespace() {
+            continue;
+        }
+
+        let tok_start = stack.len();
+        stack.push(chr);
+        if token_till(&mut stack, &mut it, '=', true).is_none() {
+            stack.clear();
+            continue;
+        }
+        let is_catchup_correction = stack[tok_start..].eq_ignore_ascii_case("catchup-correction");
+        stack.clear();
+        let val_off = token_value(&mut stack, &mut it);
+        if is_catchup_correction && stack.len() > val_off {
+            return Some(stack[val_off..].intern());
+        }
+        stack.clear();
+    }
+    None
+}
+
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
     let mut header: Option<String> = None;
-    let mut group: Option<String> = None;
+    let mut group: Option<Arc<str>> = None;
+    let mut default_catchup_correction: Option<Arc<str>> = None;
     let input_name = &input.name;
 
     let video_suffixes = match cfg.video.as_ref() {
@@ -272,38 +471,49 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
             config.extensions.iter().map(Clone::clone).collect::<Vec<String>>()
         }
         None => default_supported_video_extensions()
-    };
+        };
     let mut lines = tokio::io::BufReader::new(lines).lines();
     let mut ord_counter: u32 = 1;
     while let Ok(Some(line)) = lines.next_line().await {
-        if line.starts_with("#EXTINF") {
-            header = Some(line);
+        let bytes = line.as_bytes();
+        if let Some(b'#') = bytes.first().copied() {
+            if bytes.starts_with(b"#EXTINF") {
+                header = Some(line);
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("#EXTM3U") {
+                default_catchup_correction = parse_extm3u_catchup_correction(rest);
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("#EXTGRP:") {
+                group = Some(rest.intern());
+                continue;
+            }
             continue;
         }
-        if line.starts_with("#EXTGRP") {
-            group = Some(String::from(&line[8..]));
-            continue;
-        }
-        if line.starts_with('#') {
-            continue;
-        }
-        if let Some(header_value) = header {
-            let mut item = PlaylistItem { header: process_header(input_name, &video_suffixes, &header_value, line) };
+        let group_value = group.take();
+        if let Some(header_value) = header.take() {
+            let mut item = PlaylistItem {
+                header: process_header_internal(
+                    input_name,
+                    &video_suffixes,
+                    &header_value,
+                    line,
+                    default_catchup_correction.as_ref(),
+                ),
+            };
             let header = &mut item.header;
             header.source_ordinal = ord_counter;
             ord_counter += 1;
-                if header.group.is_empty() {
-                    if let Some(group_value) = group {
-                        header.group = group_value.intern();
-                    } else {
-                        let group = get_title_group(&header.title);
-                        header.group = group;
-                    }
+            if header.group.is_empty() {
+                if let Some(group_value) = group_value {
+                    header.group = group_value;
+                } else {
+                    header.group = get_title_group(&header.title);
                 }
-                visit(item);
+            }
+            visit(item);
         }
-        header = None;
-        group = None;
     }
 }
 
@@ -335,8 +545,60 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
 
 #[cfg(test)]
 mod test {
-    use shared::utils::Internable;
-    use crate::processing::parser::m3u::process_header;
+    use crate::model::{Config, ConfigInput};
+    use crate::utils::request::DynReader;
+    use shared::{
+        model::StreamProperties,
+        utils::Internable,
+    };
+    use crate::processing::parser::m3u::{classify_token, process_header, M3uToken};
+    use tokio::io::AsyncWriteExt;
+
+    fn make_reader(content: &str) -> DynReader {
+        let (mut writer, reader) = tokio::io::duplex(content.len().max(4096));
+        let bytes = content.as_bytes().to_vec();
+        tokio::spawn(async move {
+            writer.write_all(&bytes).await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+        Box::pin(reader)
+    }
+
+    fn test_input() -> ConfigInput {
+        ConfigInput {
+            name: "input".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ..ConfigInput::default()
+        }
+    }
+
+    #[test]
+    fn test_classify_token_length_dispatch_keeps_expected_mapping() {
+        assert!(matches!(classify_token("xui-id"), M3uToken::ProviderId));
+        assert!(matches!(classify_token("CUID"), M3uToken::ProviderId));
+        assert!(matches!(classify_token("tvg-chno"), M3uToken::TvgChno));
+        assert!(matches!(classify_token("group-title"), M3uToken::GroupTitle));
+        assert!(matches!(classify_token("TVG-ID"), M3uToken::TvgId));
+        assert!(matches!(classify_token("tvg-name"), M3uToken::TvgName));
+        assert!(matches!(classify_token("tvg-logo"), M3uToken::TvgLogo));
+        assert!(matches!(classify_token("tvg-logo-small"), M3uToken::TvgLogoSmall));
+        assert!(matches!(classify_token("parent-code"), M3uToken::ParentCode));
+        assert!(matches!(classify_token("audio-track"), M3uToken::AudioTrack));
+        assert!(matches!(classify_token("timeshift"), M3uToken::TimeShift));
+        assert!(matches!(classify_token("tvg-rec"), M3uToken::TvgRec));
+        assert!(matches!(classify_token("catchup"), M3uToken::Catchup));
+        assert!(matches!(classify_token("catchup-days"), M3uToken::CatchupDays));
+        assert!(matches!(classify_token("catchup-source"), M3uToken::CatchupSource));
+        assert!(matches!(classify_token("catchup-time"), M3uToken::CatchupTime));
+        assert!(matches!(classify_token("catchup-correction"), M3uToken::CatchupCorrection));
+        assert!(matches!(classify_token("catchup-type"), M3uToken::CatchupType));
+        assert!(matches!(classify_token("catchup-extra"), M3uToken::CatchupExtra));
+        assert!(matches!(classify_token("stream-id"), M3uToken::PossibleId));
+        assert!(matches!(classify_token("id"), M3uToken::PossibleId));
+        assert!(matches!(classify_token("foo"), M3uToken::Unknown));
+    }
 
     #[test]
     fn test_process_header_1() {
@@ -487,4 +749,71 @@ mod test {
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.id, "99999".intern()); // URL numeric id is master, CUID/stream-id are only fallbacks
     }
+
+    #[test]
+    fn test_process_header_preserves_catchup_attributes() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let url = "http://provider.example/live/user/pass/99999.ts";
+        let line = r#"#EXTINF:-1 tvg-id="channel1" catchup="append" catchup-days="7" catchup-source="?offset=-${offset}&utcstart=${timestamp}" catchup-correction="-1.5" catchup-type="xc" catchup-extra="keep",Channel 1"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        let Some(StreamProperties::Live(live_props)) = pli.additional_properties else {
+            panic!("expected live stream properties");
+        };
+        let catchup = live_props.catchup.expect("catchup should be parsed");
+        assert_eq!(catchup.mode.as_deref(), Some("append"));
+        assert_eq!(catchup.days.as_deref(), Some("7"));
+        assert_eq!(catchup.source.as_deref(), Some("?offset=-${offset}&utcstart=${timestamp}"));
+        assert_eq!(catchup.correction.as_deref(), Some("-1.5"));
+        assert_eq!(catchup.catchup_type.as_deref(), Some("xc"));
+        assert_eq!(catchup.extra_attributes.len(), 1);
+        assert_eq!(catchup.extra_attributes[0].name.as_ref(), "catchup-extra");
+        assert_eq!(live_props.tv_archive, Some(1));
+        assert_eq!(live_props.tv_archive_duration, Some(7));
+    }
+
+    #[test]
+    fn test_process_header_applies_extm3u_default_catchup_correction() {
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let line = r#"#EXTINF:-1 catchup="append" catchup-source="?offset=-${offset}",Channel 1"#;
+        let pli = super::process_header_internal(
+            &input,
+            &video_suffixes,
+            line,
+            "http://provider.example/live/user/pass/99999.ts".to_string(),
+            Some(&"-2.0".intern()),
+        );
+
+        let Some(StreamProperties::Live(live_props)) = pli.additional_properties else {
+            panic!("expected live stream properties");
+        };
+        let catchup = live_props.catchup.expect("catchup should be parsed");
+        assert_eq!(catchup.correction.as_deref(), Some("-2.0"));
+    }
+
+    #[test]
+    fn parse_extm3u_header_catchup_correction_from_attribute_tail() {
+        let correction = super::parse_extm3u_catchup_correction(r#" catchup-correction="-2.0""#);
+
+        assert_eq!(correction.as_deref(), Some("-2.0"));
+    }
+
+    #[tokio::test]
+    async fn consume_m3u_applies_extgrp_to_following_item() {
+        let content = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1,Channel 1\n",
+            "#EXTGRP:Sports\n",
+            "http://provider.example/live/user/pass/1.ts\n",
+        );
+        let mut items = Vec::new();
+
+        super::consume_m3u(&Config::default(), &test_input(), make_reader(content), |item| items.push(item)).await;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].header.group.as_ref(), "Sports");
+    }
+
 }

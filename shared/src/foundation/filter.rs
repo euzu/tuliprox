@@ -222,7 +222,7 @@ fn get_parser_item_field(expr: &Pair<Rule>) -> Result<ItemField, TuliproxError> 
     if expr.as_rule() == Rule::field {
         let field_text = expr.as_str();
         for item in ItemField::iter() {
-            if field_text.eq_ignore_ascii_case(item.to_string().as_str()) {
+            if field_text.eq_ignore_ascii_case(item.as_ref()) {
                 return Ok(item);
             }
         }
