@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Status Health Banner**:
+  - A single green/amber/red health indicator in the header aggregates the realtime connection, backend status,
+    and provider connection capacity, with a hover breakdown and click-through to the Stats view.
+
 - **Live Metric Sparklines**:
   - The Stats cards now show interactive time-series sparklines for CPU, memory, network throughput, active users,
     and active user connections, keeping a rolling history so trends are visible at a glance.

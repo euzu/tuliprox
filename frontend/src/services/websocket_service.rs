@@ -71,6 +71,8 @@ impl WebSocketService {
         }
     }
 
+    pub fn is_connected(&self) -> bool { self.connected.get() }
+
     /// Helper function to allow cloning the service into JS closures for reconnect
     fn clone_for_reconnect(&self) -> Self {
         Self {

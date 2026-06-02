@@ -2,10 +2,10 @@ use crate::{
     app::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, map_sources_to_playlist_rows, theme::Theme, AppIcon,
-            DashboardView, DownloadsView, EpgView, ErrorBoundary, IconButton, LanguagePicker, NoAccess, Panel,
-            ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup,
-            Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView,
-            WebsocketStatus,
+            DashboardView, DownloadsView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, NoAccess,
+            Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView,
+            Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
+            UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
     },
@@ -439,6 +439,7 @@ pub fn Home() -> Html {
                             } else {
                                 html! {
                                     <div class={"tp__app-header-toolbar"}>
+                                        { html_if!(can_read_system_status, { <HealthBanner/> }) }
                                         <WebsocketStatus/>
                                         <LanguagePicker />
                                         <ThemePicker theme={*theme} on_select={handle_theme_select} />
