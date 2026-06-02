@@ -1,0 +1,160 @@
+.tp__sparkline {
+  --sparkline-color: var(--theme-brand-primary-spinner, #3b82f6);
+
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 3rem;
+  margin-top: var(--gap-small);
+  cursor: crosshair;
+
+  &__svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  &__cursor-svg {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  &__series {
+    color: var(--sparkline-color);
+  }
+
+  &__line {
+    fill: none;
+    stroke: var(--sparkline-color);
+    stroke-width: 1.75px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  &__area {
+    fill: var(--sparkline-color);
+    opacity: 0.14;
+  }
+
+  &__dot {
+    position: absolute;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background-color: var(--sparkline-color);
+    box-shadow: 0 0 0 1.5px var(--card-background-color, var(--background-color, #000));
+    pointer-events: none;
+  }
+
+  &__baseline {
+    stroke: var(--modest-text-color);
+    stroke-width: 1px;
+    stroke-dasharray: 2 3;
+    opacity: 0.3;
+  }
+
+  &__cursor {
+    stroke: var(--modest-text-color);
+    stroke-width: 1px;
+    opacity: 0.5;
+  }
+
+  &__marker {
+    position: absolute;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background-color: var(--sparkline-color);
+    box-shadow: 0 0 0 1.5px var(--card-background-color, var(--background-color, #000));
+    pointer-events: none;
+    z-index: 4;
+  }
+
+  &__tooltip {
+    position: absolute;
+    transform: translate(-50%, calc(-100% - 0.75rem));
+    display: flex;
+    flex-flow: column;
+    gap: 0.1rem;
+    padding: 0.3rem 0.45rem;
+    border-radius: var(--border-radius-small, 6px);
+    background-color: var(--card-background-color, rgba(15, 23, 42, 0.96));
+    border: 1px solid var(--border-color);
+    box-shadow: 0 6px 18px var(--theme-palette-neutral-surface-660, rgba(0, 0, 0, 0.35));
+    color: var(--text-color);
+    font-size: var(--font-size-xs);
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 5;
+  }
+
+  &__tooltip--start {
+    transform: translate(0, calc(-100% - 0.75rem));
+  }
+
+  &__tooltip--end {
+    transform: translate(-100%, calc(-100% - 0.75rem));
+  }
+
+  &__tip-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  &__swatch {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 2px;
+    background-color: var(--sparkline-color);
+    flex: 0 0 auto;
+  }
+
+  &__tip-label {
+    color: var(--modest-text-color);
+  }
+
+  &__tip-value {
+    margin-left: auto;
+    font-weight: 600;
+  }
+
+  &--cpu {
+    --sparkline-color: var(--theme-brand-info, #38bdf8);
+  }
+  &--memory {
+    --sparkline-color: var(--theme-brand-quaternary, #a855f7);
+  }
+  &--network {
+    --sparkline-color: var(--ok-color, #22c55e);
+  }
+  &--net-rx {
+    --sparkline-color: var(--ok-color, #22c55e);
+  }
+  &--net-tx {
+    --sparkline-color: var(--theme-brand-emphasis, #f59e0b);
+  }
+  &--users {
+    --sparkline-color: var(--theme-brand-emphasis, #f59e0b);
+  }
+  &--connections {
+    --sparkline-color: var(--theme-brand-primary-spinner, #3b82f6);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tp__sparkline__area,
+  .tp__sparkline__line {
+    animation: tp-sparkline-fade 320ms ease-out;
+  }
+
+  @keyframes tp-sparkline-fade {
+    from {
+      opacity: 0;
+    }
+  }
+}

@@ -10,6 +10,12 @@
 
 ## 🌟 New Features
 
+- **Live Metric Sparklines**:
+  - The Stats cards now show interactive time-series sparklines for CPU, memory, network throughput, active users,
+    and active user connections, keeping a rolling history so trends are visible at a glance.
+  - Hovering shows a cursor and tooltip with the value at that point
+  - System metrics are now sampled every 2 seconds (down from 5) for more responsive charts.
+
 - **Bookmarkable Views (Deep Linking)**:
   - The active view is now reflected in the URL hash (e.g. `#stats`, `#source_editor`), so views can be
   - Browser back/forward navigation and manual hash edits now switch the active view accordingly.

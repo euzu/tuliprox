@@ -1,9 +1,22 @@
 use crate::{
-    app::components::{Card, CollapsePanel, PlaylistProgressStatusCard, StatusCard, StatusContext, StreamsView},
+    app::components::{
+        use_metrics_history, Card, CollapsePanel, MetricsHistory, PlaylistProgressStatusCard, Sparkline,
+        SparklineFormat, SparklineSeries, StatusCard, StatusContext, StreamsView,
+    },
     i18n::use_translation,
 };
 use shared::utils::human_readable_byte_size;
+use std::rc::Rc;
 use yew::prelude::*;
+
+#[derive(Clone, PartialEq)]
+struct StatsSparklineData {
+    memory: Rc<[SparklineSeries]>,
+    cpu: Rc<[SparklineSeries]>,
+    network: Rc<[SparklineSeries]>,
+    users: Rc<[SparklineSeries]>,
+    connections: Rc<[SparklineSeries]>,
+}
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct StatsViewProps {
@@ -15,6 +28,21 @@ pub struct StatsViewProps {
 pub fn StatsView(props: &StatsViewProps) -> Html {
     let translate = use_translation();
     let status_ctx = use_context::<StatusContext>().expect("Status context not found");
+    let history = use_metrics_history();
+    let sparkline_data = use_memo(history.clone(), |history| StatsSparklineData {
+        memory: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.memory))]),
+        cpu: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.cpu))]),
+        network: Rc::from([
+            SparklineSeries::new(MetricsHistory::as_vec(&history.net_rx))
+                .with_class("tp__sparkline--net-rx")
+                .with_label("\u{2193}"),
+            SparklineSeries::new(MetricsHistory::as_vec(&history.net_tx))
+                .with_class("tp__sparkline--net-tx")
+                .with_label("\u{2191}"),
+        ]),
+        users: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.users))]),
+        connections: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.connections))]),
+    });
 
     let (mem, cpu, net) = status_ctx.system_info.as_ref().map_or_else(
         || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
@@ -38,10 +66,16 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
     let render_system_stats = |cache| {
         html! {
            <div class="tp__stats__body-group">
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()} /></Card>
+               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()}
+                   chart={Some(html! { <Sparkline class="tp__sparkline--memory" format={SparklineFormat::Percent}
+                       series={sparkline_data.memory.clone()} /> })} /></Card>
                <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()} /></Card>
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.NETWORK")} data={net.clone()} /></Card>
+               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()}
+                   chart={Some(html! { <Sparkline class="tp__sparkline--cpu" format={SparklineFormat::Percent}
+                       series={sparkline_data.cpu.clone()} /> })} /></Card>
+               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.NETWORK")} data={net.clone()}
+                   chart={Some(html! { <Sparkline class="tp__sparkline--network" format={SparklineFormat::BytesPerSec}
+                       series={sparkline_data.network.clone()} /> })} /></Card>
             </div>
         }
     };
@@ -147,8 +181,12 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                     <Card><PlaylistProgressStatusCard /></Card>
                 </div>
                 <div class="tp__stats__body-group tp__stats__body-group-provider">
-                    <Card><StatusCard title={translate.t("LABEL.ACTIVE_USERS")} data={users} /></Card>
-                    <Card><StatusCard title={translate.t("LABEL.ACTIVE_USER_CONNECTIONS")} data={connections} /></Card>
+                    <Card><StatusCard title={translate.t("LABEL.ACTIVE_USERS")} data={users}
+                        chart={Some(html! { <Sparkline class="tp__sparkline--users" format={SparklineFormat::Count}
+                            series={sparkline_data.users.clone()} /> })} /></Card>
+                    <Card><StatusCard title={translate.t("LABEL.ACTIVE_USER_CONNECTIONS")} data={connections}
+                        chart={Some(html! { <Sparkline class="tp__sparkline--connections" format={SparklineFormat::Count}
+                            series={sparkline_data.connections.clone()} /> })} /></Card>
                     { render_active_provider_connections() }
                 </div>
             </div>
