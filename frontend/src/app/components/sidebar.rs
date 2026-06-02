@@ -86,7 +86,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let is_mobile = is_mobile.clone();
 
         Callback::from(move |_| {
-            let window = window().expect("no global window");
+            let Some(window) = window() else {
+                return;
+            };
 
             if let Ok(inner_width) = window.inner_width() {
                 let mobile_view = inner_width.as_f64().unwrap_or(0.0) < MOBILE_BREAKPOINT_PX;
@@ -126,18 +128,23 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             let check_sidebar = check_sidebar.clone();
             let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| check_sidebar.emit(())));
 
-            let window = window().expect("no global window");
-            window
-                .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                .expect("could not add event listener");
-
-            // Save Closure so it can be cleaned up later
-            *callback_handle.borrow_mut() = Some(closure);
+            let window = window();
+            if let Some(window) = window.as_ref() {
+                if window
+                    .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
+                    .is_ok()
+                {
+                    // Save Closure so it can be cleaned up later
+                    *callback_handle.borrow_mut() = Some(closure);
+                }
+            }
 
             // Cleanup
             move || {
-                if let Some(closure) = callback_handle.borrow_mut().take() {
-                    let _ = window.remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                if let Some(window) = window {
+                    if let Some(closure) = callback_handle.borrow_mut().take() {
+                        let _ = window.remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                    }
                 }
             }
         });

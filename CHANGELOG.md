@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Resilient Sidebar Initialization**:
+  - The sidebar no longer panics if the global `window` object is unavailable; resize handling and responsive
+    collapse now degrade gracefully instead of crashing the app.
+
 - **Improved Screen-Reader Support**:
   - Toast notifications are now announced by screen readers via an `aria-live` region (errors assertively, others
     politely).
