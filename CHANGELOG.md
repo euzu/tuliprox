@@ -10,6 +10,12 @@
 
 ## 🌟 New Features
 
+- **Toast Notification UX Upgrade**:
+  - Auto-dismiss toasts now show a countdown progress bar that reflects the remaining time before they disappear.
+  - Hovering a toast pauses both the dismiss timer and its progress bar, and resumes from where it left off on mouse leave.
+  - Error toasts gain a "copy details" action that copies the full message to the clipboard for easier bug reports.
+  - The progress bar and entrance animation respect the `prefers-reduced-motion` accessibility setting.
+
 - **M3U Catchup / Archive Preservation And Proxying**:
   - Tuliprox now preserves standard M3U catchup/archive attributes during M3U import and export.
   - Supported preserved attributes include:

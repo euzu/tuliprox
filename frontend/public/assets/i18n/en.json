@@ -884,6 +884,7 @@
     "CONTENT_SECURITY_POLICY": "Content Security Policy",
     "CONTENT_TYPE": "Content Type",
     "COPY_CREDENTIALS": "Copy Credentials",
+    "COPY_DETAILS": "Copy details",
     "COPY_LINK_PROVIDER_URL": "Copy Provider Url",
     "COPY_LINK_TULIPROX_VIRTUAL_ID": "Copy Virtual Id",
     "COPY_LINK_TULIPROX_WEBPLAYER_URL": "Copy Webplayer Url",
