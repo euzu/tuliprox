@@ -18,6 +18,11 @@
     }
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "mounts": [
+    "source=tuliprox-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=tuliprox-target,target=${containerWorkspaceFolder}/target,type=volume",
+    "source=tuliprox-gh-config,target=/home/vscode/.config/gh,type=volume"
+  ],
   "customizations": {
     "vscode": {
       "extensions": [
@@ -25,6 +30,7 @@
         "tamasfe.even-better-toml",
         "fill-labs.dependi",
         "vadimcn.vscode-lldb",
+        "usernamehw.errorlens",
         "DavidAnson.vscode-markdownlint"
       ],
       "settings": {
