@@ -16,8 +16,10 @@
       border-color 200ms ease;
   }
 
-  &:hover {
-    box-shadow: 0 8px 24px var(--theme-palette-neutral-surface-660, rgba(0, 0, 0, 0.25));
-    background-color: var(--card-hover-background-color);
+  @media (hover: hover) {
+    &:hover {
+      box-shadow: 0 8px 24px var(--theme-palette-neutral-surface-660, rgba(0, 0, 0, 0.25));
+      background-color: var(--card-hover-background-color);
+    }
   }
 }

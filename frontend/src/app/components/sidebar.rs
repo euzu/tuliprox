@@ -41,6 +41,14 @@ fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
     }
 }
 
+fn resolved_sidebar_state(collapsed: CollapseState, is_mobile: bool) -> CollapseState {
+    if is_mobile {
+        CollapseState::AutoCollapsed
+    } else {
+        collapsed
+    }
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
@@ -52,6 +60,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     });
     let is_mobile = use_state(|| false);
     let active_menu = use_state(|| props.active_page);
+    let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
@@ -266,12 +275,12 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     html! {
         <div class={classes!(
             "tp__app-sidebar",
-            sidebar_variant_class(*collapsed),
+            sidebar_variant_class(resolved_state),
             if *is_mobile { "mobile" } else { "" }
         )}>
             <div class="tp__app-sidebar__header tp__app-header">
               {
-                if matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded) && !*is_mobile {
+                if matches!(resolved_state, CollapseState::AutoExpanded | CollapseState::ManualExpanded) {
                   html! {
                    <span class="tp__app-header__logo">
                    {
@@ -292,13 +301,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 name="ToggleSidebar"
                 icon={"Sidebar"}
                 onclick={toggle_sidebar}
-                aria_expanded={matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded)}
+                aria_expanded={matches!(resolved_state, CollapseState::AutoExpanded | CollapseState::ManualExpanded)}
                 aria_label={translate.t("LABEL.TOGGLE_SIDEBAR")}
               />
             </div>
             <div class="tp__app-sidebar__scroll">
                 {
-                    if *is_mobile || matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
+                    if matches!(resolved_state, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
                         render_collapsed()
                     } else {
                         render_expanded()
@@ -311,7 +320,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{sidebar_variant_class, CollapseState};
+    use super::{resolved_sidebar_state, sidebar_variant_class, CollapseState};
 
     #[test]
     fn sidebar_variant_class_reports_collapsed_variants() {
@@ -323,5 +332,10 @@ mod tests {
     fn sidebar_variant_class_reports_expanded_variants() {
         assert_eq!(sidebar_variant_class(CollapseState::AutoExpanded), "expanded");
         assert_eq!(sidebar_variant_class(CollapseState::ManualExpanded), "expanded");
+    }
+
+    #[test]
+    fn sidebar_resolves_mobile_view_to_collapsed() {
+        assert_eq!(resolved_sidebar_state(CollapseState::ManualExpanded, true), CollapseState::AutoCollapsed);
     }
 }

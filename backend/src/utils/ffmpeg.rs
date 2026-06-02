@@ -546,6 +546,17 @@ async fn ensure_probe_file_length(path: &Path, content_length: Option<u64>) -> R
     })
 }
 
+async fn flush_probe_file(file: &mut fs::File, path: &Path) -> Result<(), ProbeFailureKind> {
+    file.flush().await.map_err(|err| {
+        warn!(
+            "Failed to flush seekable ffprobe temp file {}: {}",
+            path.display(),
+            err
+        );
+        ProbeFailureKind::Other
+    })
+}
+
 async fn probe_local_path_with_ffprobe(path: &Path, analyze_duration: u64, probe_size: u64) -> ProbeUrlOutcome {
     let display_path = path.to_string_lossy().into_owned();
     let mut command = Command::new("ffprobe");
@@ -778,6 +789,7 @@ async fn fetch_remote_span_to_file(req: &RemoteSpanRequest<'_>) -> Result<SpanWr
             break;
         }
     }
+    flush_probe_file(&mut file, path).await?;
 
     Ok(SpanWriteResult {
         status,

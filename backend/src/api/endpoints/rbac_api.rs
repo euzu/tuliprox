@@ -273,10 +273,25 @@ async fn save_and_reprepare_auth_file(
     content: &str,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let _lock = app_state.app_config.file_locks.write_lock(file_path).await;
+    let previous_content = match tokio::fs::read_to_string(file_path).await {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()})))),
+    };
     if let Err(err) = write_text_file_atomic(file_path, content).await {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))));
     }
     if let Err(err) = store_reprepared_web_auth(app_state) {
+        let rollback_result = match previous_content {
+            Some(previous_content) => write_text_file_atomic(file_path, &previous_content).await,
+            None => tokio::fs::remove_file(file_path).await,
+        };
+        if let Err(rollback_err) = rollback_result {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{err}; failed to restore previous auth file: {rollback_err}")})),
+            ));
+        }
         return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))));
     }
     Ok(())

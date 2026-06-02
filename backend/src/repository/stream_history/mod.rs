@@ -19,8 +19,8 @@ pub(crate) mod tests {
         StreamHistoryRecord {
             schema_version: RECORD_SCHEMA_VERSION,
             event_type: StreamHistoryEventType::Connect,
-            event_ts_utc: 0,
-            partition_day_utc: "2026-03-22".to_string(),
+            event_ts_utc: 1_742_600_001,
+            partition_day_utc: "2025-03-21".to_string(),
             session_id: 1,
             source_addr: None,
             api_username: None,
@@ -96,6 +96,7 @@ pub(crate) mod tests {
         let mut r = sample_connect_record();
         r.event_type = StreamHistoryEventType::Disconnect;
         r.event_ts_utc = 1_742_603_601;
+        r.partition_day_utc = "2025-03-22".to_string();
         r.session_id = session_id;
         r.disconnect_ts_utc = Some(1_742_603_601);
         r.session_duration = Some(3600);

@@ -96,6 +96,8 @@ fn decode_permissions(app_state: &AppState, token: &str) -> Option<PermissionSet
 fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permissions: PermissionSet) {
     if !permissions.contains(Permission::ConfigRead) {
         api_proxy.server.clear();
+        api_proxy.use_user_db = false;
+        api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
     }
     if !permissions.contains(Permission::UserRead) {
         api_proxy.user.clear();
@@ -107,6 +109,8 @@ fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto
         app_config.config = ConfigDto::default();
         if let Some(api_proxy) = app_config.api_proxy.as_mut() {
             api_proxy.server.clear();
+            api_proxy.use_user_db = false;
+            api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
         }
     }
 
@@ -743,7 +747,8 @@ mod tests {
 
         assert!(api_proxy.server.is_empty());
         assert_eq!(api_proxy.user.len(), 1);
-        assert!(api_proxy.use_user_db);
+        assert!(!api_proxy.use_user_db);
+        assert_eq!(api_proxy.auth_error_status, 403);
     }
 
     #[test]

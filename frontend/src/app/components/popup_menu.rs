@@ -106,10 +106,10 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
     }
 
     {
-        let on_close = props.on_close.clone();
-        use_effect_with(props.is_open, move |is_open| {
+        use_effect_with((props.is_open, props.on_close.clone()), move |(is_open, on_close)| {
             let browser_window = web_sys::window();
             let handler = if *is_open {
+                let on_close = on_close.clone();
                 let handler = Closure::wrap(Box::new(move |event: KeyboardEvent| {
                     if event.key() == "Escape" {
                         on_close.emit(());

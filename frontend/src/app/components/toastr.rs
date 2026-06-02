@@ -37,7 +37,7 @@ pub fn ToastrView() -> Html {
         html! {}
     } else {
         html! {
-            <div class="tp__toastr__container" role="status" aria-live="polite" aria-atomic="false">
+            <div class="tp__toastr__container" role="presentation">
                 {
                     // Render each toast and show an "X" icon button when close mode is Manual
                     for toasts.iter().cloned().map({
@@ -68,6 +68,7 @@ pub fn ToastrView() -> Html {
                                     <IconButton
                                         name={"toastr-close"}
                                         icon={"Close"}
+                                        aria_label={translate.t("LABEL.CLOSE")}
                                         onclick={on_close}
                                     />
                                 }
@@ -75,7 +76,7 @@ pub fn ToastrView() -> Html {
                                 html! {}
                             };
 
-                            let copy_btn = if matches!(toast.toast_type, ToastType::Error) {
+                            let copy_btn = if matches!(toast.toast_type, ToastType::Error) && *clipboard.is_supported {
                                 let on_copy = {
                                     let clipboard = clipboard.clone();
                                     let message = toast.message.clone();
@@ -90,6 +91,7 @@ pub fn ToastrView() -> Html {
                                         name={"toastr-copy"}
                                         icon={"Clipboard"}
                                         hint={translate.t("LABEL.COPY_DETAILS")}
+                                        aria_label={translate.t("LABEL.COPY_DETAILS")}
                                         onclick={on_copy}
                                     />
                                 }

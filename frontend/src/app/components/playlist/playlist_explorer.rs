@@ -910,7 +910,7 @@ pub fn PlaylistExplorer() -> Html {
 
     let render_channel_logo = |logo: &str, title: &str| {
         let logo = if logo.is_empty() { "assets/missing-logo.svg".to_string() } else { logo.to_string() };
-        let alt = if title.is_empty() { "Channel logo".to_string() } else { title.to_string() };
+        let alt = if title.is_empty() { translate.t("LABEL.CHANNEL") } else { title.to_string() };
         html! {
             <span  class="tp__playlist-explorer__channel-logo">
                 <img  alt={alt} src={logo} loading="lazy"

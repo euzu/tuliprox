@@ -51,6 +51,14 @@ fn versioned_static_asset_url(path: &str) -> String {
 
 fn versioned_config_url() -> String { versioned_static_asset_url("config.json") }
 
+fn resolve_effective_language(languages: &[LanguageInfo], active_language: &str) -> String {
+    if languages.iter().any(|language| language.code == active_language) {
+        active_language.to_string()
+    } else {
+        languages.first().map(|language| language.code.clone()).unwrap_or_else(|| "en".to_string())
+    }
+}
+
 #[component]
 pub fn App() -> Html {
     let translations_state = use_state(|| None::<HashMap<String, Value>>);
@@ -108,14 +116,15 @@ pub fn App() -> Html {
         let langs = (*languages_state).clone();
         use_effect_with((active, langs), move |(active, langs)| {
             if let Some(languages) = langs.as_ref() {
+                let effective_language = resolve_effective_language(languages, active);
                 let dir = languages
                     .iter()
-                    .find(|l| &l.code == active)
+                    .find(|l| l.code == effective_language)
                     .map(|l| l.dir.clone())
                     .unwrap_or_else(|| "ltr".to_string());
                 if let Some(root) = window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
                     let _ = root.set_attribute("dir", &dir);
-                    let _ = root.set_attribute("lang", active);
+                    let _ = root.set_attribute("lang", &effective_language);
                 }
             }
             || ()
@@ -184,11 +193,7 @@ pub fn App() -> Html {
     let config: &WebConfig = configuration_state.as_ref().unwrap();
     let icons: &Vec<Rc<IconDefinition>> = icon_state.as_ref().unwrap();
 
-    let effective_language = if languages.iter().any(|l| l.code == *active_language) {
-        (*active_language).clone()
-    } else {
-        languages.first().map(|l| l.code.clone()).unwrap_or_else(|| "en".to_string())
-    };
+    let effective_language = resolve_effective_language(&languages, &active_language);
 
     let supported_languages: Vec<String> = languages.iter().map(|l| l.code.clone()).collect();
 

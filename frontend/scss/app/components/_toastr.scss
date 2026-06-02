@@ -40,7 +40,7 @@
     transform-origin: left center;
     background-color: currentColor;
     opacity: 0.45;
-    animation-name: tp__toast-progress;
+    animation-name: tp-toast-progress;
     animation-timing-function: linear;
     animation-fill-mode: forwards;
   }
@@ -50,7 +50,7 @@
   }
 }
 
-@keyframes tp__toast-progress {
+@keyframes tp-toast-progress {
   from {
     transform: scaleX(1);
   }

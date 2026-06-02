@@ -89,7 +89,13 @@ impl NfoReader {
                 "director" => push_to_field_list!(movie.directors, text),
                 "credits" | "writer" => push_to_field_list!(movie.writers, text),
                 "studio" => push_to_field_list!(movie.studios, text),
-                "thumb" | "poster" => movie.poster = Some(text.clone()),
+                "thumb" | "poster" => {
+                    if in_actor {
+                        current_actor.thumb = Some(text.clone());
+                    } else {
+                        movie.poster = Some(text.clone());
+                    }
+                }
                 "fanart" => movie.fanart = Some(text.clone()),
                 "name" if in_actor => current_actor.name.clone_from(text),
                 "role" if in_actor => current_actor.role = Some(text.clone()),
@@ -132,7 +138,13 @@ impl NfoReader {
                 "rating" => series.rating = text.parse().ok(),
                 "genre" => push_to_field_list!(series.genres, text),
                 "studio" => push_to_field_list!(series.studios, text),
-                "thumb" | "poster" => series.poster = Some(text.clone()),
+                "thumb" | "poster" => {
+                    if in_actor {
+                        current_actor.thumb = Some(text.clone());
+                    } else {
+                        series.poster = Some(text.clone());
+                    }
+                }
                 "fanart" => series.fanart = Some(text.clone()),
                 "status" => series.status = Some(text.clone()),
                 "name" if in_actor => current_actor.name.clone_from(text),
@@ -182,6 +194,13 @@ impl NfoReader {
                         current_text.clear();
                     }
                 }
+                Ok(Event::CData(e)) => {
+                    if let Ok(decoded) = e.decode() {
+                        current_text.push_str(decoded.trim());
+                    } else {
+                        current_text.clear();
+                    }
+                }
                 Ok(Event::End(e)) => {
                     let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     let tag = tag_name.as_str();
@@ -213,7 +232,7 @@ mod tests {
     async fn test_parse_movie_nfo() {
         let nfo_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <movie>
-    <title>The Matrix</title>
+    <title><![CDATA[The Matrix]]></title>
     <originaltitle>The Matrix</originaltitle>
     <year>1999</year>
     <plot>A computer hacker learns about the true nature of reality.</plot>
@@ -228,6 +247,12 @@ mod tests {
     <director>Lana Wachowski</director>
     <director>Lilly Wachowski</director>
     <studio>Warner Bros.</studio>
+    <poster>movie-poster.jpg</poster>
+    <actor>
+        <name>Keanu Reeves</name>
+        <role>Neo</role>
+        <thumb>neo.jpg</thumb>
+    </actor>
 </movie>"#;
 
         let metadata = NfoReader::parse_movie_nfo(nfo_content);
@@ -240,6 +265,8 @@ mod tests {
             assert_eq!(movie.tmdb_id, Some(603));
             assert_eq!(movie.genres.as_ref().map(Vec::len).unwrap_or_default(), 2);
             assert_eq!(movie.directors.as_ref().map(Vec::len).unwrap_or_default(), 2);
+            assert_eq!(movie.poster.as_deref(), Some("movie-poster.jpg"));
+            assert_eq!(movie.actors.as_ref().and_then(|actors| actors.first()).and_then(|actor| actor.thumb.as_deref()), Some("neo.jpg"));
         } else {
             panic!("Expected movie metadata");
         }
@@ -262,6 +289,12 @@ mod tests {
     <genre>Thriller</genre>
     <studio>AMC</studio>
     <status>Ended</status>
+    <poster>series-poster.jpg</poster>
+    <actor>
+        <name>Bryan Cranston</name>
+        <role>Walter White</role>
+        <thumb>walter.jpg</thumb>
+    </actor>
 </tvshow>"#;
 
         let metadata = NfoReader::parse_series_nfo(nfo_content);
@@ -275,6 +308,11 @@ mod tests {
             assert_eq!(series.tvdb_id, Some(81189));
             assert_eq!(series.genres.as_ref().map(Vec::len).unwrap_or_default(), 3);
             assert_eq!(series.status, Some("Ended".to_string()));
+            assert_eq!(series.poster.as_deref(), Some("series-poster.jpg"));
+            assert_eq!(
+                series.actors.as_ref().and_then(|actors| actors.first()).and_then(|actor| actor.thumb.as_deref()),
+                Some("walter.jpg")
+            );
         } else {
             panic!("Expected series metadata");
         }

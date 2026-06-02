@@ -25,6 +25,9 @@ impl NetworkAccessDto {
 
         let prefix_str = parts.next().ok_or_else(make_err)?;
         let prefix: u8 = prefix_str.trim().parse().map_err(|_| make_err())?;
+        if parts.next().is_some() {
+            return Err(make_err());
+        }
 
         Ok((ip, prefix))
     }
