@@ -284,7 +284,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                   html! {}
                 }
               }
-              <IconButton name="ToggleSidebar" icon={"Sidebar"} onclick={toggle_sidebar} />
+              <IconButton
+                name="ToggleSidebar"
+                icon={"Sidebar"}
+                onclick={toggle_sidebar}
+                aria_expanded={matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded)}
+                aria_label={translate.t("LABEL.TOGGLE_SIDEBAR")}
+              />
             </div>
             <div class="tp__app-sidebar__scroll">
                 {

@@ -37,7 +37,7 @@ pub fn ToastrView() -> Html {
         html! {}
     } else {
         html! {
-            <div class="tp__toastr__container">
+            <div class="tp__toastr__container" role="status" aria-live="polite" aria-atomic="false">
                 {
                     // Render each toast and show an "X" icon button when close mode is Manual
                     for toasts.iter().cloned().map({
@@ -74,7 +74,7 @@ pub fn ToastrView() -> Html {
                             } else {
                                 html! {}
                             };
-                            
+
                             let copy_btn = if matches!(toast.toast_type, ToastType::Error) {
                                 let on_copy = {
                                     let clipboard = clipboard.clone();
@@ -125,10 +125,17 @@ pub fn ToastrView() -> Html {
                                 None => html! {},
                             };
 
+                            let is_error = matches!(toast.toast_type, ToastType::Error);
+                            let toast_role = if is_error { "alert" } else { "status" };
+                            let toast_live = if is_error { "assertive" } else { "polite" };
+
                             html! {
                                 <div
                                     key={toast.id}
                                     class={classes!("tp__toast", type_class)}
+                                    role={toast_role}
+                                    aria-live={toast_live}
+                                    aria-atomic="true"
                                     onmouseenter={on_mouse_enter}
                                     onmouseleave={on_mouse_leave}
                                 >

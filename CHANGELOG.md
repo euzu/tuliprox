@@ -10,6 +10,12 @@
 
 ## 🌟 New Features
 
+- **Improved Screen-Reader Support**:
+  - Toast notifications are now announced by screen readers via an `aria-live` region (errors assertively, others
+    politely).
+  - The sidebar toggle button exposes its `aria-expanded` state and an accessible label, and the active navigation
+    item is marked with `aria-current="page"`.
+
 - **Table Empty-State Message**:
   - Paged/data tables now show a localized "No content" message in their empty state instead of just an icon,
     making it clearer when a query or filter returns no rows. (Table headers already stick to the top while scrolling.)
