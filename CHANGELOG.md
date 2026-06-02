@@ -219,6 +219,8 @@
 
 ## 🐛 Fixes
 
+- **Async Local File Serving**: The local-file stream handler now canonicalizes paths with `tokio::fs::canonicalize`
+  instead of the blocking `std` call, so the async runtime is no longer blocked while resolving the file path.
 - **Template Expansion Efficiency**: Optimized `template.yml` / `template.d` multi-template expansion so sequence-style templates no longer
   duplicate unrelated entries during dependency resolution.
   - Sequence templates still resolve correctly and preserve order.

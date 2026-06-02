@@ -2952,7 +2952,7 @@ pub(crate) async fn local_stream_response(
     let path = PathBuf::from(pli.url.strip_prefix("file://").unwrap_or(&pli.url));
 
     // Canonicalize and validate the path
-    let path = match path.canonicalize() {
+    let path = match tokio::fs::canonicalize(&path).await {
         Ok(canonical) => canonical,
         Err(err) => {
             error!("Local file path is corrupt {}: {err}", path.display());
