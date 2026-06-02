@@ -33,6 +33,8 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
     let TableDefinition { items, num_cols, is_sortable, on_sort, render_header_cell, render_data_cell } =
         &*props.definition;
 
+    let translate = use_translation();
+
     // Local sort state: None = neutral; Some((col, order)) = sorted column and order
     let sort_state = use_state::<Option<(usize, SortOrder)>, _>(|| None);
 
@@ -136,7 +138,7 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
                       }
                     } else {
                        html!{
-                          <tr><td colspan={num_cols.to_string()}><NoContent/></td></tr>
+                          <tr><td colspan={num_cols.to_string()}><NoContent text={translate.t("LABEL.NO_CONTENT")}/></td></tr>
                         }
                     }
                 }

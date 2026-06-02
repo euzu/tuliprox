@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Table Empty-State Message**:
+  - Paged/data tables now show a localized "No content" message in their empty state instead of just an icon,
+    making it clearer when a query or filter returns no rows. (Table headers already stick to the top while scrolling.)
+
 - **Debounced Filter Editor Input**:
   - Typing in the filter editor no longer re-parses and previews the filter on every keystroke; parsing and change
     notifications are now debounced, keeping the textarea responsive while editing large filters.
