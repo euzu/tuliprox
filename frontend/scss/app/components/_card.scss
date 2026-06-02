@@ -17,8 +17,7 @@
   }
 
   &:hover {
-    transform: translateY(-2px);
     box-shadow: 0 8px 24px var(--theme-palette-neutral-surface-660, rgba(0, 0, 0, 0.25));
-    border-color: var(--active-color, var(--border-color));
+    background-color: var(--card-hover-background-color);
   }
 }

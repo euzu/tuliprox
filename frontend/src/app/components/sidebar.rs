@@ -130,10 +130,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 
             let window = window();
             if let Some(window) = window.as_ref() {
-                if window
-                    .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                    .is_ok()
-                {
+                if window.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref()).is_ok() {
                     // Save Closure so it can be cleaned up later
                     *callback_handle.borrow_mut() = Some(closure);
                 }

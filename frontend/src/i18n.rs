@@ -98,10 +98,8 @@ impl YewI18n {
 
         let config = I18nConfig { translations: serialized.clone() };
         let mut i18n = I18n::new(config, serialized).expect("Failed to initialize i18nrs");
-        let default_lang = supported_languages
-            .iter()
-            .find(|l| l.as_str() == active_language)
-            .or_else(|| supported_languages.first());
+        let default_lang =
+            supported_languages.iter().find(|l| l.as_str() == active_language).or_else(|| supported_languages.first());
         if let Some(default_lang) = default_lang {
             let _ = i18n.set_translation_language(default_lang, &StorageType::LocalStorage, "tp_language");
         }

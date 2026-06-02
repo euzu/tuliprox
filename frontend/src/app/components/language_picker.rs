@@ -5,7 +5,6 @@ use crate::{
 use web_sys::MouseEvent;
 use yew::{function_component, html, use_context, use_state, Callback, Html, NodeRef};
 
-
 #[function_component(LanguagePicker)]
 pub fn language_picker() -> Html {
     let translate = use_translation();

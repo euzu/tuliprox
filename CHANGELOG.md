@@ -10,7 +10,6 @@
 
 ## 🌟 New Features
 
-
 - **UI Micro-Interactions**:
   - Cards now gently lift with a soft shadow on hover, buttons give a subtle press/ripple feedback when clicked,
     and collapse/accordion chevrons smoothly rotate between open and closed states. All effects honor

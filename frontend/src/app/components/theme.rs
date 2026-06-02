@@ -217,9 +217,7 @@ impl Theme {
             if let Some(document) = window.document() {
                 if let Some(body) = document.body() {
                     let theme = self.to_string();
-                    let is_switch = body
-                        .get_attribute("data-theme")
-                        .is_some_and(|current| current != theme);
+                    let is_switch = body.get_attribute("data-theme").is_some_and(|current| current != theme);
 
                     if is_switch {
                         let _ = body.class_list().add_1(THEME_TRANSITION_CLASS);

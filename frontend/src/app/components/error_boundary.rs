@@ -11,8 +11,10 @@ pub struct ErrorBoundaryHandle {
 }
 
 impl ErrorBoundaryHandle {
+    #[allow(dead_code)]
     pub fn report(&self, message: impl Into<String>) { self.report.emit(message.into()); }
 
+    #[allow(dead_code)]
     pub fn reset(&self) { self.reset.emit(()); }
 }
 

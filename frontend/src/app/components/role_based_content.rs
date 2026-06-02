@@ -1,5 +1,8 @@
 use crate::{
-    app::{components::api_user::ApiUserView, components::ErrorBoundary, switch, AppRoute},
+    app::{
+        components::{api_user::ApiUserView, ErrorBoundary},
+        switch, AppRoute,
+    },
     hooks::use_service_context,
     i18n::use_translation,
 };
