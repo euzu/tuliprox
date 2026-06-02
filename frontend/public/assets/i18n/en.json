@@ -1457,6 +1457,8 @@
       "DOWNLOAD_CANCELLED": "Download cancelled.",
       "DOWNLOAD_REMOVED": "Download removed.",
       "DOWNLOAD_RETRIED": "Download retried.",
+      "CONFIRM_CANCEL": "Do you really want to cancel this transfer?",
+      "CONFIRM_REMOVE": "Do you really want to remove this entry?",
       "FAIL": "Failed to download!",
       "INVALID_RECORD_DURATION": "Recording duration must be a positive number of minutes.",
       "INVALID_RECORD_START": "Recording start time is invalid.",

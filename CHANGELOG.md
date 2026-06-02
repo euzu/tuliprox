@@ -10,6 +10,11 @@
 
 ## 🌟 New Features
 
+- **Confirmation For Destructive Download/Recording Actions**:
+  - Cancelling a transfer/recording and removing a download entry now prompt a confirmation dialog before proceeding.
+  - The confirmation dialog focuses the safe (Cancel) action by default, consistent with other destructive actions
+    (delete user, delete target, delete RBAC user/group).
+
 - **Toast Notification UX Upgrade**:
   - Auto-dismiss toasts now show a countdown progress bar that reflects the remaining time before they disappear.
   - Hovering a toast pauses both the dismiss timer and its progress bar, and resumes from where it left off on mouse leave.
