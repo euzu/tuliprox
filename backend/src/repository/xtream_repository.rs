@@ -1230,6 +1230,7 @@ fn needs_preserved_stream_property_merge(
                 || (l_new.audio.is_none() && l_old.audio.is_some())
                 || (l_new.last_probed_timestamp.is_none() && l_old.last_probed_timestamp.is_some())
                 || (l_new.last_success_timestamp.is_none() && l_old.last_success_timestamp.is_some())
+                || (l_new.catchup.is_none() && l_old.catchup.is_some())
         }
         _ => false,
     }
@@ -1304,6 +1305,11 @@ pub(crate) fn merge_preserved_stream_properties(
 
             if l_new.last_success_timestamp.is_none() && l_old.last_success_timestamp.is_some() {
                 l_new.last_success_timestamp = l_old.last_success_timestamp;
+                changed = true;
+            }
+
+            if l_new.catchup.is_none() && l_old.catchup.is_some() {
+                l_new.catchup.clone_from(&l_old.catchup);
                 changed = true;
             }
 
@@ -1510,7 +1516,7 @@ mod tests {
     use super::{merge_preserved_stream_properties, needs_update_info_details, preserve_details_input_xtream_playlist_cluster_to_disk};
     use crate::repository::{BPlusTreeQuery, BPlusTreeUpdate};
     use shared::model::{
-        LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
+        CatchupProperties, LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
         XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
@@ -1606,6 +1612,34 @@ mod tests {
             StreamProperties::Live(live) => {
                 assert_eq!(live.last_probed_timestamp, Some(1_800_000_000));
                 assert_eq!(live.last_success_timestamp, Some(1_800_000_100));
+            }
+            _ => panic!("expected live properties"),
+        }
+    }
+
+    #[test]
+    fn merge_preserves_missing_live_catchup_properties() {
+        let mut new_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            ..LiveStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            catchup: Some(CatchupProperties {
+                mode: Some("append".into()),
+                source: Some("?offset=-${offset}".into()),
+                ..CatchupProperties::default()
+            }),
+            ..LiveStreamProperties::default()
+        }));
+
+        let changed = merge_preserved_stream_properties(&mut new_props, &old_props);
+        assert!(changed);
+        match new_props {
+            StreamProperties::Live(live) => {
+                let catchup = live.catchup.expect("catchup should be preserved");
+                assert_eq!(catchup.mode.as_deref(), Some("append"));
+                assert_eq!(catchup.source.as_deref(), Some("?offset=-${offset}"));
             }
             _ => panic!("expected live properties"),
         }

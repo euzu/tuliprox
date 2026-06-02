@@ -1102,6 +1102,31 @@ output:
 > redirect-mode
 > routing and cycling behavior without exposing the direct upstream endpoint in the initial playlist URL.
 
+#### M3U Catchup & Archive Support
+
+Tuliprox preserves standard M3U catchup/archive attributes from provider playlists.
+The following attributes are recognized and preserved during M3U import and export:
+
+* `catchup`
+* `catchup-days`
+* `catchup-source`
+* `catchup-time`
+* `catchup-correction`
+* `catchup-type`
+* Any unknown `catchup-*` attributes
+
+**Proxy Behavior:**
+
+* **Direct Output:** When Tuliprox outputs streams directly (e.g., when not using proxy rewrite), it preserves the original provider  
+  metadata exactly as received.
+* **Rewritten Output (Reverse Proxy):** When Tuliprox rewrites URLs to act as a reverse proxy, it generates authenticated local Tuliprox  
+  archive URLs instead of leaking the provider's upstream archive URLs.
+
+**Supported Modes:**
+Tuliprox supports processing and proxying the following catchup modes: `default`, `append`, `shift`, `xc`, `fs`, and `vod`.
+For unknown modes with an explicit source template, Tuliprox attempts to safely proxy them. For unknown modes without a source template,  
+Tuliprox preserves the metadata but logs a limitation that it cannot safely proxy the unknown mode locally.
+
 ### 3. Type `strm`
 
 ```yaml
