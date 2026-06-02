@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Descriptive Image Alt Text**:
+  - Logo images on the login screen and sidebar now use the configured app title for their alt text, and playlist
+    channel logos use the channel title, improving screen-reader accessibility.
+
 - **Popup Menu Keyboard Dismissal**:
   - Popup menus now close when pressing `Escape`, in addition to clicking outside, improving keyboard accessibility.
 

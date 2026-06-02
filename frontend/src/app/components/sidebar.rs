@@ -262,7 +262,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                    <span class="tp__app-header__logo">
                    {
                       if let Some(logo) = services.config.ui_config.app_logo.as_ref() {
-                        html! { <img src={logo.to_string()} alt="logo"/> }
+                        let alt = format!("{} logo", services.config.ui_config.app_title.as_deref().unwrap_or("tuliprox"));
+                        html! { <img src={logo.to_string()} alt={alt}/> }
                       } else {
                         html! { <AppIcon name="Logo"/> }
                       }
