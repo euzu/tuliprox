@@ -289,7 +289,7 @@ async fn get_config_api_proxy_config_public(
     };
     match read_api_proxy_file(api_proxy_file_path.as_str(), true) {
         Ok(Some(mut api_proxy_dto)) => {
-            api_proxy_dto.user = vec![];
+            filter_api_proxy_by_permissions(&mut api_proxy_dto, PermissionSet::new());
             let response = axum::response::Json(api_proxy_dto).into_response();
             return response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &revision);
         }
@@ -371,7 +371,7 @@ async fn save_config_api_proxy_config(
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_API_PROXY_REVISION, &updated_revision)
 }
 
-async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<PermissionSet>) -> axum::response::Response {
+async fn get_config_common(app_state: &Arc<AppState>, permissions: PermissionSet) -> axum::response::Response {
     let (config_file_path, sources_file_path, api_proxy_file_path) = {
         let paths = app_state.app_config.paths.load();
         (
@@ -416,9 +416,7 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
                 error!("Failed to prepare users: {err}");
                 internal_server_error!()
             } else {
-                if let Some(permissions) = permissions {
-                    filter_app_config_by_permissions(&mut app_config, permissions);
-                }
+                filter_app_config_by_permissions(&mut app_config, permissions);
                 let response = axum::response::Json(app_config).into_response();
                 let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
                 let response = response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
@@ -433,7 +431,7 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
 }
 
 async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
-    get_config_common(&app_state, None).await
+    get_config_common(&app_state, PermissionSet::new()).await
 }
 
 async fn config(
@@ -450,7 +448,7 @@ async fn config(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    get_config_common(&app_state, Some(permissions)).await
+    get_config_common(&app_state, permissions).await
 }
 
 async fn get_config_api_proxy_config(
@@ -749,6 +747,32 @@ mod tests {
         assert_eq!(api_proxy.user.len(), 1);
         assert!(!api_proxy.use_user_db);
         assert_eq!(api_proxy.auth_error_status, 403);
+    }
+
+    #[test]
+    fn public_permissions_scrub_all_config_sections() {
+        let mut app_config = AppConfigDto {
+            config: ConfigDto {
+                storage_dir: Some(String::from("storage")),
+                ..ConfigDto::default()
+            },
+            sources: SourcesConfigDto {
+                inputs: vec![],
+                sources: vec![],
+                provider: Some(vec![]),
+                templates: Some(vec![]),
+            },
+            mappings: None,
+            templates: Some(TemplateDefinitionDto::default()),
+            api_proxy: Some(make_test_api_proxy()),
+        };
+
+        filter_app_config_by_permissions(&mut app_config, PermissionSet::new());
+
+        assert_eq!(app_config.config, ConfigDto::default());
+        assert_eq!(app_config.sources, SourcesConfigDto::default());
+        assert!(app_config.templates.is_none());
+        assert_eq!(app_config.api_proxy, Some(ApiProxyConfigDto::default()));
     }
 
     #[test]
