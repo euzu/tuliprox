@@ -49,3 +49,20 @@ body {
   max-width: 100%;
   background-color: inherit;
 }
+
+// Cross-dissolve theme-driven colors while switching themes.
+// The `tp-theme-transition` class is added briefly by the theme switcher and
+// removed once the animation completes, so it never affects normal interactions.
+@media (prefers-reduced-motion: no-preference) {
+  body.tp-theme-transition,
+  body.tp-theme-transition * {
+    transition:
+      background-color 280ms ease,
+      color 280ms ease,
+      border-color 280ms ease,
+      outline-color 280ms ease,
+      fill 280ms ease,
+      stroke 280ms ease,
+      box-shadow 280ms ease !important;
+  }
+}

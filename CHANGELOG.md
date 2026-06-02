@@ -10,6 +10,11 @@
 
 ## 🌟 New Features
 
+- **Animated Theme Transitions**:
+  - Switching themes now cross-dissolves colors, backgrounds, borders, and shadows instead of snapping instantly.
+    The transition is applied only during the switch (never during normal hover/interaction) and is fully disabled
+    for users who set `prefers-reduced-motion: reduce`.
+
 - **Resilient Sidebar Initialization**:
   - The sidebar no longer panics if the global `window` object is unavailable; resize handling and responsive
     collapse now degrade gracefully instead of crashing the app.

@@ -1,4 +1,4 @@
-use crate::utils::{get_local_storage_item, remove_local_storage_item, set_local_storage_item};
+use crate::utils::{get_local_storage_item, remove_local_storage_item, set_local_storage_item, set_timeout};
 use shared::error::TuliproxError;
 use std::{
     fmt::{Display, Formatter},
@@ -7,6 +7,9 @@ use std::{
 use web_sys::window;
 
 pub const TP_THEME_KEY: &str = "tp-theme";
+
+const THEME_TRANSITION_CLASS: &str = "tp-theme-transition";
+const THEME_TRANSITION_MS: i32 = 320;
 
 const THEME_DARK: &str = "dark";
 const THEME_REFINED_DARK: &str = "refined-dark";
@@ -213,7 +216,26 @@ impl Theme {
         if let Some(window) = window() {
             if let Some(document) = window.document() {
                 if let Some(body) = document.body() {
-                    let _ = body.set_attribute("data-theme", &self.to_string());
+                    let theme = self.to_string();
+                    let is_switch = body
+                        .get_attribute("data-theme")
+                        .is_some_and(|current| current != theme);
+
+                    if is_switch {
+                        let _ = body.class_list().add_1(THEME_TRANSITION_CLASS);
+                    }
+
+                    let _ = body.set_attribute("data-theme", &theme);
+
+                    if is_switch {
+                        let body = body.clone();
+                        set_timeout(
+                            move || {
+                                let _ = body.class_list().remove_1(THEME_TRANSITION_CLASS);
+                            },
+                            THEME_TRANSITION_MS,
+                        );
+                    }
                 }
             }
         }
