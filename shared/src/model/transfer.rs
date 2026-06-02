@@ -175,12 +175,8 @@ mod tests {
 
     #[test]
     fn transfers_delta_queue_replaced_round_trips() {
-        let task = TransferTaskDto {
-            title: "Queued".to_string(),
-            downloaded_bytes: 0,
-            total_bytes: None,
-            ..make_test_task()
-        };
+        let task =
+            TransferTaskDto { title: "Queued".to_string(), downloaded_bytes: 0, total_bytes: None, ..make_test_task() };
 
         let delta = TransfersDelta::QueueReplaced { queue: vec![task.clone()] };
         let json = serde_json::to_string(&delta).expect("serialize");

@@ -121,6 +121,7 @@ fn resolve_effective_source_url<'a>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_rewrite(
     mut m3u_pli: M3uPlaylistItem,
     ctx: &UrlRewriteContext<'_>,

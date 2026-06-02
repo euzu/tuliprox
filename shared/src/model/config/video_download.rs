@@ -174,11 +174,8 @@ mod tests {
 
     #[test]
     fn prepare_sets_default_download_dir_when_missing() {
-        let mut video = VideoConfigDto {
-            extensions: Vec::new(),
-            download: Some(make_test_download_config()),
-            web_search: None,
-        };
+        let mut video =
+            VideoConfigDto { extensions: Vec::new(), download: Some(make_test_download_config()), web_search: None };
         video.prepare().expect("prepare should succeed");
         let download = video.download.expect("download should exist");
         assert_eq!(download.directory.as_deref(), Some(DEFAULT_DOWNLOAD_DIR));
@@ -186,11 +183,8 @@ mod tests {
 
     #[test]
     fn prepare_sets_default_episode_pattern_when_missing() {
-        let mut video = VideoConfigDto {
-            extensions: Vec::new(),
-            download: Some(make_test_download_config()),
-            web_search: None,
-        };
+        let mut video =
+            VideoConfigDto { extensions: Vec::new(), download: Some(make_test_download_config()), web_search: None };
         video.prepare().expect("prepare should succeed");
         let download = video.download.expect("download should exist");
         assert!(download.episode_pattern.is_some(), "expected default episode pattern to be set");
@@ -213,10 +207,8 @@ mod tests {
 
     #[test]
     fn serializing_skips_default_download_dir() {
-        let download = VideoDownloadConfigDto {
-            directory: Some(DEFAULT_DOWNLOAD_DIR.to_string()),
-            ..make_test_download_config()
-        };
+        let download =
+            VideoDownloadConfigDto { directory: Some(DEFAULT_DOWNLOAD_DIR.to_string()), ..make_test_download_config() };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(
             !serialized.contains("\"directory\""),
@@ -226,20 +218,16 @@ mod tests {
 
     #[test]
     fn serializing_keeps_custom_download_dir() {
-        let download = VideoDownloadConfigDto {
-            directory: Some("custom-downloads".to_string()),
-            ..make_test_download_config()
-        };
+        let download =
+            VideoDownloadConfigDto { directory: Some("custom-downloads".to_string()), ..make_test_download_config() };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(serialized.contains("\"directory\""), "expected directory field for custom value, got: {serialized}");
     }
 
     #[test]
     fn serializing_skips_default_episode_pattern() {
-        let download = VideoDownloadConfigDto {
-            episode_pattern: default_episode_pattern(),
-            ..make_test_download_config()
-        };
+        let download =
+            VideoDownloadConfigDto { episode_pattern: default_episode_pattern(), ..make_test_download_config() };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(
             !serialized.contains("\"episode_pattern\""),
@@ -322,11 +310,8 @@ mod tests {
 
     #[test]
     fn serializing_keeps_non_zero_priorities_and_skips_zero_priorities() {
-        let non_zero = VideoDownloadConfigDto {
-            download_priority: -1,
-            recording_priority: 2,
-            ..make_test_download_config()
-        };
+        let non_zero =
+            VideoDownloadConfigDto { download_priority: -1, recording_priority: 2, ..make_test_download_config() };
         let zero = VideoDownloadConfigDto { download_priority: 0, recording_priority: 0, ..non_zero.clone() };
 
         let non_zero_serialized = serde_json::to_string(&non_zero).expect("non-zero priorities serialize");

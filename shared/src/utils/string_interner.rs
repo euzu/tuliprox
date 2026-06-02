@@ -98,14 +98,10 @@ macro_rules! intern_impl {
 }
 
 /// Interns a string slice.
-fn intern_str(s: &str) -> Arc<str> {
-    intern_impl!(s, Arc::from(s))
-}
+fn intern_str(s: &str) -> Arc<str> { intern_impl!(s, Arc::from(s)) }
 
 /// Interns an owned string.
-fn intern_string(s: String) -> Arc<str> {
-    intern_impl!(s.as_str(), Arc::from(s))
-}
+fn intern_string(s: String) -> Arc<str> { intern_impl!(s.as_str(), Arc::from(s)) }
 
 /// Returns the current number of strings held in the interning pool.
 /// Uses a read lock and is safe to call on hot paths for threshold checks.
