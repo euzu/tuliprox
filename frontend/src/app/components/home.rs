@@ -2,7 +2,7 @@ use crate::{
     app::{
         components::{
             config::ConfigView, loading_indicator::BusyIndicator, map_sources_to_playlist_rows, theme::Theme, AppIcon,
-            DashboardView, DownloadsView, EpgView, IconButton, NoAccess, Panel, ParticleFlowBackground,
+            DashboardView, DownloadsView, EpgView, IconButton, LanguagePicker, NoAccess, Panel, ParticleFlowBackground,
             PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView, Setup, Sidebar, SourceEditor,
             StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView, UserlistView, WebsocketStatus,
         },
@@ -222,6 +222,7 @@ pub fn Home() -> Html {
                         }
                         </div>
                         <div class={"tp__app-header-toolbar"}>
+                            <LanguagePicker />
                             <ThemePicker theme={*theme} on_select={handle_theme_select.clone()} />
                             <IconButton name="Logout" icon="Logout" onclick={handle_logout.clone()} />
                         </div>
@@ -277,6 +278,7 @@ pub fn Home() -> Html {
                                 html! {
                                     <div class={"tp__app-header-toolbar"}>
                                         <WebsocketStatus/>
+                                        <LanguagePicker />
                                         <ThemePicker theme={*theme} on_select={handle_theme_select} />
                                         <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
                                     </div>

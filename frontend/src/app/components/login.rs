@@ -1,5 +1,7 @@
 use crate::{
-    app::components::{input::Input, svg_icon::AppIcon, theme::Theme, ParticleFlowBackground, TextButton, ThemePicker},
+    app::components::{
+        input::Input, svg_icon::AppIcon, theme::Theme, LanguagePicker, ParticleFlowBackground, TextButton, ThemePicker,
+    },
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -88,6 +90,7 @@ pub fn Login() -> Html {
         <ParticleFlowBackground />
         <div class="tp__login-view">
            <div class="tp__login-view__toolbar">
+                <LanguagePicker />
                 <ThemePicker theme={*theme} on_select={handle_theme_select} />
            </div>
            <div class={"tp__login-view__header"}>

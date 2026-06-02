@@ -10,6 +10,14 @@
 
 ## 🌟 New Features
 
+- **Runtime-Discovered UI Languages With RTL Support**:
+  - The frontend now reads the available UI languages at runtime from an `assets/i18n/index.json` manifest, so adding a
+    language only requires shipping a `<code>.json` locale file and adding an entry to the manifest — no code change.
+  - A language picker appears in the toolbar (next to the theme picker) whenever more than one language is available,
+    and the chosen language is remembered across sessions.
+  - Each language declares its text direction (`ltr`/`rtl`); the document direction is updated accordingly, providing
+    baseline support for right-to-left languages such as Arabic.
+
 - **Confirmation For Destructive Download/Recording Actions**:
   - Cancelling a transfer/recording and removing a download entry now prompt a confirmation dialog before proceeding.
   - The confirmation dialog focuses the safe (Cancel) action by default, consistent with other destructive actions

@@ -1,7 +1,7 @@
 use crate::{
     app::components::{
         api_user::playlist::ApiUserPlaylist, loading_indicator::BusyIndicator, theme::Theme, AppIcon, IconButton,
-        ThemePicker, ToastrView, WebsocketStatus,
+        LanguagePicker, ThemePicker, ToastrView, WebsocketStatus,
     },
     hooks::use_service_context,
     provider::DialogProvider,
@@ -45,6 +45,7 @@ pub fn ApiUserView() -> Html {
                         </div>
                         <div class={"tp__app-header-toolbar"}>
                             <WebsocketStatus/>
+                            <LanguagePicker />
                             <ThemePicker theme={*theme} on_select={handle_theme_select} />
                             <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
                         </div>
