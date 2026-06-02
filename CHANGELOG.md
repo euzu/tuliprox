@@ -10,6 +10,76 @@
 
 ## 🌟 New Features
 
+
+- **UI Micro-Interactions**:
+  - Cards now gently lift with a soft shadow on hover, buttons give a subtle press/ripple feedback when clicked,
+    and collapse/accordion chevrons smoothly rotate between open and closed states. All effects honor
+    `prefers-reduced-motion: reduce`.
+
+- **Animated Theme Transitions**:
+  - Switching themes now cross-dissolves colors, backgrounds, borders, and shadows instead of snapping instantly.
+    The transition is applied only during the switch (never during normal hover/interaction) and is fully disabled
+    for users who set `prefers-reduced-motion: reduce`.
+
+- **Resilient Sidebar Initialization**:
+  - The sidebar no longer panics if the global `window` object is unavailable; resize handling and responsive
+    collapse now degrade gracefully instead of crashing the app.
+
+- **Improved Screen-Reader Support**:
+  - Toast notifications are now announced by screen readers via an `aria-live` region (errors assertively, others
+    politely).
+  - The sidebar toggle button exposes its `aria-expanded` state and an accessible label, and the active navigation
+    item is marked with `aria-current="page"`.
+
+- **Table Empty-State Message**:
+  - Paged/data tables now show a localized "No content" message in their empty state instead of just an icon,
+    making it clearer when a query or filter returns no rows. (Table headers already stick to the top while scrolling.)
+
+- **Debounced Filter Editor Input**:
+  - Typing in the filter editor no longer re-parses and previews the filter on every keystroke; parsing and change
+    notifications are now debounced, keeping the textarea responsive while editing large filters.
+
+- **Persisted UI Preferences**:
+  - The sidebar collapsed/expanded state and the stream-history table page size are now remembered across sessions
+    (the active theme was already persisted), so the UI restores your last layout on reload.
+
+- **Explicit Button Type On Shared Controls**:
+  - The shared `IconButton` and `TextButton` primitives now render with `type="button"`, preventing accidental
+    form submission when used inside forms.
+
+- **Descriptive Image Alt Text**:
+  - Logo images on the login screen and sidebar now use the configured app title for their alt text, and playlist
+    channel logos use the channel title, improving screen-reader accessibility.
+
+- **Popup Menu Keyboard Dismissal**:
+  - Popup menus now close when pressing `Escape`, in addition to clicking outside, improving keyboard accessibility.
+
+- **Recoverable Error Boundary**:
+  - Added an `ErrorBoundary` component that wraps each main view (dashboard, stats, streams, downloads, users,
+    sources, playlists, EPG, RBAC, config) and the API-user playlist, so a recoverable failure shows a fallback with
+    a retry button instead of leaving the section blank — and a failure in one view no longer affects the others.
+  - Descendants can report a recoverable error through the boundary's context handle; retrying re-mounts the
+    protected subtree so the user can recover without reloading the whole app.
+
+- **Runtime-Discovered UI Languages With RTL Support**:
+  - The frontend now reads the available UI languages at runtime from an `assets/i18n/index.json` manifest, so adding a
+    language only requires shipping a `<code>.json` locale file and adding an entry to the manifest — no code change.
+  - A language picker appears in the toolbar (next to the theme picker) whenever more than one language is available,
+    and the chosen language is remembered across sessions.
+  - Each language declares its text direction (`ltr`/`rtl`); the document direction is updated accordingly, providing
+    baseline support for right-to-left languages such as Arabic.
+
+- **Confirmation For Destructive Download/Recording Actions**:
+  - Cancelling a transfer/recording and removing a download entry now prompt a confirmation dialog before proceeding.
+  - The confirmation dialog focuses the safe (Cancel) action by default, consistent with other destructive actions
+    (delete user, delete target, delete RBAC user/group).
+
+- **Toast Notification UX Upgrade**:
+  - Auto-dismiss toasts now show a countdown progress bar that reflects the remaining time before they disappear.
+  - Hovering a toast pauses both the dismiss timer and its progress bar, and resumes from where it left off on mouse leave.
+  - Error toasts gain a "copy details" action that copies the full message to the clipboard for easier bug reports.
+  - The progress bar and entrance animation respect the `prefers-reduced-motion` accessibility setting.
+
 - **M3U Catchup / Archive Preservation And Proxying**:
   - Tuliprox now preserves standard M3U catchup/archive attributes during M3U import and export.
   - Supported preserved attributes include:
@@ -193,6 +263,8 @@
 
 ## 🐛 Fixes
 
+- **Async Local File Serving**: The local-file stream handler now canonicalizes paths with `tokio::fs::canonicalize`
+  instead of the blocking `std` call, so the async runtime is no longer blocked while resolving the file path.
 - **Template Expansion Efficiency**: Optimized `template.yml` / `template.d` multi-template expansion so sequence-style templates no longer
   duplicate unrelated entries during dependency resolution.
   - Sequence templates still resolve correctly and preserve order.

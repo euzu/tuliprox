@@ -34,6 +34,20 @@
     }
   }
 
+  &__chevron {
+    display: inline-flex;
+    align-items: center;
+    transform-origin: center;
+
+    @media (prefers-reduced-motion: no-preference) {
+      transition: transform 220ms ease;
+    }
+  }
+
+  &:not(.tp__collapsed) .tp__collapse-panel__chevron {
+    transform: rotate(180deg);
+  }
+
   &__body {
     display: flex;
     flex-flow: column;

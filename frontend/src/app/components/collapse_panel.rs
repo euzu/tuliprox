@@ -37,7 +37,9 @@ pub fn CollapsePanel(props: &CollapsePanelProps) -> Html {
                 <span class="tp__collapse-panel__header-title">
                     { props.title_content.clone().unwrap_or_else(|| html! { &props.title }) }
                 </span>
-                <AppIcon name={ if *expanded { "ChevronUp" } else {"ChevronDown"} }/>
+                <span class="tp__collapse-panel__chevron">
+                    <AppIcon name="ChevronDown"/>
+                </span>
             </div>
             <div /*ref={panel_ref} */class="tp__collapse-panel__body">
             { for props.children.iter() }

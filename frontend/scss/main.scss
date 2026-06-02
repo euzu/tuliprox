@@ -49,3 +49,17 @@ body {
   max-width: 100%;
   background-color: inherit;
 }
+
+@media (prefers-reduced-motion: no-preference) {
+  body.tp-theme-transition,
+  body.tp-theme-transition * {
+    transition:
+      background-color 280ms ease,
+      color 280ms ease,
+      border-color 280ms ease,
+      outline-color 280ms ease,
+      fill 280ms ease,
+      stroke 280ms ease,
+      box-shadow 280ms ease !important;
+  }
+}

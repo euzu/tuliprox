@@ -1,5 +1,5 @@
 use wasm_bindgen::{prelude::Closure, JsCast};
-use web_sys::{window, HtmlElement, MouseEvent};
+use web_sys::{window, HtmlElement, KeyboardEvent, MouseEvent};
 use yew::{create_portal, prelude::*};
 
 #[derive(Properties, PartialEq, Clone)]
@@ -99,6 +99,35 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
                 if let Some(handler) = handler {
                     if let Some(win) = browser_window.as_ref() {
                         let _ = win.remove_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref());
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let on_close = props.on_close.clone();
+        use_effect_with(props.is_open, move |is_open| {
+            let browser_window = web_sys::window();
+            let handler = if *is_open {
+                let handler = Closure::wrap(Box::new(move |event: KeyboardEvent| {
+                    if event.key() == "Escape" {
+                        on_close.emit(());
+                    }
+                }) as Box<dyn FnMut(_)>);
+
+                if let Some(win) = browser_window.as_ref() {
+                    let _ = win.add_event_listener_with_callback("keydown", handler.as_ref().unchecked_ref());
+                }
+                Some(handler)
+            } else {
+                None
+            };
+
+            move || {
+                if let Some(handler) = handler {
+                    if let Some(win) = browser_window.as_ref() {
+                        let _ = win.remove_event_listener_with_callback("keydown", handler.as_ref().unchecked_ref());
                     }
                 }
             }

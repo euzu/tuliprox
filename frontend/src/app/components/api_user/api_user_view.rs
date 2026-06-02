@@ -1,9 +1,10 @@
 use crate::{
     app::components::{
-        api_user::playlist::ApiUserPlaylist, loading_indicator::BusyIndicator, theme::Theme, AppIcon, IconButton,
-        ThemePicker, ToastrView, WebsocketStatus,
+        api_user::playlist::ApiUserPlaylist, loading_indicator::BusyIndicator, theme::Theme, AppIcon, ErrorBoundary,
+        IconButton, LanguagePicker, ThemePicker, ToastrView, WebsocketStatus,
     },
     hooks::use_service_context,
+    i18n::use_translation,
     provider::DialogProvider,
 };
 use yew::{component, html, use_state, Callback, Html};
@@ -11,6 +12,7 @@ use yew::{component, html, use_state, Callback, Html};
 #[component]
 pub fn ApiUserView() -> Html {
     let services = use_service_context();
+    let translate = use_translation();
     let theme = use_state(Theme::get_current_theme);
 
     let handle_theme_select = {
@@ -45,12 +47,15 @@ pub fn ApiUserView() -> Html {
                         </div>
                         <div class={"tp__app-header-toolbar"}>
                             <WebsocketStatus/>
+                            <LanguagePicker />
                             <ThemePicker theme={*theme} on_select={handle_theme_select} />
                             <IconButton name="Logout" icon="Logout" onclick={handle_logout} />
                         </div>
                     </div>
                     <div class="tp__app-main__body">
-                        <ApiUserPlaylist />
+                        <ErrorBoundary name={translate.t("LABEL.PLAYLIST")}>
+                            <ApiUserPlaylist />
+                        </ErrorBoundary>
                     </div>
               </div>
             </div>

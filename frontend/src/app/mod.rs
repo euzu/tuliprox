@@ -6,10 +6,11 @@ use crate::{
     app::components::{Authentication, Home, LoadingScreen, Login, RoleBasedContent},
     error::Error,
     hooks::IconDefinition,
-    i18n::I18nProvider,
+    i18n::{I18nProvider, LanguageInfo, LanguageManifest, LanguageState},
     model::WebConfig,
     provider::{IconContextProvider, ServiceContextProvider},
     services::request_get,
+    utils::{get_local_storage_item, set_local_storage_item},
 };
 pub use context::*;
 use futures::future::join_all;
@@ -52,22 +53,39 @@ fn versioned_config_url() -> String { versioned_static_asset_url("config.json") 
 
 #[component]
 pub fn App() -> Html {
-    let supported_languages = vec!["en"];
-    let translations_state = use_state(|| None);
+    let translations_state = use_state(|| None::<HashMap<String, Value>>);
+    let languages_state = use_state(|| None::<Rc<Vec<LanguageInfo>>>);
     let configuration_state = use_state(|| None);
     let icon_state = use_state(|| None);
+    let active_language = use_state(|| get_local_storage_item("tp_language").unwrap_or_else(|| "en".to_string()));
 
     {
         let trans_state = translations_state.clone();
-        let languages = supported_languages.clone();
+        let langs_state = languages_state.clone();
         use_async_with_options::<_, (), Error>(
             async move {
+                let manifest_url = versioned_static_asset_url("assets/i18n/index.json");
+                let mut languages = match request_get::<LanguageManifest>(&manifest_url, None, None).await {
+                    Ok(Some(manifest)) => manifest.languages,
+                    _ => Vec::new(),
+                };
+                if languages.is_empty() {
+                    languages.push(LanguageInfo {
+                        code: "en".to_string(),
+                        label: "English".to_string(),
+                        dir: "ltr".to_string(),
+                    });
+                }
+
                 let futures = languages
                     .iter()
-                    .map(|lang| async move {
-                        let url = versioned_static_asset_url(&format!("assets/i18n/{lang}.json"));
-                        let result: Result<Option<Value>, Error> = request_get(&url, None, None).await;
-                        (lang.to_string(), result)
+                    .map(|lang| {
+                        let code = lang.code.clone();
+                        async move {
+                            let url = versioned_static_asset_url(&format!("assets/i18n/{code}.json"));
+                            let result: Result<Option<Value>, Error> = request_get(&url, None, None).await;
+                            (code, result)
+                        }
                     })
                     .collect::<Vec<_>>();
                 let results = join_all(futures).await;
@@ -78,10 +96,30 @@ pub fn App() -> Html {
                     }
                 }
                 trans_state.set(Some(translations));
+                langs_state.set(Some(Rc::new(languages)));
                 Ok(())
             },
             UseAsyncOptions::enable_auto(),
         );
+    }
+
+    {
+        let active = (*active_language).clone();
+        let langs = (*languages_state).clone();
+        use_effect_with((active, langs), move |(active, langs)| {
+            if let Some(languages) = langs.as_ref() {
+                let dir = languages
+                    .iter()
+                    .find(|l| &l.code == active)
+                    .map(|l| l.dir.clone())
+                    .unwrap_or_else(|| "ltr".to_string());
+                if let Some(root) = window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
+                    let _ = root.set_attribute("dir", &dir);
+                    let _ = root.set_attribute("lang", active);
+                }
+            }
+            || ()
+        });
     }
 
     {
@@ -134,23 +172,55 @@ pub fn App() -> Html {
         );
     }
 
-    if translations_state.as_ref().is_none() || configuration_state.as_ref().is_none() || icon_state.as_ref().is_none()
+    if translations_state.as_ref().is_none()
+        || languages_state.as_ref().is_none()
+        || configuration_state.as_ref().is_none()
+        || icon_state.as_ref().is_none()
     {
         return html! { <LoadingScreen/> };
     }
     let transl = translations_state.as_ref().unwrap();
+    let languages = languages_state.as_ref().unwrap().clone();
     let config: &WebConfig = configuration_state.as_ref().unwrap();
     let icons: &Vec<Rc<IconDefinition>> = icon_state.as_ref().unwrap();
+
+    let effective_language = if languages.iter().any(|l| l.code == *active_language) {
+        (*active_language).clone()
+    } else {
+        languages.first().map(|l| l.code.clone()).unwrap_or_else(|| "en".to_string())
+    };
+
+    let supported_languages: Vec<String> = languages.iter().map(|l| l.code.clone()).collect();
+
+    let on_language_change = {
+        let active_language = active_language.clone();
+        Callback::from(move |code: String| {
+            set_local_storage_item("tp_language", &code);
+            active_language.set(code);
+        })
+    };
+
+    let language_state = LanguageState {
+        languages: languages.clone(),
+        active: effective_language.clone(),
+        on_change: on_language_change,
+    };
 
     html! {
         <BrowserRouter>
             <ServiceContextProvider config={config.clone()}>
                 <IconContextProvider icons={icons.clone()}>
-                    <I18nProvider supported_languages={supported_languages} translations={transl.clone()}>
-                        <Authentication>
-                            <RoleBasedContent />
-                        </Authentication>
-                    </I18nProvider>
+                    <ContextProvider<LanguageState> context={language_state}>
+                        <I18nProvider
+                            supported_languages={supported_languages}
+                            active_language={effective_language}
+                            translations={transl.clone()}
+                        >
+                            <Authentication>
+                                <RoleBasedContent />
+                            </Authentication>
+                        </I18nProvider>
+                    </ContextProvider<LanguageState>>
                 </IconContextProvider>
             </ServiceContextProvider>
         </BrowserRouter>

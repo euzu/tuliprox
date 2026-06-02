@@ -1,9 +1,16 @@
 use gloo_timers::callback::Timeout;
 use std::{
     cell::RefCell,
+    collections::HashMap,
     rc::Rc,
     sync::atomic::{AtomicU32, Ordering},
 };
+
+struct ToastTimer {
+    timeout: Option<Timeout>,
+    remaining_ms: u32,
+    started_at: f64,
+}
 
 #[derive(Clone, PartialEq, Default)]
 pub enum ToastType {
@@ -37,6 +44,15 @@ pub struct Toast {
     pub close_mode: ToastCloseMode,
 }
 
+impl Toast {
+    pub fn duration_ms(&self) -> Option<u32> {
+        match self.close_mode {
+            ToastCloseMode::Auto(ms) => Some(ms),
+            ToastCloseMode::Manual => None,
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct ToastrState {
     pub toasts: Vec<Toast>,
@@ -56,6 +72,7 @@ pub struct ToastrService {
     pub counter: AtomicU32,
     pub state: Rc<RefCell<ToastrState>>,
     subscriber: ToastrSubscriber,
+    timers: Rc<RefCell<HashMap<u32, ToastTimer>>>,
 }
 
 impl Default for ToastrService {
@@ -68,6 +85,7 @@ impl ToastrService {
             counter: AtomicU32::new(0),
             state: Rc::new(RefCell::new(ToastrState::default())),
             subscriber: Rc::new(RefCell::new(None)),
+            timers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -92,16 +110,47 @@ impl ToastrService {
         drop(state);
 
         if let ToastCloseMode::Auto(duration_ms) = options.close_mode {
-            let state_ref = self.state.clone();
-            let subscriber_ref = self.subscriber.clone();
-            Timeout::new(duration_ms, move || {
-                let mut state = state_ref.borrow_mut();
-                state.remove_toast(toast_id);
-                if let Some(subscriber) = subscriber_ref.borrow().as_ref() {
-                    subscriber(state.toasts.clone());
-                }
-            })
-            .forget();
+            self.schedule_dismiss(toast_id, duration_ms);
+        }
+    }
+
+    fn schedule_dismiss(&self, id: u32, ms: u32) {
+        let state_ref = self.state.clone();
+        let subscriber_ref = self.subscriber.clone();
+        let timers_ref = self.timers.clone();
+        let started_at = js_sys::Date::now();
+        let timeout = Timeout::new(ms, move || {
+            timers_ref.borrow_mut().remove(&id);
+            let mut state = state_ref.borrow_mut();
+            state.remove_toast(id);
+            if let Some(subscriber) = subscriber_ref.borrow().as_ref() {
+                subscriber(state.toasts.clone());
+            }
+        });
+        self.timers.borrow_mut().insert(id, ToastTimer { timeout: Some(timeout), remaining_ms: ms, started_at });
+    }
+    // Pause the auto-dismiss countdown and calculate remaining time
+    pub fn pause(&self, id: u32) {
+        let mut timers = self.timers.borrow_mut();
+        if let Some(entry) = timers.get_mut(&id) {
+            if entry.timeout.take().is_some() {
+                let elapsed = (js_sys::Date::now() - entry.started_at).max(0.0) as u32;
+                entry.remaining_ms = entry.remaining_ms.saturating_sub(elapsed);
+            }
+        }
+    }
+
+    // Resume a previously paused auto-dismiss countdown with the remaining time.
+    pub fn resume(&self, id: u32) {
+        let remaining = {
+            let timers = self.timers.borrow();
+            match timers.get(&id) {
+                Some(entry) if entry.timeout.is_none() => Some(entry.remaining_ms),
+                _ => None,
+            }
+        };
+        if let Some(ms) = remaining {
+            self.schedule_dismiss(id, ms.max(1));
         }
     }
 
@@ -142,6 +191,7 @@ impl ToastrService {
 
     // manual close
     pub fn dismiss(&self, id: u32) {
+        self.timers.borrow_mut().remove(&id);
         let mut state = self.state.borrow_mut();
         state.remove_toast(id);
         if let Some(subscriber) = self.subscriber.borrow().as_ref() {
