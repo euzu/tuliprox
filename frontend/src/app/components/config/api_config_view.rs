@@ -498,7 +498,12 @@ pub fn ApiConfigView() -> Html {
                 <div class="tp__api-config-view__proxy-server tp__api-config-view__proxy-server__view">
                     {
                         if form_state_api_proxy_config.form.server.is_empty() {
-                            html! { <NoContent /> }
+                            html! {
+                                <NoContent
+                                    text={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_SERVER_TITLE")}
+                                    hint={translate.t("MESSAGES.EMPTY_STATE.API_PROXY_SERVER_HINT")}
+                                />
+                            }
                         } else {
                             html! { <Table::<ApiProxyServerInfoDto> definition={table_definition.clone()} /> }
                         }

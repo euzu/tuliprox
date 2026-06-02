@@ -331,7 +331,12 @@ pub fn SchedulesConfigView() -> Html {
               </Card>
             }
         }
-        None => html! { <NoContent /> },
+        None => html! {
+            <NoContent
+                text={translate.t("MESSAGES.EMPTY_STATE.SCHEDULES_TITLE")}
+                hint={translate.t("MESSAGES.EMPTY_STATE.SCHEDULES_HINT")}
+            />
+        },
     };
 
     let render_edit_mode = || {

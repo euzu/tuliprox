@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Guided Empty States**:
+  - Empty lists now show a short hint explaining what to do next instead of just "No content",
+    applied to HDHomeRun devices, schedules, the API proxy server list, the playlist explorer, and the EPG viewer.
+
 - **Status Health Banner**:
   - A single green/amber/red health indicator in the header aggregates the realtime connection, backend status,
     and provider connection capacity, with a hover breakdown and click-through to the Stats view.
