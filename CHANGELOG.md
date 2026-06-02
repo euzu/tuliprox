@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Bookmarkable Views (Deep Linking)**:
+  - The active view is now reflected in the URL hash (e.g. `#stats`, `#source_editor`), so views can be
+  - Browser back/forward navigation and manual hash edits now switch the active view accordingly.
+
 - **UI Micro-Interactions**:
   - Cards now gently lift with a soft shadow on hover, buttons give a subtle press/ripple feedback when clicked,
     and collapse/accordion chevrons smoothly rotate between open and closed states. All effects honor
