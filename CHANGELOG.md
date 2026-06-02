@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Debounced Filter Editor Input**:
+  - Typing in the filter editor no longer re-parses and previews the filter on every keystroke; parsing and change
+    notifications are now debounced, keeping the textarea responsive while editing large filters.
+
 - **Persisted UI Preferences**:
   - The sidebar collapsed/expanded state and the stream-history table page size are now remembered across sessions
     (the active theme was already persisted), so the UI restores your last layout on reload.
