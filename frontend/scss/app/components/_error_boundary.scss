@@ -1,0 +1,40 @@
+.tp__error-boundary {
+  display: flex;
+  flex-flow: column;
+  justify-content: center;
+  align-items: center;
+  gap: var(--padding-mini);
+  padding: var(--padding-default);
+  width: 100%;
+  box-sizing: border-box;
+  text-align: center;
+
+  &__icon {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: var(--color-error, #d9534f);
+    fill: currentColor;
+
+    .svg-icon {
+      width: 2.5rem;
+      height: 2.5rem;
+    }
+  }
+
+  &__title {
+    font-weight: 600;
+    font-size: 1.1rem;
+  }
+
+  &__message {
+    max-width: 40rem;
+    opacity: 0.85;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  &__retry {
+    margin-top: var(--padding-mini);
+  }
+}

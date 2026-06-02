@@ -503,98 +503,50 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    fn make_test_credential(username: &str, status: ProxyUserStatus) -> ProxyUserCredentials {
+        ProxyUserCredentials {
+            username: username.to_string(),
+            password: "Test".to_string(),
+            token: Some("Test".to_string()),
+            proxy: ProxyType::Reverse(None),
+            server: Some("default".to_string()),
+            epg_timeshift: None,
+            epg_request_timeshift: None,
+            created_at: None,
+            exp_date: Some(1_672_705_545),
+            max_connections: 1,
+            status: Some(status),
+            output_clusters: ClusterFlags::all(),
+            ui_enabled: true,
+            comment: None,
+            priority: 0,
+            soft_connections: 0,
+            soft_priority: 0,
+            t_is_api_user: false,
+            network_access: None,
+        }
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     pub async fn save_target_user() {
         let user = TargetUser {
             target: "test".to_string(),
             credentials: vec![
-                Arc::new(ProxyUserCredentials {
-                    username: "Test".to_string(),
-                    password: "Test".to_string(),
-                    token: Some("Test".to_string()),
-                    proxy: ProxyType::Reverse(None),
-                    server: Some("default".to_string()),
-                    epg_timeshift: None,
-                    epg_request_timeshift: None,
-                    created_at: None,
-                    exp_date: Some(1_672_705_545),
-                    max_connections: 1,
-                    status: Some(ProxyUserStatus::Active),
-                    output_clusters: ClusterFlags::all(),
-                    ui_enabled: true,
-                    comment: None,
-                    priority: 0,
-                    soft_connections: 0,
-                    soft_priority: 0,
-                    t_is_api_user: false,
-                    network_access: None,
-                }),
-                Arc::new(ProxyUserCredentials {
-                    username: "Test2".to_string(),
-                    password: "Test".to_string(),
-                    token: Some("Test".to_string()),
-                    proxy: ProxyType::Reverse(None),
-                    server: Some("default".to_string()),
-                    epg_timeshift: None,
-                    epg_request_timeshift: None,
-                    created_at: None,
-                    exp_date: Some(1_672_705_545),
-                    max_connections: 1,
-                    status: Some(ProxyUserStatus::Expired),
-                    output_clusters: ClusterFlags::all(),
-                    ui_enabled: true,
-                    comment: None,
-                    priority: 0,
-                    soft_connections: 0,
-                    soft_priority: 0,
-                    t_is_api_user: false,
-                    network_access: None,
-                }),
-                Arc::new(ProxyUserCredentials {
-                    username: "Test3".to_string(),
-                    password: "Test".to_string(),
-                    token: Some("Test".to_string()),
-                    proxy: ProxyType::Reverse(None),
-                    server: Some("default".to_string()),
-                    epg_timeshift: None,
-                    epg_request_timeshift: None,
-                    created_at: None,
-                    exp_date: Some(1_672_705_545),
-                    max_connections: 1,
-                    status: Some(ProxyUserStatus::Expired),
-                    output_clusters: ClusterFlags::all(),
-                    ui_enabled: true,
-                    comment: None,
-                    priority: 0,
-                    soft_connections: 0,
-                    soft_priority: 0,
-                    t_is_api_user: false,
-                    network_access: None,
-                }),
-                Arc::new(ProxyUserCredentials {
-                    username: "Test4".to_string(),
-                    password: "Test".to_string(),
-                    token: Some("Test".to_string()),
-                    proxy: ProxyType::Reverse(None),
-                    server: Some("default".to_string()),
-                    epg_timeshift: None,
-                    epg_request_timeshift: None,
-                    created_at: None,
-                    exp_date: Some(1_672_705_545),
-                    max_connections: 1,
-                    status: Some(ProxyUserStatus::Expired),
-                    output_clusters: ClusterFlags::Live | ClusterFlags::Vod,
-                    ui_enabled: true,
-                    comment: None,
-                    priority: -10, // non-zero priority to verify round-trip serialization
-                    soft_connections: 2,
-                    soft_priority: -3,
-                    t_is_api_user: false,
-                    network_access: Some(crate::model::NetworkAccess {
+                Arc::new(make_test_credential("Test", ProxyUserStatus::Active)),
+                Arc::new(make_test_credential("Test2", ProxyUserStatus::Expired)),
+                Arc::new(make_test_credential("Test3", ProxyUserStatus::Expired)),
+                Arc::new({
+                    let mut c = make_test_credential("Test4", ProxyUserStatus::Expired);
+                    c.output_clusters = ClusterFlags::Live | ClusterFlags::Vod;
+                    c.priority = -10;
+                    c.soft_connections = 2;
+                    c.soft_priority = -3;
+                    c.network_access = Some(crate::model::NetworkAccess {
                         allowed_countries: vec!["DE".to_string(), "AT".to_string()],
                         allowed_networks: vec!["10.0.0.0/8".parse().unwrap(), "192.168.1.0/24".parse().unwrap()],
-                    }),
+                    });
+                    c
                 }),
             ],
         };

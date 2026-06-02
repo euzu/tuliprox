@@ -64,116 +64,118 @@ impl NfoReader {
 
     /// Parses movie NFO content
     fn parse_movie_nfo(content: &str) -> Option<MediaMetadata> {
-        let mut reader = Reader::from_str(content);
-        reader.config_mut().trim_text(true);
-
         let mut movie = MovieMetadata {
             source: MetadataSource::KodiNfo,
             last_updated: chrono::Utc::now().timestamp(),
             ..MovieMetadata::default()
         };
 
-        let mut buf = Vec::new();
-        let mut current_text = String::new();
-        let mut in_actor = false;
-        let mut current_actor = Actor {
-            name: String::new(),
-            role: None,
-            thumb: None,
-        };
-
-        loop {
-            match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) => {
-                    let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    if tag_name == "actor" {
-                        in_actor = true;
-                        current_actor = Actor {
-                            name: String::new(),
-                            role: None,
-                            thumb: None,
-                        };
-                    }
-                    current_text.clear();
+        let parsed = Self::read_nfo_events(content, |tag, text, in_actor, current_actor| {
+            match tag {
+                "title" if !in_actor => movie.title.clone_from(text),
+                "originaltitle" => movie.original_title = Some(text.clone()),
+                "year" => movie.year = text.parse().ok(),
+                "plot" => movie.plot = Some(text.clone()),
+                "tagline" => movie.tagline = Some(text.clone()),
+                "runtime" => {
+                    let runtime_str = text.split_whitespace().next().unwrap_or("");
+                    movie.runtime = runtime_str.parse().ok();
                 }
-                Ok(Event::Text(e)) => {
-                    if let Ok(decoded) = e.decode() {
-                        current_text.push_str(decoded.trim());
+                "mpaa" => movie.mpaa = Some(text.clone()),
+                "id" | "imdb" | "imdbid" => movie.imdb_id = Some(text.clone()),
+                "tmdbid" => movie.tmdb_id = text.parse().ok(),
+                "rating" => movie.rating = text.parse().ok(),
+                "genre" => push_to_field_list!(movie.genres, text),
+                "director" => push_to_field_list!(movie.directors, text),
+                "credits" | "writer" => push_to_field_list!(movie.writers, text),
+                "studio" => push_to_field_list!(movie.studios, text),
+                "thumb" | "poster" => {
+                    if in_actor {
+                        current_actor.thumb = Some(text.clone());
                     } else {
-                        current_text.clear();
+                        movie.poster = Some(text.clone());
                     }
                 }
-                Ok(Event::End(e)) => {
-                    let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    match tag_name.as_str() {
-                        "title" if !in_actor => movie.title.clone_from(&current_text),
-                        "originaltitle" => movie.original_title = Some(current_text.clone()),
-                        "year" => movie.year = current_text.parse().ok(),
-                        "plot" => movie.plot = Some(current_text.clone()),
-                        "tagline" => movie.tagline = Some(current_text.clone()),
-                        "runtime" => {
-                            // Runtime might be in format "136" or "136 min"
-                            let runtime_str = current_text.split_whitespace().next().unwrap_or("");
-                            movie.runtime = runtime_str.parse().ok();
-                        }
-                        "mpaa" => movie.mpaa = Some(current_text.clone()),
-                        "id" | "imdb" | "imdbid" => movie.imdb_id = Some(current_text.clone()),
-                        "tmdbid" => movie.tmdb_id = current_text.parse().ok(),
-                        "rating" => movie.rating = current_text.parse().ok(),
-                        "genre" => push_to_field_list!(movie.genres, current_text),
-                        "director" => push_to_field_list!(movie.directors, current_text),
-                        "credits" | "writer" => push_to_field_list!(movie.writers, current_text),
-                        "studio" => push_to_field_list!(movie.studios, current_text),
-                        "thumb" | "poster" => movie.poster = Some(current_text.clone()),
-                        "fanart" => movie.fanart = Some(current_text.clone()),
-                        "name" if in_actor => current_actor.name.clone_from(&current_text),
-                        "role" if in_actor => current_actor.role = Some(current_text.clone()),
-                        "actor" => {
-                            if !current_actor.name.is_empty() {
-                                push_to_field_list!(movie.actors, current_actor);
-                            }
-                            in_actor = false;
-                        }
-                        _ => {}
+                "fanart" => movie.fanart = Some(text.clone()),
+                "name" if in_actor => current_actor.name.clone_from(text),
+                "role" if in_actor => current_actor.role = Some(text.clone()),
+                "actor" if !current_actor.name.is_empty() => {
+                        push_to_field_list!(movie.actors, current_actor);
                     }
-                    current_text.clear();
-                }
-                Ok(Event::Eof) => break,
-                Err(e) => {
-                    error!("Error parsing movie NFO: {e}");
-                    return None;
-                }
                 _ => {}
             }
-            buf.clear();
-        }
+        });
 
-        if movie.title.is_empty() {
-            None
-        } else {
+        if parsed && !movie.title.is_empty() {
             Some(MediaMetadata::Movie(movie))
+        } else {
+            None
         }
     }
 
     /// Parses TV series NFO content
     fn parse_series_nfo(content: &str) -> Option<MediaMetadata> {
-        let mut reader = Reader::from_str(content);
-        reader.config_mut().trim_text(true);
-
         let mut series = SeriesMetadata {
             source: MetadataSource::KodiNfo,
             last_updated: chrono::Utc::now().timestamp(),
             ..SeriesMetadata::default()
         };
 
+        let parsed = Self::read_nfo_events(content, |tag, text, in_actor, current_actor| {
+            match tag {
+                "title" if !in_actor => series.title.clone_from(text),
+                "originaltitle" => series.original_title = Some(text.clone()),
+                "year" | "premiered" => {
+                    if let Some(year_str) = text.split('-').next() {
+                        series.year = year_str.parse().ok();
+                    }
+                }
+                "plot" => series.plot = Some(text.clone()),
+                "mpaa" => series.mpaa = Some(text.clone()),
+                "id" | "imdb" | "imdbid" => series.imdb_id = Some(text.clone()),
+                "tmdbid" => series.tmdb_id = text.parse().ok(),
+                "tvdbid" => series.tvdb_id = text.parse().ok(),
+                "rating" => series.rating = text.parse().ok(),
+                "genre" => push_to_field_list!(series.genres, text),
+                "studio" => push_to_field_list!(series.studios, text),
+                "thumb" | "poster" => {
+                    if in_actor {
+                        current_actor.thumb = Some(text.clone());
+                    } else {
+                        series.poster = Some(text.clone());
+                    }
+                }
+                "fanart" => series.fanart = Some(text.clone()),
+                "status" => series.status = Some(text.clone()),
+                "name" if in_actor => current_actor.name.clone_from(text),
+                "role" if in_actor => current_actor.role = Some(text.clone()),
+                "actor" if !current_actor.name.is_empty() => {
+                        push_to_field_list!(series.actors, current_actor);
+                    }
+                _ => {}
+            }
+        });
+
+        if parsed && !series.title.is_empty() {
+            Some(MediaMetadata::Series(series))
+        } else {
+            None
+        }
+    }
+
+    /// Generic XML event loop for NFO files.
+    /// Calls `on_end_tag(tag_name, current_text, in_actor, current_actor)` for each closing tag.
+    /// Returns `true` if parsing completed without fatal errors.
+    fn read_nfo_events<F>(content: &str, mut on_end_tag: F) -> bool
+    where
+        F: FnMut(&str, &String, bool, &mut Actor),
+    {
+        let mut reader = Reader::from_str(content);
+        reader.config_mut().trim_text(true);
         let mut buf = Vec::new();
         let mut current_text = String::new();
         let mut in_actor = false;
-        let mut current_actor = Actor {
-            name: String::new(),
-            role: None,
-            thumb: None,
-        };
+        let mut current_actor = Actor { name: String::new(), role: None, thumb: None };
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -181,11 +183,7 @@ impl NfoReader {
                     let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                     if tag_name == "actor" {
                         in_actor = true;
-                        current_actor = Actor {
-                            name: String::new(),
-                            role: None,
-                            thumb: None,
-                        };
+                        current_actor = Actor { name: String::new(), role: None, thumb: None };
                     }
                     current_text.clear();
                 }
@@ -196,55 +194,33 @@ impl NfoReader {
                         current_text.clear();
                     }
                 }
+                Ok(Event::CData(e)) => {
+                    if let Ok(decoded) = e.decode() {
+                        current_text.push_str(decoded.trim());
+                    } else {
+                        current_text.clear();
+                    }
+                }
                 Ok(Event::End(e)) => {
                     let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    match tag_name.as_str() {
-                        "title" if !in_actor => series.title.clone_from(&current_text),
-                        "originaltitle" => series.original_title = Some(current_text.clone()),
-                        "year" | "premiered" => {
-                            // Extract year from date like "2008-01-20"
-                            if let Some(year_str) = current_text.split('-').next() {
-                                series.year = year_str.parse().ok();
-                            }
-                        }
-                        "plot" => series.plot = Some(current_text.clone()),
-                        "mpaa" => series.mpaa = Some(current_text.clone()),
-                        "id" | "imdb" | "imdbid" => series.imdb_id = Some(current_text.clone()),
-                        "tmdbid" => series.tmdb_id = current_text.parse().ok(),
-                        "tvdbid" => series.tvdb_id = current_text.parse().ok(),
-                        "rating" => series.rating = current_text.parse().ok(),
-                        "genre" => push_to_field_list!(series.genres, current_text),
-                        "studio" => push_to_field_list!(series.studios, current_text),
-                        "thumb" | "poster" => series.poster = Some(current_text.clone()),
-                        "fanart" => series.fanart = Some(current_text.clone()),
-                        "status" => series.status = Some(current_text.clone()),
-                        "name" if in_actor => current_actor.name.clone_from(&current_text),
-                        "role" if in_actor => current_actor.role = Some(current_text.clone()),
-                        "actor" => {
-                            if !current_actor.name.is_empty() {
-                                push_to_field_list!(series.actors, current_actor);
-                            }
-                            in_actor = false;
-                        }
-                        _ => {}
+                    let tag = tag_name.as_str();
+                    let was_actor = tag == "actor";
+                    on_end_tag(tag, &current_text, in_actor, &mut current_actor);
+                    if was_actor {
+                        in_actor = false;
                     }
                     current_text.clear();
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => {
-                    error!("Error parsing series NFO: {e}");
-                    return None;
+                    error!("Error parsing NFO: {e}");
+                    return false;
                 }
                 _ => {}
             }
             buf.clear();
         }
-
-        if series.title.is_empty() {
-            None
-        } else {
-            Some(MediaMetadata::Series(series))
-        }
+        true
     }
 }
 
@@ -256,7 +232,7 @@ mod tests {
     async fn test_parse_movie_nfo() {
         let nfo_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <movie>
-    <title>The Matrix</title>
+    <title><![CDATA[The Matrix]]></title>
     <originaltitle>The Matrix</originaltitle>
     <year>1999</year>
     <plot>A computer hacker learns about the true nature of reality.</plot>
@@ -271,6 +247,12 @@ mod tests {
     <director>Lana Wachowski</director>
     <director>Lilly Wachowski</director>
     <studio>Warner Bros.</studio>
+    <poster>movie-poster.jpg</poster>
+    <actor>
+        <name>Keanu Reeves</name>
+        <role>Neo</role>
+        <thumb>neo.jpg</thumb>
+    </actor>
 </movie>"#;
 
         let metadata = NfoReader::parse_movie_nfo(nfo_content);
@@ -283,6 +265,8 @@ mod tests {
             assert_eq!(movie.tmdb_id, Some(603));
             assert_eq!(movie.genres.as_ref().map(Vec::len).unwrap_or_default(), 2);
             assert_eq!(movie.directors.as_ref().map(Vec::len).unwrap_or_default(), 2);
+            assert_eq!(movie.poster.as_deref(), Some("movie-poster.jpg"));
+            assert_eq!(movie.actors.as_ref().and_then(|actors| actors.first()).and_then(|actor| actor.thumb.as_deref()), Some("neo.jpg"));
         } else {
             panic!("Expected movie metadata");
         }
@@ -305,6 +289,12 @@ mod tests {
     <genre>Thriller</genre>
     <studio>AMC</studio>
     <status>Ended</status>
+    <poster>series-poster.jpg</poster>
+    <actor>
+        <name>Bryan Cranston</name>
+        <role>Walter White</role>
+        <thumb>walter.jpg</thumb>
+    </actor>
 </tvshow>"#;
 
         let metadata = NfoReader::parse_series_nfo(nfo_content);
@@ -318,6 +308,11 @@ mod tests {
             assert_eq!(series.tvdb_id, Some(81189));
             assert_eq!(series.genres.as_ref().map(Vec::len).unwrap_or_default(), 3);
             assert_eq!(series.status, Some("Ended".to_string()));
+            assert_eq!(series.poster.as_deref(), Some("series-poster.jpg"));
+            assert_eq!(
+                series.actors.as_ref().and_then(|actors| actors.first()).and_then(|actor| actor.thumb.as_deref()),
+                Some("walter.jpg")
+            );
         } else {
             panic!("Expected series metadata");
         }

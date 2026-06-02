@@ -1,14 +1,17 @@
 use crate::{
     app::components::IconButton,
     hooks::use_service_context,
+    i18n::use_translation,
     services::{Toast, ToastCloseMode, ToastType},
 };
 use yew::prelude::*;
-use yew_hooks::use_mount;
+use yew_hooks::{use_clipboard, use_mount};
 
 #[component]
 pub fn ToastrView() -> Html {
     let service_ctx = use_service_context();
+    let translate = use_translation();
+    let clipboard = use_clipboard();
     let toasts = use_state(Vec::<Toast>::new);
 
     {
@@ -34,11 +37,13 @@ pub fn ToastrView() -> Html {
         html! {}
     } else {
         html! {
-            <div class="tp__toastr__container">
+            <div class="tp__toastr__container" role="presentation">
                 {
                     // Render each toast and show an "X" icon button when close mode is Manual
                     for toasts.iter().cloned().map({
                         let service_ctx = service_ctx.clone();
+                        let translate = translate.clone();
+                        let clipboard = clipboard.clone();
                         move |toast| {
                             // Decide visual style per toast type
                             let type_class = match toast.toast_type {
@@ -63,6 +68,7 @@ pub fn ToastrView() -> Html {
                                     <IconButton
                                         name={"toastr-close"}
                                         icon={"Close"}
+                                        aria_label={translate.t("LABEL.CLOSE")}
                                         onclick={on_close}
                                     />
                                 }
@@ -70,12 +76,77 @@ pub fn ToastrView() -> Html {
                                 html! {}
                             };
 
+                            let copy_btn = if matches!(toast.toast_type, ToastType::Error) && *clipboard.is_supported {
+                                let on_copy = {
+                                    let clipboard = clipboard.clone();
+                                    let message = toast.message.clone();
+                                    Callback::from(move |(_name, _e)| {
+                                        if *clipboard.is_supported {
+                                            clipboard.write_text(message.clone());
+                                        }
+                                    })
+                                };
+                                html! {
+                                    <IconButton
+                                        name={"toastr-copy"}
+                                        icon={"Clipboard"}
+                                        hint={translate.t("LABEL.COPY_DETAILS")}
+                                        aria_label={translate.t("LABEL.COPY_DETAILS")}
+                                        onclick={on_copy}
+                                    />
+                                }
+                            } else {
+                                html! {}
+                            };
+
+                            // Pause the auto-dismiss countdown while the pointer hovers the
+                            // toast, and resume it on leave (the progress bar mirrors this in CSS).
+                            let on_mouse_enter = {
+                                let service_ctx = service_ctx.clone();
+                                let id = toast.id;
+                                Callback::from(move |_e: MouseEvent| {
+                                    service_ctx.toastr.pause(id);
+                                })
+                            };
+                            let on_mouse_leave = {
+                                let service_ctx = service_ctx.clone();
+                                let id = toast.id;
+                                Callback::from(move |_e: MouseEvent| {
+                                    service_ctx.toastr.resume(id);
+                                })
+                            };
+
+                            // Auto-dismiss toasts get a progress bar whose duration matches the timer.
+                            let progress = match toast.duration_ms() {
+                                Some(duration_ms) => html! {
+                                    <div
+                                        class="tp__toast__progress"
+                                        style={format!("animation-duration: {duration_ms}ms")}
+                                    />
+                                },
+                                None => html! {},
+                            };
+
+                            let is_error = matches!(toast.toast_type, ToastType::Error);
+                            let toast_role = if is_error { "alert" } else { "status" };
+                            let toast_live = if is_error { "assertive" } else { "polite" };
+
                             html! {
-                                <div key={toast.id} class={classes!("tp__toast", type_class)}>
+                                <div
+                                    key={toast.id}
+                                    class={classes!("tp__toast", type_class)}
+                                    role={toast_role}
+                                    aria-live={toast_live}
+                                    aria-atomic="true"
+                                    onmouseenter={on_mouse_enter}
+                                    onmouseleave={on_mouse_leave}
+                                >
                                     <span class="tp__toast__message">
                                         { render_message(&toast.message) }
                                     </span>
+                                    { copy_btn }
                                     { close_btn }
+                                    { progress }
                                 </div>
                             }
                         }

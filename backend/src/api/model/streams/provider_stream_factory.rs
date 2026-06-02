@@ -226,18 +226,18 @@ impl ProviderStreamFactoryOptions {
         let username = self.username.as_deref()?;
         let client_ip = self.client_ip.as_deref()?;
         let stream_channel = self.stream_channel.clone()?;
-        Some(StreamInfo::new(
-            0,
-            0,
+        Some(StreamInfo::new(shared::model::StreamInfoParams {
+            uid: 0,
+            meter_uid: 0,
             username,
-            &self.addr,
+            addr: &self.addr,
             client_ip,
-            provider_name,
+            provider: provider_name,
             stream_channel,
-            self.user_agent.clone().unwrap_or_default(),
-            None,
-            None,
-        ))
+            user_agent: self.user_agent.clone().unwrap_or_default(),
+            country_code: None,
+            session_token: None,
+        }))
     }
 
     fn get_connect_failure_stage(&self) -> Option<FailureStage> { self.connect_failure_stage }

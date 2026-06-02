@@ -296,18 +296,18 @@ pub(crate) fn record_connect_failed_attempt(attempt: ConnectFailedAttempt<'_>) {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let info = StreamInfo::new(
-        0,
-        0,
-        &attempt.user.username,
-        &attempt.fingerprint.addr,
-        &attempt.fingerprint.client_ip,
-        attempt.provider_name,
-        attempt.stream_channel,
+    let info = StreamInfo::new(shared::model::StreamInfoParams {
+        uid: 0,
+        meter_uid: 0,
+        username: &attempt.user.username,
+        addr: &attempt.fingerprint.addr,
+        client_ip: &attempt.fingerprint.client_ip,
+        provider: attempt.provider_name,
+        stream_channel: attempt.stream_channel,
         user_agent,
-        None,
-        None,
-    );
+        country_code: None,
+        session_token: None,
+    });
     // Resolve target_name from target_id using the stable target config name.
     let target_name =
         attempt.app_state.app_config.get_target_by_id(info.channel.target_id).as_deref().map(|t| (&t.name).intern());
@@ -2952,7 +2952,7 @@ pub(crate) async fn local_stream_response(
     let path = PathBuf::from(pli.url.strip_prefix("file://").unwrap_or(&pli.url));
 
     // Canonicalize and validate the path
-    let path = match path.canonicalize() {
+    let path = match tokio::fs::canonicalize(&path).await {
         Ok(canonical) => canonical,
         Err(err) => {
             error!("Local file path is corrupt {}: {err}", path.display());

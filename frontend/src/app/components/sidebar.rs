@@ -3,7 +3,7 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
     model::ViewType,
-    utils::html_if,
+    utils::{get_local_storage_item, html_if, set_local_storage_item},
 };
 use shared::model::permission::Permission;
 use std::str::FromStr;
@@ -13,6 +13,7 @@ use yew::prelude::*;
 use yew_hooks::use_mount;
 
 const MOBILE_BREAKPOINT_PX: f64 = 780.0;
+const TP_SIDEBAR_COLLAPSED_KEY: &str = "tp-sidebar-collapsed";
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CollapseState {
@@ -40,13 +41,26 @@ fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
     }
 }
 
+fn resolved_sidebar_state(collapsed: CollapseState, is_mobile: bool) -> CollapseState {
+    if is_mobile {
+        CollapseState::AutoCollapsed
+    } else {
+        collapsed
+    }
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();
-    let collapsed = use_state(|| CollapseState::AutoExpanded);
+    let collapsed = use_state(|| match get_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY).as_deref() {
+        Some("collapsed") => CollapseState::ManualCollapsed,
+        Some("expanded") => CollapseState::ManualExpanded,
+        _ => CollapseState::AutoExpanded,
+    });
     let is_mobile = use_state(|| false);
     let active_menu = use_state(|| props.active_page);
+    let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
@@ -67,6 +81,11 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
                 CollapseState::AutoExpanded | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
             };
+            let stored = match next {
+                CollapseState::ManualCollapsed => "collapsed",
+                _ => "expanded",
+            };
+            set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, stored);
             collapsed.set(next);
         })
     };
@@ -76,7 +95,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let is_mobile = is_mobile.clone();
 
         Callback::from(move |_| {
-            let window = window().expect("no global window");
+            let Some(window) = window() else {
+                return;
+            };
 
             if let Ok(inner_width) = window.inner_width() {
                 let mobile_view = inner_width.as_f64().unwrap_or(0.0) < MOBILE_BREAKPOINT_PX;
@@ -116,18 +137,20 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             let check_sidebar = check_sidebar.clone();
             let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| check_sidebar.emit(())));
 
-            let window = window().expect("no global window");
-            window
-                .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                .expect("could not add event listener");
-
-            // Save Closure so it can be cleaned up later
-            *callback_handle.borrow_mut() = Some(closure);
+            let window = window();
+            if let Some(window) = window.as_ref() {
+                if window.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref()).is_ok() {
+                    // Save Closure so it can be cleaned up later
+                    *callback_handle.borrow_mut() = Some(closure);
+                }
+            }
 
             // Cleanup
             move || {
-                if let Some(closure) = callback_handle.borrow_mut().take() {
-                    let _ = window.remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                if let Some(window) = window {
+                    if let Some(closure) = callback_handle.borrow_mut().take() {
+                        let _ = window.remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                    }
                 }
             }
         });
@@ -252,17 +275,18 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     html! {
         <div class={classes!(
             "tp__app-sidebar",
-            sidebar_variant_class(*collapsed),
+            sidebar_variant_class(resolved_state),
             if *is_mobile { "mobile" } else { "" }
         )}>
             <div class="tp__app-sidebar__header tp__app-header">
               {
-                if matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded) && !*is_mobile {
+                if matches!(resolved_state, CollapseState::AutoExpanded | CollapseState::ManualExpanded) {
                   html! {
                    <span class="tp__app-header__logo">
                    {
                       if let Some(logo) = services.config.ui_config.app_logo.as_ref() {
-                        html! { <img src={logo.to_string()} alt="logo"/> }
+                        let alt = format!("{} logo", services.config.ui_config.app_title.as_deref().unwrap_or("tuliprox"));
+                        html! { <img src={logo.to_string()} alt={alt}/> }
                       } else {
                         html! { <AppIcon name="Logo"/> }
                       }
@@ -273,11 +297,17 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                   html! {}
                 }
               }
-              <IconButton name="ToggleSidebar" icon={"Sidebar"} onclick={toggle_sidebar} />
+              <IconButton
+                name="ToggleSidebar"
+                icon={"Sidebar"}
+                onclick={toggle_sidebar}
+                aria_expanded={matches!(resolved_state, CollapseState::AutoExpanded | CollapseState::ManualExpanded)}
+                aria_label={translate.t("LABEL.TOGGLE_SIDEBAR")}
+              />
             </div>
             <div class="tp__app-sidebar__scroll">
                 {
-                    if *is_mobile || matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
+                    if matches!(resolved_state, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
                         render_collapsed()
                     } else {
                         render_expanded()
@@ -290,7 +320,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{sidebar_variant_class, CollapseState};
+    use super::{resolved_sidebar_state, sidebar_variant_class, CollapseState};
 
     #[test]
     fn sidebar_variant_class_reports_collapsed_variants() {
@@ -302,5 +332,10 @@ mod tests {
     fn sidebar_variant_class_reports_expanded_variants() {
         assert_eq!(sidebar_variant_class(CollapseState::AutoExpanded), "expanded");
         assert_eq!(sidebar_variant_class(CollapseState::ManualExpanded), "expanded");
+    }
+
+    #[test]
+    fn sidebar_resolves_mobile_view_to_collapsed() {
+        assert_eq!(resolved_sidebar_state(CollapseState::ManualExpanded, true), CollapseState::AutoCollapsed);
     }
 }

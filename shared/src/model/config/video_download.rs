@@ -154,27 +154,28 @@ mod tests {
     use super::*;
     use crate::utils::DEFAULT_DOWNLOAD_DIR;
 
+    fn make_test_download_config() -> VideoDownloadConfigDto {
+        VideoDownloadConfigDto {
+            headers: HashMap::new(),
+            directory: None,
+            organize_into_directories: false,
+            episode_pattern: None,
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            retry_backoff_max_secs: default_retry_backoff_max_secs(),
+            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
+            retry_max_attempts: default_retry_max_attempts(),
+        }
+    }
+
     #[test]
     fn prepare_sets_default_download_dir_when_missing() {
-        let mut video = VideoConfigDto {
-            extensions: Vec::new(),
-            download: Some(VideoDownloadConfigDto {
-                headers: HashMap::new(),
-                directory: None,
-                organize_into_directories: false,
-                episode_pattern: None,
-                download_priority: 0,
-                recording_priority: 0,
-                reserve_slots_for_users: 0,
-                max_background_per_provider: 0,
-                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-                retry_backoff_multiplier: default_retry_backoff_multiplier(),
-                retry_backoff_max_secs: default_retry_backoff_max_secs(),
-                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-                retry_max_attempts: default_retry_max_attempts(),
-            }),
-            web_search: None,
-        };
+        let mut video =
+            VideoConfigDto { extensions: Vec::new(), download: Some(make_test_download_config()), web_search: None };
         video.prepare().expect("prepare should succeed");
         let download = video.download.expect("download should exist");
         assert_eq!(download.directory.as_deref(), Some(DEFAULT_DOWNLOAD_DIR));
@@ -182,25 +183,8 @@ mod tests {
 
     #[test]
     fn prepare_sets_default_episode_pattern_when_missing() {
-        let mut video = VideoConfigDto {
-            extensions: Vec::new(),
-            download: Some(VideoDownloadConfigDto {
-                headers: HashMap::new(),
-                directory: None,
-                organize_into_directories: false,
-                episode_pattern: None,
-                download_priority: 0,
-                recording_priority: 0,
-                reserve_slots_for_users: 0,
-                max_background_per_provider: 0,
-                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-                retry_backoff_multiplier: default_retry_backoff_multiplier(),
-                retry_backoff_max_secs: default_retry_backoff_max_secs(),
-                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-                retry_max_attempts: default_retry_max_attempts(),
-            }),
-            web_search: None,
-        };
+        let mut video =
+            VideoConfigDto { extensions: Vec::new(), download: Some(make_test_download_config()), web_search: None };
         video.prepare().expect("prepare should succeed");
         let download = video.download.expect("download should exist");
         assert!(download.episode_pattern.is_some(), "expected default episode pattern to be set");
@@ -211,19 +195,8 @@ mod tests {
         let mut video = VideoConfigDto {
             extensions: Vec::new(),
             download: Some(VideoDownloadConfigDto {
-                headers: HashMap::new(),
                 directory: Some("custom-downloads".to_string()),
-                organize_into_directories: false,
-                episode_pattern: None,
-                download_priority: 0,
-                recording_priority: 0,
-                reserve_slots_for_users: 0,
-                max_background_per_provider: 0,
-                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-                retry_backoff_multiplier: default_retry_backoff_multiplier(),
-                retry_backoff_max_secs: default_retry_backoff_max_secs(),
-                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-                retry_max_attempts: default_retry_max_attempts(),
+                ..make_test_download_config()
             }),
             web_search: None,
         };
@@ -234,21 +207,8 @@ mod tests {
 
     #[test]
     fn serializing_skips_default_download_dir() {
-        let download = VideoDownloadConfigDto {
-            headers: HashMap::new(),
-            directory: Some(DEFAULT_DOWNLOAD_DIR.to_string()),
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-            retry_backoff_multiplier: default_retry_backoff_multiplier(),
-            retry_backoff_max_secs: default_retry_backoff_max_secs(),
-            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-            retry_max_attempts: default_retry_max_attempts(),
-        };
+        let download =
+            VideoDownloadConfigDto { directory: Some(DEFAULT_DOWNLOAD_DIR.to_string()), ..make_test_download_config() };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(
             !serialized.contains("\"directory\""),
@@ -258,42 +218,16 @@ mod tests {
 
     #[test]
     fn serializing_keeps_custom_download_dir() {
-        let download = VideoDownloadConfigDto {
-            headers: HashMap::new(),
-            directory: Some("custom-downloads".to_string()),
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-            retry_backoff_multiplier: default_retry_backoff_multiplier(),
-            retry_backoff_max_secs: default_retry_backoff_max_secs(),
-            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-            retry_max_attempts: default_retry_max_attempts(),
-        };
+        let download =
+            VideoDownloadConfigDto { directory: Some("custom-downloads".to_string()), ..make_test_download_config() };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(serialized.contains("\"directory\""), "expected directory field for custom value, got: {serialized}");
     }
 
     #[test]
     fn serializing_skips_default_episode_pattern() {
-        let download = VideoDownloadConfigDto {
-            headers: HashMap::new(),
-            directory: None,
-            organize_into_directories: false,
-            episode_pattern: default_episode_pattern(),
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-            retry_backoff_multiplier: default_retry_backoff_multiplier(),
-            retry_backoff_max_secs: default_retry_backoff_max_secs(),
-            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-            retry_max_attempts: default_retry_max_attempts(),
-        };
+        let download =
+            VideoDownloadConfigDto { episode_pattern: default_episode_pattern(), ..make_test_download_config() };
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
         assert!(
             !serialized.contains("\"episode_pattern\""),
@@ -306,19 +240,12 @@ mod tests {
         let mut video = VideoConfigDto {
             extensions: Vec::new(),
             download: Some(VideoDownloadConfigDto {
-                headers: HashMap::new(),
-                directory: None,
-                organize_into_directories: false,
-                episode_pattern: None,
-                download_priority: 0,
-                recording_priority: 0,
-                reserve_slots_for_users: 0,
-                max_background_per_provider: 0,
                 retry_backoff_initial_secs: 3,
                 retry_backoff_multiplier: 2.5,
                 retry_backoff_max_secs: 45,
                 retry_backoff_jitter_percent: 0,
                 retry_max_attempts: 7,
+                ..make_test_download_config()
             }),
             web_search: None,
         };
@@ -335,19 +262,12 @@ mod tests {
     #[test]
     fn serializing_keeps_custom_download_retry_backoff_settings() {
         let download = VideoDownloadConfigDto {
-            headers: HashMap::new(),
-            directory: None,
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
             retry_backoff_initial_secs: 4,
             retry_backoff_multiplier: 2.0,
             retry_backoff_max_secs: 60,
             retry_backoff_jitter_percent: 10,
             retry_max_attempts: 6,
+            ..make_test_download_config()
         };
 
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
@@ -361,19 +281,9 @@ mod tests {
     #[test]
     fn serializing_keeps_scheduler_policy_settings() {
         let download = VideoDownloadConfigDto {
-            headers: HashMap::new(),
-            directory: None,
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: 0,
-            recording_priority: 0,
             reserve_slots_for_users: 1,
             max_background_per_provider: 2,
-            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-            retry_backoff_multiplier: default_retry_backoff_multiplier(),
-            retry_backoff_max_secs: default_retry_backoff_max_secs(),
-            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-            retry_max_attempts: default_retry_max_attempts(),
+            ..make_test_download_config()
         };
 
         let serialized = serde_json::to_string(&download).expect("download serialization should succeed");
@@ -386,19 +296,9 @@ mod tests {
         let mut video = VideoConfigDto {
             extensions: Vec::new(),
             download: Some(VideoDownloadConfigDto {
-                headers: HashMap::new(),
-                directory: None,
-                organize_into_directories: false,
-                episode_pattern: None,
                 download_priority: -2,
                 recording_priority: 3,
-                reserve_slots_for_users: 0,
-                max_background_per_provider: 0,
-                retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-                retry_backoff_multiplier: default_retry_backoff_multiplier(),
-                retry_backoff_max_secs: default_retry_backoff_max_secs(),
-                retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-                retry_max_attempts: default_retry_max_attempts(),
+                ..make_test_download_config()
             }),
             web_search: None,
         };
@@ -410,21 +310,8 @@ mod tests {
 
     #[test]
     fn serializing_keeps_non_zero_priorities_and_skips_zero_priorities() {
-        let non_zero = VideoDownloadConfigDto {
-            headers: HashMap::new(),
-            directory: None,
-            organize_into_directories: false,
-            episode_pattern: None,
-            download_priority: -1,
-            recording_priority: 2,
-            reserve_slots_for_users: 0,
-            max_background_per_provider: 0,
-            retry_backoff_initial_secs: default_retry_backoff_initial_secs(),
-            retry_backoff_multiplier: default_retry_backoff_multiplier(),
-            retry_backoff_max_secs: default_retry_backoff_max_secs(),
-            retry_backoff_jitter_percent: default_retry_backoff_jitter_percent(),
-            retry_max_attempts: default_retry_max_attempts(),
-        };
+        let non_zero =
+            VideoDownloadConfigDto { download_priority: -1, recording_priority: 2, ..make_test_download_config() };
         let zero = VideoDownloadConfigDto { download_priority: 0, recording_priority: 0, ..non_zero.clone() };
 
         let non_zero_serialized = serde_json::to_string(&non_zero).expect("non-zero priorities serialize");

@@ -1,5 +1,7 @@
 use crate::{
-    app::components::{input::Input, svg_icon::AppIcon, theme::Theme, ParticleFlowBackground, TextButton, ThemePicker},
+    app::components::{
+        input::Input, svg_icon::AppIcon, theme::Theme, LanguagePicker, ParticleFlowBackground, TextButton, ThemePicker,
+    },
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -19,9 +21,12 @@ pub fn Login() -> Html {
     let app_title = services.config.ui_config.app_title.as_ref().map_or("tuliprox", |v| v.as_str());
 
     let services_ctx = services.clone();
-    let app_logo = use_memo(services_ctx, |service| match service.config.ui_config.app_logo.as_ref() {
-        Some(logo) => html! { <img src={logo.to_string()} alt="logo"/> },
-        None => html! { <AppIcon name="Logo"  width={"48"} height={"48"}/> },
+    let app_logo = use_memo(services_ctx, |service| {
+        let alt = format!("{} logo", service.config.ui_config.app_title.as_deref().unwrap_or("tuliprox"));
+        match service.config.ui_config.app_logo.as_ref() {
+            Some(logo) => html! { <img src={logo.to_string()} alt={alt}/> },
+            None => html! { <AppIcon name="Logo"  width={"48"} height={"48"}/> },
+        }
     });
 
     let authenticate = {
@@ -88,6 +93,7 @@ pub fn Login() -> Html {
         <ParticleFlowBackground />
         <div class="tp__login-view">
            <div class="tp__login-view__toolbar">
+                <LanguagePicker />
                 <ThemePicker theme={*theme} on_select={handle_theme_select} />
            </div>
            <div class={"tp__login-view__header"}>

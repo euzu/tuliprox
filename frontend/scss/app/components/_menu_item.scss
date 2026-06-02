@@ -5,9 +5,15 @@
   gap: var(--gap-default);
   color: var(--menu-text-color);
   fill: currentColor;
+  appearance: none;
+  background-color: transparent;
+  border: none;
+  box-sizing: content-box;
   padding: 12px;
   border-radius: var(--border-radius);
   cursor: pointer;
+  font: inherit;
+  text-align: left;
 
   height: 1.3rem;
   .svg-icon {

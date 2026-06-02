@@ -40,6 +40,16 @@ pub struct ProbeStreamStats {
     pub bitrate: Option<u32>,
 }
 
+/// Common parameters shared across all probe variants.
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeParams<'a> {
+    pub url: &'a str,
+    pub user_agent: Option<&'a str>,
+    pub analyze_duration: u64,
+    pub probe_size: u64,
+    pub timeout_secs: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FfmpegExecutor;
 
@@ -110,13 +120,10 @@ impl FfmpegExecutor {
 
     pub async fn probe_url(
         &self,
-        url: &str,
-        user_agent: Option<&str>,
-        analyze_duration: u64,
-        probe_size: u64,
-        timeout_secs: u64,
+        params: &ProbeParams<'_>,
         proxy_cfg: Option<&ProxyConfig>,
     ) -> ProbeUrlOutcome {
+        let ProbeParams { url, user_agent, analyze_duration, probe_size, timeout_secs } = *params;
         // Determine timeout: Ensure it's at least as long as the analyze duration + buffer,
         // but respect the user setting if it's longer.
         let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
@@ -159,16 +166,12 @@ impl FfmpegExecutor {
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn probe_remote_url(
         &self,
         client: &Client,
-        url: &str,
-        user_agent: Option<&str>,
-        analyze_duration: u64,
-        probe_size: u64,
-        timeout_secs: u64,
+        params: &ProbeParams<'_>,
     ) -> ProbeUrlOutcome {
+        let ProbeParams { url, user_agent, analyze_duration, probe_size, timeout_secs } = *params;
         let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
         let config_timeout = Duration::from_secs(timeout_secs);
         let timeout_val = std::cmp::max(analyze_overhead, config_timeout);
@@ -191,16 +194,12 @@ impl FfmpegExecutor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn probe_remote_seekable_url(
         &self,
         client: &Client,
-        url: &str,
-        user_agent: Option<&str>,
-        analyze_duration: u64,
-        probe_size: u64,
-        timeout_secs: u64,
+        params: &ProbeParams<'_>,
     ) -> ProbeUrlOutcome {
+        let ProbeParams { url, user_agent, analyze_duration, probe_size, timeout_secs } = *params;
         let analyze_overhead = Duration::from_micros(analyze_duration) + Duration::from_secs(5);
         let config_timeout = Duration::from_secs(timeout_secs);
         let timeout_val = std::cmp::max(analyze_overhead, config_timeout);
@@ -224,14 +223,9 @@ impl FfmpegExecutor {
     }
 
     /// Wrapper around [`Self::probe_url`] that races the probe against an optional cancellation token.
-    #[allow(clippy::too_many_arguments)]
     pub async fn probe_url_with_cancel(
         &self,
-        url: &str,
-        user_agent: Option<&str>,
-        analyze_duration: u64,
-        probe_size: u64,
-        timeout_secs: u64,
+        params: &ProbeParams<'_>,
         proxy_cfg: Option<&ProxyConfig>,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> ProbeUrlOutcome {
@@ -239,63 +233,53 @@ impl FfmpegExecutor {
             tokio::select! {
                 biased;
                 () = token.cancelled() => {
-                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(url));
+                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(params.url));
                     ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled)
                 }
-                result = self.probe_url(url, user_agent, analyze_duration, probe_size, timeout_secs, proxy_cfg) => result,
+                result = self.probe_url(params, proxy_cfg) => result,
             }
         } else {
-            self.probe_url(url, user_agent, analyze_duration, probe_size, timeout_secs, proxy_cfg).await
+            self.probe_url(params, proxy_cfg).await
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn probe_remote_url_with_cancel(
         &self,
         client: &Client,
-        url: &str,
-        user_agent: Option<&str>,
-        analyze_duration: u64,
-        probe_size: u64,
-        timeout_secs: u64,
+        params: &ProbeParams<'_>,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> ProbeUrlOutcome {
         if let Some(token) = cancel_token {
             tokio::select! {
                 biased;
                 () = token.cancelled() => {
-                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(url));
+                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(params.url));
                     ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled)
                 }
-                result = self.probe_remote_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs) => result,
+                result = self.probe_remote_url(client, params) => result,
             }
         } else {
-            self.probe_remote_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs).await
+            self.probe_remote_url(client, params).await
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn probe_remote_seekable_url_with_cancel(
         &self,
         client: &Client,
-        url: &str,
-        user_agent: Option<&str>,
-        analyze_duration: u64,
-        probe_size: u64,
-        timeout_secs: u64,
+        params: &ProbeParams<'_>,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> ProbeUrlOutcome {
         if let Some(token) = cancel_token {
             tokio::select! {
                 biased;
                 () = token.cancelled() => {
-                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(url));
+                    warn!("Probe preempted for {}", shared::utils::sanitize_sensitive_info(params.url));
                     ProbeUrlOutcome::Failed(ProbeFailureKind::Cancelled)
                 }
-                result = self.probe_remote_seekable_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs) => result,
+                result = self.probe_remote_seekable_url(client, params) => result,
             }
         } else {
-            self.probe_remote_seekable_url(client, url, user_agent, analyze_duration, probe_size, timeout_secs).await
+            self.probe_remote_seekable_url(client, params).await
         }
     }
 
@@ -562,6 +546,17 @@ async fn ensure_probe_file_length(path: &Path, content_length: Option<u64>) -> R
     })
 }
 
+async fn flush_probe_file(file: &mut fs::File, path: &Path) -> Result<(), ProbeFailureKind> {
+    file.flush().await.map_err(|err| {
+        warn!(
+            "Failed to flush seekable ffprobe temp file {}: {}",
+            path.display(),
+            err
+        );
+        ProbeFailureKind::Other
+    })
+}
+
 async fn probe_local_path_with_ffprobe(path: &Path, analyze_duration: u64, probe_size: u64) -> ProbeUrlOutcome {
     let display_path = path.to_string_lossy().into_owned();
     let mut command = Command::new("ffprobe");
@@ -601,16 +596,16 @@ async fn stage_seekable_probe_file(
 ) -> Result<SeekableProbeStage, ProbeFailureKind> {
     let head_window = seekable_probe_window_bytes(probe_size);
     let tail_window = seekable_probe_window_bytes(probe_size);
-    let head_result = fetch_remote_span_to_file(
+    let head_result = fetch_remote_span_to_file(&RemoteSpanRequest {
         client,
         url,
         user_agent,
-        Some((0, head_window.saturating_sub(1))),
-        temp_path,
-        0,
-        probe_bytes_limit(head_window),
-        true,
-    )
+        range: Some((0, head_window.saturating_sub(1))),
+        path: temp_path,
+        offset: 0,
+        max_bytes: probe_bytes_limit(head_window),
+        allow_full_body_write_on_200: true,
+    })
     .await?;
 
     ensure_probe_file_length(temp_path, head_result.total_length).await?;
@@ -657,16 +652,16 @@ async fn stage_seekable_probe_file(
         tail_start
     );
 
-    let tail_result = fetch_remote_span_to_file(
+    let tail_result = fetch_remote_span_to_file(&RemoteSpanRequest {
         client,
         url,
         user_agent,
-        Some((tail_start, content_length - 1)),
-        temp_path,
-        tail_start,
-        probe_bytes_limit(content_length - tail_start),
-        false,
-    )
+        range: Some((tail_start, content_length - 1)),
+        path: temp_path,
+        offset: tail_start,
+        max_bytes: probe_bytes_limit(content_length - tail_start),
+        allow_full_body_write_on_200: false,
+    })
     .await?;
 
     if tail_result.status == StatusCode::PARTIAL_CONTENT && tail_result.bytes_written > 0 {
@@ -685,17 +680,19 @@ async fn stage_seekable_probe_file(
     Ok(stage)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn fetch_remote_span_to_file(
-    client: &Client,
-    url: &str,
-    user_agent: Option<&str>,
+struct RemoteSpanRequest<'a> {
+    client: &'a Client,
+    url: &'a str,
+    user_agent: Option<&'a str>,
     range: Option<(u64, u64)>,
-    path: &Path,
+    path: &'a Path,
     offset: u64,
     max_bytes: usize,
     allow_full_body_write_on_200: bool,
-) -> Result<SpanWriteResult, ProbeFailureKind> {
+}
+
+async fn fetch_remote_span_to_file(req: &RemoteSpanRequest<'_>) -> Result<SpanWriteResult, ProbeFailureKind> {
+    let RemoteSpanRequest { client, url, user_agent, range, path, offset, max_bytes, allow_full_body_write_on_200 } = *req;
     let mut request = client.get(url);
     if let Some(ua) = user_agent {
         request = request.header(USER_AGENT, ua);
@@ -792,6 +789,7 @@ async fn fetch_remote_span_to_file(
             break;
         }
     }
+    flush_probe_file(&mut file, path).await?;
 
     Ok(SpanWriteResult {
         status,

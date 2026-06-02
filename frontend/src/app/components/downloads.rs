@@ -2,7 +2,8 @@ use crate::{
     app::components::{IconButton, Table, TableDefinition, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
-    model::EventMessage,
+    model::{DialogResult, EventMessage},
+    services::DialogService,
     utils::format_bytes,
 };
 use shared::{
@@ -284,6 +285,7 @@ fn apply_download_delta(
 pub fn downloads_view() -> Html {
     let translate = use_translation();
     let services = use_service_context();
+    let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let has_download_write = services.auth.has_permission(Permission::DownloadWrite);
     let active_tab = use_state(|| DownloadTab::Queue);
     let queue_state = use_state(|| Rc::new(Vec::<FileDownloadDto>::new()));
@@ -407,12 +409,17 @@ pub fn downloads_view() -> Html {
         let services = services.clone();
         let translate = translate.clone();
         let active_download = active_download.clone();
+        let dialog = dialog.clone();
         Callback::from(move |uuid: String| {
             let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
             let active_download = active_download.clone();
+            let dialog = dialog.clone();
             spawn_local(async move {
+                if dialog.confirm(&translate.t("MESSAGES.DOWNLOAD.CONFIRM_CANCEL")).await != DialogResult::Ok {
+                    return;
+                }
                 let optimistic_delta = optimistic_active_delta(&active_download, &uuid, TransferStatusDto::Cancelled);
                 let result = services.downloads.cancel_download(uuid).await;
                 handle_download_action_result(
@@ -431,11 +438,16 @@ pub fn downloads_view() -> Html {
         let request_downloads = request_downloads.clone();
         let services = services.clone();
         let translate = translate.clone();
+        let dialog = dialog.clone();
         Callback::from(move |uuid: String| {
             let request_downloads = request_downloads.clone();
             let services = services.clone();
             let translate = translate.clone();
+            let dialog = dialog.clone();
             spawn_local(async move {
+                if dialog.confirm(&translate.t("MESSAGES.DOWNLOAD.CONFIRM_REMOVE")).await != DialogResult::Ok {
+                    return;
+                }
                 let result = services.downloads.remove_download(uuid).await;
                 handle_download_action_result(
                     result,

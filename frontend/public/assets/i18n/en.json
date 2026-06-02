@@ -884,6 +884,7 @@
     "CONTENT_SECURITY_POLICY": "Content Security Policy",
     "CONTENT_TYPE": "Content Type",
     "COPY_CREDENTIALS": "Copy Credentials",
+    "COPY_DETAILS": "Copy details",
     "COPY_LINK_PROVIDER_URL": "Copy Provider Url",
     "COPY_LINK_TULIPROX_VIRTUAL_ID": "Copy Virtual Id",
     "COPY_LINK_TULIPROX_WEBPLAYER_URL": "Copy Webplayer Url",
@@ -1262,6 +1263,7 @@
     "SKIP_VOD": "Skip VOD",
     "SLEEP_TIMER_MINS": "Sleep Timer (mins)",
     "SMART_EPG": "Smart Epg",
+    "SOMETHING_WENT_WRONG": "Something went wrong",
     "SORT": "Sort",
     "SORT_SETTINGS": "Sort Settings",
     "SOURCE": "Source",
@@ -1400,6 +1402,7 @@
     "ACTIVE_STREAMS": "Active Streams",
     "PLAYER": "Player",
     "TITLE": "Title",
+    "TOGGLE_SIDEBAR": "Toggle sidebar",
     "SELECTED": "Selected",
     "FILTERED": "Filtered",
     "TOTAL": "Total",
@@ -1441,7 +1444,8 @@
     "NEXT_PAGE": "Next Page",
     "PREVIOUS_PAGE": "Previous Page",
     "PAGE": "Page",
-    "PAGES": "Pages"
+    "PAGES": "Pages",
+    "NO_CONTENT": "No content"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -1456,6 +1460,8 @@
       "DOWNLOAD_CANCELLED": "Download cancelled.",
       "DOWNLOAD_REMOVED": "Download removed.",
       "DOWNLOAD_RETRIED": "Download retried.",
+      "CONFIRM_CANCEL": "Do you really want to cancel this transfer?",
+      "CONFIRM_REMOVE": "Do you really want to remove this entry?",
       "FAIL": "Failed to download!",
       "INVALID_RECORD_DURATION": "Recording duration must be a positive number of minutes.",
       "INVALID_RECORD_START": "Recording start time is invalid.",

@@ -109,7 +109,7 @@ pub fn FilterInput(props: &FilterInputProps) -> Html {
             "LABEL.CLOSE",
             DialogResult::Cancel,
             Some("Close".to_owned()),
-            None,
+            Some("secondary".to_string()),
         )]),
         right: vec![DialogAction::new(
             "submit",

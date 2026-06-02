@@ -747,11 +747,13 @@ impl LibraryProcessor {
 
         match FfmpegExecutor::new()
             .probe_url(
-                file_path,
-                None,
-                ffprobe.analyze_duration_micros,
-                ffprobe.probe_size_bytes,
-                ffprobe.timeout.unwrap_or(60),
+                &crate::utils::ffmpeg::ProbeParams {
+                    url: file_path,
+                    user_agent: None,
+                    analyze_duration: ffprobe.analyze_duration_micros,
+                    probe_size: ffprobe.probe_size_bytes,
+                    timeout_secs: ffprobe.timeout.unwrap_or(60),
+                },
                 // Local file probing does not traverse the network, so no proxy config is applied.
                 None,
             )

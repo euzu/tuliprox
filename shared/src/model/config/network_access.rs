@@ -13,6 +13,25 @@ pub struct NetworkAccessDto {
 impl NetworkAccessDto {
     pub fn is_empty(&self) -> bool { is_empty_vec(&self.allowed_countries) && is_empty_vec(&self.allowed_networks) }
 
+    fn parse_cidr(network_str: &str) -> Result<(std::net::IpAddr, u8), TuliproxError> {
+        let make_err = || {
+            TuliproxError::ProxyUser(format!(
+                "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
+            ))
+        };
+        let mut parts = network_str.split('/');
+        let ip_str = parts.next().ok_or_else(make_err)?;
+        let ip: std::net::IpAddr = ip_str.trim().parse().map_err(|_| make_err())?;
+
+        let prefix_str = parts.next().ok_or_else(make_err)?;
+        let prefix: u8 = prefix_str.trim().parse().map_err(|_| make_err())?;
+        if parts.next().is_some() {
+            return Err(make_err());
+        }
+
+        Ok((ip, prefix))
+    }
+
     /// Prepares the DTO for storage/comparison: trim whitespace, uppercase country codes,
     /// deduplicate country codes, validate CIDRs, normalize empty lists to None.
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
@@ -44,30 +63,7 @@ impl NetworkAccessDto {
                     continue;
                 }
                 let network_str = trimmed.to_string();
-                let ip: std::net::IpAddr = match network_str.split('/').next() {
-                    Some(addr) => addr.trim().parse().map_err(|_| {
-                        TuliproxError::ProxyUser(format!(
-                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
-                        ))
-                    })?,
-                    None => {
-                        return Err(TuliproxError::ProxyUser(format!(
-                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
-                        )));
-                    }
-                };
-                let prefix: u8 = match network_str.split('/').nth(1) {
-                    Some(p) => p.trim().parse().map_err(|_| {
-                        TuliproxError::ProxyUser(format!(
-                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
-                        ))
-                    })?,
-                    None => {
-                        return Err(TuliproxError::ProxyUser(format!(
-                            "Invalid network_access.allowed_networks entry '{network_str}', expected CIDR"
-                        )));
-                    }
-                };
+                let (ip, prefix) = Self::parse_cidr(&network_str)?;
                 let prefix_valid = match ip {
                     std::net::IpAddr::V4(_) => prefix <= 32,
                     std::net::IpAddr::V6(_) => prefix <= 128,

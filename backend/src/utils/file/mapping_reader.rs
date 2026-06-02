@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use crate::model::{Mappings};
 use shared::error::TuliproxError;
-use crate::utils::traverse_dir;
 use crate::utils::{config_file_reader, open_file};
 use log::{warn};
 use std::path::{Path, PathBuf};
@@ -75,16 +74,8 @@ fn merge_mapping_definitions(mappings: Vec<MappingsDto>) -> MappingsDto {
 }
 
 fn read_mappings_from_directory(path: &Path, resolve_env: bool) -> Result<Option<(Vec<PathBuf>, MappingsDto)>, TuliproxError> {
-    let mut files = vec![];
-    let mut visit = |entry: &std::fs::DirEntry, metadata: &std::fs::Metadata| {
-        if metadata.is_file() {
-            let file_path = entry.path();
-            if file_path.extension().is_some_and(|ext| ext == "yml") {
-                files.push(file_path);
-            }
-        }
-    };
-    traverse_dir(path, &mut visit).map_err(|err| TuliproxError::Io(format!("Failed to read mappings {err}")))?;
+    let mut files = crate::utils::collect_yaml_files(path)
+        .map_err(|err| TuliproxError::Io(format!("Failed to read mappings {err}")))?;
 
     files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
