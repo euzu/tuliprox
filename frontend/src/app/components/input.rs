@@ -29,6 +29,8 @@ pub struct InputProps {
     pub icon: Option<String>,
     #[prop_or_default]
     pub placeholder: Option<String>,
+    #[prop_or_default]
+    pub aria_label: Option<String>,
 }
 
 #[component]
@@ -67,6 +69,9 @@ pub fn Input(props: &InputProps) -> Html {
         })
     };
 
+    let aria_label =
+        if props.label.is_some() { None } else { props.aria_label.clone().or_else(|| props.placeholder.clone()) };
+
     html! {
         <div class="tp__input">
             { if props.label.is_some() {
@@ -96,6 +101,7 @@ pub fn Input(props: &InputProps) -> Html {
                     onkeydown={props.onkeydown.clone()}
                     oninput={handle_oninput}
                     placeholder={props.placeholder.clone()}
+                    aria-label={aria_label}
                     />
                 { html_if!(props.hidden, {
                      <IconButton name="hide" icon="Visibility" class={if !*hide_content {"active"} else {""}} onclick={handle_hide_content} />
