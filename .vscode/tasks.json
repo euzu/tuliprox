@@ -4,7 +4,7 @@
     {
       "label": "backend: run",
       "type": "shell",
-      "command": "cargo run -p tuliprox",
+      "command": "cargo run -p tuliprox --bin tuliprox -- -s -p ${workspaceFolder}/config",
       "problemMatcher": ["$rustc"],
       "group": "build",
       "presentation": {
@@ -15,7 +15,7 @@
     {
       "label": "backend: watch",
       "type": "shell",
-      "command": "cargo watch -x 'run -p tuliprox'",
+      "command": "cargo watch -i 'data/**' -i 'config/**' -x 'run -p tuliprox --bin tuliprox -- -s -p ${workspaceFolder}/config'",
       "problemMatcher": ["$rustc"],
       "isBackground": true,
       "presentation": {
