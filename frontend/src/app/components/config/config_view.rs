@@ -28,6 +28,8 @@ use crate::{
 use log::warn;
 use shared::model::{permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
 use std::str::FromStr;
+use wasm_bindgen::{closure::Closure, JsCast};
+use web_sys::BeforeUnloadEvent;
 use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
@@ -442,6 +444,31 @@ pub fn ConfigView() -> Html {
             });
         })
     };
+
+    // Warn before the browser unloads (refresh/close/navigation) while there are
+    // unsaved config edits, so the user does not silently lose their changes.
+    let has_unsaved_changes = (*edit_mode || setup_mode) && !form_state.slots.collect_modified_forms().is_empty();
+    {
+        use_effect_with(has_unsaved_changes, move |&dirty| {
+            let closure = Closure::<dyn FnMut(BeforeUnloadEvent)>::wrap(Box::new(move |event: BeforeUnloadEvent| {
+                event.prevent_default();
+                event.set_return_value("");
+            }));
+            if dirty {
+                if let Some(win) = web_sys::window() {
+                    let _ = win.add_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
+                }
+            }
+            move || {
+                if dirty {
+                    if let Some(win) = web_sys::window() {
+                        let _ =
+                            win.remove_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
+                    }
+                }
+            }
+        });
+    }
 
     let context = ConfigViewContext {
         edit_mode: edit_mode.clone(),
