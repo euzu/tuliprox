@@ -13,10 +13,11 @@ TRUNK := $(CARGO_BIN_DIR)/trunk
 WASM_BINDGEN := $(CARGO_BIN_DIR)/wasm-bindgen
 CARGO_SET_VERSION := $(CARGO_BIN_DIR)/cargo-set-version
 MDBOOK := $(CARGO_BIN_DIR)/mdbook
+NIGHTLY_TOOLCHAIN := nightly-2026-05-01
 
 # Explicitly force stable/nightly to avoid system-wide overrides
 CARGO_STABLE     := $(CARGO) +stable
-CARGO_NIGHTLY    := $(CARGO) +nightly
+CARGO_NIGHTLY    := $(CARGO) +$(NIGHTLY_TOOLCHAIN)
 CROSS            := cross
 TRUNK            := trunk
 
@@ -39,7 +40,7 @@ install-tools: rustup install-nightly-fmt cross trunk wasm-bindgen cargo-set-ver
 .PHONY: install-nightly-fmt
 install-nightly-fmt: ## Install nightly toolchain specifically for formatting
 	@echo "📦 Ensuring nightly rustfmt is available"
-	@$(RUSTUP) toolchain install nightly --component rustfmt --profile minimal
+	@$(RUSTUP) toolchain install $(NIGHTLY_TOOLCHAIN) --component rustfmt --profile minimal
 	@echo "✅ Nightly rustfmt ready"
 
 .PHONY: rustup

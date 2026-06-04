@@ -118,15 +118,20 @@ pub fn read_framed<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> io:
     reader.read_exact(&mut payload)?;
     let mut crc_buf = [0u8; 4];
     reader.read_exact(&mut crc_buf)?;
+    verify_crc(crc_buf, &payload)?;
+    deserialize_named(&payload)
+}
+
+fn verify_crc(crc_buf: [u8; 4], payload: &[u8]) -> io::Result<()> {
     let expected_crc = u32::from_be_bytes(crc_buf);
-    let actual_crc = crc32fast::hash(&payload);
+    let actual_crc = crc32fast::hash(payload);
     if actual_crc != expected_crc {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("CRC mismatch: expected {expected_crc:#010x}, got {actual_crc:#010x}"),
         ));
     }
-    deserialize_named(&payload)
+    Ok(())
 }
 
 /// Write the file magic bytes at the beginning of a `.pending` file.
@@ -214,28 +219,16 @@ pub async fn async_read_framed<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de
     reader.read_exact(&mut payload).await?;
     let mut crc_buf = [0u8; 4];
     reader.read_exact(&mut crc_buf).await?;
-    let expected_crc = u32::from_be_bytes(crc_buf);
-    let actual_crc = crc32fast::hash(&payload);
-    if actual_crc != expected_crc {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("CRC mismatch: expected {expected_crc:#010x}, got {actual_crc:#010x}"),
-        ));
-    }
+    verify_crc(crc_buf, &payload)?;
     deserialize_named(&payload)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{
-        model::{PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo, XtreamCluster},
-        utils::Internable,
-    };
-    use std::net::SocketAddr;
+    use shared::model::{StreamHistoryEventType, DisconnectReason, FailureStage, ConnectFailureReason};
+    use crate::model::{StreamHistoryRecord, RECORD_SCHEMA_VERSION, DisconnectQos};
     use std::io::Cursor;
-    use shared::model::{ConnectFailureReason, FailureStage, DisconnectReason, StreamHistoryEventType};
-    use crate::model::{DisconnectQos, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
     use crate::utils::encode_base64_hash;
 
     fn sample_file_header() -> FileHeaderBody {
@@ -270,139 +263,7 @@ mod tests {
         }
     }
 
-    fn sample_connect_record() -> StreamHistoryRecord {
-        StreamHistoryRecord {
-            schema_version: RECORD_SCHEMA_VERSION,
-            event_type: StreamHistoryEventType::Connect,
-            event_ts_utc: 1_742_600_001,
-            partition_day_utc: "2026-03-22".to_string(),
-            session_id: 999,
-            source_addr: Some("192.0.2.1:12345".to_string()),
-            api_username: Some("alice".to_string()),
-            provider_name: Some("acme-tv".intern()),
-            provider_username: Some("acme_user".to_string()),
-            input_name: Some("provider-input".intern()),
-            virtual_id: Some(1234),
-            item_type: Some(PlaylistItemType::Live),
-            title: Some("News Channel".to_string()),
-            group: Some("News".to_string()),
-            country: Some("DE".to_string()),
-            user_agent: Some("VLC/3.0".to_string()),
-            shared: Some(false),
-            shared_joined_existing: None,
-            shared_stream_id: None,
-            provider_id: Some(1),
-            cluster: Some("live".to_string()),
-            container: Some("mpegts".to_string()),
-            stream_url_hash: Some("abc123".to_string()),
-            stream_identity_key: Some("identity123".to_string()),
-            video_codec: Some("H.264".to_string()),
-            audio_codec: Some("AAC".to_string()),
-            audio_channels: Some("STEREO".to_string()),
-            resolution: Some("1920x1080".to_string()),
-            fps: Some("50".to_string()),
-            connect_ts_utc: Some(1_742_600_001),
-            disconnect_ts_utc: None,
-            session_duration: None,
-            bytes_sent: None,
-            first_byte_latency_ms: None,
-            provider_reconnect_count: None,
-            failure_stage: None,
-            provider_http_status: None,
-            provider_error_class: None,
-            connect_failure_reason: None,
-            disconnect_reason: None,
-            previous_session_id: None,
-            target_name: None,
-        }
-    }
-
-    fn sample_disconnect_record(session_id: u64) -> StreamHistoryRecord {
-        StreamHistoryRecord {
-            schema_version: RECORD_SCHEMA_VERSION,
-            event_type: StreamHistoryEventType::Disconnect,
-            event_ts_utc: 1_742_603_601,
-            partition_day_utc: "2026-03-22".to_string(),
-            session_id,
-            source_addr: Some("192.0.2.1:12345".to_string()),
-            api_username: Some("alice".to_string()),
-            provider_name: Some("acme-tv".intern()),
-            provider_username: Some("acme_user".to_string()),
-            input_name: Some("provider-input".intern()),
-            virtual_id: Some(1234),
-            item_type: Some(PlaylistItemType::Live),
-            title: Some("News Channel".to_string()),
-            group: Some("News".to_string()),
-            country: Some("DE".to_string()),
-            user_agent: Some("VLC/3.0".to_string()),
-            shared: Some(false),
-            shared_joined_existing: None,
-            shared_stream_id: None,
-            provider_id: Some(1),
-            cluster: Some("live".to_string()),
-            container: Some("mpegts".to_string()),
-            stream_url_hash: Some("abc123".to_string()),
-            stream_identity_key: Some("identity123".to_string()),
-            video_codec: Some("H.264".to_string()),
-            audio_codec: Some("AAC".to_string()),
-            audio_channels: Some("STEREO".to_string()),
-            resolution: Some("1920x1080".to_string()),
-            fps: Some("50".to_string()),
-            connect_ts_utc: Some(1_742_600_001),
-            disconnect_ts_utc: Some(1_742_603_601),
-            session_duration: Some(3600),
-            bytes_sent: Some(1_234_567_890),
-            first_byte_latency_ms: Some(150),
-            provider_reconnect_count: Some(0),
-            failure_stage: None,
-            provider_http_status: None,
-            provider_error_class: None,
-            connect_failure_reason: None,
-            disconnect_reason: Some(DisconnectReason::ClientClosed),
-            previous_session_id: None,
-            target_name: None,
-        }
-    }
-
-    fn sample_stream_info() -> StreamInfo {
-        let addr: SocketAddr = "192.0.2.1:12345".parse().unwrap();
-        let mut info = StreamInfo::new(
-            999,
-            1001,
-            "alice",
-            &addr,
-            "192.0.2.1",
-            "acme-tv".intern(),
-            StreamChannel {
-                target_id: 1,
-                virtual_id: 1234,
-                provider_id: 1,
-                input_name: "provider-input".intern(),
-                item_type: PlaylistItemType::Live,
-                cluster: XtreamCluster::Live,
-                group: "News".intern(),
-                title: "News Channel".intern(),
-                url: "http://localhost/stream.ts".intern(),
-                shared: false,
-                shared_joined_existing: None,
-                shared_stream_id: None,
-                technical: Some(StreamTechnicalInfo {
-                    container: "mpegts".to_string(),
-                    resolution: "1920x1080".to_string(),
-                    fps: "50".to_string(),
-                    video_codec: "H.264".to_string(),
-                    audio_codec: "AAC".to_string(),
-                    audio_channels: "STEREO".to_string(),
-                }),
-                epg_channel_id: None,
-            },
-            String::from("VLC/3.0"),
-            Some(String::from("DE")),
-            None,
-        );
-        info.ts = 1_742_600_001;
-        info
-    }
+    use crate::repository::stream_history::tests::{sample_connect_record, sample_disconnect_record, sample_stream_info};
 
     #[test]
     fn stream_history_header_round_trip() {

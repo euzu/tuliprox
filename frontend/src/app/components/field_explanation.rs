@@ -3,7 +3,7 @@ use crate::{
     i18n::{use_translation, YewI18n},
     model::{DialogAction, DialogActions, DialogResult},
     services::DialogService,
-    utils::t_safe,
+    utils::{join_non_empty_parts, t_safe},
 };
 use yew::{platform::spawn_local, prelude::*};
 
@@ -13,7 +13,7 @@ fn normalize_field_id(raw: &str) -> String {
         .map(|ch| if ch.is_ascii_alphanumeric() || ch == '.' { ch.to_ascii_uppercase() } else { '_' })
         .collect::<String>();
 
-    normalized.split('_').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("_")
+    join_non_empty_parts(normalized.split('_'), "_")
 }
 
 fn field_tokens(field_id: &str) -> Vec<&str> { field_id.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>() }

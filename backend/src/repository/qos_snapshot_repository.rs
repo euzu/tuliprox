@@ -365,13 +365,9 @@ mod tests {
     use shared::utils::Internable;
     use super::{QosAggregationCheckpoint, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow};
 
-    #[test]
-    fn qos_snapshot_repository_roundtrips_snapshot_and_checkpoint() {
-        let temp = tempdir().expect("tempdir should succeed");
-        let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
-
-        let snapshot = QosSnapshotRecord {
-            stream_identity_key: "stream-a".to_string(),
+    fn make_test_snapshot(identity_key: &str, score: u8) -> QosSnapshotRecord {
+        QosSnapshotRecord {
+            stream_identity_key: identity_key.to_string(),
             input_name: "input-a".intern(),
             target_name: "target-a".intern(),
             provider_name: "provider-a".intern(),
@@ -382,14 +378,22 @@ mod tests {
             last_event_at: 1_700_000_123,
             window_24h: QosSnapshotWindow {
                 connect_count: 3,
-                score: 81,
+                score,
                 confidence: 60,
                 ..QosSnapshotWindow::default()
             },
             window_7d: QosSnapshotWindow::default(),
             window_30d: QosSnapshotWindow::default(),
             daily_buckets: BTreeMap::default(),
-        };
+        }
+    }
+
+    #[test]
+    fn qos_snapshot_repository_roundtrips_snapshot_and_checkpoint() {
+        let temp = tempdir().expect("tempdir should succeed");
+        let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
+
+        let snapshot = make_test_snapshot("stream-a", 81);
 
         repo.put_snapshot(&snapshot).expect("put snapshot should succeed");
         let loaded = repo
@@ -416,21 +420,7 @@ mod tests {
         let temp = tempdir().expect("tempdir should succeed");
         let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
 
-        let snapshot = QosSnapshotRecord {
-            stream_identity_key: "stream-a".to_string(),
-            input_name: "input-a".intern(),
-            target_name: "target-a".intern(),
-            provider_name: "provider-a".intern(),
-            provider_id: 22,
-            virtual_id: 33,
-            item_type: PlaylistItemType::Live,
-            updated_at: 1_700_000_000,
-            last_event_at: 1_700_000_123,
-            window_24h: QosSnapshotWindow::default(),
-            window_7d: QosSnapshotWindow::default(),
-            window_30d: QosSnapshotWindow::default(),
-            daily_buckets: BTreeMap::default(),
-        };
+        let snapshot = make_test_snapshot("stream-a", 0);
 
         repo.put_snapshot(&snapshot).expect("put snapshot should succeed");
         assert!(repo.delete_snapshot("stream-a").expect("delete should succeed"));
@@ -453,26 +443,7 @@ mod tests {
         let temp = tempdir().expect("tempdir should succeed");
         let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
 
-        let snapshot = QosSnapshotRecord {
-            stream_identity_key: "stream-a".to_string(),
-            input_name: "input-a".intern(),
-            target_name: "target-a".intern(),
-            provider_name: "provider-a".intern(),
-            provider_id: 22,
-            virtual_id: 33,
-            item_type: PlaylistItemType::Live,
-            updated_at: 1_700_000_000,
-            last_event_at: 1_700_000_123,
-            window_24h: QosSnapshotWindow {
-                connect_count: 3,
-                score: 81,
-                confidence: 60,
-                ..QosSnapshotWindow::default()
-            },
-            window_7d: QosSnapshotWindow::default(),
-            window_30d: QosSnapshotWindow::default(),
-            daily_buckets: BTreeMap::default(),
-        };
+        let snapshot = make_test_snapshot("stream-a", 81);
 
         repo.put_snapshot(&snapshot).expect("put snapshot should succeed");
         let loaded = QosSnapshotRepository::get_snapshot_read_only(temp.path(), "stream-a")

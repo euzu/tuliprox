@@ -62,6 +62,13 @@ enum PriorityOwner {
     Shared(SharedConnectionId),
 }
 
+struct AcquireProviderParams<'a> {
+    addr: &'a SocketAddr,
+    priority: i8,
+    kind: ConnectionKind,
+    session_owner: Option<&'a str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderHandle {
     pub client_id: ClientConnectionId,
@@ -333,44 +340,37 @@ impl ActiveProviderManager {
     async fn acquire_exact_connection_inner(
         &self,
         provider_name: &Arc<str>,
-        addr: &SocketAddr,
         allow_grace: bool,
-        priority: i8,
-        kind: ConnectionKind,
-        session_owner: Option<&str>,
+        params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
-        if self.is_reserved_for_other(provider_name, session_owner).await {
+        if self.is_reserved_for_other(provider_name, params.session_owner).await {
             return None;
         }
         let allocation = self.providers.acquire_exact_connection_with_grace_override(provider_name, allow_grace).await;
         if matches!(allocation, ProviderAllocation::Exhausted) {
             return None;
         }
-        self.register_allocation(allocation, addr, priority, kind).await
+        self.register_allocation(allocation, params.addr, params.priority, params.kind).await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn finalize_lineup_allocation(
         &self,
         input_name: &Arc<str>,
-        addr: &SocketAddr,
         allow_grace: bool,
-        priority: i8,
-        kind: ConnectionKind,
         allocation: ProviderAllocation,
-        session_owner: Option<&str>,
+        params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
         if matches!(&allocation, ProviderAllocation::GracePeriod(_))
-            && self.evict_lower_priority_on_input(input_name, priority, kind, session_owner).await
+            && self.evict_lower_priority_on_input(input_name, params.priority, params.kind, params.session_owner).await
         {
             let evicted_on_same = !self.providers.is_over_limit(&allocation.get_provider_name().unwrap_or_default()).await;
             if !evicted_on_same {
                 let new_alloc = self.providers.acquire_connection_with_grace_override(input_name, allow_grace).await;
                 if !matches!(new_alloc, ProviderAllocation::Exhausted) {
                     if let Some(provider_name) = new_alloc.get_provider_name() {
-                        if !self.is_reserved_for_other(&provider_name, session_owner).await {
+                        if !self.is_reserved_for_other(&provider_name, params.session_owner).await {
                             allocation.release().await;
-                            return self.register_allocation(new_alloc, addr, priority, kind).await;
+                            return self.register_allocation(new_alloc, params.addr, params.priority, params.kind).await;
                         }
                     }
                     new_alloc.release().await;
@@ -378,7 +378,7 @@ impl ActiveProviderManager {
             }
         }
 
-        self.register_allocation(allocation, addr, priority, kind).await
+        self.register_allocation(allocation, params.addr, params.priority, params.kind).await
     }
 
     fn select_victim_from_index(
@@ -494,16 +494,12 @@ impl ActiveProviderManager {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn acquire_connection_inner(
         &self,
         provider_or_input_name: &Arc<str>,
-        addr: &SocketAddr,
         force: bool,
         allow_grace_override: Option<bool>,
-        priority: i8,
-        kind: ConnectionKind,
-        session_owner: Option<&str>,
+        params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
         let allow_grace = if force { true } else { allow_grace_override.unwrap_or(true) };
 
@@ -512,13 +508,13 @@ impl ActiveProviderManager {
             if matches!(allocation, ProviderAllocation::Exhausted) {
                 return None;
             }
-            return self.register_allocation(allocation, addr, priority, kind).await;
+            return self.register_allocation(allocation, params.addr, params.priority, params.kind).await;
         }
 
-        if let Some(owner) = session_owner {
+        if let Some(owner) = params.session_owner {
             if let Some(reserved_provider) = self.get_reserved_provider_for_owner(provider_or_input_name, owner).await {
                 return self
-                    .acquire_exact_connection_inner(&reserved_provider, addr, allow_grace, priority, kind, Some(owner))
+                    .acquire_exact_connection_inner(&reserved_provider, allow_grace, params)
                     .await;
             }
         }
@@ -532,11 +528,11 @@ impl ActiveProviderManager {
                 break;
             }
             if let Some(provider_name) = allocation.get_provider_name() {
-                if self.is_reserved_for_other(&provider_name, session_owner).await {
+                if self.is_reserved_for_other(&provider_name, params.session_owner).await {
                     debug_if_enabled!(
                         "Skipping reserved provider {} for {}",
                         sanitize_sensitive_info(&provider_name),
-                        sanitize_sensitive_info(&addr.to_string())
+                        sanitize_sensitive_info(&params.addr.to_string())
                     );
                     skipped_reserved.insert(provider_name);
                     allocation.release().await;
@@ -549,21 +545,18 @@ impl ActiveProviderManager {
             return self
                 .finalize_lineup_allocation(
                     provider_or_input_name,
-                    addr,
                     allow_grace,
-                    priority,
-                    kind,
                     allocation,
-                    session_owner,
+                    params,
                 )
                 .await;
         }
 
         if let Some(preempted_alloc) = self
-            .try_preempt_connection(provider_or_input_name, priority, allow_grace, kind, session_owner)
+            .try_preempt_connection(provider_or_input_name, params.priority, allow_grace, params.kind, params.session_owner)
             .await
         {
-            return self.register_allocation(preempted_alloc, addr, priority, kind).await;
+            return self.register_allocation(preempted_alloc, params.addr, params.priority, params.kind).await;
         }
 
         None
@@ -911,7 +904,9 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderHandle> {
-        self.acquire_exact_connection_inner(provider_name, addr, allow_grace, priority, kind, session_owner).await
+        self.acquire_exact_connection_inner(provider_name, allow_grace, &AcquireProviderParams {
+            addr, priority, kind, session_owner,
+        }).await
     }
 
     pub async fn force_exact_acquire_connection(
@@ -933,7 +928,9 @@ impl ActiveProviderManager {
         priority: i8,
         kind: ConnectionKind,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, None, priority, kind, None).await
+        self.acquire_connection_inner(input_name, false, None, &AcquireProviderParams {
+            addr, priority, kind, session_owner: None,
+        }).await
     }
 
     /// Acquire a provider connection while explicitly controlling provider-side grace allocations.
@@ -957,20 +954,26 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, addr, false, Some(allow_grace), priority, kind, session_owner).await
+        self.acquire_connection_inner(input_name, false, Some(allow_grace), &AcquireProviderParams {
+            addr, priority, kind, session_owner,
+        }).await
     }
 
     /// Acquire a provider connection for probe tasks with configurable priority.
     /// Probes never consume grace capacity.
     pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, ConnectionKind::Normal, None).await
+        self.acquire_connection_inner(input_name, false, Some(false), &AcquireProviderParams {
+            addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, session_owner: None,
+        }).await
     }
 
     /// Acquire a provider connection for background transfers (downloads/recordings).
     /// Transfers participate in the same provider priority/preemption model as normal
     /// streams, but they never consume grace capacity and wait externally on notifications.
     pub async fn acquire_connection_for_download(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, &DUMMY_ADDR, false, Some(false), priority, ConnectionKind::Normal, None).await
+        self.acquire_connection_inner(input_name, false, Some(false), &AcquireProviderParams {
+            addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, session_owner: None,
+        }).await
     }
 
     // This method is used for redirects to cycle through the provider

@@ -389,6 +389,14 @@ fn is_stable_session_stream(stream: &StreamInfo) -> bool {
         )
 }
 
+fn uses_session_reentry_guard(stream: &StreamInfo) -> bool {
+    stream.channel.item_type.requires_provider_affinity()
+        || matches!(
+            extract_extension_from_url(stream.channel.url.as_ref()).as_deref(),
+            Some(ext) if ext == HLS_EXT || ext == DASH_EXT
+        )
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RecentWinnerProtection {
     protected_addr: SocketAddr,
@@ -512,6 +520,17 @@ impl SocketRegistration {
             ts: current_time_secs(),
         }
     }
+}
+
+struct UserSessionParams<'a> {
+    session_token: &'a str,
+    virtual_id: u32,
+    provider: &'a str,
+    stream_url: &'a str,
+    addr: &'a SocketAddr,
+    connection_permission: UserConnectionPermission,
+    connection_kind: Option<ConnectionKind>,
+    socket_bound: bool,
 }
 
 pub struct ActiveUserManager {
@@ -643,10 +662,15 @@ impl ActiveUserManager {
         key
     }
 
+    fn cleanup_idle_transition_gates(transition_gates: &mut HashMap<String, Arc<Mutex<()>>>) {
+        transition_gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+    }
+
     pub(crate) async fn acquire_playback_transition(&self, username: &str, token: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let key = Self::transition_gate_key(username, token);
         let gate = {
             let mut transition_gates = self.transition_gates.lock().await;
+            Self::cleanup_idle_transition_gates(&mut transition_gates);
             Arc::clone(
                 transition_gates
                     .entry(key)
@@ -654,6 +678,10 @@ impl ActiveUserManager {
             )
         };
         gate.lock_owned().await
+    }
+
+    fn should_reuse_stream_for_session(existing_stream: &StreamInfo, incoming_channel: &StreamChannel) -> bool {
+        existing_stream.channel.item_type.requires_provider_affinity() || incoming_channel.item_type.requires_provider_affinity()
     }
 
     pub(crate) fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) {
@@ -714,10 +742,35 @@ impl ActiveUserManager {
     /// the underlying HTTP connection may still remain open.
     #[allow(clippy::too_many_lines)]
     pub async fn release_stream(&self, addr: &SocketAddr) -> Option<StreamInfo> {
+        self.release_stream_inner(addr, None).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub async fn release_stream_by_uid(&self, addr: &SocketAddr, stream_uid: u32) -> Option<StreamInfo> {
+        self.release_stream_inner(addr, Some(stream_uid)).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn release_stream_inner(&self, addr: &SocketAddr, stream_uid: Option<u32>) -> Option<StreamInfo> {
         let (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
 
-            let username = user_connections.key_by_addr.get(addr).map(|reg| reg.username.clone())?;
+            let username = user_connections
+                .key_by_addr
+                .get(addr)
+                .filter(|reg| !reg.username.is_empty())
+                .map(|reg| reg.username.clone())
+                .or_else(|| {
+                    stream_uid.and_then(|uid| {
+                        user_connections.by_key.iter().find_map(|(username, connection_data)| {
+                            connection_data
+                                .streams
+                                .iter()
+                                .any(|stream| stream.uid == uid && stream.addr == *addr)
+                                .then(|| username.clone())
+                        })
+                    })
+                })?;
 
             let mut removed_stream = None;
             let mut expiry_entry = None;
@@ -726,10 +779,12 @@ impl ActiveUserManager {
             let mut promotion = None;
             if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
                 let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
-                if let Some(stream_idx) = connection_data
-                    .streams
-                    .iter()
-                    .position(|stream| stream.addr == *addr && !stream.preserved)
+                if let Some(stream_idx) = connection_data.streams.iter().position(|stream| {
+                    !stream.preserved
+                        && stream_uid.map_or(stream.addr == *addr, |uid| {
+                                                    stream.uid == uid && stream.addr == *addr
+                                                })
+                })
                 {
                     let migrated_addr = connection_data.streams[stream_idx]
                         .session_token
@@ -1369,7 +1424,10 @@ impl ActiveUserManager {
                 .streams
                 .iter()
                 .position(|stream_info| match session_token {
-                    Some(token) => stream_info.session_token.as_deref() == Some(token),
+                    Some(token) => {
+                        stream_info.session_token.as_deref() == Some(token)
+                            && Self::should_reuse_stream_for_session(stream_info, stream_channel)
+                    }
                     None => stream_info.addr == fingerprint.addr && stream_info.session_token.is_none(),
                 })
                 .map(|stream_idx| {
@@ -1436,18 +1494,18 @@ impl ActiveUserManager {
                 let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
                 let country_code = self.lookup_country(&fingerprint.client_ip);
 
-                let mut stream_info = StreamInfo::new(
+                let mut stream_info = StreamInfo::new(shared::model::StreamInfoParams {
                     uid,
                     meter_uid,
                     username,
-                    &fingerprint.addr,
-                    &fingerprint.client_ip,
+                    addr: &fingerprint.addr,
+                    client_ip: &fingerprint.client_ip,
                     provider,
-                    stream_channel.clone(),
-                    user_agent_string,
+                    stream_channel: stream_channel.clone(),
+                    user_agent: user_agent_string,
                     country_code,
                     session_token,
-                );
+                });
 
                 if let Some(token) = session_token {
                     if let Some(session) = connection_data.sessions.iter().find(|s| s.token == token) {
@@ -1520,31 +1578,21 @@ impl ActiveUserManager {
     }
 
 
-    #[allow(clippy::too_many_arguments)]
-    fn new_user_session(
-        session_token: &str,
-        virtual_id: u32,
-        provider: &str,
-        stream_url: &str,
-        addr: &SocketAddr,
-        connection_permission: UserConnectionPermission,
-        connection_kind: Option<ConnectionKind>,
-        socket_bound: bool,
-    ) -> UserSession {
+    fn new_user_session(params: &UserSessionParams<'_>) -> UserSession {
         let now = current_time_secs();
         UserSession {
-            token: session_token.to_string(),
+            token: params.session_token.to_string(),
             transition_version: 1,
-            virtual_id,
-            provider: provider.intern(),
-            stream_url: stream_url.intern(),
-            addr: *addr,
-            socket_bound,
-            active_addrs: vec![*addr],
+            virtual_id: params.virtual_id,
+            provider: params.provider.intern(),
+            stream_url: params.stream_url.intern(),
+            addr: *params.addr,
+            socket_bound: params.socket_bound,
+            active_addrs: vec![*params.addr],
             ts: now,
             started_at: now,
-            permission: connection_permission,
-            connection_kind,
+            permission: params.connection_permission,
+            connection_kind: params.connection_kind,
             lifecycle: PlaybackLifecycle::Prepared,
         }
     }
@@ -1774,7 +1822,7 @@ impl ActiveUserManager {
             return version;
         }
 
-        let session = Self::new_user_session(
+        let session = Self::new_user_session(&UserSessionParams {
             session_token,
             virtual_id,
             provider,
@@ -1783,7 +1831,7 @@ impl ActiveUserManager {
             connection_permission,
             connection_kind,
             socket_bound,
-        );
+        });
         let version = session.transition_version;
         connection_data.add_session(session);
         let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
@@ -1892,7 +1940,7 @@ impl ActiveUserManager {
             debug_if_enabled!("Creating first session for user {username} {}", sanitize_sensitive_info(stream_url));
             let mut data = UserConnectionData::new(0, user.max_connections, user.soft_connections);
             let session =
-                Self::new_user_session(
+                Self::new_user_session(&UserSessionParams {
                     session_token,
                     virtual_id,
                     provider,
@@ -1901,7 +1949,7 @@ impl ActiveUserManager {
                     connection_permission,
                     connection_kind,
                     socket_bound,
-                );
+                });
             data.add_session(session);
             data
         });
@@ -1958,7 +2006,7 @@ impl ActiveUserManager {
             user.username,
             sanitize_sensitive_info(stream_url)
         );
-        let session = Self::new_user_session(
+        let session = Self::new_user_session(&UserSessionParams {
             session_token,
             virtual_id,
             provider,
@@ -1967,7 +2015,7 @@ impl ActiveUserManager {
             connection_permission,
             connection_kind,
             socket_bound,
-        );
+        });
         let token = session.token.clone();
         connection_data.add_session(session);
         let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
@@ -2818,10 +2866,11 @@ impl ActiveUserManager {
         let mut socket_guard_keys = Vec::new();
 
         for stream in connection_data.streams.iter().filter(|stream| stream.addr == *addr) {
-            if is_stable_session_stream(stream) {
-                if let Some(session_token) = stream.session_token.clone() {
-                    session_tokens.push(session_token);
-                }
+            if uses_session_reentry_guard(stream) && stream.session_token.is_some() {
+                let Some(session_token) = stream.session_token.clone() else {
+                    continue;
+                };
+                session_tokens.push(session_token);
             } else {
                 socket_guard_keys.push(create_socket_reentry_guard_key(
                     &username,
@@ -3228,6 +3277,7 @@ mod tests {
             shared_stream_id: None,
             technical: None,
             epg_channel_id: None,
+            epg_reference_ts: None,
         }
     }
 
@@ -3247,6 +3297,7 @@ mod tests {
             shared_stream_id: None,
             technical: None,
             epg_channel_id: None,
+            epg_reference_ts: None,
         }
     }
 
@@ -4721,11 +4772,11 @@ mod tests {
                 session_token: "tok-hls",
                 virtual_id: 2001,
                 provider: "provider-a",
-                stream_url: "http://localhost/live.ts",
+                stream_url: "http://localhost/live.m3u8",
                 addr: &first_addr,
                 connection_permission: UserConnectionPermission::Allowed,
                 connection_kind: Some(ConnectionKind::Normal),
-                socket_bound: true,
+                socket_bound: false,
             })
             .await;
         manager
@@ -4740,7 +4791,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &first,
                 provider: "provider-a".intern(),
-                stream_channel: &test_channel(2001),
+                stream_channel: &test_adaptive_channel(2001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-hls"),
             })
@@ -4764,7 +4815,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &second,
                 provider: "provider-a".intern(),
-                stream_channel: &test_channel(2001),
+                stream_channel: &test_adaptive_channel(2001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-hls"),
             })
@@ -4947,6 +4998,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recently_evicted_vod_uses_session_reentry_guard() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let evicted_addr: SocketAddr = "127.0.0.1:55113".parse().unwrap();
+        let protected_addr: SocketAddr = "127.0.0.1:55114".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-vod-guard".to_string(), "127.0.0.1".to_string(), evicted_addr);
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("vod-guard-user");
+        user.max_connections = 1;
+        let mut channel = test_channel(2019);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = "http://localhost/movie.mkv".intern();
+
+        manager.add_connection(&evicted_addr).await;
+        manager.add_connection(&protected_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-guard-vod",
+                virtual_id: channel.virtual_id,
+                provider: "provider-a",
+                stream_url: channel.url.as_ref(),
+                addr: &evicted_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 19,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-guard-vod"),
+            })
+            .await;
+
+        manager
+            .mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10)
+            .await;
+
+        assert_eq!(
+            manager
+                .recently_evicted_session_protected_addr("tok-guard-vod")
+                .await,
+            Some(protected_addr)
+        );
+        let connections = manager.connections.read().await;
+        assert!(
+            connections.recent_socket_reentry_guards.is_empty(),
+            "provider-affine VOD must not be guarded by transient socket identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_affine_stream_without_session_token_uses_socket_reentry_fallback() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let evicted_addr: SocketAddr = "127.0.0.1:55115".parse().unwrap();
+        let protected_addr: SocketAddr = "127.0.0.1:55116".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-vod-no-token".to_string(), "127.0.0.1".to_string(), evicted_addr);
+        let mut channel = test_channel(2020);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.url = "http://localhost/movie-no-token.mkv".intern();
+
+        manager.add_connection(&evicted_addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 20,
+                meter_uid: 0,
+                username: "vod-no-token-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await;
+
+        manager
+            .mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10)
+            .await;
+
+        assert_eq!(
+            manager
+                .recent_socket_reentry_protected_addr("vod-no-token-user", "127.0.0.1", channel.virtual_id)
+                .await,
+            Some(protected_addr)
+        );
+    }
+
+    #[tokio::test]
     async fn test_reused_logical_stream_refreshes_normal_priority() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
@@ -5036,7 +5201,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &test_channel(3001),
+                stream_channel: &test_adaptive_channel(3001),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-meter"),
             })
@@ -5057,7 +5222,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-b".intern(),
-                stream_channel: &test_channel(3002),
+                stream_channel: &test_adaptive_channel(3002),
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-meter"),
             })
@@ -5073,6 +5238,165 @@ mod tests {
         assert_eq!(streams[0].meter_uid, 202);
         assert_eq!(streams[0].provider.as_ref(), "provider-b");
         assert_eq!(streams[0].channel.virtual_id, 3002);
+    }
+
+    #[tokio::test]
+    async fn socket_bound_live_streams_with_colliding_token_are_tracked_separately() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let Some(addr) = "127.0.0.1:55032".parse::<SocketAddr>().ok() else {
+            return;
+        };
+        let fingerprint = Fingerprint::new("fp-key-colliding".to_string(), "127.0.0.1".to_string(), addr);
+
+        manager.add_connection(&addr).await;
+        let first = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 31,
+                meter_uid: 301,
+                username: "user1",
+                max_connections: 0,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_channel(3003),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-live-colliding"),
+            })
+            .await;
+        let second = manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 32,
+                meter_uid: 302,
+                username: "user1",
+                max_connections: 0,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-b".intern(),
+                stream_channel: &test_channel(3003),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-live-colliding"),
+            })
+            .await;
+
+        assert!(first.is_some());
+        assert!(second.is_some());
+
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 2);
+        assert!(streams.iter().any(|stream| stream.uid == 31));
+        assert!(streams.iter().any(|stream| stream.uid == 32));
+    }
+
+    #[tokio::test]
+    async fn unlimited_user_can_open_same_and_different_live_streams_from_same_ip() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let username = "unlimited-same-ip";
+        let client_ip = "10.9.0.1";
+        let addrs = [
+            "10.9.0.1:55101".parse::<SocketAddr>().unwrap(),
+            "10.9.0.1:55102".parse::<SocketAddr>().unwrap(),
+            "10.9.0.1:55103".parse::<SocketAddr>().unwrap(),
+        ];
+        let fingerprints = [
+            Fingerprint::new("fp-unlimited-1".to_string(), client_ip.to_string(), addrs[0]),
+            Fingerprint::new("fp-unlimited-2".to_string(), client_ip.to_string(), addrs[1]),
+            Fingerprint::new("fp-unlimited-3".to_string(), client_ip.to_string(), addrs[2]),
+        ];
+
+        for addr in addrs {
+            manager.add_connection(&addr).await;
+        }
+
+        for (idx, (fingerprint, virtual_id)) in fingerprints.iter().zip([4100, 4100, 4101]).enumerate() {
+            let token = format!("tok-unlimited-{idx}");
+            manager
+                .update_connection(ActiveUserConnectionParams {
+                    uid: 410 + u32::try_from(idx).unwrap_or_default(),
+                    meter_uid: 0,
+                    username,
+                    max_connections: 0,
+                    soft_connections: 0,
+                    connection_kind: ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint,
+                    provider: "provider-a".intern(),
+                    stream_channel: &test_channel(virtual_id),
+                    user_agent: Cow::Borrowed("ua"),
+                    session_token: Some(&token),
+                })
+                .await
+                .expect("unlimited stream should register");
+        }
+
+        assert_eq!(manager.user_connections(username).await, 3);
+        assert_eq!(manager.active_streams().await.len(), 3);
+        assert_eq!(
+            manager.connection_admission(username, 0, 0).await.permission,
+            UserConnectionPermission::Allowed
+        );
+        assert_eq!(
+            manager
+                .connection_admission_for_session(username, 0, 0, "tok-unlimited-new")
+                .await
+                .permission,
+            UserConnectionPermission::Allowed
+        );
+    }
+
+    #[tokio::test]
+    async fn release_stream_by_uid_removes_only_matching_stream_on_shared_addr() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let Some(addr) = "127.0.0.1:55033".parse::<SocketAddr>().ok() else {
+            return;
+        };
+        let fingerprint = Fingerprint::new("fp-key-shared-addr".to_string(), "127.0.0.1".to_string(), addr);
+
+        manager.add_connection(&addr).await;
+        for uid in [41, 42] {
+            manager
+                .update_connection(ActiveUserConnectionParams {
+                    uid,
+                    meter_uid: uid + 300,
+                    username: "user1",
+                    max_connections: 0,
+                    soft_connections: 0,
+                    connection_kind: ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &fingerprint,
+                    provider: "provider-a".intern(),
+                    stream_channel: &test_channel(3004),
+                    user_agent: Cow::Borrowed("ua"),
+                    session_token: Some("tok-live-shared-addr"),
+                })
+                .await;
+        }
+
+        let removed = manager.release_stream_by_uid(&addr, 42).await;
+        assert!(removed.as_ref().is_some_and(|stream| stream.uid == 42));
+
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].uid, 41);
     }
 
     #[tokio::test]
@@ -7424,6 +7748,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playback_transition_gate_cleanup_removes_idle_gates_on_next_acquire() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let first_guard = manager.acquire_playback_transition("user-gated-cleanup", "tok-first").await;
+        assert_eq!(manager.transition_gates.lock().await.len(), 1);
+        drop(first_guard);
+
+        let second_guard = manager.acquire_playback_transition("user-gated-cleanup", "tok-second").await;
+        assert_eq!(manager.transition_gates.lock().await.len(), 1);
+        drop(second_guard);
+    }
+
+    #[tokio::test]
     async fn check_divergence_detects_connection_count_mismatch() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
@@ -7508,18 +7848,26 @@ mod tests {
             data.increment_kind(ConnectionKind::Normal);
 
             // Add a stream whose session_token doesn't match any counted session
-            let orphan_stream = StreamInfo::new(
-                903, 0, &user.username, &addr, "127.0.0.1", "provider-a".intern(),
-                StreamChannel {
+            let orphan_stream = StreamInfo::new(shared::model::StreamInfoParams {
+                uid: 903,
+                meter_uid: 0,
+                username: &user.username,
+                addr: &addr,
+                client_ip: "127.0.0.1",
+                provider: "provider-a".intern(),
+                stream_channel: StreamChannel {
                     target_id: 1, virtual_id: 9003, provider_id: 1,
                     input_name: "provider-a".intern(), item_type: PlaylistItemType::Live,
                     cluster: XtreamCluster::Live, group: "g".intern(), title: "t".intern(),
                     url: "http://localhost/stream.ts".intern(),
                     shared: false, shared_joined_existing: None, shared_stream_id: None, technical: None,
                     epg_channel_id: None,
+                    epg_reference_ts: None,
                 },
-                "ua".to_string(), None, Some("tok-orphan"),
-            );
+                user_agent: "ua".to_string(),
+                country_code: None,
+                session_token: Some("tok-orphan"),
+            });
             data.streams.push(orphan_stream);
             data.stream_kinds.insert(903, ConnectionKind::Normal);
         }

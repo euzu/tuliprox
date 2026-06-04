@@ -218,6 +218,20 @@ mod tests {
     }
 
     #[test]
+    fn prepare_rejects_cidr_with_extra_segment() {
+        let mut user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            network_access: Some(NetworkAccessDto {
+                allowed_countries: None,
+                allowed_networks: Some(vec!["10.0.0.0/8/extra".to_string()]),
+            }),
+            ..Default::default()
+        };
+        assert!(user.prepare().is_err());
+    }
+
+    #[test]
     fn prepare_normalizes_empty_network_access_to_none() {
         let mut user = ProxyUserCredentialsDto {
             username: "alice".to_string(),

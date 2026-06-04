@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-shared = { version = "3.3.35", path = "../shared" }
+shared = { version = "3.3.46", path = "../shared" }
 chrono.workspace = true
 yew = "0.22.1"
 yew-router = "0.19.0"
@@ -40,11 +40,7 @@ strum_macros.workspace = true
 
 [dependencies.web-sys]
 version = "0.3.91"
-features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement",
-    "DomRect", "HtmlDialogElement", "CssStyleDeclaration",
-    "Event", "MutationObserver", "MutationObserverInit",
-    "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation",
-    "HtmlCanvasElement", "HtmlSelectElement"]
+features = ["Document", "Element", "Node", "Window", "HtmlCollection", "HtmlImageElement", "HtmlInputElement", "DomRect", "HtmlDialogElement", "CssStyleDeclaration", "Event", "BeforeUnloadEvent", "MutationObserver", "MutationObserverInit", "WebGlRenderingContext", "WebGlProgram", "WebGlShader", "WebGlBuffer", "WebGlUniformLocation", "HtmlCanvasElement", "HtmlSelectElement", "DomTokenList"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.64"

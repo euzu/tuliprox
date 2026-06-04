@@ -84,7 +84,14 @@ const SETUP_ERROR_PATTERNS: &[(&[&str], &str)] = &[
 ];
 
 fn normalize_setup_error_message(message: &str) -> String {
-    message.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut result = String::new();
+    for part in message.trim().to_lowercase().split_whitespace() {
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(part);
+    }
+    result
 }
 
 fn matches_setup_error_pattern(message: &str, pattern_keywords: &[&str]) -> bool {

@@ -6,6 +6,7 @@
   padding: var(--padding-default);
   width: 100%;
   box-sizing: border-box;
+  text-align: center;
 
   &__indicator {
     display: flex;
@@ -24,5 +25,23 @@
       width: 1.2rem;
       height: 1.2rem;
     }
+  }
+
+  &__text {
+    margin: var(--padding-default) 0 0;
+    font-weight: 600;
+  }
+
+  &__hint {
+    margin: 0.25rem 0 0;
+    max-width: 28rem;
+    color: var(--text-color-secondary, currentColor);
+    opacity: 0.75;
+    font-size: 0.875rem;
+    line-height: 1.4;
+  }
+
+  &__action {
+    margin-top: var(--padding-default);
   }
 }

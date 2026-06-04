@@ -822,6 +822,7 @@
     "ADD_QUALITY_TO_FILENAME": "Quality",
     "ADD_SERVER": "Add Server",
     "ADD_STRIP_ENTRY": "Add Strip Entry",
+    "ADD_TRAKT_CHART": "Add a Trakt chart",
     "ADD_TRAKT_LIST": "Add a Trakt list",
     "ADD_URL": "Add Url",
     "ADD_WATCH": "Add Watch",
@@ -884,6 +885,7 @@
     "CONTENT_SECURITY_POLICY": "Content Security Policy",
     "CONTENT_TYPE": "Content Type",
     "COPY_CREDENTIALS": "Copy Credentials",
+    "COPY_DETAILS": "Copy details",
     "COPY_LINK_PROVIDER_URL": "Copy Provider Url",
     "COPY_LINK_TULIPROX_VIRTUAL_ID": "Copy Virtual Id",
     "COPY_LINK_TULIPROX_WEBPLAYER_URL": "Copy Webplayer Url",
@@ -1262,6 +1264,7 @@
     "SKIP_VOD": "Skip VOD",
     "SLEEP_TIMER_MINS": "Sleep Timer (mins)",
     "SMART_EPG": "Smart Epg",
+    "SOMETHING_WENT_WRONG": "Something went wrong",
     "SORT": "Sort",
     "SORT_SETTINGS": "Sort Settings",
     "SOURCE": "Source",
@@ -1278,6 +1281,18 @@
     "STAR_ON_GITHUB": "If you like this project, star ⭐ us on GitHub",
     "STATS": "Stats",
     "STATUS": "Status",
+    "HEALTH_BANNER": "System health",
+    "HEALTH_HEALTHY": "Healthy",
+    "HEALTH_DEGRADED": "Degraded",
+    "HEALTH_UNHEALTHY": "Unhealthy",
+    "HEALTH_UNKNOWN": "Unknown",
+    "HEALTH_WEBSOCKET": "Realtime connection",
+    "HEALTH_BACKEND": "Backend status",
+    "HEALTH_PROVIDERS": "Provider capacity",
+    "HEALTH_CONNECTED": "Connected",
+    "HEALTH_DISCONNECTED": "Disconnected",
+    "HEALTH_PROVIDERS_OK": "All healthy",
+    "HEALTH_PROVIDERS_NONE": "No active providers",
     "STREAM": "Stream",
     "STREAM_GRACE": "Stream Grace",
     "STREAM_SESSION": "Stream Session",
@@ -1334,10 +1349,21 @@
     "TOKEN_TTL_MINS": "Token ttl (mins)",
     "TRAKT": "Trakt",
     "TRAKT_CATEGORY_NAME": "Category name",
+    "TRAKT_CHARTS": "Charts",
+    "TRAKT_CHART_KIND": "Chart kind",
+    "TRAKT_CHART_KIND_MOVIES": "Movies",
+    "TRAKT_CHART_KIND_SHOWS": "Shows",
+    "TRAKT_CHART_TYPE": "Chart type",
+    "TRAKT_CHART_TYPE_POPULAR": "Popular",
+    "TRAKT_CHART_TYPE_TRENDING": "Trending",
     "TRAKT_FUZZY_MATCH_THRESHOLD": "Fuzzy matchthreshold",
     "TRAKT_TMDB_ONLY": "TMDB only",
     "TRAKT_LISTS": "Lists",
     "TRAKT_LIST_SLUG": "List Slug",
+    "TRAKT_CONTENT_TYPE": "Trakt content type",
+    "TRAKT_CONTENT_TYPE_BOTH": "Both",
+    "TRAKT_CONTENT_TYPE_SERIES": "Series",
+    "TRAKT_CONTENT_TYPE_VOD": "Vod",
     "TRAKT_USER": "Trakt User",
     "TRANSFERRED": "Transferred",
     "TUNER_COUNT": "Tuner Count",
@@ -1401,6 +1427,7 @@
     "ACTIVE_STREAMS": "Active Streams",
     "PLAYER": "Player",
     "TITLE": "Title",
+    "TOGGLE_SIDEBAR": "Toggle sidebar",
     "SELECTED": "Selected",
     "FILTERED": "Filtered",
     "TOTAL": "Total",
@@ -1442,7 +1469,8 @@
     "NEXT_PAGE": "Next Page",
     "PREVIOUS_PAGE": "Previous Page",
     "PAGE": "Page",
-    "PAGES": "Pages"
+    "PAGES": "Pages",
+    "NO_CONTENT": "No content"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
@@ -1457,6 +1485,8 @@
       "DOWNLOAD_CANCELLED": "Download cancelled.",
       "DOWNLOAD_REMOVED": "Download removed.",
       "DOWNLOAD_RETRIED": "Download retried.",
+      "CONFIRM_CANCEL": "Do you really want to cancel this transfer?",
+      "CONFIRM_REMOVE": "Do you really want to remove this entry?",
       "FAIL": "Failed to download!",
       "INVALID_RECORD_DURATION": "Recording duration must be a positive number of minutes.",
       "INVALID_RECORD_START": "Recording start time is invalid.",
@@ -1488,17 +1518,30 @@
     "LOGIN": {
       "MESSAGE": "Enter Your Credentials"
     },
+    "SESSION": {
+      "EXPIRED": "Your session has expired. Please log in again."
+    },
     "NO_ACCESS_MESSAGE": "Your account has no permissions assigned. Contact an administrator.",
     "NO_ACCESS_TITLE": "No Access",
     "NO_CONTENT": "No content",
+    "EMPTY_STATE": {
+      "HDHOMERUN_DEVICES_TITLE": "No HDHomeRun devices",
+      "HDHOMERUN_DEVICES_HINT": "Switch to edit mode and add a device to emulate an HDHomeRun tuner for your players.",
+      "SCHEDULES_TITLE": "No schedules",
+      "SCHEDULES_HINT": "Add a schedule to run playlist updates automatically at the times you choose.",
+      "API_PROXY_SERVER_TITLE": "No server endpoints",
+      "API_PROXY_SERVER_HINT": "Add a server entry to define the host and ports your clients use to reach the playlists."
+    },
     "PLAYLIST": {
       "WEBPLAYER_URL_COPY_TO_CLIPBOARD": "The copied WebPlayer url is valid for 30 seconds."
     },
     "PLAYLIST_EXPLORER": {
-      "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content."
+      "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content.",
+      "SELECT_A_PLAYLIST_HINT": "Pick a source from the selector above to browse its channels, movies and series."
     },
     "EPG": {
-      "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content."
+      "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",
+      "SELECT_AN_EPG_HINT": "Choose an EPG source above to preview its programme guide."
     },
     "RBAC": {
       "ADMIN_HINT": "User is Admin \u2014 additional groups have no effect.",

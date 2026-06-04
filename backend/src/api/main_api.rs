@@ -8,6 +8,7 @@ use crate::{
             hdhomerun_api::hdhr_api_register,
             hls_api::hls_api_register,
             m3u_api::m3u_api_register,
+            provider_resolve_api::provider_resolve_api_register,
             v1_api::v1_api_register,
             web_index::{index_register_with_path, index_register_without_path},
             websocket_api::ws_api_register,
@@ -644,6 +645,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     let mut api_router = axum::Router::new()
         .merge(xtream_api_register())
         .merge(m3u_api_register())
+        .merge(provider_resolve_api_register())
         .merge(xmltv_api_register())
         .merge(hls_api_register())
         .merge(cvs_api_register());

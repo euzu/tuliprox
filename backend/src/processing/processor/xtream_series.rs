@@ -18,9 +18,7 @@ use crate::processing::processor::{
     FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
 };
 use crate::repository::persists_input_series_info;
-use crate::repository::{
-    get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource, PlaylistSource,
-};
+use crate::repository::{get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource};
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
 use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
 use crate::utils::{debug_if_enabled, xtream};
@@ -124,7 +122,7 @@ async fn playlist_resolve_series_info(
     // Apply pipe transformations to new groups
     let mut new_playlist = groups_to_add;
     for f in pipe {
-        let mut source = MemoryPlaylistSource::new(new_playlist);
+        let mut source = MemoryPlaylistSource::new(new_playlist).into_source();
         if let Some(v) = f(&mut source, target) {
             new_playlist = v;
         } else {
@@ -1001,24 +999,23 @@ pub async fn update_series_metadata(
                             let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
                                 .ok()
                                 .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                            let probe_params = crate::utils::ffmpeg::ProbeParams {
+                                url: probe_url.as_ref(),
+                                user_agent: user_agent.as_deref(),
+                                analyze_duration: probe_settings.analyze_duration_micros,
+                                probe_size: probe_settings.probe_size_bytes,
+                                timeout_secs: probe_settings.timeout_secs,
+                            };
                             let probe_result = if is_remote_probe {
                                 FfmpegExecutor::new().probe_remote_seekable_url_with_cancel(
                                     client,
-                                    probe_url.as_ref(),
-                                    user_agent.as_deref(),
-                                    probe_settings.analyze_duration_micros,
-                                    probe_settings.probe_size_bytes,
-                                    probe_settings.timeout_secs,
+                                    &probe_params,
                                     cancel_token,
                                 )
                                 .await
                             } else {
                                 FfmpegExecutor::new().probe_url_with_cancel(
-                                    probe_url.as_ref(),
-                                    user_agent.as_deref(),
-                                    probe_settings.analyze_duration_micros,
-                                    probe_settings.probe_size_bytes,
-                                    probe_settings.timeout_secs,
+                                    &probe_params,
                                     config.proxy.as_ref(),
                                     cancel_token,
                                 )

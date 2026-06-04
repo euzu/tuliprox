@@ -108,6 +108,7 @@ pub(crate) struct ActiveClientStreamParams<'a> {
     pub connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
     pub fingerprint: &'a Fingerprint,
     pub stream_channel: StreamChannel,
+    pub socket_bound: bool,
     pub session_token: Option<&'a str>,
     pub req_headers: &'a HeaderMap,
     pub meter_uid: u32,
@@ -169,6 +170,7 @@ struct ActiveClientStreamState {
     waker: Option<Arc<AtomicWaker>>,
     connection_manager: Arc<ConnectionManager>,
     fingerprint: Arc<Fingerprint>,
+    stream_uid: Option<u32>,
     provider_stopped: bool,
     user_stream_released: bool,
     /// Mirrors `user_stream_released` for the provider handle to guard against double-release
@@ -237,6 +239,7 @@ impl ActiveClientStreamState {
         self.user_stream_released = true;
         self.connection_manager.send_cleanup(CleanupEvent::ReleaseStream {
             addr: self.fingerprint.addr,
+            stream_uid: self.stream_uid,
             provider_end_reason: self.provider_end_reason.load(Ordering::Relaxed),
             reconnect_count: self.provider_reconnect_count.load(Ordering::Relaxed),
             provider_error_class: self.provider_error_class,
@@ -699,6 +702,7 @@ impl Drop for ActiveClientStream {
             self.state.provider_handle_released = true;
             self.state.connection_manager.send_cleanup(CleanupEvent::ReleaseStreamAndProviderHandle {
                 addr,
+                stream_uid: self.state.stream_uid,
                 handle: handle_for_cleanup,
                 provider_end_reason: self.state.provider_end_reason.load(Ordering::Relaxed),
                 reconnect_count: self.state.provider_reconnect_count.load(Ordering::Relaxed),
@@ -719,6 +723,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         connection_kind,
         fingerprint,
         stream_channel,
+        socket_bound,
         session_token,
         req_headers,
         meter_uid,
@@ -735,7 +740,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
 
     let virtual_id = stream_channel.virtual_id;
     let is_shared_source_stream = stream_channel.shared && stream_details.stream.is_some();
-    app_state
+    let registered_stream = app_state
         .connection_manager
         .update_connection(crate::api::model::ConnectionParams {
             meter_uid,
@@ -752,6 +757,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             session_token,
         })
         .await;
+    let stream_uid = registered_stream.as_ref().map(|stream| stream.uid);
     if let Some((_, _, _m_, Some(cvt))) = stream_details.stream_info.as_ref() {
         app_state.connection_manager.update_stream_detail(&fingerprint.addr, *cvt).await;
     }
@@ -830,7 +836,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         grace_active_version,
         grace_resolution_context: owned_grace_ctx,
         grace_kind: Some(connection_kind),
-        socket_bound: stream_channel.item_type.uses_socket_bound_session(),
+        socket_bound,
     });
 
     let cfg = &app_state.app_config;
@@ -899,6 +905,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         waker: Some(waker),
         connection_manager: Arc::clone(&app_state.connection_manager),
         fingerprint: Arc::new(fingerprint.clone()),
+        stream_uid,
         provider_stopped: false,
         user_stream_released: false,
         provider_handle_released: false,
@@ -1048,6 +1055,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                 crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id }
                             } else {
                                 crate::api::api_utils::EvictionReentryGuard::Session(
+                                    // Defensive fallback: an empty token will not match any real session.
                                     session_token.as_deref().unwrap_or_default(),
                                 )
                             };
@@ -1485,6 +1493,7 @@ mod tests {
             shared_stream_id: None,
             technical: None,
             epg_channel_id: None,
+            epg_reference_ts: None,
         }
     }
 
@@ -1603,6 +1612,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 addr,
             )),
+            stream_uid: None,
             provider_stopped: true,
             user_stream_released: true,
             provider_handle_released: true,
@@ -1899,6 +1909,7 @@ mod tests {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
+            socket_bound: true,
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 0,
@@ -1973,6 +1984,7 @@ mod tests {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_shared_stream_channel(1, "http://provider-1.example/live/1"),
+            socket_bound: true,
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 0,
@@ -2042,6 +2054,7 @@ mod tests {
                 "127.0.0.1".to_string(),
                 addr,
             )),
+            stream_uid: None,
             provider_stopped: false,
             user_stream_released: true,
             provider_handle_released: true,
@@ -2452,6 +2465,7 @@ mod tests {
             connection_kind: crate::api::model::ConnectionKind::Normal,
             fingerprint: &test_fingerprint,
             stream_channel: create_test_stream_channel(1, "http://provider-1.example/live/1"),
+            socket_bound: true,
             session_token: None,
             req_headers: &HeaderMap::default(),
             meter_uid: 55,

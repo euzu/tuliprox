@@ -1084,6 +1084,7 @@ lists and public Trakt charts.
 | `lists[].list_slug`              | String  | Yes      |                        | Trakt list slug. Combined with `user`, this uniquely identifies the remote list to load.                                                   |
 | `lists[].category_name`          | String  | Yes      |                        | Name of the generated virtual category inside Tuliprox's Xtream output. This controls where matched entries appear to clients.             |
 | `lists[].content_type`           | Enum    | Yes      |                        | `vod` or `series`. This determines which class of playlist entries Tuliprox will attempt to match and inject into the generated category.  |
+| `lists[].tmdb_only`              | Bool    | No       | `false`                | If `true`, only exact TMDB-id matches are accepted for this list, disabling title/year fuzzy fallback and reducing false positives.        |
 | `lists[].fuzzy_match_threshold`  | Integer | No       |                        | Fuzzy matching threshold for title matching. Higher values reduce false positives but may miss loosely matching items.                     |
 | `charts[]`                       | List    | No       | `[]`                   | Public Trakt chart definitions. Unlike `lists[]`, these are system charts and do not have a user/list owner.                               |
 | `charts[].kind`                  | Enum    | Yes      |                        | `movies` or `shows`. Aliases such as `movie`, `vod`, `show`, `series`, and `tvshows` are accepted.                                         |
@@ -1119,6 +1120,31 @@ output:
 > **Note:** `mask_redirect_url` should be enabled if you use multiple providers and want Tuliprox to preserve
 > redirect-mode
 > routing and cycling behavior without exposing the direct upstream endpoint in the initial playlist URL.
+
+#### M3U Catchup & Archive Support
+
+Tuliprox preserves standard M3U catchup/archive attributes from provider playlists.
+The following attributes are recognized and preserved during M3U import and export:
+
+* `catchup`
+* `catchup-days`
+* `catchup-source`
+* `catchup-time`
+* `catchup-correction`
+* `catchup-type`
+* Any unknown `catchup-*` attributes
+
+**Proxy Behavior:**
+
+* **Direct Output:** When Tuliprox outputs streams directly (e.g., when not using proxy rewrite), it preserves the original provider  
+  metadata exactly as received.
+* **Rewritten Output (Reverse Proxy):** When Tuliprox rewrites URLs to act as a reverse proxy, it generates authenticated local Tuliprox  
+  archive URLs instead of leaking the provider's upstream archive URLs.
+
+**Supported Modes:**
+Tuliprox supports processing and proxying the following catchup modes: `default`, `append`, `shift`, `xc`, `fs`, and `vod`.
+For unknown modes with an explicit source template, Tuliprox attempts to safely proxy them. For unknown modes without a source template,  
+Tuliprox preserves the metadata but logs a limitation that it cannot safely proxy the unknown mode locally.
 
 ### 3. Type `strm`
 

@@ -13,6 +13,17 @@ const LABEL_TRAKT_CATEGORY_NAME: &str = "LABEL.TRAKT_CATEGORY_NAME";
 const LABEL_TRAKT_CONTENT_TYPE: &str = "LABEL.TRAKT_CONTENT_TYPE";
 const LABEL_TRAKT_TMDB_ONLY: &str = "LABEL.TRAKT_TMDB_ONLY";
 const LABEL_TRAKT_FUZZY_MATCH_THRESHOLD: &str = "LABEL.TRAKT_FUZZY_MATCH_THRESHOLD";
+const LABEL_TRAKT_CONTENT_TYPE_VOD: &str = "LABEL.TRAKT_CONTENT_TYPE_VOD";
+const LABEL_TRAKT_CONTENT_TYPE_SERIES: &str = "LABEL.TRAKT_CONTENT_TYPE_SERIES";
+const LABEL_TRAKT_CONTENT_TYPE_BOTH: &str = "LABEL.TRAKT_CONTENT_TYPE_BOTH";
+
+fn trakt_content_type_label_key(content_type: TraktContentType) -> &'static str {
+    match content_type {
+        TraktContentType::Vod => LABEL_TRAKT_CONTENT_TYPE_VOD,
+        TraktContentType::Series => LABEL_TRAKT_CONTENT_TYPE_SERIES,
+        TraktContentType::Both => LABEL_TRAKT_CONTENT_TYPE_BOTH,
+    }
+}
 
 generate_form_reducer!(
     state: TraktListFormState { form: TraktListConfigDto },
@@ -53,25 +64,28 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
         modified: false,
     });
 
-    let content_type_options = use_memo(form_state.form.content_type, |content_type| {
-        let default_ct = content_type;
-        vec![
-            DropDownOption {
-                id: "vod".to_string(),
-                label: html! { "Vod" },
-                selected: default_ct == &TraktContentType::Vod,
-            },
-            DropDownOption {
-                id: "series".to_string(),
-                label: html! { "Series" },
-                selected: default_ct == &TraktContentType::Series,
-            },
-            DropDownOption {
-                id: "both".to_string(),
-                label: html! { "Both" },
-                selected: default_ct == &TraktContentType::Both,
-            },
-        ]
+    let content_type_options = use_memo(form_state.form.content_type, {
+        let translate = translate.clone();
+        move |content_type| {
+            let default_ct = content_type;
+            vec![
+                DropDownOption {
+                    id: TraktContentType::Vod.to_string(),
+                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_VOD) },
+                    selected: default_ct == &TraktContentType::Vod,
+                },
+                DropDownOption {
+                    id: TraktContentType::Series.to_string(),
+                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_SERIES) },
+                    selected: default_ct == &TraktContentType::Series,
+                },
+                DropDownOption {
+                    id: TraktContentType::Both.to_string(),
+                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_BOTH) },
+                    selected: default_ct == &TraktContentType::Both,
+                },
+            ]
+        }
     });
 
     let handle_submit = {
@@ -110,7 +124,7 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             }
 
             if props.readonly {
-                { config_field_custom!(translate.t(LABEL_TRAKT_CONTENT_TYPE), form_state.form.content_type.to_string()) }
+                { config_field_custom!(translate.t(LABEL_TRAKT_CONTENT_TYPE), translate.t(trakt_content_type_label_key(form_state.form.content_type))) }
             } else {
                 { config_field_child!(translate.t(LABEL_TRAKT_CONTENT_TYPE), "TRAKT_LIST_FORM.TRAKT_CONTENT_TYPE", {
                     let form_state_ct = form_state.clone();

@@ -26,12 +26,19 @@ pub fn MenuItem(props: &MenuItemProps) -> Html {
         })
     };
 
+    let is_active = props.class.split_whitespace().any(|c| c == "active");
+
     html! {
-        <div class={classes!("tp__menu-item", props.class.clone())} onclick={ handle_click }>
+        <button
+            type="button"
+            class={classes!("tp__menu-item", props.class.clone())}
+            onclick={ handle_click }
+            aria-current={if is_active { Some("page") } else { None }}
+        >
             {html_if!(!props.icon.is_empty(),
                 {<AppIcon name={props.icon.clone()}></AppIcon> }
             )}
             <label>{props.label.clone()}</label>
-        </div>
+        </button>
     }
 }

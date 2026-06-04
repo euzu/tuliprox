@@ -2,12 +2,17 @@
   display: flex;
   flex-flow: column;
   gap: var(--gap-default);
+  height: 100%;
   &__title {
     color: var(--modest-text-color);
   }
   &__body {
     color: var(--text-color);
     font-size: var(--font-size-md);
+  }
+  &__chart {
+    margin-top: auto;
+    padding-top: var(--gap-small);
   }
   &__footer {
     color: var(--modest-text-color);

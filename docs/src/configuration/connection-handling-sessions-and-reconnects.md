@@ -35,8 +35,10 @@ A session is the logical playback identity of a user for one stream activity.
 Important distinction:
 
 - HLS and catchup rely heavily on logical sessions
-- regular TS/VOD/local playback is counted by active socket-backed stream, not by a long-lived playback session
-- this means opening the same TS/VOD stream twice on two sockets counts as 2 connections
+- plain TS live playback is counted by active socket-backed stream, not by a long-lived playback session
+- VOD, series, catchup, and local playback use logical sessions for reopen/seek/range continuity
+- this means opening the same TS live stream twice on two sockets counts as 2 user connections when user limits are enabled
+- if the user has `max_connections: 0`, user-limit admission is unlimited and those TS sockets are not rejected by the user limit
 
 It helps Tuliprox decide:
 
@@ -92,8 +94,9 @@ It does not mean that every later socket should always be treated as the same pl
 In particular:
 
 - HLS and catchup may reuse session identity within their configured TTL
-- regular TS/VOD/local playback remains socket-bound and is counted per active stream/socket
-- a second TS/VOD socket therefore consumes another user connection or soft slot
+- plain TS live playback remains socket-bound and is counted per active stream/socket
+- a second TS socket therefore consumes another user connection or soft slot when user limits are enabled
+- VOD, series, and local playback are not socket-bound for session tracking because seek/range/reopen requests often belong to the same playback
 
 The TTL does not automatically mean:
 
@@ -206,7 +209,8 @@ Depending on timing, Tuliprox may:
 - or discard the session once the window expires
 
 This is most relevant for HLS and catchup continuity.
-Regular TS/VOD/local playback should be understood primarily as socket-bound admission.
+Plain TS live playback should be understood primarily as socket-bound admission.
+VOD, series, and local playback should be understood as session-based reopen/seek workflows rather than plain socket-bound playback.
 
 ## What matters when shared streams and sessions meet
 

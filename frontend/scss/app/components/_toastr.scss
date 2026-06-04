@@ -6,7 +6,7 @@
   flex-direction: column;
   align-items: flex-end;
   gap: 0.5rem;
-  z-index: 9999;
+  z-index: var(--z-index-toast);
 }
 
 .tp__toast {
@@ -18,6 +18,8 @@
   font-size: var(--font-size-md);
   box-shadow: var(--toastr-shadow);
   animation: fadeIn 0.3s ease-out;
+  position: relative;
+  overflow: hidden;
 
   &__message {
     display: flex;
@@ -27,6 +29,33 @@
   .svg-icon {
     width: 1.5rem;
     height: 1.5rem;
+  }
+
+  &__progress {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 3px;
+    width: 100%;
+    transform-origin: left center;
+    background-color: currentColor;
+    opacity: 0.45;
+    animation-name: tp-toast-progress;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+
+  &:hover &__progress {
+    animation-play-state: paused;
+  }
+}
+
+@keyframes tp-toast-progress {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
   }
 }
 
@@ -71,5 +100,16 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tp__toast {
+    animation: none;
+  }
+
+  .tp__toast__progress {
+    animation: none;
+    display: none;
   }
 }

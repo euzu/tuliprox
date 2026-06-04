@@ -225,7 +225,7 @@ async fn playlist_update(
             }
         }
         Err(err) => {
-            error!("Failed playlist update {}", sanitize_sensitive_info(err.to_string().as_str()));
+            error!("Failed playlist update {}", sanitize_sensitive_info(&err.to_string()));
             (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response()
         }
     }
@@ -404,7 +404,7 @@ async fn playlist_epg(
                     }
                     Ok(None) => return axum::http::StatusCode::NO_CONTENT.into_response(),
                     Err(err) => {
-                        error!("Failed to load input EPG for '{}': {}", input.name, sanitize_sensitive_info(err.to_string().as_str()));
+                        error!("Failed to load input EPG for '{}': {}", input.name, sanitize_sensitive_info(&err.to_string()));
                         return (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                             axum::Json(serde_json::json!({"error": "Failed to load EPG"})),
@@ -436,7 +436,7 @@ async fn playlist_epg(
                     return json_or_bin_response(accept.as_deref(), &epg).into_response();
                 }
                 Err(err) => {
-                    error!("Failed to load custom EPG: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    error!("Failed to load custom EPG: {}", sanitize_sensitive_info(&err.to_string()));
                     return (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                         axum::Json(serde_json::json!({"error": "Failed to load EPG"})),
@@ -915,6 +915,7 @@ mod tests {
                 "demo.channel".intern(),
                 Some("Low Show".intern()),
                 None,
+                None,
             )],
         };
         let high_priority = EpgChannel {
@@ -927,6 +928,7 @@ mod tests {
                 "demo.channel".intern(),
                 Some("High Show".intern()),
                 None,
+                None,
             )],
         };
         let same_priority = EpgChannel {
@@ -934,8 +936,8 @@ mod tests {
             title: Some("Same".intern()),
             icon: Some("http://same/icon.png".intern()),
             programmes: vec![
-                EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("Duplicate".intern()), None),
-                EpgProgramme::new_all(50, 60, "demo.channel".intern(), Some("Second Show".intern()), None),
+                EpgProgramme::new_all(30, 40, "demo.channel".intern(), Some("Duplicate".intern()), None, None),
+                EpgProgramme::new_all(50, 60, "demo.channel".intern(), Some("Second Show".intern()), None, None),
             ],
         };
 

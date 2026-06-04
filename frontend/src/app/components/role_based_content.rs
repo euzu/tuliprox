@@ -1,5 +1,8 @@
 use crate::{
-    app::{components::api_user::ApiUserView, switch, AppRoute},
+    app::{
+        components::{api_user::ApiUserView, ErrorBoundary},
+        switch, AppRoute,
+    },
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -29,8 +32,16 @@ pub fn RoleBasedContent() -> Html {
     let translate = use_translation();
 
     match resolve_view(services.auth.is_authenticated(), services.auth.is_api_user()) {
-        RoleBasedView::MainApp => html! { <Switch<AppRoute> render={switch} /> },
-        RoleBasedView::ApiUser => html! { <ApiUserView /> },
+        RoleBasedView::MainApp => html! {
+            <ErrorBoundary>
+                <Switch<AppRoute> render={switch} />
+            </ErrorBoundary>
+        },
+        RoleBasedView::ApiUser => html! {
+            <ErrorBoundary>
+                <ApiUserView />
+            </ErrorBoundary>
+        },
         RoleBasedView::Unauthorized => html! { <div class="tp__unauthorized">{translate.t("UNAUTHORIZED")}</div> },
     }
 }

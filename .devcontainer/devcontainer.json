@@ -1,0 +1,46 @@
+{
+  "name": "tuliprox",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
+  },
+  "forwardPorts": [8901, 9899],
+  "portsAttributes": {
+    "8901": {
+      "label": "backend (api)",
+      "onAutoForward": "notify"
+    },
+    "9899": {
+      "label": "frontend (trunk serve)",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "mounts": [
+    "source=tuliprox-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=tuliprox-target,target=${containerWorkspaceFolder}/target,type=volume",
+    "source=tuliprox-gh-config,target=/home/vscode/.config/gh,type=volume"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "vadimcn.vscode-lldb",
+        "usernamehw.errorlens",
+        "DavidAnson.vscode-markdownlint"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true,
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        }
+      }
+    }
+  },
+  "remoteUser": "vscode"
+}

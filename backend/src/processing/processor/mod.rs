@@ -8,7 +8,6 @@ mod sort;
 mod trakt;
 mod library;
 mod stream_probe;
-mod filtered_playlist_source;
 mod probe_handle_guard;
 mod resolve_options;
 pub use self::playlist::*;

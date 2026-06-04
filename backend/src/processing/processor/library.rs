@@ -1,4 +1,4 @@
-use crate::library::{EpisodeMetadata, MediaMetadata, MetadataAsyncIter, MetadataCacheEntry, TechnicalMetadata};
+use crate::library::{Actor, EpisodeMetadata, MediaMetadata, MetadataAsyncIter, MetadataCacheEntry, TechnicalMetadata, VideoClipMetadata};
 use crate::library::resolve_metadata_storage_path;
 use crate::model::{AppConfig, ConfigInput};
 use shared::concat_string;
@@ -39,6 +39,24 @@ fn technical_bitrate(technical: Option<&TechnicalMetadata>) -> u32 {
         .and_then(|metadata| metadata.bitrate)
         .filter(|value| *value > 0)
         .unwrap_or_default()
+}
+
+fn join_actor_names(actors: &[Actor]) -> Arc<str> {
+    let mut names = String::new();
+    for (idx, actor) in actors.iter().enumerate() {
+        if idx > 0 {
+            names.push_str(", ");
+        }
+        names.push_str(&actor.name);
+    }
+    names.intern()
+}
+
+fn youtube_trailer_key(videos: Option<&[VideoClipMetadata]>) -> Option<&str> {
+    videos?
+        .iter()
+        .find(|video| video.site.eq_ignore_ascii_case("youtube"))
+        .map(|video| video.key.as_str())
 }
 
 pub async fn download_library_playlist(_client: &reqwest::Client, app_config: &Arc<AppConfig>, input: &ConfigInput) -> (Vec<PlaylistGroup>, Vec<TuliproxError>) {
@@ -280,10 +298,11 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
         .and_then(|s| s.to_str())
         .map(ToString::to_string).unwrap_or_default();
 
-    let actor_names = movie.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ").intern());
+    let actor_names = movie.actors.as_deref().map(join_actor_names);
     let technical = movie.technical.as_ref();
     let duration_secs = technical_duration_secs(technical).or_else(|| movie.runtime.map(|runtime| runtime * 60));
     let duration = duration_secs.map(duration_secs_to_xtream_duration);
+    let youtube_trailer = youtube_trailer_key(movie.videos.as_deref());
 
     let properties = VideoStreamProperties {
         name: movie.title.clone().into(),
@@ -297,7 +316,7 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
         rating: movie.rating,
         rating_5based: None,
         stream_type: Some("movie".intern()),
-        trailer: movie.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone().into())),
+        trailer: youtube_trailer.map(Into::into),
         tmdb: movie.tmdb_id,
         is_adult: 0,
         details: Some(VideoStreamDetailProperties {
@@ -308,7 +327,7 @@ pub fn metadata_cache_entry_to_xtream_movie_info(
             release_date: movie.year.map(|y| format!("{y}-01-01").into()),
             episode_run_time: movie.runtime,
             director: movie.directors.as_ref().map(|d| d.join(", ").into()),
-            youtube_trailer: movie.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone().into())),
+            youtube_trailer: youtube_trailer.map(Into::into),
             actors: actor_names.clone(),
             cast: actor_names.clone(),
             genre: movie.genres.as_ref().map(|g| g.join(", ").into()),
@@ -347,9 +366,9 @@ pub fn metadata_cache_entry_to_xtream_series_info(
         MediaMetadata::Series(m) => m,
     };
 
-    let actor_names: Arc<str> = series.actors.as_ref().map(|a| a.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(", ")).unwrap_or_default().into();
+    let actor_names: Arc<str> = series.actors.as_deref().map(join_actor_names).unwrap_or_default();
     let release_date = series.year.map(|y| format!("{y}-01-01"));
-    let youtube_trailer = series.videos.as_ref().and_then(|v| v.iter().find(|video| video.site.eq_ignore_ascii_case("youtube")).map(|video| video.key.clone())).unwrap_or_default();
+    let youtube_trailer = youtube_trailer_key(series.videos.as_deref()).unwrap_or_default();
     let series_thumbnail = thumbnail_url(entry, api_base_path);
     let series_art = series.poster.clone().or(series_thumbnail.clone());
 

@@ -31,6 +31,7 @@ pub fn TextButton(props: &TextButtonProps) -> Html {
 
     html! {
         <button
+            type="button"
             autofocus={props.autofocus}
             disabled={props.disabled}
             onclick={handle_click}

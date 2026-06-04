@@ -40,7 +40,13 @@ This page is deliberately narrower than the runtime-internals page:
 
 ### Session token
 
-The session token is the stable logical playback identity.
+The session token is the playback identity used by admission, address tracking, and provider affinity.
+
+It is stable for follow-up requests of the same playback, but it is not always derived from the same fields:
+
+- plain TS live uses a socket-scoped playback token
+- VOD, series, catchup, and local playback use a logical token suitable for reopen/seek/range workflows
+- HLS/DASH playlist starts use a token scoped to that initial adaptive playback start, and rewritten segment URLs carry that token forward
 
 It is used to answer questions like:
 
@@ -108,8 +114,8 @@ Why:
 - VOD uses range and seek requests that still belong to one playback
 - HLS fetches many chunk requests that still belong to one playback
 
-This means the same logical HLS or VOD stream must keep the same provider account for its follow-up requests, even though  
-those requests may arrive on different sockets.
+This means the same provider-affine HLS, VOD, series, or catchup stream must keep the same provider account for
+its follow-up requests, even though those requests may arrive on different sockets.
 
 ### Adaptive preserved session
 
@@ -142,9 +148,16 @@ Important:
 
 ### TS live, VOD, series
 
-The regular M3U and Xtream playback endpoints build a stable playback token with:
+The regular M3U and Xtream playback endpoints build playback tokens with:
 
-- `create_session_fingerprint(fingerprint, username, virtual_id)`
+- `create_playback_session_fingerprint(...)`
+
+The helper deliberately keeps the token matrix different per playback type:
+
+- plain TS live is socket-scoped, so two TS sockets are two independent playback attempts
+- VOD and series are logical, so range/seek/reopen requests can continue the same playback
+- HLS/DASH playlist starts are scoped to the initial adaptive playback start, so two players behind the same
+  IP/user-agent can watch the same HLS/DASH channel independently
 
 ### Catchup
 
@@ -160,11 +173,11 @@ On segment fetch:
 
 - Tuliprox decodes the HLS token
 - extracts the session token if present
-- falls back to `create_session_fingerprint(...)` if needed
+- falls back to a logical `create_session_fingerprint(...)` only for legacy or malformed tokens without an embedded session token
 
 ### Local playback
 
-Local playback uses a stable `playback_session_token` passed into `local_stream_response(...)`.
+Local playback uses a stable logical `playback_session_token` passed into `local_stream_response(...)`.
 
 ## The three decisions that must stay separate
 
@@ -222,7 +235,7 @@ Intended model:
 If you collapse this into socket-binding, you get the wrong matrix:
 
 - TS would be over-pinned
-- VOD/HLS would be under-pinned
+- VOD/series/HLS would be under-pinned
 
 ## Current code flow
 
@@ -303,7 +316,8 @@ That is what allows a VOD session to survive:
 
 The address move itself is not the provider-affinity rule.
 
-Provider-affinity is the separate invariant that follow-up requests for the same VOD/HLS playback should continue on the same provider account.
+Provider-affinity is the separate invariant that follow-up requests for the same VOD/series/HLS playback should
+continue on the same provider account.
 
 This also explains why seek/reopen behavior must not be confused with:
 
@@ -367,6 +381,10 @@ These tests cover the most fragile parts of the current logic:
 - `resolve_admission_with_strategies_allows_existing_session_even_when_user_is_at_limit`
 - `local_stream_response_reuses_stable_playback_session_token_across_reopens`
 - `vod_session_survives_overlapping_and_seek_sockets`
+- `playback_session_fingerprint_keeps_ts_socket_bound_but_vod_logical`
+- `adaptive_playback_session_fingerprint_is_unique_per_initial_socket`
+- `unlimited_user_can_open_same_and_different_live_streams_from_same_ip`
+- `recently_evicted_vod_uses_session_reentry_guard`
 - `update_session_addr_prunes_previous_registration_for_socket_bound_session`
 - `test_adaptive_session_release_connection_preserves_logical_stream_and_start_time`
 

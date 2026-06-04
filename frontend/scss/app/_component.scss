@@ -15,6 +15,7 @@
 @forward "components/preferences";
 @forward "components/dashboard/action_card";
 @forward "components/dashboard/status_card";
+@forward "components/dashboard/sparkline";
 @forward "components/dashboard/dashboard_view";
 @forward "components/dashboard/stats_view";
 @forward "components/dashboard/streams_view";
@@ -64,6 +65,8 @@
 @forward "components/search";
 @forward "components/loading_indicator";
 @forward "components/theme_picker";
+@forward "components/language_picker";
+@forward "components/error_boundary";
 @forward "components/toastr";
 @forward "components/drop_down_icon_button";
 @forward "components/downloads";
@@ -83,6 +86,7 @@
 @forward "components/keyvalue_editor";
 @forward "components/loading_screen";
 @forward "components/websocket_status";
+@forward "components/health_banner";
 @forward "components/playlist/epg_view";
 @forward "components/particle_flow_background";
 @forward "components/source_editor/source_editor";

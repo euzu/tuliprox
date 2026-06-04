@@ -89,14 +89,17 @@ This matters especially for:
 
 - HLS
 - catchup
+- VOD/series range and seek requests
+- quick reconnects
+- channel switches with a brief overlap
 
 It does not apply equally to every stream type:
 
 - HLS and catchup are session-oriented because many follow-up HTTP requests still belong to one logical playback
-- regular TS/VOD/local playback is socket-bound for admission and connection counting
-- for TS/VOD, a second socket is a second connection even if it is the same user, same IP, and same stream
-- quick reconnects
-- channel switches with a brief overlap
+- VOD, series, and local playback use logical sessions for reopen, seek, and range-style behavior
+- plain TS live playback is socket-bound for admission and connection counting
+- for plain TS live, a second active socket is a second connection when user limits are enabled
+- if `max_connections: 0`, user-side admission is unlimited and the same IP may open the same or different TS streams
 
 ### Grace
 
@@ -142,12 +145,15 @@ Examples:
 
 If Tuliprox recognizes the same playback, not every follow-up request is treated like a completely new stream.
 
-This recognition is mainly relevant for HLS and catchup style playback.
-Regular TS/VOD playback is intentionally stricter:
+This recognition is mainly relevant for HLS, catchup, VOD, series, and local reopen/seek workflows.
+Plain TS live playback is intentionally stricter:
 
 - one active socket-backed stream counts as one connection
 - a parallel reopen on another socket counts as another connection
 - if `max_connections` is already exhausted, only a soft slot, admission strategy, or rejection remains
+
+If `max_connections` is `0`, this user-side limit does not reject additional TS sockets.
+Provider capacity and shared-stream behavior still apply separately.
 
 ### 2. Normal connection
 
@@ -273,7 +279,8 @@ Only the second case is temporarily suppressed.
 Important:
 
 - for HLS/catchup, this protection is scoped to the same session identity where Tuliprox has a stable session token
-- for socket-bound TS/VOD/local playback, Tuliprox uses a short same-user, same-IP, same-channel winner protection instead
+- for VOD, series, and local playback, this protection follows the logical session identity used for reopen/seek behavior
+- for socket-bound plain TS live playback, Tuliprox uses a short same-user, same-IP, same-channel winner protection instead
 - switching to a different channel is not blocked by it
 - soft admission can still succeed if a soft slot is free
 - the goal is to stop endless eviction ping-pong between aggressive player reconnect loops

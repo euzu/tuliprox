@@ -10,7 +10,9 @@ use log::{debug, error, info, warn};
 use path_clean::PathClean;
 use shared::model::{LibraryMetadataFormat, LibraryScanResult};
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
+use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,6 +26,34 @@ enum ProcessAction {
     Added,
     Updated,
     Unchanged,
+}
+
+#[derive(Debug)]
+enum LibraryProcessError {
+    Resolve(String),
+    Io(io::Error),
+}
+
+impl fmt::Display for LibraryProcessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Resolve(message) => f.write_str(message),
+            Self::Io(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for LibraryProcessError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Resolve(_) => None,
+            Self::Io(err) => Some(err),
+        }
+    }
+}
+
+impl From<io::Error> for LibraryProcessError {
+    fn from(value: io::Error) -> Self { Self::Io(value) }
 }
 
 // VOD processor that orchestrates scanning, classification, metadata resolution, and storage
@@ -225,7 +255,7 @@ impl LibraryProcessor {
         force_rescan: bool,
         can_probe: bool,
         can_extract_thumbnails: bool,
-    ) -> Result<ProcessAction, String> {
+    ) -> Result<ProcessAction, LibraryProcessError> {
         match group {
             MediaGroup::Movie { .. } => {
                 self.process_movie(group, existing_map, force_rescan, can_probe, can_extract_thumbnails).await
@@ -264,8 +294,10 @@ impl LibraryProcessor {
         force_rescan: bool,
         can_probe: bool,
         can_extract_thumbnails: bool,
-    ) -> Result<ProcessAction, String> {
-        let MediaGroup::Movie { file, .. } = group else { return Err(format!("Expected movie to resolve but got {group}")) };
+    ) -> Result<ProcessAction, LibraryProcessError> {
+        let MediaGroup::Movie { file, .. } = group else {
+            return Err(LibraryProcessError::Resolve(format!("Expected movie to resolve but got {group}")));
+        };
         // Check if file already exists in cache
         let (mut cache_entry, status) = if let Some(existing_entry) = existing_map.get(&file.file_path) {
             // Check if file has been modified
@@ -311,8 +343,8 @@ impl LibraryProcessor {
             file.modified_timestamp,
             can_extract_thumbnails,
         ).await;
-        self.storage.store(&cache_entry).await.map_err(|e| e.to_string())?;
-        self.write_metadata_files(&cache_entry).await.map_err(|e| e.to_string())?;
+        self.storage.store(&cache_entry).await?;
+        self.write_metadata_files(&cache_entry).await?;
         Ok(status)
     }
 
@@ -325,8 +357,10 @@ impl LibraryProcessor {
         force_rescan: bool,
         can_probe: bool,
         can_extract_thumbnails: bool,
-    ) -> Result<ProcessAction, String> {
-        let MediaGroup::Series { show_key, episodes } = group else { return Err(format!("Expected series to resolve but got {group}")) };
+    ) -> Result<ProcessAction, LibraryProcessError> {
+        let MediaGroup::Series { show_key, episodes } = group else {
+            return Err(LibraryProcessError::Resolve(format!("Expected series to resolve but got {group}")));
+        };
         let series_file_path = episodes
             .iter()
             .find_map(|episode| {
@@ -508,14 +542,17 @@ impl LibraryProcessor {
             }
         }
 
-        self.storage.store(&chache_entry).await.map_err(|e| e.to_string())?;
-        self.write_metadata_files(&chache_entry).await.map_err(|e| e.to_string())?;
+        self.storage.store(&chache_entry).await?;
+        self.write_metadata_files(&chache_entry).await?;
         Ok(status)
     }
 
     // Resolves metadata for a video file
-    async fn resolve_metadata(&self, file: &MediaGroup) -> Result<MediaMetadata, String> {
-        self.resolver.resolve(file).await.ok_or_else(|| format!("Could not resolve metadata for {file}"))
+    async fn resolve_metadata(&self, file: &MediaGroup) -> Result<MediaMetadata, LibraryProcessError> {
+        self.resolver
+            .resolve(file)
+            .await
+            .ok_or_else(|| LibraryProcessError::Resolve(format!("Could not resolve metadata for {file}")))
     }
 
     /// Extracts and caches a thumbnail if no TMDB poster is available.
@@ -710,11 +747,13 @@ impl LibraryProcessor {
 
         match FfmpegExecutor::new()
             .probe_url(
-                file_path,
-                None,
-                ffprobe.analyze_duration_micros,
-                ffprobe.probe_size_bytes,
-                ffprobe.timeout.unwrap_or(60),
+                &crate::utils::ffmpeg::ProbeParams {
+                    url: file_path,
+                    user_agent: None,
+                    analyze_duration: ffprobe.analyze_duration_micros,
+                    probe_size: ffprobe.probe_size_bytes,
+                    timeout_secs: ffprobe.timeout.unwrap_or(60),
+                },
                 // Local file probing does not traverse the network, so no proxy config is applied.
                 None,
             )

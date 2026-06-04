@@ -10,7 +10,11 @@ use shared::{
     model::PatternTemplate,
 };
 use web_sys::InputEvent;
-use yew::{classes, component, html, use_context, use_effect_with, use_state, Callback, Html, Properties, TargetCast};
+use yew::{
+    classes, component, html, use_context, use_effect_with, use_mut_ref, use_state, Callback, Html, Properties,
+    TargetCast,
+};
+use yew_hooks::use_debounce;
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct FilterEditorProps {
@@ -22,6 +26,8 @@ pub struct FilterEditorProps {
     pub on_valid_change: Callback<bool>,
     pub on_templates_change: Callback<Option<Vec<PatternTemplate>>>,
 }
+
+const FILTER_INPUT_DEBOUNCE_MS: u32 = 300;
 
 pub(crate) fn parse_filter_preview(
     filter: Option<&str>,
@@ -46,6 +52,10 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
 
     let templates_state = use_state(|| cfg_templates.clone());
     let filter_state = use_state(|| props.filter.clone());
+    // Raw textarea value, updated immediately on every keystroke so typing stays responsive.
+    let input_value = use_state(|| props.filter.clone().unwrap_or_default());
+    // Latest pending value awaiting the debounced parse/emit.
+    let pending_value = use_mut_ref(|| props.filter.clone());
 
     {
         let templates = templates_state.clone();
@@ -58,8 +68,12 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
 
     {
         let filter = filter_state.clone();
+        let input_value = input_value.clone();
+        let pending_value = pending_value.clone();
         use_effect_with(props.filter.clone(), move |flt| {
             filter.set(flt.clone());
+            input_value.set(flt.clone().unwrap_or_default());
+            *pending_value.borrow_mut() = flt.clone();
         });
     }
 
@@ -73,19 +87,30 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
         });
     }
 
-    let handle_filter_input = {
+    let debounce = {
         let filter = filter_state.clone();
         let on_filter_change = props.on_filter_change.clone();
+        let pending_value = pending_value.clone();
+        use_debounce(
+            move || {
+                let next = pending_value.borrow().clone();
+                filter.set(next.clone());
+                on_filter_change.emit(next);
+            },
+            FILTER_INPUT_DEBOUNCE_MS,
+        )
+    };
+
+    let handle_filter_input = {
+        let input_value = input_value.clone();
+        let pending_value = pending_value.clone();
+        let debounce = debounce.clone();
         Callback::from(move |event: InputEvent| {
             if let Some(input) = event.target_dyn_into::<web_sys::HtmlTextAreaElement>() {
                 let value = input.value();
-                if value.is_empty() {
-                    filter.set(None);
-                    on_filter_change.emit(None);
-                } else {
-                    filter.set(Some(value.clone()));
-                    on_filter_change.emit(Some(value));
-                }
+                input_value.set(value.clone());
+                *pending_value.borrow_mut() = if value.is_empty() { None } else { Some(value) };
+                debounce.run();
             }
         })
     };
@@ -116,7 +141,7 @@ pub fn FilterEditor(props: &FilterEditorProps) -> Html {
               </div>
             </CollapsePanel>
             <div class="tp__filter-editor__editor">
-                <textarea class="tp__filter-editor__editor-input" value={(*filter_state).clone()} oninput={handle_filter_input}/>
+                <textarea class="tp__filter-editor__editor-input" value={(*input_value).clone()} oninput={handle_filter_input}/>
             </div>
             <div class="tp__filter-editor__preview">
                 <FilterView inline={false} pretty={true} filter={parsed_filter} />

@@ -245,22 +245,11 @@ fn playlist_comparator(
     }
 }
 
-macro_rules! sort_groups_by_source_order {
-    ($groups: ident) => {
-        $groups.sort_by(|a, b| {
-            let order1 = a
-                .channels
-                .first()
-                .as_ref()
-                .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
-            let order2 = b
-                .channels
-                .first()
-                .as_ref()
-                .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
-            order1.cmp(&order2)
-        });
-    };
+fn get_group_source_ordinal(group: &PlaylistGroup) -> u32 {
+    group
+        .channels
+        .first()
+        .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal))
 }
 
 fn compare_cached_rule_entries(
@@ -305,7 +294,7 @@ pub(in crate::processing::processor) fn sort_playlist(
                 .channels
                 .sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
         }
-        sort_groups_by_source_order!(playlist);
+        playlist.sort_by_key(get_group_source_ordinal);
         return true;
     };
 
@@ -326,7 +315,7 @@ fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_
         .collect();
 
     if group_rules.is_empty() {
-        sort_groups_by_source_order!(groups);
+        groups.sort_by_key(get_group_source_ordinal);
         return;
     }
 
@@ -340,15 +329,7 @@ fn sort_groups(groups: &mut Vec<PlaylistGroup>, rules: &[ConfigSortRule], match_
             return ord;
         }
 
-        let order1 = groups[*left_idx]
-            .channels
-            .first()
-            .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
-        let order2 = groups[*right_idx]
-            .channels
-            .first()
-            .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal));
-        order1.cmp(&order2)
+        get_group_source_ordinal(&groups[*left_idx]).cmp(&get_group_source_ordinal(&groups[*right_idx]))
     });
 
     reorder_by_indices(groups, &group_indices);

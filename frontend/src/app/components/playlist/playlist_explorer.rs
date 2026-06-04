@@ -173,6 +173,100 @@ enum ExplorerLevel {
     SeriesInfo(Rc<UiPlaylistGroup>, Rc<UiPlaylistItem>, Option<Box<SeriesStreamProperties>>),
 }
 
+#[derive(Properties, Clone, PartialEq)]
+struct RecordDialogContentProps {
+    start_value: Rc<RefCell<String>>,
+    duration_value: Rc<RefCell<String>>,
+    priority_value: Rc<RefCell<String>>,
+    start_label: String,
+    duration_label: String,
+    priority_label: String,
+    selected_title: String,
+}
+
+#[component]
+fn RecordDialogContent(props: &RecordDialogContentProps) -> Html {
+    let start_state = use_state(|| props.start_value.borrow().clone());
+    let duration_state = use_state(|| props.duration_value.borrow().clone());
+    let priority_state = use_state(|| props.priority_value.borrow().clone());
+
+    let on_start_input = {
+        let start_state = start_state.clone();
+        let start_value = Rc::clone(&props.start_value);
+        Callback::from(move |event: InputEvent| {
+            let input: HtmlInputElement = event.target_unchecked_into();
+            let value = input.value();
+            *start_value.borrow_mut() = value.clone();
+            start_state.set(value);
+        })
+    };
+
+    let on_duration_input = {
+        let duration_state = duration_state.clone();
+        let duration_value = Rc::clone(&props.duration_value);
+        Callback::from(move |event: InputEvent| {
+            let input: HtmlInputElement = event.target_unchecked_into();
+            let value = input.value();
+            *duration_value.borrow_mut() = value.clone();
+            duration_state.set(value);
+        })
+    };
+
+    let on_priority_input = {
+        let priority_state = priority_state.clone();
+        let priority_value = Rc::clone(&props.priority_value);
+        Callback::from(move |event: InputEvent| {
+            let input: HtmlInputElement = event.target_unchecked_into();
+            let value = input.value();
+            *priority_value.borrow_mut() = value.clone();
+            priority_state.set(value);
+        })
+    };
+
+    html! {
+        <div class="tp__record-dialog">
+            <div class="tp__input">
+                <label class="tp__label">{props.start_label.clone()}</label>
+                <div class="tp__input-wrapper">
+                    <input
+                        type="datetime-local"
+                        value={(*start_state).clone()}
+                        oninput={on_start_input}
+                    />
+                </div>
+            </div>
+            <div class="tp__input">
+                <label class="tp__label">{props.duration_label.clone()}{" (min)"}</label>
+                <div class="tp__input-wrapper">
+                    <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={(*duration_state).clone()}
+                        oninput={on_duration_input}
+                    />
+                </div>
+            </div>
+            <div class="tp__input">
+                <label class="tp__label">{props.priority_label.clone()}</label>
+                <div class="tp__input-wrapper">
+                    <input
+                        type="number"
+                        min="-128"
+                        max="127"
+                        step="1"
+                        value={(*priority_state).clone()}
+                        oninput={on_priority_input}
+                    />
+                </div>
+            </div>
+            <div class="tp__field-explanation">
+                {props.selected_title.clone()}
+            </div>
+        </div>
+    }
+}
+
 #[component]
 pub fn PlaylistExplorer() -> Html {
     let context = use_context::<PlaylistExplorerContext>().expect("PlaylistExplorer context not found");
@@ -613,63 +707,18 @@ pub fn PlaylistExplorer() -> Html {
                                         Some("primary".to_string()),
                                     )],
                                 };
-                                let start_value_input = Rc::clone(&start_value);
-                                let duration_value_input = Rc::clone(&duration_value);
-                                let priority_value_input = Rc::clone(&priority_value);
-                                let default_recording_priority_value = default_recording_priority
-                                    .map_or_else(String::new, |priority| priority.to_string());
                                 let result = dialog
                                     .content(
                                         html! {
-                                            <div class="tp__record-dialog">
-                                                <div class="tp__input">
-                                                    <label class="tp__label">{translate_clone.t("LABEL.START")}</label>
-                                                    <div class="tp__input-wrapper">
-                                                        <input
-                                                            type="datetime-local"
-                                                            value={default_start_value.clone()}
-                                                            oninput={Callback::from(move |event: InputEvent| {
-                                                                let input: HtmlInputElement = event.target_unchecked_into();
-                                                                *start_value_input.borrow_mut() = input.value();
-                                                            })}
-                                                        />
-                                                    </div>
-                                                </div>
-                                                <div class="tp__input">
-                                                    <label class="tp__label">{translate_clone.t("LABEL.DURATION")}{" (min)"}</label>
-                                                    <div class="tp__input-wrapper">
-                                                        <input
-                                                            type="number"
-                                                            min="1"
-                                                            step="1"
-                                                            value="90"
-                                                            oninput={Callback::from(move |event: InputEvent| {
-                                                                let input: HtmlInputElement = event.target_unchecked_into();
-                                                                *duration_value_input.borrow_mut() = input.value();
-                                                            })}
-                                                        />
-                                                    </div>
-                                                </div>
-                                                <div class="tp__input">
-                                                    <label class="tp__label">{translate_clone.t("LABEL.PRIORITY")}</label>
-                                                    <div class="tp__input-wrapper">
-                                                        <input
-                                                            type="number"
-                                                            min="-127"
-                                                            max="127"
-                                                            step="1"
-                                                            value={default_recording_priority_value.clone()}
-                                                            oninput={Callback::from(move |event: InputEvent| {
-                                                                let input: HtmlInputElement = event.target_unchecked_into();
-                                                                *priority_value_input.borrow_mut() = input.value();
-                                                            })}
-                                                        />
-                                                    </div>
-                                                </div>
-                                                <div class="tp__field-explanation">
-                                                    {selected.title.clone()}
-                                                </div>
-                                            </div>
+                                            <RecordDialogContent
+                                                start_value={Rc::clone(&start_value)}
+                                                duration_value={Rc::clone(&duration_value)}
+                                                priority_value={Rc::clone(&priority_value)}
+                                                start_label={translate_clone.t("LABEL.START")}
+                                                duration_label={translate_clone.t("LABEL.DURATION")}
+                                                priority_label={translate_clone.t("LABEL.PRIORITY")}
+                                                selected_title={selected.title.clone()}
+                                            />
                                         },
                                         Some(actions),
                                         false,
@@ -814,7 +863,10 @@ pub fn PlaylistExplorer() -> Html {
     let render_categories = || {
         if playlist.is_none() {
             html! {
-                <NoContent text={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_TO_VIEW_CONTENT")} />
+                <NoContent
+                    text={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_TO_VIEW_CONTENT")}
+                    hint={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_HINT")}
+                />
             }
         } else {
             let active_cluster = cluster_visible.intern();
@@ -859,11 +911,12 @@ pub fn PlaylistExplorer() -> Html {
         }
     };
 
-    let render_channel_logo = |logo: &str| {
+    let render_channel_logo = |logo: &str, title: &str| {
         let logo = if logo.is_empty() { "assets/missing-logo.svg".to_string() } else { logo.to_string() };
+        let alt = if title.is_empty() { translate.t("LABEL.CHANNEL") } else { title.to_string() };
         html! {
             <span  class="tp__playlist-explorer__channel-logo">
-                <img  alt={"n/a"} src={logo} loading="lazy"
+                <img  alt={alt} src={logo} loading="lazy"
                 onerror={Callback::from(move |e: web_sys::Event| {
                 if let Some(target)  = e.target() {
                     if let Ok(img) = target.dyn_into::<web_sys::HtmlImageElement>() {
@@ -883,7 +936,7 @@ pub fn PlaylistExplorer() -> Html {
             <button class="tp__icon-button" onclick={Callback::from(move |event: MouseEvent| popup_onclick.emit((chan_clone.clone(), event)))}>
                 <AppIcon name="Popup"></AppIcon>
             </button>
-            {render_channel_logo(&chan.logo)}
+            {render_channel_logo(&chan.logo, &chan.title)}
             <span class="tp__playlist-explorer__channel-title">{chan.title.clone()}</span>
             </span>
         }
@@ -894,7 +947,7 @@ pub fn PlaylistExplorer() -> Html {
         let chan_clone = Rc::clone(chan);
         html! {
             <span class="tp__playlist-explorer__channel tp__playlist-explorer__channel-video">
-                {render_channel_logo(&chan.logo)}
+                {render_channel_logo(&chan.logo, &chan.title)}
                 {
                     html_if!(chan.rating > 0.001, {
                         <Chip class="tp__playlist-explorer__channel-video-rating" label={format_float_localized(chan.rating, 1, false)} />
@@ -920,7 +973,7 @@ pub fn PlaylistExplorer() -> Html {
         };
         html! {
             <span onclick={chan_click} class="tp__playlist-explorer__channel tp__playlist-explorer__channel-series">
-                {render_channel_logo(&chan.logo)}
+                {render_channel_logo(&chan.logo, &chan.title)}
                 {
                     html_if!(chan.rating > 0.001, {
                         <Chip class="tp__playlist-explorer__channel-series-rating" label={format_float_localized(chan.rating, 1, false)} />
@@ -949,7 +1002,7 @@ pub fn PlaylistExplorer() -> Html {
         let rating = chan.rating.unwrap_or_default();
         html! {
             <span class="tp__playlist-explorer__channel tp__playlist-explorer__channel-episode">
-                {render_channel_logo(&chan.movie_image)}
+                {render_channel_logo(&chan.movie_image, &chan.title)}
                 {
                     html_if!(rating > 0.001, {
                         <Chip class="tp__playlist-explorer__channel-episode-rating" label={format_float_localized(rating, 1, false)} />

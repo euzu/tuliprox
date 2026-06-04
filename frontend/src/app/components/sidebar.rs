@@ -3,7 +3,7 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
     model::ViewType,
-    utils::html_if,
+    utils::{get_local_storage_item, html_if, set_local_storage_item},
 };
 use shared::model::permission::Permission;
 use std::str::FromStr;
@@ -13,6 +13,7 @@ use yew::prelude::*;
 use yew_hooks::use_mount;
 
 const MOBILE_BREAKPOINT_PX: f64 = 780.0;
+const TP_SIDEBAR_COLLAPSED_KEY: &str = "tp-sidebar-collapsed";
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum CollapseState {
@@ -40,26 +41,64 @@ fn sidebar_variant_class(collapsed: CollapseState) -> &'static str {
     }
 }
 
+fn resolved_sidebar_state(collapsed: CollapseState, is_mobile: bool) -> CollapseState {
+    if is_mobile {
+        match collapsed {
+            CollapseState::ManualExpanded => CollapseState::ManualExpanded,
+            CollapseState::AutoCollapsed | CollapseState::AutoExpanded | CollapseState::ManualCollapsed => {
+                CollapseState::AutoCollapsed
+            }
+        }
+    } else {
+        collapsed
+    }
+}
+
+fn is_sidebar_expanded(collapsed: CollapseState) -> bool {
+    matches!(collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded)
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();
-    let collapsed = use_state(|| CollapseState::AutoExpanded);
+    let collapsed = use_state(|| match get_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY).as_deref() {
+        Some("collapsed") => CollapseState::ManualCollapsed,
+        Some("expanded") => CollapseState::ManualExpanded,
+        _ => CollapseState::AutoExpanded,
+    });
     let is_mobile = use_state(|| false);
-    let active_menu = use_state(|| props.active_page);
+    let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
+    let active_menu = props.active_page;
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
-        let active_menu = active_menu.clone();
+        let is_mobile = is_mobile.clone();
+        let collapsed = collapsed.clone();
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(view_type) = ViewType::from_str(&name) {
-                active_menu.set(view_type);
                 viewchange.emit(view_type);
+                if *is_mobile {
+                    set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, "collapsed");
+                    collapsed.set(CollapseState::ManualCollapsed);
+                }
             }
         })
     };
 
+    let set_sidebar_state = {
+        let collapsed = collapsed.clone();
+        Callback::from(move |next: CollapseState| {
+            let stored = match next {
+                CollapseState::ManualCollapsed => "collapsed",
+                _ => "expanded",
+            };
+            set_local_storage_item(TP_SIDEBAR_COLLAPSED_KEY, stored);
+            collapsed.set(next);
+        })
+    };
     let toggle_sidebar = {
+        let set_sidebar_state = set_sidebar_state.clone();
         let collapsed = collapsed.clone();
         Callback::from(move |_| {
             let current = *collapsed;
@@ -67,8 +106,12 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 CollapseState::AutoCollapsed | CollapseState::ManualCollapsed => CollapseState::ManualExpanded,
                 CollapseState::AutoExpanded | CollapseState::ManualExpanded => CollapseState::ManualCollapsed,
             };
-            collapsed.set(next);
+            set_sidebar_state.emit(next);
         })
+    };
+    let close_sidebar = {
+        let set_sidebar_state = set_sidebar_state.clone();
+        Callback::from(move |_: MouseEvent| set_sidebar_state.emit(CollapseState::ManualCollapsed))
     };
 
     let check_sidebar_state = {
@@ -76,7 +119,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let is_mobile = is_mobile.clone();
 
         Callback::from(move |_| {
-            let window = window().expect("no global window");
+            let Some(window) = window() else {
+                return;
+            };
 
             if let Ok(inner_width) = window.inner_width() {
                 let mobile_view = inner_width.as_f64().unwrap_or(0.0) < MOBILE_BREAKPOINT_PX;
@@ -116,18 +161,20 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             let check_sidebar = check_sidebar.clone();
             let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| check_sidebar.emit(())));
 
-            let window = window().expect("no global window");
-            window
-                .add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref())
-                .expect("could not add event listener");
-
-            // Save Closure so it can be cleaned up later
-            *callback_handle.borrow_mut() = Some(closure);
+            let window = window();
+            if let Some(window) = window.as_ref() {
+                if window.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref()).is_ok() {
+                    // Save Closure so it can be cleaned up later
+                    *callback_handle.borrow_mut() = Some(closure);
+                }
+            }
 
             // Cleanup
             move || {
-                if let Some(closure) = callback_handle.borrow_mut().take() {
-                    let _ = window.remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                if let Some(window) = window {
+                    if let Some(closure) = callback_handle.borrow_mut().take() {
+                        let _ = window.remove_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
+                    }
                 }
             }
         });
@@ -137,36 +184,36 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let auth = &services.auth;
         html! {
           <div class="tp__app-sidebar__content">
-            <MenuItem class={if *active_menu == ViewType::Dashboard { "active" } else {""}} icon="DashboardOutline" name={ViewType::Dashboard.to_string()} label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></MenuItem>
+            <MenuItem class={if active_menu == ViewType::Dashboard { "active" } else {""}} icon="DashboardOutline" name={ViewType::Dashboard.to_string()} label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></MenuItem>
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if *active_menu == ViewType::Stats { "active" } else {""}} icon="Stats" name={ViewType::Stats.to_string()} label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if active_menu == ViewType::Stats { "active" } else {""}} icon="Stats" name={ViewType::Stats.to_string()} label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if *active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if active_menu == ViewType::Streams { "active" } else {""}} icon="Streams" name={ViewType::Streams.to_string()} label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></MenuItem>
              })}
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <MenuItem class={if *active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if active_menu == ViewType::StreamHistory { "active" } else {""}} icon="Log" name={ViewType::StreamHistory.to_string()} label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></MenuItem>
             })}
             {html_if!(auth.has_permission(Permission::DownloadRead), {
-                <MenuItem class={if *active_menu == ViewType::Downloads { "active" } else {""}} icon="Download" name={ViewType::Downloads.to_string()} label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></MenuItem>
+                <MenuItem class={if active_menu == ViewType::Downloads { "active" } else {""}} icon="Download" name={ViewType::Downloads.to_string()} label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></MenuItem>
              })}
             {html_if!(
                 auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
                 {
                     <CollapsePanel title={translate.t("LABEL.SETTINGS")}>
                       {html_if!(auth.is_admin(), {
-                        <MenuItem class={if *active_menu == ViewType::Rbac { "active" } else {""}} icon="Shield" name={ViewType::Rbac.to_string()} label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></MenuItem>
+                        <MenuItem class={if active_menu == ViewType::Rbac { "active" } else {""}} icon="Shield" name={ViewType::Rbac.to_string()} label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::ConfigRead), {
-                          <MenuItem class={if *active_menu == ViewType::Config { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if active_menu == ViewType::Config { "active" } else {""}} icon="Config" name={ViewType::Config.to_string()} label={translate.t("LABEL.CONFIG")}  onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::UserRead), {
-                          <MenuItem class={if *active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::SourceRead), {
                           <>
-                          <MenuItem class={if *active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
-                          <MenuItem class={if *active_menu == ViewType::PlaylistSettings { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if active_menu == ViewType::PlaylistSettings { "active" } else {""}} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></MenuItem>
                           </>
                       })}
                     </CollapsePanel>
@@ -177,13 +224,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 {
                     <CollapsePanel title={translate.t("LABEL.PLAYLIST")}>
                       {html_if!(auth.has_permission(Permission::PlaylistWrite), {
-                          <MenuItem class={if *active_menu == ViewType::PlaylistUpdate { "active" } else {""}} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if active_menu == ViewType::PlaylistUpdate { "active" } else {""}} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::PlaylistRead), {
-                          <MenuItem class={if *active_menu == ViewType::PlaylistExplorer { "active" } else {""}} icon="Live" name={ViewType::PlaylistExplorer.to_string()} label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if active_menu == ViewType::PlaylistExplorer { "active" } else {""}} icon="Live" name={ViewType::PlaylistExplorer.to_string()} label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></MenuItem>
                       })}
                       {html_if!(auth.has_permission(Permission::EpgRead), {
-                          <MenuItem class={if *active_menu == ViewType::PlaylistEpg { "active" } else {""}} icon="Epg" name={ViewType::PlaylistEpg.to_string()} label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></MenuItem>
+                          <MenuItem class={if active_menu == ViewType::PlaylistEpg { "active" } else {""}} icon="Epg" name={ViewType::PlaylistEpg.to_string()} label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></MenuItem>
                       })}
                     </CollapsePanel>
                 }
@@ -196,18 +243,18 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let auth = &services.auth;
         html! {
           <div class="tp__app-sidebar__content">
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Dashboard, if *active_menu == ViewType::Dashboard { " active" } else {""})}  icon="DashboardOutline" name={ViewType::Dashboard.to_string()} onclick={&handle_menu_click}></IconButton>
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Dashboard, if active_menu == ViewType::Dashboard { " active" } else {""})}  icon="DashboardOutline" name={ViewType::Dashboard.to_string()} hint={translate.t("LABEL.DASHBOARD")} aria_label={translate.t("LABEL.DASHBOARD")} onclick={&handle_menu_click}></IconButton>
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Stats, if *active_menu == ViewType::Stats { " active" } else {""})} icon="Stats" name={ViewType::Stats.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Stats, if active_menu == ViewType::Stats { " active" } else {""})} icon="Stats" name={ViewType::Stats.to_string()} hint={translate.t("LABEL.STATS")} aria_label={translate.t("LABEL.STATS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(props.show_streams_page && auth.has_permission(Permission::SystemRead), {
-             <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if *active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} onclick={&handle_menu_click}></IconButton>
+             <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Streams, if active_menu == ViewType::Streams { " active" } else {""})} icon="Streams" name={ViewType::Streams.to_string()} hint={translate.t("LABEL.STREAMS")} aria_label={translate.t("LABEL.STREAMS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::SystemRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if *active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::StreamHistory, if active_menu == ViewType::StreamHistory { " active" } else {""})} icon="Log" name={ViewType::StreamHistory.to_string()} hint={translate.t("LABEL.STREAM_HISTORY")} aria_label={translate.t("LABEL.STREAM_HISTORY")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::DownloadRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Downloads, if *active_menu == ViewType::Downloads { " active" } else {""})} icon="Download" name={ViewType::Downloads.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Downloads, if active_menu == ViewType::Downloads { " active" } else {""})} icon="Download" name={ViewType::Downloads.to_string()} hint={translate.t("LABEL.DOWNLOADS")} aria_label={translate.t("LABEL.DOWNLOADS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(
                 auth.has_any_permissions(Permission::ConfigRead | Permission::SourceRead | Permission::UserRead),
@@ -216,18 +263,18 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 }
             )}
             {html_if!(auth.is_admin(), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Rbac, if *active_menu == ViewType::Rbac { " active" } else {""})} icon="Shield" name={ViewType::Rbac.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Rbac, if active_menu == ViewType::Rbac { " active" } else {""})} icon="Shield" name={ViewType::Rbac.to_string()} hint={translate.t("LABEL.RBAC")} aria_label={translate.t("LABEL.RBAC")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::ConfigRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if *active_menu == ViewType::Config { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Config, if active_menu == ViewType::Config { " active" } else {""})} icon="Config" name={ViewType::Config.to_string()} hint={translate.t("LABEL.CONFIG")} aria_label={translate.t("LABEL.CONFIG")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::UserRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if *active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::SourceRead), {
                 <>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if *active_menu == ViewType::SourceEditor { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} onclick={&handle_menu_click}></IconButton>
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if *active_menu == ViewType::PlaylistSettings { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if active_menu == ViewType::SourceEditor { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} hint={translate.t("LABEL.SOURCE_EDITOR")} aria_label={translate.t("LABEL.SOURCE_EDITOR")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistSettings, if active_menu == ViewType::PlaylistSettings { " active" } else {""})} icon="PlayArrowOutline" name={ViewType::PlaylistSettings.to_string()} hint={translate.t("LABEL.PLAYLIST")} aria_label={translate.t("LABEL.PLAYLIST")} onclick={&handle_menu_click}></IconButton>
                 </>
             })}
             {html_if!(
@@ -237,60 +284,77 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 }
             )}
             {html_if!(auth.has_permission(Permission::PlaylistWrite), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistUpdate, if *active_menu == ViewType::PlaylistUpdate { " active" } else {""})} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistUpdate, if active_menu == ViewType::PlaylistUpdate { " active" } else {""})} icon="Refresh" name={ViewType::PlaylistUpdate.to_string()} hint={translate.t("LABEL.UPDATE")} aria_label={translate.t("LABEL.UPDATE")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::PlaylistRead), {
-               <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistExplorer, if *active_menu == ViewType::PlaylistExplorer { " active" } else {""})} icon="Live" name={ViewType::PlaylistExplorer.to_string()} onclick={&handle_menu_click}></IconButton>
+               <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistExplorer, if active_menu == ViewType::PlaylistExplorer { " active" } else {""})} icon="Live" name={ViewType::PlaylistExplorer.to_string()} hint={translate.t("LABEL.PLAYLIST_VIEWER")} aria_label={translate.t("LABEL.PLAYLIST_VIEWER")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::EpgRead), {
-                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if *active_menu == ViewType::PlaylistEpg { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if active_menu == ViewType::PlaylistEpg { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} hint={translate.t("LABEL.PLAYLIST_EPG")} aria_label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></IconButton>
             })}
           </div>
         }
     };
 
     html! {
-        <div class={classes!(
-            "tp__app-sidebar",
-            sidebar_variant_class(*collapsed),
-            if *is_mobile { "mobile" } else { "" }
-        )}>
-            <div class="tp__app-sidebar__header tp__app-header">
-              {
-                if matches!(*collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded) && !*is_mobile {
-                  html! {
-                   <span class="tp__app-header__logo">
-                   {
-                      if let Some(logo) = services.config.ui_config.app_logo.as_ref() {
-                        html! { <img src={logo.to_string()} alt="logo"/> }
-                      } else {
-                        html! { <AppIcon name="Logo"/> }
+        <>
+            { html_if!(*is_mobile && is_sidebar_expanded(resolved_state), {
+                <button
+                    type="button"
+                    class="tp__app-sidebar__backdrop"
+                    onclick={close_sidebar}
+                    aria-label={translate.t("LABEL.TOGGLE_SIDEBAR")}
+                />
+            }) }
+            <div class={classes!(
+                "tp__app-sidebar",
+                sidebar_variant_class(resolved_state),
+                if *is_mobile { "mobile" } else { "" }
+            )}>
+                <div class="tp__app-sidebar__header tp__app-header">
+                  {
+                    if is_sidebar_expanded(resolved_state) {
+                      html! {
+                       <span class="tp__app-header__logo">
+                       {
+                          if let Some(logo) = services.config.ui_config.app_logo.as_ref() {
+                            let alt = format!("{} logo", services.config.ui_config.app_title.as_deref().unwrap_or("tuliprox"));
+                            html! { <img src={logo.to_string()} alt={alt}/> }
+                          } else {
+                            html! { <AppIcon name="Logo"/> }
+                          }
+                       }
+                       </span>
                       }
-                   }
-                   </span>
-                  }
-                } else {
-                  html! {}
-                }
-              }
-              <IconButton name="ToggleSidebar" icon={"Sidebar"} onclick={toggle_sidebar} />
-            </div>
-            <div class="tp__app-sidebar__scroll">
-                {
-                    if *is_mobile || matches!(*collapsed, CollapseState::AutoCollapsed | CollapseState::ManualCollapsed) {
-                        render_collapsed()
                     } else {
-                        render_expanded()
+                      html! {}
                     }
-                }
+                  }
+                  <IconButton
+                    name="ToggleSidebar"
+                    icon={"Sidebar"}
+                    onclick={toggle_sidebar}
+                    aria_expanded={is_sidebar_expanded(resolved_state)}
+                    aria_label={translate.t("LABEL.TOGGLE_SIDEBAR")}
+                  />
+                </div>
+                <div class="tp__app-sidebar__scroll">
+                    {
+                        if is_sidebar_expanded(resolved_state) {
+                            render_expanded()
+                        } else {
+                            render_collapsed()
+                        }
+                    }
+                </div>
             </div>
-        </div>
+        </>
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{sidebar_variant_class, CollapseState};
+    use super::{is_sidebar_expanded, resolved_sidebar_state, sidebar_variant_class, CollapseState};
 
     #[test]
     fn sidebar_variant_class_reports_collapsed_variants() {
@@ -302,5 +366,20 @@ mod tests {
     fn sidebar_variant_class_reports_expanded_variants() {
         assert_eq!(sidebar_variant_class(CollapseState::AutoExpanded), "expanded");
         assert_eq!(sidebar_variant_class(CollapseState::ManualExpanded), "expanded");
+    }
+
+    #[test]
+    fn sidebar_resolves_mobile_view_to_collapsed() {
+        assert_eq!(resolved_sidebar_state(CollapseState::ManualExpanded, true), CollapseState::ManualExpanded);
+        assert_eq!(resolved_sidebar_state(CollapseState::AutoExpanded, true), CollapseState::AutoCollapsed);
+        assert_eq!(resolved_sidebar_state(CollapseState::ManualCollapsed, true), CollapseState::AutoCollapsed);
+    }
+
+    #[test]
+    fn sidebar_expanded_helper_reports_only_expanded_variants() {
+        assert!(is_sidebar_expanded(CollapseState::AutoExpanded));
+        assert!(is_sidebar_expanded(CollapseState::ManualExpanded));
+        assert!(!is_sidebar_expanded(CollapseState::AutoCollapsed));
+        assert!(!is_sidebar_expanded(CollapseState::ManualCollapsed));
     }
 }

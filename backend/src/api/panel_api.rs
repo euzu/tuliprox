@@ -662,7 +662,7 @@ async fn fetch_root_user_api_info(
             debug_if_enabled!(
                 "panel_api user_api account_info failed for {}: {}",
                 sanitize_sensitive_info(&input.name),
-                sanitize_sensitive_info(err.to_string().as_str())
+                sanitize_sensitive_info(&err.to_string())
             );
             return Ok(None);
         }
@@ -1094,7 +1094,7 @@ pub(crate) fn can_provision_on_exhausted(app_state: &AppState, input: &ConfigInp
         return false;
     }
     if let Err(err) = validate_panel_api_config(panel_cfg) {
-        debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(err.to_string().as_str()));
+        debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(&err.to_string()));
         return false;
     }
     if is_alias_pool_max_reached(app_state, input) {
@@ -1604,7 +1604,7 @@ async fn try_renew_expired_account(
                         debug_if_enabled!(
                             "panel_api client_adult_content failed for {}: {}",
                             sanitize_sensitive_info(&acct.name),
-                            sanitize_sensitive_info(err.to_string().as_str())
+                            sanitize_sensitive_info(&err.to_string())
                         );
                     }
                 }
@@ -1657,7 +1657,7 @@ async fn try_renew_expired_account(
                 debug_if_enabled!(
                     "panel_api client_renew failed for {}: {}",
                     sanitize_sensitive_info(&acct.name),
-                    sanitize_sensitive_info(err.to_string().as_str())
+                    sanitize_sensitive_info(&err.to_string())
                 );
             }
         }
@@ -1698,7 +1698,7 @@ async fn try_create_new_account(
                     debug_if_enabled!(
                         "panel_api client_adult_content failed for {}: {}",
                         sanitize_sensitive_info(&alias_name),
-                        sanitize_sensitive_info(err.to_string().as_str())
+                        sanitize_sensitive_info(&err.to_string())
                     );
                 }
             }
@@ -1767,7 +1767,7 @@ async fn try_create_new_account(
             Some(PanelApiProvisionOutcome::Created { username, password })
         }
         Err(err) => {
-            debug_if_enabled!("panel_api client_new failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
+            debug_if_enabled!("panel_api client_new failed: {}", sanitize_sensitive_info(&err.to_string()));
             None
         }
     }
@@ -1803,7 +1803,7 @@ pub async fn try_provision_account_on_exhausted(
         app_state.app_config.file_locks.write_lock_str(format!("panel_api:{}", input.name).as_str()).await;
 
     if let Err(err) = validate_panel_api_config(panel_cfg) {
-        debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(err.to_string().as_str()));
+        debug_if_enabled!("panel_api config invalid: {}", sanitize_sensitive_info(&err.to_string()));
         return None;
     }
     if is_alias_pool_max_reached(app_state, input) {
@@ -1908,7 +1908,7 @@ async fn ensure_alias_pool_min(
                                 debug_if_enabled!(
                                     "panel_api client_adult_content failed for {}: {}",
                                     sanitize_sensitive_info(&acct.name),
-                                    sanitize_sensitive_info(err.to_string().as_str())
+                                    sanitize_sensitive_info(&err.to_string())
                                 );
                             }
                         }
@@ -1960,7 +1960,7 @@ async fn ensure_alias_pool_min(
                         debug_if_enabled!(
                             "panel_api client_renew failed for {}: {}",
                             sanitize_sensitive_info(&acct.name),
-                            sanitize_sensitive_info(err.to_string().as_str())
+                            sanitize_sensitive_info(&err.to_string())
                         );
                     }
                 }
@@ -1989,7 +1989,7 @@ async fn ensure_alias_pool_min(
                         debug_if_enabled!(
                             "panel_api client_adult_content failed for {}: {}",
                             sanitize_sensitive_info(&alias_name),
-                            sanitize_sensitive_info(err.to_string().as_str())
+                            sanitize_sensitive_info(&err.to_string())
                         );
                     }
                 }
@@ -2044,7 +2044,7 @@ async fn ensure_alias_pool_min(
                 }
             }
             Err(err) => {
-                debug_if_enabled!("panel_api client_new failed: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                debug_if_enabled!("panel_api client_new failed: {}", sanitize_sensitive_info(&err.to_string()));
                 break;
             }
         }
@@ -2070,7 +2070,7 @@ async fn sync_panel_api_for_input_on_boot(
         debug_if_enabled!(
             "panel_api boot sync skipped for {}: {}",
             sanitize_sensitive_info(&input.name),
-            sanitize_sensitive_info(err.to_string().as_str())
+            sanitize_sensitive_info(&err.to_string())
         );
         return false;
     }
@@ -2126,7 +2126,7 @@ async fn sync_panel_api_for_input_on_boot(
                     debug_if_enabled!(
                         "panel_api root client_info (raw) failed for {}: {}",
                         sanitize_sensitive_info(&input.name),
-                        sanitize_sensitive_info(err.to_string().as_str())
+                        sanitize_sensitive_info(&err.to_string())
                     );
                     None
                 }
@@ -2200,7 +2200,7 @@ async fn sync_panel_api_for_input_on_boot(
                     debug_if_enabled!(
                         "panel_api client_info failed for {}: {}",
                         sanitize_sensitive_info(&acct.name),
-                        sanitize_sensitive_info(err.to_string().as_str())
+                        sanitize_sensitive_info(&err.to_string())
                     );
                     None
                 }
@@ -2311,7 +2311,7 @@ async fn sync_panel_api_for_input_on_boot(
                             debug_if_enabled!(
                                 "panel_api client_renew failed for root {}: {}",
                                 sanitize_sensitive_info(&input.name),
-                                sanitize_sensitive_info(err.to_string().as_str())
+                                sanitize_sensitive_info(&err.to_string())
                             );
                             if new_enabled {
                                 match panel_client_new(app_state.as_ref(), panel_cfg).await {
@@ -2431,7 +2431,7 @@ async fn sync_panel_api_for_input_on_boot(
                                         debug_if_enabled!(
                                             "panel_api client_new failed for root {}: {}",
                                             sanitize_sensitive_info(&input.name),
-                                            sanitize_sensitive_info(err.to_string().as_str())
+                                            sanitize_sensitive_info(&err.to_string())
                                         );
                                         (old_username.clone(), old_password.clone(), false)
                                     }
@@ -2552,7 +2552,7 @@ async fn sync_panel_api_for_input_on_boot(
                             debug_if_enabled!(
                                 "panel_api client_new failed for root {}: {}",
                                 sanitize_sensitive_info(&input.name),
-                                sanitize_sensitive_info(err.to_string().as_str())
+                                sanitize_sensitive_info(&err.to_string())
                             );
                             (old_username.clone(), old_password.clone(), false)
                         }
@@ -2572,7 +2572,7 @@ async fn sync_panel_api_for_input_on_boot(
                         debug_if_enabled!(
                             "panel_api client_adult_content failed for root {}: {}",
                             sanitize_sensitive_info(&input.name),
-                            sanitize_sensitive_info(err.to_string().as_str())
+                            sanitize_sensitive_info(&err.to_string())
                         );
                     }
                 }
@@ -2800,7 +2800,7 @@ async fn sync_panel_api_for_input_on_boot(
                     debug_if_enabled!(
                         "panel_api client_renew failed for alias {}: {}",
                         sanitize_sensitive_info(&account_name),
-                        sanitize_sensitive_info(err.to_string().as_str())
+                        sanitize_sensitive_info(&err.to_string())
                     );
                     if new_enabled {
                         match panel_client_new(app_state.as_ref(), panel_cfg).await {
@@ -2827,7 +2827,7 @@ async fn sync_panel_api_for_input_on_boot(
                                         debug_if_enabled!(
                                             "panel_api client_adult_content failed for {}: {}",
                                             sanitize_sensitive_info(&alias_name),
-                                            sanitize_sensitive_info(err.to_string().as_str())
+                                            sanitize_sensitive_info(&err.to_string())
                                         );
                                     }
                                 }
@@ -2896,7 +2896,7 @@ async fn sync_panel_api_for_input_on_boot(
                                 debug_if_enabled!(
                                     "panel_api client_new failed for input {}: {}",
                                     sanitize_sensitive_info(&input.name),
-                                    sanitize_sensitive_info(err.to_string().as_str())
+                                    sanitize_sensitive_info(&err.to_string())
                                 );
                                 continue;
                             }
@@ -2929,7 +2929,7 @@ async fn sync_panel_api_for_input_on_boot(
                             debug_if_enabled!(
                                 "panel_api client_adult_content failed for {}: {}",
                                 sanitize_sensitive_info(&alias_name),
-                                sanitize_sensitive_info(err.to_string().as_str())
+                                sanitize_sensitive_info(&err.to_string())
                             );
                         }
                     }
@@ -2998,7 +2998,7 @@ async fn sync_panel_api_for_input_on_boot(
                     debug_if_enabled!(
                         "panel_api client_new failed for input {}: {}",
                         sanitize_sensitive_info(&input.name),
-                        sanitize_sensitive_info(err.to_string().as_str())
+                        sanitize_sensitive_info(&err.to_string())
                     );
                     continue;
                 }
@@ -3018,7 +3018,7 @@ async fn sync_panel_api_for_input_on_boot(
                 debug_if_enabled!(
                     "panel_api client_adult_content failed for {}: {}",
                     sanitize_sensitive_info(&account_name),
-                    sanitize_sensitive_info(err.to_string().as_str())
+                    sanitize_sensitive_info(&err.to_string())
                 );
             }
         }
@@ -3113,7 +3113,7 @@ async fn sync_panel_api_for_input_on_boot(
                 debug_if_enabled!(
                     "panel_api client_adult_content failed for {}: {}",
                     sanitize_sensitive_info(&acct.name),
-                    sanitize_sensitive_info(err.to_string().as_str())
+                    sanitize_sensitive_info(&err.to_string())
                 );
             }
         }
@@ -3193,7 +3193,7 @@ async fn sync_panel_api_for_input_on_boot(
                 debug_if_enabled!(
                     "panel_api account_info failed for {}: {}",
                     sanitize_sensitive_info(&input.name),
-                    sanitize_sensitive_info(err.to_string().as_str())
+                    sanitize_sensitive_info(&err.to_string())
                 );
             }
         }
@@ -3277,7 +3277,7 @@ pub(crate) async fn sync_panel_api_alias_pool_for_target(app_state: &Arc<AppStat
                 debug_if_enabled!(
                     "panel_api user sync skipped for {}: {}",
                     sanitize_sensitive_info(&input.name),
-                    sanitize_sensitive_info(err.to_string().as_str())
+                    sanitize_sensitive_info(&err.to_string())
                 );
                 continue;
             }
@@ -3313,7 +3313,7 @@ fn build_player_api_action_url(base_url: &str, username: &str, password: &str, a
     let mut base = concat_string!(scheme, "://", host);
     if let Some(port) = url.port() {
         base.push(':');
-        base.push_str(port.to_string().as_str());
+        base.push_str(&port.to_string());
     }
     base.push_str("/player_api.php");
     let mut test_url = Url::parse(&base).ok()?;
@@ -3339,6 +3339,17 @@ impl PanelApiProbeTarget {
             PanelApiProbeTarget::PlayerApi { action, .. } => action,
         }
     }
+}
+
+fn format_probe_target_actions(targets: &[PanelApiProbeTarget]) -> String {
+    let mut result = String::new();
+    for (idx, target) in targets.iter().enumerate() {
+        if idx > 0 {
+            result.push(',');
+        }
+        result.push_str(target.action());
+    }
+    result
 }
 
 fn build_panel_api_probe_targets(input: &ConfigInput, username: &str, password: &str) -> Vec<PanelApiProbeTarget> {
@@ -3445,7 +3456,7 @@ async fn wait_for_panel_api_account_ready(
         return false;
     }
 
-    let targets_list = probe_targets.iter().map(PanelApiProbeTarget::action).collect::<Vec<_>>().join(",");
+    let targets_list = format_probe_target_actions(&probe_targets);
     debug_if_enabled!(
         "panel_api probe start for {} (input={} timeout={}s interval={}s method={}) targets={}",
         sanitize_sensitive_info(account_name),
@@ -3593,7 +3604,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
         debug_if_enabled!(
             "panel_api provisioning closing client connection for input {} addr={}",
             sanitize_sensitive_info(&input.name),
-            sanitize_sensitive_info(addr.to_string().as_str())
+            sanitize_sensitive_info(&addr.to_string())
         );
         let _ = app_state
             .connection_manager
@@ -3702,7 +3713,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
     debug_if_enabled!(
         "panel_api provisioning closing client connection for input {} addr={}",
         sanitize_sensitive_info(&input.name),
-        sanitize_sensitive_info(addr.to_string().as_str())
+        sanitize_sensitive_info(&addr.to_string())
     );
     let _ = app_state
         .connection_manager

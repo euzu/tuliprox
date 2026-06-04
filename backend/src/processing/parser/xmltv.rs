@@ -178,6 +178,7 @@ impl TVGuide {
         epg_id: &Arc<str>,
         start_attrib: &Arc<str>,
         stop_attrib: &Arc<str>,
+        catchup_id_attrib: &Arc<str>,
         tag_title: &Arc<str>,
         tag_desc: &Arc<str>,
     ) -> Option<EpgProgramme> {
@@ -203,7 +204,16 @@ impl TVGuide {
             }
         }
 
-        Some(EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc))
+        let catchup_id = tag.attributes.as_ref().and_then(|attributes| attributes.get(catchup_id_attrib)).cloned();
+
+        Some(EpgProgramme::new_all(
+            start_time,
+            stop_time,
+            Arc::clone(epg_id),
+            title,
+            desc,
+            catchup_id,
+        ))
     }
 
     /// Finds the best fuzzy match for a channel's normalized EPG ID using phonetic encoding and Jaro-Winkler similarity.
@@ -304,6 +314,7 @@ impl TVGuide {
         let epg_attrib_channel = EPG_ATTRIB_CHANNEL.intern();
         let start_attrib = "start".intern();
         let stop_attrib = "stop".intern();
+        let catchup_id_attrib = "catchup-id".intern();
         let tag_title = "title".intern();
         let tag_desc = "desc".intern();
 
@@ -350,7 +361,15 @@ impl TVGuide {
                             if let Some(epg_id) = tag.get_attribute_value(&epg_attrib_channel) {
                                 if source_processed.contains(epg_id) {
                                     if let Some(programme) =
-                                        Self::extract_programme(&tag, epg_id, &start_attrib, &stop_attrib, &tag_title, &tag_desc)
+                                        Self::extract_programme(
+                                            &tag,
+                                            epg_id,
+                                            &start_attrib,
+                                            &stop_attrib,
+                                            &catchup_id_attrib,
+                                            &tag_title,
+                                            &tag_desc,
+                                        )
                                     {
                                         accumulator.push_programme(epg_source.priority, source_order, programme);
                                     }
@@ -738,6 +757,9 @@ fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgram
     if existing.desc.is_none() {
         existing.desc = incoming.desc;
     }
+    if existing.catchup_id.is_none() {
+        existing.catchup_id = incoming.catchup_id;
+    }
 }
 
 fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
@@ -836,7 +858,14 @@ mod tests {
     }
 
     fn epg_programme(id: &str, start: i64, stop: i64, title: Option<&str>, desc: Option<&str>) -> EpgProgramme {
-        EpgProgramme::new_all(start, stop, id.intern(), title.map(Internable::intern), desc.map(Internable::intern))
+        EpgProgramme::new_all(
+            start,
+            stop,
+            id.intern(),
+            title.map(Internable::intern),
+            desc.map(Internable::intern),
+            None,
+        )
     }
 
     #[test]

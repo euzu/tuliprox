@@ -93,6 +93,20 @@ impl Device {
     }
 }
 
+#[inline]
+#[allow(clippy::unnecessary_wraps)]
+fn serialize_lineup(lineup: &Lineup, has_next: bool) -> Result<Bytes, String> {
+    match serde_json::to_string(lineup) {
+        Ok(mut content) => {
+            if has_next {
+                content.push(',');
+            }
+            Ok(Bytes::from(content))
+        }
+        Err(_) => Ok(Bytes::from("")),
+    }
+}
+
 fn xtream_item_to_lineup_stream<I>(
     cfg: Arc<AppConfig>,
     cluster: XtreamCluster,
@@ -135,15 +149,7 @@ where
                     guide_name: item.title.clone(),
                     url: stream_url.clone(),
                 };
-                match serde_json::to_string(&lineup) {
-                    Ok(mut content) => {
-                        if has_next {
-                            content.push(',');
-                        }
-                        Ok(Bytes::from(content))
-                    }
-                    Err(_) => Ok(Bytes::from("")),
-                }
+                serialize_lineup(&lineup, has_next)
             });
             mapped.left_stream()
         }
@@ -163,15 +169,7 @@ where
                     guide_name: item.title.clone(),
                     url: if item.t_stream_url.is_empty() { item.url.clone() } else { item.t_stream_url.clone() },
                 };
-                match serde_json::to_string(&lineup) {
-                    Ok(mut content) => {
-                        if has_next {
-                            content.push(',');
-                        }
-                        Ok(Bytes::from(content))
-                    }
-                    Err(_) => Ok(Bytes::from("")),
-                }
+                serialize_lineup(&lineup, has_next)
             });
             mapped.left_stream()
         }

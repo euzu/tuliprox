@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug backend (tuliprox)",
+      "cargo": {
+        "args": ["build", "--bin=tuliprox", "--package=tuliprox"],
+        "filter": {
+          "name": "tuliprox",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests (workspace)",
+      "cargo": {
+        "args": ["test", "--no-run", "--workspace"],
+        "filter": {
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

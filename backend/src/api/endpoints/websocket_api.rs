@@ -17,7 +17,45 @@ use shared::{
     },
     utils::{concat_path_leading_slash, default_kick_secs},
 };
-use std::sync::Arc;
+use std::{fmt, io, sync::Arc};
+
+#[derive(Debug)]
+enum WebSocketApiError {
+    Transport(axum::Error),
+    Protocol(io::Error),
+    ProtocolVersionMismatch,
+    EventSend { context: &'static str, source: axum::Error },
+}
+
+impl fmt::Display for WebSocketApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(err) => write!(f, "{err}"),
+            Self::Protocol(err) => write!(f, "{err}"),
+            Self::ProtocolVersionMismatch => f.write_str("Protocol version mismatch"),
+            Self::EventSend { context, source } => write!(f, "{context}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for WebSocketApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(err) => Some(err),
+            Self::Protocol(err) => Some(err),
+            Self::ProtocolVersionMismatch => None,
+            Self::EventSend { source, .. } => Some(source),
+        }
+    }
+}
+
+impl From<axum::Error> for WebSocketApiError {
+    fn from(value: axum::Error) -> Self { Self::Transport(value) }
+}
+
+impl From<io::Error> for WebSocketApiError {
+    fn from(value: io::Error) -> Self { Self::Protocol(value) }
+}
 
 // WebSocket upgrade handler
 async fn websocket_handler(
@@ -87,12 +125,12 @@ fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
     })
 }
 
-async fn handle_handshake(msg: Message, socket: &mut WebSocket, version: u8) -> Result<(), String> {
+async fn handle_handshake(msg: Message, socket: &mut WebSocket, version: u8) -> Result<(), WebSocketApiError> {
     if let Message::Binary(bytes) = msg {
         if bytes.len() == 1 {
             let client_version = bytes[0];
             if client_version == version {
-                socket.send(Message::binary(bytes)).await.map_err(|e| e.to_string())?;
+                socket.send(Message::binary(bytes)).await?;
                 return Ok(());
             }
             error!("Protocol Version mismatch: server={version}, client={client_version}");
@@ -106,7 +144,7 @@ async fn handle_handshake(msg: Message, socket: &mut WebSocket, version: u8) -> 
         })))
         .await;
 
-    Err("Protocol version mismatch".into())
+    Err(WebSocketApiError::ProtocolVersionMismatch)
 }
 
 async fn handle_protocol_message(
@@ -251,8 +289,8 @@ async fn handle_incoming_message(
     app_state: &Arc<AppState>,
     auth_required: bool,
     secret_key: Option<&Vec<u8>>,
-) -> Result<(), String> {
-    let msg = result.map_err(|e| e.to_string())?;
+) -> Result<(), WebSocketApiError> {
+    let msg = result?;
 
     match handler {
         ProtocolHandler::Version(version) => {
@@ -272,9 +310,9 @@ async fn handle_incoming_message(
                 Some(protocol_msg) => {
                     let bytes = match protocol_msg.to_bytes() {
                         Ok(bytes) => bytes,
-                        Err(err) => ProtocolMessage::Error(err.to_string()).to_bytes().map_err(|e| e.to_string())?,
+                        Err(err) => ProtocolMessage::Error(err.to_string()).to_bytes()?,
                     };
-                    Ok(socket.send(Message::Binary(bytes)).await.map_err(|e| e.to_string())?)
+                    Ok(socket.send(Message::Binary(bytes)).await?)
                 }
             }
         }
@@ -285,78 +323,82 @@ async fn handle_event_message(
     socket: &mut WebSocket,
     event: EventMessage,
     handler: &ProtocolHandler,
-) -> Result<(), String> {
+) -> Result<(), WebSocketApiError> {
     match handler {
         ProtocolHandler::Version(_) => {}
         ProtocolHandler::Default(mem) => {
             if websocket_can_receive_runtime_events(mem, &event) {
                 match event {
                     EventMessage::ServerError(error) => {
-                        let msg = ProtocolMessage::ServerError(error).to_bytes().map_err(|e| e.to_string())?;
-                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Server Error event: {e} "))?;
+                        send_event_response(socket, ProtocolMessage::ServerError(error), "Server Error event").await?;
                     }
                     EventMessage::ActiveUser(event) => {
-                        let msg = ProtocolMessage::ActiveUserResponse(event).to_bytes().map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Active user connection change event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::ActiveUserResponse(event),
+                            "Active user connection change event",
+                        )
+                        .await?;
                     }
                     EventMessage::ActiveProvider(provider, connections) => {
-                        let msg = ProtocolMessage::ActiveProviderResponse(provider, connections)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Provider connection change event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::ActiveProviderResponse(provider, connections),
+                            "Provider connection change event",
+                        )
+                        .await?;
                     }
                     EventMessage::ConfigChange(config) => {
-                        let msg =
-                            ProtocolMessage::ConfigChangeResponse(config).to_bytes().map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Configuration files change event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::ConfigChangeResponse(config),
+                            "Configuration files change event",
+                        )
+                        .await?;
                     }
                     EventMessage::PlaylistUpdate(state) => {
-                        let msg =
-                            ProtocolMessage::PlaylistUpdateResponse(state).to_bytes().map_err(|e| e.to_string())?;
-                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Playlist update event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::PlaylistUpdateResponse(state),
+                            "Playlist update event",
+                        )
+                        .await?;
                     }
                     EventMessage::PlaylistUpdateProgress(target, msg) => {
-                        let msg = ProtocolMessage::PlaylistUpdateProgressResponse(target, msg)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Playlist update progress event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::PlaylistUpdateProgressResponse(target, msg),
+                            "Playlist update progress event",
+                        )
+                        .await?;
                     }
                     EventMessage::SystemInfoUpdate(system_info) => {
-                        let msg =
-                            ProtocolMessage::SystemInfoResponse(system_info).to_bytes().map_err(|e| e.to_string())?;
-                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("System info event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::SystemInfoResponse(system_info),
+                            "System info event",
+                        )
+                        .await?;
                     }
                     EventMessage::LibraryScanProgress(summary) => {
-                        let msg = ProtocolMessage::LibraryScanProgressResponse(summary)
-                            .to_bytes()
-                            .map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Library scan progress event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::LibraryScanProgressResponse(summary),
+                            "Library scan progress event",
+                        )
+                        .await?;
                     }
                     EventMessage::DownloadsUpdate(downloads) => {
-                        let msg = ProtocolMessage::DownloadsResponse(downloads).to_bytes().map_err(|e| e.to_string())?;
-                        socket.send(Message::Binary(msg)).await.map_err(|e| format!("Downloads event: {e} "))?;
+                        send_event_response(socket, ProtocolMessage::DownloadsResponse(downloads), "Downloads event")
+                            .await?;
                     }
                     EventMessage::DownloadsDeltaUpdate(delta) => {
-                        let msg = ProtocolMessage::DownloadsDeltaResponse(delta).to_bytes().map_err(|e| e.to_string())?;
-                        socket
-                            .send(Message::Binary(msg))
-                            .await
-                            .map_err(|e| format!("Downloads delta event: {e} "))?;
+                        send_event_response(
+                            socket,
+                            ProtocolMessage::DownloadsDeltaResponse(delta),
+                            "Downloads delta event",
+                        )
+                        .await?;
                     }
                     EventMessage::InputMetadataUpdatesCompleted(_)
                     | EventMessage::InputMetadataUpdatesStarted(_) => {
@@ -367,6 +409,18 @@ async fn handle_event_message(
         }
     }
     Ok(())
+}
+
+async fn send_event_response(
+    socket: &mut WebSocket,
+    message: ProtocolMessage,
+    context: &'static str,
+) -> Result<(), WebSocketApiError> {
+    let msg = message.to_bytes()?;
+    socket
+        .send(Message::Binary(msg))
+        .await
+        .map_err(|source| WebSocketApiError::EventSend { context, source })
 }
 
 // WebSocket communication logic
@@ -410,9 +464,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
                     Ok(entries) => {
                         if let ProtocolHandler::Default(mem) = &handler {
                             if mem.stream_meter_subscribed {
-                                let msg = ProtocolMessage::StreamMeterBatchResponse(entries)
-                                    .to_bytes()
-                                    .map_err(|e| e.to_string());
+                                let msg = ProtocolMessage::StreamMeterBatchResponse(entries).to_bytes();
                                 match msg {
                                     Ok(msg) => {
                                         if let Err(e) = socket.send(Message::Binary(msg)).await {

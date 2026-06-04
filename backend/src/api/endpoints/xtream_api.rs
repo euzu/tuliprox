@@ -6,7 +6,7 @@ use crate::{
         api_utils,
         api_utils::{
             admission_failure_response, create_api_proxy_user, create_catchup_session_key,
-            create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
+            create_playback_session_fingerprint, create_session_fingerprint, empty_json_response_as_array, empty_json_response_as_object,
             force_provider_stream_response, get_session_reservation_ttl_secs, get_user_target,
             get_user_target_by_credentials, internal_server_error, is_seek_request, is_session_based_playback,
             is_stream_share_enabled, local_stream_response,
@@ -309,7 +309,7 @@ async fn xtream_player_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, true);
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
         let user_session = app_state
             .active_users
             .get_and_update_user_session(&user.username, &playback_session_token)
@@ -322,9 +322,7 @@ async fn xtream_player_api_stream(
             user_session.as_ref(),
             playback_session_token.as_str(),
             false,
-            crate::api::api_utils::EvictionReentryGuard::SocketPlayback {
-                virtual_id: pli.virtual_id,
-            },
+            crate::api::api_utils::EvictionReentryGuard::Session(playback_session_token.as_str()),
             false,
             false,
         )
@@ -371,11 +369,12 @@ async fn xtream_player_api_stream(
     let session_key = if item_type == PlaylistItemType::Catchup {
         create_catchup_session_key(fingerprint, &user.username, virtual_id)
     } else {
-        create_session_fingerprint(
+        create_playback_session_fingerprint(
             fingerprint,
             &user.username,
             virtual_id,
-            crate::api::api_utils::is_socket_bound_playback_session(item_type, Some(playback_ext)),
+            item_type,
+            Some(playback_ext),
         )
     };
     let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
@@ -513,6 +512,7 @@ async fn xtream_player_api_stream(
             &user,
             user_session.as_ref(),
             &stream_url,
+            None,
             pli.virtual_id,
             &input,
             req_headers,
@@ -525,6 +525,11 @@ async fn xtream_player_api_stream(
 
     let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
 
+    let pinned_provider = user_session
+        .as_ref()
+        .filter(|_| item_type.requires_provider_affinity())
+        .map(|session| &session.provider);
+
     stream_response(
         fingerprint,
         app_state,
@@ -532,6 +537,7 @@ async fn xtream_player_api_stream(
         Some(request_class),
         stream_channel,
         &stream_url,
+        pinned_provider,
         req_headers,
         &input,
         &target,
@@ -638,7 +644,7 @@ async fn xtream_player_api_stream_with_token(
         let user = create_api_proxy_user(app_state);
 
         if pli.item_type.is_local() {
-            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id, true);
+            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id, false);
             return local_stream_response(
                 fingerprint,
                 app_state,
@@ -665,11 +671,12 @@ async fn xtream_player_api_stream_with_token(
             if playback_ext.is_empty() { requested_extension.as_deref() } else { Some(&*playback_ext) };
 
         let is_session_request = is_session_based_playback(pli.item_type, playback_ext);
-        let session_key = create_session_fingerprint(
+        let session_key = create_playback_session_fingerprint(
             fingerprint,
             "webui",
             virtual_id,
-            crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, playback_ext),
+            pli.item_type,
+            playback_ext,
         );
 
         // TODO how should we use fixed provider for hls in multi provider config?
@@ -682,6 +689,7 @@ async fn xtream_player_api_stream_with_token(
                 &user,
                 None,
                 &pli.url,
+                None,
                 virtual_id,
                 &input,
                 req_headers,
@@ -709,6 +717,7 @@ async fn xtream_player_api_stream_with_token(
             None,
             pli.to_stream_channel(target.id),
             &stream_url,
+            None,
             req_headers,
             &input,
             &target,
@@ -770,7 +779,7 @@ async fn xtream_player_api_resource(
                         redirect(redirect_url.as_ref()).into_response()
                     }
                     Err(err) => {
-                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                        error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                         axum::http::StatusCode::BAD_REQUEST.into_response()
                     }
                 }
@@ -1010,7 +1019,7 @@ pub async fn xtream_get_stream_info_response(
                     return match api_utils::resolve_redirect_location(Some(&input), &info_url) {
                         Ok(redirect_url) => redirect(redirect_url.as_ref()).into_response(),
                         Err(err) => {
-                            error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                            error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                             axum::http::StatusCode::BAD_REQUEST.into_response()
                         }
                     };
@@ -1101,7 +1110,7 @@ async fn xtream_get_short_epg(
                             return match api_utils::resolve_redirect_location(Some(&input), &info_url) {
                                 Ok(redirect_url) => redirect(redirect_url.as_ref()).into_response(),
                                 Err(err) => {
-                                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
                                     axum::http::StatusCode::BAD_REQUEST.into_response()
                                 }
                             };
@@ -1125,7 +1134,7 @@ async fn xtream_get_short_epg(
                             )
                                 .into_response(),
                             Err(err) => {
-                                error!("Failed to download epg {}", sanitize_sensitive_info(err.to_string().as_str()));
+                                error!("Failed to download epg {}", sanitize_sensitive_info(&err.to_string()));
                                 axum::Json(json!(ShortEpgResultDto::default())).into_response()
                             }
                         };

@@ -77,6 +77,8 @@ pub struct EpgProgramme {
     pub stop: i64,
     pub title: Option<Arc<str>>,
     pub desc: Option<Arc<str>>,
+    #[serde(default)]
+    pub catchup_id: Option<Arc<str>>,
     #[serde(skip)]
     channel: Arc<str>,
 }
@@ -88,10 +90,17 @@ impl EpgProgramme {
 
 impl EpgProgramme {
     pub fn new(start: i64, stop: i64, channel: Arc<str>) -> Self {
-        Self { start, stop, channel, title: None, desc: None }
+        Self { start, stop, channel, title: None, desc: None, catchup_id: None }
     }
-    pub fn new_all(start: i64, stop: i64, channel: Arc<str>, title: Option<Arc<str>>, desc: Option<Arc<str>>) -> Self {
-        Self { start, stop, channel, title, desc }
+    pub fn new_all(
+        start: i64,
+        stop: i64,
+        channel: Arc<str>,
+        title: Option<Arc<str>>,
+        desc: Option<Arc<str>>,
+        catchup_id: Option<Arc<str>>,
+    ) -> Self {
+        Self { start, stop, channel, title, desc, catchup_id }
     }
 }
 
@@ -107,6 +116,8 @@ pub struct StreamEpgItemRequest {
     pub epg_channel_id: String,
     #[serde(default)]
     pub target_id: Option<u16>,
+    #[serde(default)]
+    pub reference_ts: Option<i64>,
 }
 
 /// Response DTO for per-stream EPG lookup.

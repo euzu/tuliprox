@@ -267,6 +267,36 @@ fn store_reprepared_web_auth(app_state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+async fn save_and_reprepare_auth_file(
+    app_state: &Arc<AppState>,
+    file_path: &FsPath,
+    content: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let _lock = app_state.app_config.file_locks.write_lock(file_path).await;
+    let previous_content = match tokio::fs::read_to_string(file_path).await {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()})))),
+    };
+    if let Err(err) = write_text_file_atomic(file_path, content).await {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))));
+    }
+    if let Err(err) = store_reprepared_web_auth(app_state) {
+        let rollback_result = match previous_content {
+            Some(previous_content) => write_text_file_atomic(file_path, &previous_content).await,
+            None => tokio::fs::remove_file(file_path).await,
+        };
+        if let Err(rollback_err) = rollback_result {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{err}; failed to restore previous auth file: {rollback_err}")})),
+            ));
+        }
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))));
+    }
+    Ok(())
+}
+
 fn token_from_extensions_or_headers(request: &mut axum::extract::Request) -> Result<AuthBearer, StatusCode> {
     if let Some(token) = request.extensions().get::<AuthBearer>().cloned() {
         return Ok(token);
@@ -429,12 +459,8 @@ async fn create_user(
     });
 
     let (userfile_path, _) = resolve_auth_paths(&web_auth, &config_path);
-    let _lock = app_state.app_config.file_locks.write_lock(&userfile_path).await;
-    if let Err(err) = write_text_file_atomic(&userfile_path, &serialize_users_file(&users)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
-    }
-    if let Err(err) = store_reprepared_web_auth(&app_state) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))).into_response();
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await {
+        return response.into_response();
     }
 
     info!("RBAC API: created web UI user '{username}'");
@@ -507,12 +533,8 @@ async fn update_user(
     }
 
     let (userfile_path, _) = resolve_auth_paths(&web_auth, &config_path);
-    let _lock = app_state.app_config.file_locks.write_lock(&userfile_path).await;
-    if let Err(err) = write_text_file_atomic(&userfile_path, &serialize_users_file(&users)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
-    }
-    if let Err(err) = store_reprepared_web_auth(&app_state) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))).into_response();
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await {
+        return response.into_response();
     }
 
     info!("RBAC API: updated web UI user '{username}'");
@@ -550,12 +572,8 @@ async fn delete_user(
     users.remove(user_index);
 
     let (userfile_path, _) = resolve_auth_paths(&web_auth, &config_path);
-    let _lock = app_state.app_config.file_locks.write_lock(&userfile_path).await;
-    if let Err(err) = write_text_file_atomic(&userfile_path, &serialize_users_file(&users)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
-    }
-    if let Err(err) = store_reprepared_web_auth(&app_state) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))).into_response();
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await {
+        return response.into_response();
     }
 
     info!("RBAC API: deleted web UI user '{username}'");
@@ -597,12 +615,8 @@ async fn create_group(
     });
 
     let (_, groupfile_path) = resolve_auth_paths(&web_auth, &config_path);
-    let _lock = app_state.app_config.file_locks.write_lock(&groupfile_path).await;
-    if let Err(err) = write_text_file_atomic(&groupfile_path, &serialize_groups_file(&groups)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
-    }
-    if let Err(err) = store_reprepared_web_auth(&app_state) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))).into_response();
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await {
+        return response.into_response();
     }
 
     info!("RBAC API: created group '{name}'");
@@ -642,12 +656,8 @@ async fn update_group(
     groups[group_index].permissions = normalize_permissions(&request.permissions);
 
     let (_, groupfile_path) = resolve_auth_paths(&web_auth, &config_path);
-    let _lock = app_state.app_config.file_locks.write_lock(&groupfile_path).await;
-    if let Err(err) = write_text_file_atomic(&groupfile_path, &serialize_groups_file(&groups)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
-    }
-    if let Err(err) = store_reprepared_web_auth(&app_state) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))).into_response();
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await {
+        return response.into_response();
     }
 
     info!("RBAC API: updated group '{name}'");
@@ -696,12 +706,8 @@ async fn delete_group(
     groups.remove(group_index);
 
     let (_, groupfile_path) = resolve_auth_paths(&web_auth, &config_path);
-    let _lock = app_state.app_config.file_locks.write_lock(&groupfile_path).await;
-    if let Err(err) = write_text_file_atomic(&groupfile_path, &serialize_groups_file(&groups)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err.to_string()}))).into_response();
-    }
-    if let Err(err) = store_reprepared_web_auth(&app_state) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err}))).into_response();
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await {
+        return response.into_response();
     }
 
     info!("RBAC API: deleted group '{name}'");

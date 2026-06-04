@@ -1,4 +1,5 @@
 use i18nrs::{I18n, I18nConfig, StorageType};
+use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -6,6 +7,43 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 use yew::prelude::*;
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct LanguageInfo {
+    pub code: String,
+    #[serde(default)]
+    pub label: String,
+    /// Text direction: "ltr" (default) or "rtl" (e.g. Arabic).
+    #[serde(default = "default_dir")]
+    pub dir: String,
+}
+
+fn default_dir() -> String { "ltr".to_string() }
+
+impl LanguageInfo {
+    pub fn is_rtl(&self) -> bool { self.dir.eq_ignore_ascii_case("rtl") }
+
+    pub fn display_label(&self) -> String {
+        if self.label.is_empty() {
+            self.code.to_uppercase()
+        } else {
+            self.label.clone()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct LanguageManifest {
+    #[serde(default)]
+    pub languages: Vec<LanguageInfo>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct LanguageState {
+    pub languages: Rc<Vec<LanguageInfo>>,
+    pub active: String,
+    pub on_change: Callback<String>,
+}
 
 static INTERNED_STRINGS: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
 
@@ -43,10 +81,14 @@ impl PartialEq for YewI18n {
 }
 
 impl YewI18n {
-    fn from_parts(supported_languages: &[&'static str], translations: &HashMap<String, Value>) -> Self {
+    fn from_parts(
+        supported_languages: &[String],
+        active_language: &str,
+        translations: &HashMap<String, Value>,
+    ) -> Self {
         let mut serialized = HashMap::<&'static str, &'static str>::new();
         for lang in supported_languages {
-            let value = translations.get(*lang).cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            let value = translations.get(lang).cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
             serialized.insert(intern_static(lang), intern_string(value.to_string()));
         }
 
@@ -56,7 +98,9 @@ impl YewI18n {
 
         let config = I18nConfig { translations: serialized.clone() };
         let mut i18n = I18n::new(config, serialized).expect("Failed to initialize i18nrs");
-        if let Some(default_lang) = supported_languages.first() {
+        let default_lang =
+            supported_languages.iter().find(|l| l.as_str() == active_language).or_else(|| supported_languages.first());
+        if let Some(default_lang) = default_lang {
             let _ = i18n.set_translation_language(default_lang, &StorageType::LocalStorage, "tp_language");
         }
 
@@ -68,8 +112,10 @@ impl YewI18n {
 
 #[derive(Debug, Clone, PartialEq, Properties)]
 pub struct I18nProviderProps {
-    #[prop_or_else(|| vec!["en", "fr"])]
-    pub supported_languages: Vec<&'static str>,
+    #[prop_or_else(|| vec!["en".to_string()])]
+    pub supported_languages: Vec<String>,
+    #[prop_or_else(|| "en".to_string())]
+    pub active_language: String,
     #[prop_or_default]
     pub translations: HashMap<String, Value>,
     #[prop_or_default]
@@ -79,8 +125,10 @@ pub struct I18nProviderProps {
 #[function_component(I18nProvider)]
 pub fn i18n_provider(props: &I18nProviderProps) -> Html {
     let i18n = use_memo(
-        (props.supported_languages.clone(), props.translations.clone()),
-        |(supported_languages, translations)| YewI18n::from_parts(supported_languages, translations),
+        (props.supported_languages.clone(), props.active_language.clone(), props.translations.clone()),
+        |(supported_languages, active_language, translations)| {
+            YewI18n::from_parts(supported_languages, active_language, translations)
+        },
     );
 
     html! {

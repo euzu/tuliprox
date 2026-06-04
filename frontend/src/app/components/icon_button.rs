@@ -13,6 +13,10 @@ pub struct IconButtonProps {
     pub hint: String,
     #[prop_or_default]
     pub button_ref: Option<NodeRef>,
+    #[prop_or_default]
+    pub aria_expanded: Option<bool>,
+    #[prop_or_default]
+    pub aria_label: Option<String>,
 }
 
 #[component]
@@ -28,7 +32,9 @@ pub fn IconButton(props: &IconButtonProps) -> Html {
     };
 
     html! {
-            <button title={props.hint.clone()} ref={props.button_ref.clone().unwrap_or_default()} class={classes!("tp__icon-button", if props.icon == "Delete" {"tp__icon-button__remove"} else {""}, props.class.clone())} onclick={handle_click}>
+            <button type="button" title={props.hint.clone()} ref={props.button_ref.clone().unwrap_or_default()} class={classes!("tp__icon-button", if props.icon == "Delete" {"tp__icon-button__remove"} else {""}, props.class.clone())} onclick={handle_click}
+                aria-expanded={props.aria_expanded.map(|v| v.to_string())}
+                aria-label={props.aria_label.clone()}>
             <AppIcon name={props.icon.clone()}></AppIcon>
         </button>
     }

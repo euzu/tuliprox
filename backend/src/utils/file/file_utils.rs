@@ -260,7 +260,8 @@ pub async fn persist_file(persist_file: Option<PathBuf>, text: &str) {
 
 pub fn prepare_persist_path(file_name: &str, date_prefix: &str) -> PathBuf {
     let now = chrono::Local::now();
-    let persist_filename = file_name.replace("{}", format!("{date_prefix}{}", now.format("%Y%m%d_%H%M%S").to_string().as_str()).as_str());
+    let timestamp = format!("{date_prefix}{}", now.format("%Y%m%d_%H%M%S"));
+    let persist_filename = file_name.replace("{}", &timestamp);
     std::path::PathBuf::from(persist_filename)
 }
 
@@ -380,6 +381,20 @@ where
     }
 
     Ok(())
+}
+
+pub fn collect_yaml_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = vec![];
+    let mut visit = |entry: &std::fs::DirEntry, metadata: &std::fs::Metadata| {
+        if metadata.is_file() {
+            let file_path = entry.path();
+            if file_path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+                files.push(file_path);
+            }
+        }
+    };
+    traverse_dir(path, &mut visit)?;
+    Ok(files)
 }
 
 pub fn prepare_file_path(persist: Option<&str>, storage_dir: &str, action: &str) -> Option<PathBuf> {
@@ -528,7 +543,7 @@ pub fn get_file_extension(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_string_path, resolve_mapping_file_path, resolve_template_file_path,
+        collect_yaml_files, normalize_string_path, resolve_mapping_file_path, resolve_template_file_path,
         resolve_template_persist_file_path,
     };
     use std::path::PathBuf;
@@ -602,5 +617,16 @@ mod tests {
             resolve_template_persist_file_path(Some("template.d"), config_path.to_string_lossy().as_ref());
         let expected = config_path.join("template.d").join("template.yml");
         assert_eq!(PathBuf::from(resolved), expected);
+    }
+
+    #[test]
+    fn test_collect_yaml_files_accepts_both_extensions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("one.yml"), "").unwrap();
+        std::fs::write(temp_dir.path().join("two.yaml"), "").unwrap();
+        std::fs::write(temp_dir.path().join("ignored.txt"), "").unwrap();
+
+        let files = collect_yaml_files(temp_dir.path()).unwrap();
+        assert_eq!(files.len(), 2);
     }
 }

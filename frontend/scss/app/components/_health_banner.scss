@@ -1,0 +1,186 @@
+.tp__health-banner {
+  --health-color: var(--theme-brand-positive);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.6rem 0.25rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--health-color) 45%, transparent);
+  background: color-mix(in srgb, var(--health-color) 14%, transparent);
+  color: var(--text-color);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  outline: none;
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--health-color) 60%, transparent);
+  }
+
+  &--healthy {
+    --health-color: var(--theme-brand-positive);
+  }
+
+  &--degraded {
+    --health-color: var(--theme-brand-warning);
+  }
+
+  &--unhealthy {
+    --health-color: var(--theme-brand-danger);
+  }
+
+  &--unknown {
+    --health-color: var(--theme-brand-border);
+  }
+
+  &__dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    background: var(--health-color);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--health-color) 25%, transparent);
+    flex: 0 0 auto;
+  }
+
+  &__label {
+    pointer-events: none;
+  }
+
+  &__popover {
+    position: fixed;
+    z-index: var(--z-index-popover);
+    min-width: 16rem;
+    padding: 0.75rem 0.85rem;
+    border-radius: 0.6rem;
+    border: 1px solid var(--popup-border-color);
+    background: var(--popup-background-color);
+    color: var(--popup-color);
+    box-shadow: var(--popup-shadow);
+    font-weight: 400;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-0.25rem);
+    transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s ease;
+  }
+
+  &:hover &__popover,
+  &:focus-within &__popover {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+  }
+
+  &__popover-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+
+  &__popover-title {
+    font-weight: 700;
+    font-size: 0.78rem;
+  }
+
+  &__popover-since {
+    font-size: 0.7rem;
+    opacity: 0.6;
+  }
+
+  &__row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.18rem 0;
+    font-size: 0.74rem;
+  }
+
+  &__row-label {
+    opacity: 0.75;
+  }
+
+  &__row-value {
+    margin-left: auto;
+    font-weight: 600;
+  }
+
+  &__signal {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--theme-brand-border);
+
+    &--ok {
+      background: var(--theme-brand-positive);
+    }
+
+    &--warn {
+      background: var(--theme-brand-warning);
+    }
+
+    &--bad {
+      background: var(--theme-brand-danger);
+    }
+  }
+
+  &__provider {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.15rem 0 0.15rem 0.4rem;
+    font-size: 0.72rem;
+  }
+
+  &__provider-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 6rem;
+    opacity: 0.85;
+  }
+
+  &__provider-value {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.8;
+  }
+
+  &__bar {
+    width: 3.5rem;
+    height: 0.3rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--theme-brand-border) 60%, transparent);
+    overflow: hidden;
+    flex: 0 0 auto;
+  }
+
+  &__bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--health-color);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tp__health-banner__dot {
+    animation: tp-health-pulse 2.4s ease-in-out infinite;
+  }
+}
+
+@keyframes tp-health-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--health-color) 25%, transparent);
+  }
+
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--health-color) 8%, transparent);
+  }
+}

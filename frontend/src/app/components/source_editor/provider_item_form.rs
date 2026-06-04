@@ -455,7 +455,14 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
                 { config_field_custom!(
                     translate.t(LABEL_DNS_SCHEMES),
                     dns_state.form.schemes.as_ref().map_or_else(String::new, |schemes| {
-                        schemes.iter().map(|scheme| scheme_to_id(*scheme)).collect::<Vec<_>>().join(", ")
+                        let mut result = String::new();
+                        for scheme in schemes {
+                            if !result.is_empty() {
+                                result.push_str(", ");
+                            }
+                            result.push_str(scheme_to_id(*scheme));
+                        }
+                        result
                     })
                 ) }
                 { config_field_bool!(dns_state.form, translate.t(LABEL_DNS_KEEP_VHOST), keep_vhost) }

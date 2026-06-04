@@ -37,7 +37,8 @@ use std::{
     sync::{atomic::AtomicI8, Arc},
     time::Duration,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -323,7 +324,7 @@ fn build_http_client_with_fallback(
     Ok(fallback_client())
 }
 
-pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
+pub fn create_cache(config: &Config) -> Option<Arc<RwLock<LRUResourceCache>>> {
     let lru_cache = config.reverse_proxy.as_ref().and_then(|r| r.cache.as_ref()).and_then(|c| {
         if c.enabled {
             Some(LRUResourceCache::new(c.size, c.directory.as_str()))
@@ -335,11 +336,11 @@ pub fn create_cache(config: &Config) -> Option<Arc<Mutex<LRUResourceCache>>> {
     if cache_enabled {
         info!("Scanning cache");
         if let Some(res_cache) = lru_cache {
-            let cache = Arc::new(Mutex::new(res_cache));
+            let cache = Arc::new(RwLock::new(res_cache));
             let cache_scanner = Arc::clone(&cache);
             tokio::spawn(async move {
                 let scan_result = {
-                    let mut cache = cache_scanner.lock().await;
+                    let mut cache = cache_scanner.write().await;
                     task::block_in_place(|| cache.scan())
                 };
                 if let Err(err) = scan_result {
@@ -396,7 +397,7 @@ pub struct AppState {
     pub http_client: Arc<ArcSwap<Client>>,
     pub http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub downloads: Arc<DownloadQueue>,
-    pub cache: Arc<ArcSwapOption<Mutex<LRUResourceCache>>>,
+    pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
@@ -465,7 +466,7 @@ impl AppState {
 
         if let Some(cache) = self.cache.load().as_ref() {
             if enabled {
-                cache.lock().await.update_config(size, cache_dir);
+                cache.write().await.update_config(size, cache_dir);
             } else {
                 self.cache.store(None);
             }
