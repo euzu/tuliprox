@@ -61,6 +61,8 @@ pub struct StreamChannel {
     // None when no EPG is configured for the underlying input/target/item.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "arc_str_option_serde")]
     pub epg_channel_id: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epg_reference_ts: Option<i64>,
 }
 
 pub fn create_stream_channel_with_type(
@@ -92,6 +94,7 @@ impl XtreamPlaylistItem {
             shared_stream_id: None,
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
             epg_channel_id: self.epg_channel_id.clone(),
+            epg_reference_ts: None,
         }
     }
 }
@@ -114,6 +117,7 @@ impl M3uPlaylistItem {
             shared_stream_id: None,
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
             epg_channel_id: self.epg_channel_id.clone(),
+            epg_reference_ts: None,
         }
     }
 }

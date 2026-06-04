@@ -449,6 +449,32 @@ mod tests {
     }
 
     #[test]
+    fn discriminator_changes_when_collectors_change() {
+        let first = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                mode: Some("shift".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("v0=20240101120000&v1=20240101130000"),
+        )
+        .unwrap()
+        .unwrap();
+        let second = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                mode: Some("shift".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("v0=20240101140000&v1=20240101150000"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_ne!(first.discriminator, second.discriminator);
+    }
+
+    #[test]
     fn catchup_marker_detection_is_explicit() {
         assert!(has_m3u_catchup_marker(Some(&format!("{M3U_CATCHUP_MARKER}=abc&v0=1"))));
         assert!(!has_m3u_catchup_marker(Some("v0=1")));

@@ -58,9 +58,19 @@ impl EpgData {
 fn epg_interval_effect_deps(
     epg_channel_id: &Option<std::sync::Arc<str>>,
     epg_data: Option<&Rc<EpgData>>,
+    epg_reference_ts: Option<i64>,
     hide_epg: bool,
-) -> (Option<std::sync::Arc<str>>, Option<u64>, bool) {
-    (epg_channel_id.clone(), epg_data.map(|data| data.fetched_at_secs), hide_epg)
+) -> (Option<std::sync::Arc<str>>, Option<u64>, Option<i64>, bool) {
+    (epg_channel_id.clone(), epg_data.map(|data| data.fetched_at_secs), epg_reference_ts, hide_epg)
+}
+
+fn epg_fetch_effect_deps(
+    epg_channel_id: &Option<std::sync::Arc<str>>,
+    needs_refetch: bool,
+    epg_reference_ts: Option<i64>,
+    hide_properties: StreamInfoFieldsSet,
+) -> (Option<std::sync::Arc<str>>, bool, Option<i64>, StreamInfoFieldsSet) {
+    (epg_channel_id.clone(), needs_refetch, epg_reference_ts, hide_properties)
 }
 
 /// Computes current and next programme from a list of programmes.
@@ -94,6 +104,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
     let epg_channel_id = stream.channel.epg_channel_id.clone();
     let epg_target_id = stream.channel.target_id;
+    let epg_reference_ts = stream.channel.epg_reference_ts;
 
     // EPG state: cached response + fetched timestamp
     let epg_data: UseStateHandle<Option<Rc<EpgData>>> = use_state(|| None);
@@ -121,76 +132,76 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
         let epg_data = epg_data.clone();
         let current_next = current_next.clone();
         let needs_refetch = needs_refetch.clone();
-        use_effect_with(
-            (epg_channel_id.clone(), *needs_refetch, hide_properties),
-            move |(epg_channel_id, force_refetch, _hide_props)| {
-                let Some(epg_channel_id) = epg_channel_id.clone() else {
-                    return;
+        let fetch_deps = epg_fetch_effect_deps(&epg_channel_id, *needs_refetch, epg_reference_ts, hide_properties);
+        use_effect_with(fetch_deps, move |(epg_channel_id, force_refetch, effect_reference_ts, _hide_props)| {
+            let Some(epg_channel_id) = epg_channel_id.clone() else {
+                return;
+            };
+            if hide_properties.contains(StreamInfoFields::HideEpg) {
+                return;
+            }
+            let force_refetch = *force_refetch;
+            let effect_reference_ts = *effect_reference_ts;
+
+            let epg_channel_id = epg_channel_id.clone();
+            let epg_data = epg_data.clone();
+            let current_next = current_next.clone();
+            let needs_refetch = needs_refetch.clone();
+
+            spawn_local(async move {
+                let now_secs = current_time_secs();
+                let now_i64 = effect_reference_ts.unwrap_or(now_secs as i64);
+                let reset_state = || {
+                    current_next.set(None);
+                    epg_data.set(None);
+                    if force_refetch {
+                        needs_refetch.set(false);
+                    }
                 };
-                if hide_properties.contains(StreamInfoFields::HideEpg) {
-                    return;
-                }
-                let force_refetch = *force_refetch;
 
-                let epg_channel_id = epg_channel_id.clone();
-                let epg_data = epg_data.clone();
-                let current_next = current_next.clone();
-                let needs_refetch = needs_refetch.clone();
-
-                spawn_local(async move {
-                    let now_secs = current_time_secs();
-                    let now_i64 = now_secs as i64;
-                    let reset_state = || {
+                // Check if cache is valid before fetching
+                if let Some(ref data) = *epg_data {
+                    if !data.matches_channel(&epg_channel_id) {
                         current_next.set(None);
                         epg_data.set(None);
-                        if force_refetch {
-                            needs_refetch.set(false);
-                        }
-                    };
-
-                    // Check if cache is valid before fetching
-                    if let Some(ref data) = *epg_data {
-                        if !data.matches_channel(&epg_channel_id) {
-                            current_next.set(None);
-                            epg_data.set(None);
-                        } else if !force_refetch && !data.is_stale(now_secs) {
-                            return;
-                        }
+                    } else if !force_refetch && !data.is_stale(now_secs) {
+                        return;
                     }
+                }
 
-                    // Fetch fresh data
-                    let service = PlaylistService::new();
-                    if let Some(response) = service
-                        .get_stream_epg(vec![StreamEpgItemRequest {
-                            epg_channel_id: epg_channel_id.to_string(),
-                            target_id: Some(epg_target_id),
-                        }])
-                        .await
-                    {
-                        if let Some(entry) = response.entries.first() {
-                            let (current, next) = compute_current_next(&entry.programmes, now_i64);
-                            let new_data = Rc::new(EpgData {
-                                channel_id: epg_channel_id.clone(),
-                                response,
-                                fetched_at_secs: now_secs,
-                            });
-                            current_next.set(current.map(|cur| (cur, next)));
-                            epg_data.set(Some(new_data));
-                        } else {
-                            reset_state();
-                            return;
-                        }
+                // Fetch fresh data
+                let service = PlaylistService::new();
+                if let Some(response) = service
+                    .get_stream_epg(vec![StreamEpgItemRequest {
+                        epg_channel_id: epg_channel_id.to_string(),
+                        target_id: Some(epg_target_id),
+                        reference_ts: effect_reference_ts,
+                    }])
+                    .await
+                {
+                    if let Some(entry) = response.entries.first() {
+                        let (current, next) = compute_current_next(&entry.programmes, now_i64);
+                        let new_data = Rc::new(EpgData {
+                            channel_id: epg_channel_id.clone(),
+                            response,
+                            fetched_at_secs: now_secs,
+                        });
+                        current_next.set(current.map(|cur| (cur, next)));
+                        epg_data.set(Some(new_data));
                     } else {
                         reset_state();
                         return;
                     }
+                } else {
+                    reset_state();
+                    return;
+                }
 
-                    if force_refetch {
-                        needs_refetch.set(false);
-                    }
-                });
-            },
-        );
+                if force_refetch {
+                    needs_refetch.set(false);
+                }
+            });
+        });
     }
 
     // Local tick: recompute current/next and detect staleness every 30 seconds
@@ -198,15 +209,17 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
         let interval_deps = epg_interval_effect_deps(
             &epg_channel_id,
             (*epg_data).as_ref(),
+            epg_reference_ts,
             hide_properties.contains(StreamInfoFields::HideEpg),
         );
         let epg_data = epg_data.clone();
         let current_next = current_next.clone();
         let needs_refetch = needs_refetch.clone();
-        use_effect_with(interval_deps, move |(epg_channel_id, _, hide_epg)| {
+        use_effect_with(interval_deps, move |(epg_channel_id, _, effect_reference_ts, hide_epg)| {
             if *hide_epg {
                 return Box::new(|| ()) as Box<dyn FnOnce()>;
             }
+            let effect_reference_ts = *effect_reference_ts;
             epg_channel_id.as_ref().map_or_else(
                 || Box::new(|| ()) as Box<dyn FnOnce()>,
                 |channel_id| {
@@ -242,7 +255,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         // Recompute current/next from cached data
                         if let Some(data) = (*epg_data).as_ref() {
                             if let Some(entry) = data.response.entries.first() {
-                                let now_i64 = now_secs as i64;
+                                let now_i64 = effect_reference_ts.unwrap_or(now_secs as i64);
                                 let (current, next) = compute_current_next(&entry.programmes, now_i64);
                                 // Only show current if one is active; clears stale state otherwise
                                 current_next.set(current.map(|cur| (cur, next)));
@@ -505,13 +518,44 @@ mod tests {
             fetched_at_secs: 200,
         });
 
-        let first_deps = epg_interval_effect_deps(&channel_id, Some(&first), false);
-        let second_deps = epg_interval_effect_deps(&channel_id, Some(&second), false);
+        let first_deps = epg_interval_effect_deps(&channel_id, Some(&first), None, false);
+        let second_deps = epg_interval_effect_deps(&channel_id, Some(&second), None, false);
 
         assert_ne!(first_deps, second_deps);
         assert_eq!(first_deps.1, Some(100));
         assert_eq!(second_deps.1, Some(200));
-        assert!(!first_deps.2);
-        assert!(!second_deps.2);
+        assert_eq!(first_deps.2, None);
+        assert_eq!(second_deps.2, None);
+        assert!(!first_deps.3);
+        assert!(!second_deps.3);
+    }
+
+    #[test]
+    fn test_epg_fetch_effect_deps_change_when_reference_changes() {
+        let channel_id = Some(std::sync::Arc::<str>::from("channel-1"));
+
+        let first_deps = epg_fetch_effect_deps(&channel_id, false, Some(1_700_000_000), StreamInfoFieldsSet::new());
+        let second_deps = epg_fetch_effect_deps(&channel_id, false, Some(1_700_000_600), StreamInfoFieldsSet::new());
+
+        assert_ne!(first_deps, second_deps);
+        assert_eq!(first_deps.2, Some(1_700_000_000));
+        assert_eq!(second_deps.2, Some(1_700_000_600));
+    }
+
+    #[test]
+    fn test_epg_interval_effect_deps_change_when_reference_changes() {
+        let channel_id = Some(std::sync::Arc::<str>::from("channel-1"));
+        let data = Rc::new(EpgData {
+            channel_id: std::sync::Arc::<str>::from("channel-1"),
+            response: StreamEpgResponse { entries: vec![] },
+            fetched_at_secs: 100,
+        });
+
+        let first_deps = epg_interval_effect_deps(&channel_id, Some(&data), Some(1_700_000_000), false);
+        let second_deps = epg_interval_effect_deps(&channel_id, Some(&data), Some(1_700_000_600), false);
+
+        assert_ne!(first_deps, second_deps);
+        assert_eq!(first_deps.2, Some(1_700_000_000));
+        assert_eq!(second_deps.2, Some(1_700_000_600));
     }
 }

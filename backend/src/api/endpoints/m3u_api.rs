@@ -264,7 +264,11 @@ async fn m3u_api_stream_loaded(
             .await
             .into_response();
         }
-        session.stream_url.clone()
+        if pli.item_type == PlaylistItemType::Catchup {
+            pli.url.clone()
+        } else {
+            session.stream_url.clone()
+        }
     } else {
         pli.url.clone()
     };
@@ -333,6 +337,7 @@ async fn m3u_api_stream_loaded(
             &user,
             user_session.as_ref(),
             &pli.url,
+            None,
             pli.virtual_id,
             &input,
             req_headers,
