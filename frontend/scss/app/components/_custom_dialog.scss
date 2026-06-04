@@ -9,7 +9,7 @@
   align-items: flex-start;
   justify-content: center;
   background-color: var(--custom-dialog-backdrop-color);
-  z-index: 1000;
+  z-index: var(--z-index-overlay);
   animation: fadeIn 0.2s ease-out;
 }
 

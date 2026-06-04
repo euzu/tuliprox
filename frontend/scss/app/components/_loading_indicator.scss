@@ -2,7 +2,7 @@ $indicator-height: 5px;
 
 .tp__busy-indicator {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-index-overlay);
   top: var(--app-header-height);
   left: 0;
   display: inline-block;
@@ -55,4 +55,3 @@ $indicator-height: 5px;
     transform: scaleX(0); // The bar contracts back to the center
   }
 }
-

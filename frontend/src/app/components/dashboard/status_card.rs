@@ -10,6 +10,8 @@ pub struct StatusCardProps {
     pub footer: String,
     #[prop_or_default]
     pub classname: String,
+    #[prop_or_default]
+    pub chart: Option<Html>,
 }
 
 #[component]
@@ -22,6 +24,13 @@ pub fn StatusCard(props: &StatusCardProps) -> Html {
             <div class="tp__status-card__body">
                 {props.data.clone()}
             </div>
+            {
+                if let Some(chart) = props.chart.clone() {
+                    html! { <div class="tp__status-card__chart">{ chart }</div> }
+                } else {
+                    Html::default()
+                }
+            }
             <div class="tp__status-card__footer">
                 {props.footer.clone()}
             </div>

@@ -33,7 +33,7 @@ use shared::{
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -395,6 +395,10 @@ fn get_applied_epg_timestamps(
     }
 }
 
+fn get_source_epg_timestamps(programme: &EpgProgramme) -> (i64, i64) {
+    (programme.start, programme.stop)
+}
+
 fn format_epg_timeshift_strings(
     programme: &EpgProgramme,
     epg_processing_options: &EpgProcessingOptions,
@@ -495,6 +499,19 @@ pub async fn serve_short_epg(
 /// Serves per-stream EPG data for the UI "now playing" / "up next" display.
 /// Queries epg.db by `epg_channel_id`, filters to 8h window, applies user timeshift.
 /// Returns empty entries for all error/missing cases (no errors surfaced to client).
+const STREAM_EPG_ARCHIVE_WINDOW_BACK_SECS: i64 = 4 * 3600;
+const STREAM_EPG_ARCHIVE_WINDOW_FWD_SECS: i64 = 12 * 3600;
+
+fn stream_epg_reference_map(items: &[StreamEpgItemRequest]) -> HashMap<&str, i64> {
+    let mut references = HashMap::with_capacity(items.len());
+    for item in items {
+        if let Some(reference_ts) = item.reference_ts {
+            references.entry(item.epg_channel_id.as_str()).or_insert(reference_ts);
+        }
+    }
+    references
+}
+
 async fn serve_stream_epg(
     app_state: &Arc<AppState>,
     user: &ProxyUserCredentials,
@@ -503,8 +520,7 @@ async fn serve_stream_epg(
     items: Vec<StreamEpgItemRequest>,
 ) -> StreamEpgResponse {
     let epg_processing_options = get_epg_processing_options(app_state, user, target);
-    let now = chrono::Utc::now().timestamp();
-    let window_end = now + 8 * 3600;
+    let live_now = chrono::Utc::now().timestamp();
 
     // Deduplicate by first occurrence, preserving order
     let unique_ids: Vec<&str> = {
@@ -536,11 +552,15 @@ async fn serve_stream_epg(
         }
     };
 
+    let reference_by_channel = stream_epg_reference_map(&items);
     let mut entries = Vec::with_capacity(channels.len());
 
     for (epg_channel_id, channel) in channels {
+        let reference_ts = reference_by_channel.get(epg_channel_id.as_ref()).copied().unwrap_or(live_now);
+        let window_start = reference_ts.saturating_sub(STREAM_EPG_ARCHIVE_WINDOW_BACK_SECS);
+        let window_end = reference_ts.saturating_add(STREAM_EPG_ARCHIVE_WINDOW_FWD_SECS);
         let programmes = match channel {
-            Some(ch) => stream_epg_programmes_for_channel(&ch.programmes, &epg_processing_options, now, window_end),
+            Some(ch) => stream_epg_programmes_for_channel(&ch.programmes, &epg_processing_options, window_start, window_end),
             None => Vec::new(),
         };
 
@@ -557,14 +577,15 @@ async fn serve_stream_epg(
 fn stream_epg_programmes_for_channel(
     programmes: &[EpgProgramme],
     epg_processing_options: &EpgProcessingOptions,
-    now: i64,
+    window_start: i64,
     window_end: i64,
 ) -> Vec<EpgProgrammeDto> {
     programmes
         .iter()
         .filter_map(|programme| {
-            let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
-            (stop_ts > now && start_ts <= window_end).then(|| {
+            let (source_start_ts, source_stop_ts) = get_source_epg_timestamps(programme);
+            (source_stop_ts > window_start && source_start_ts <= window_end).then(|| {
+                let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
                 let (start_str, stop_str) =
                     format_epg_timeshift_strings(programme, epg_processing_options, start_ts, stop_ts);
                 EpgProgrammeDto {
@@ -753,7 +774,7 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_stream_epg_items, rewrite_epg_channel_resource_url, stream_epg_programmes_for_channel};
+    use super::{group_stream_epg_items, rewrite_epg_channel_resource_url, stream_epg_programmes_for_channel, stream_epg_reference_map};
     use crate::utils::{EpgProcessingOptions, EpgTimeShift};
     use shared::{
         model::{EpgChannel, EpgProgramme, StreamEpgItemRequest},
@@ -771,6 +792,7 @@ mod tests {
         let err = group_stream_epg_items(vec![StreamEpgItemRequest {
             epg_channel_id: "epg-1".to_string(),
             target_id: None,
+            reference_ts: None,
         }])
         .unwrap_err();
         assert_eq!(err, "all items must include target_id");
@@ -782,14 +804,17 @@ mod tests {
             StreamEpgItemRequest {
                 epg_channel_id: "epg-1".to_string(),
                 target_id: Some(2),
+                reference_ts: None,
             },
             StreamEpgItemRequest {
                 epg_channel_id: "epg-2".to_string(),
                 target_id: Some(5),
+                reference_ts: None,
             },
             StreamEpgItemRequest {
                 epg_channel_id: "epg-3".to_string(),
                 target_id: Some(2),
+                reference_ts: None,
             },
         ])
         .unwrap();
@@ -802,6 +827,40 @@ mod tests {
         );
         assert_eq!(groups[1].0, 5);
         assert_eq!(groups[1].1.iter().map(|item| item.epg_channel_id.as_str()).collect::<Vec<_>>(), vec!["epg-2"]);
+    }
+
+    #[test]
+    fn stream_epg_archive_window_uses_reference() {
+        let reference = 1_700_000_000_i64 - 3_600;
+        let window_start = reference.saturating_sub(super::STREAM_EPG_ARCHIVE_WINDOW_BACK_SECS);
+        let window_end = reference.saturating_add(super::STREAM_EPG_ARCHIVE_WINDOW_FWD_SECS);
+        assert!(window_start < reference);
+        assert!(window_end > reference);
+    }
+
+    #[test]
+    fn stream_epg_reference_map_keeps_first_reference_per_channel() {
+        let items = [
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-1".to_string(),
+                target_id: Some(1),
+                reference_ts: Some(100),
+            },
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-1".to_string(),
+                target_id: Some(1),
+                reference_ts: Some(200),
+            },
+            StreamEpgItemRequest {
+                epg_channel_id: "epg-2".to_string(),
+                target_id: Some(1),
+                reference_ts: None,
+            },
+        ];
+        let references = stream_epg_reference_map(&items);
+
+        assert_eq!(references.get("epg-1"), Some(&100));
+        assert_eq!(references.get("epg-2"), None);
     }
 
     fn sample_channel(icon: Option<&str>) -> EpgChannel {
@@ -840,8 +899,8 @@ mod tests {
 
     #[test]
     fn stream_epg_programmes_for_channel_filters_using_shifted_fixed_times() {
-        let now = 10_000;
-        let window_end = now + 8 * 3600;
+        let window_start = 10_000;
+        let window_end = window_start + 8 * 3600;
         let epg_processing_options = EpgProcessingOptions {
             rewrite_urls: false,
             time_shift: EpgTimeShift::Fixed(120),
@@ -849,16 +908,16 @@ mod tests {
         };
         let programmes = vec![
             EpgProgramme::new_all(
-                now - 7_300,
-                now - 100,
+                window_start - 7_300,
+                window_start - 100,
                 "channel-1".intern(),
                 Some("Shifted Into Window".intern()),
                 None,
                 None,
             ),
             EpgProgramme::new_all(
-                now + 60,
-                now + 600,
+                window_start + 60,
+                window_start + 600,
                 "channel-1".intern(),
                 Some("Already In Window".intern()),
                 None,
@@ -874,14 +933,15 @@ mod tests {
             ),
         ];
 
-        let filtered = stream_epg_programmes_for_channel(&programmes, &epg_processing_options, now, window_end);
+        let filtered =
+            stream_epg_programmes_for_channel(&programmes, &epg_processing_options, window_start, window_end);
 
         assert_eq!(
             filtered.iter().map(|programme| programme.title.as_str()).collect::<Vec<_>>(),
-            vec!["Shifted Into Window", "Already In Window"]
+            vec!["Already In Window"]
         );
-        assert_eq!(filtered[0].start_timestamp, now - 100);
-        assert_eq!(filtered[0].stop_timestamp, now + 7_100);
+        assert_eq!(filtered[0].start_timestamp, window_start + 7_260);
+        assert_eq!(filtered[0].stop_timestamp, window_start + 7_800);
     }
 
 }

@@ -15,7 +15,7 @@
   color: var(--popup-color);
   box-shadow: var(--popup-shadow);
   overflow: hidden;
-  z-index: 9999;
+  z-index: var(--z-index-menu);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
 

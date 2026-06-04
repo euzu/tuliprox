@@ -11,7 +11,7 @@ use crate::{
             try_unwrap_body, RedirectParams,
         },
         endpoints::{
-            hls_api::handle_hls_stream_request,
+            hls_api::{handle_hls_stream_request, m3u_archive_epg_reference_ts},
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
@@ -264,7 +264,11 @@ async fn m3u_api_stream_loaded(
             .await
             .into_response();
         }
-        session.stream_url.clone()
+        if pli.item_type == PlaylistItemType::Catchup {
+            pli.url.clone()
+        } else {
+            session.stream_url.clone()
+        }
     } else {
         pli.url.clone()
     };
@@ -327,12 +331,14 @@ async fn m3u_api_stream_loaded(
     let is_session_request = is_session_based_playback(pli.item_type, Some(extension));
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::utils::HLS_EXT {
+        let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
         return handle_hls_stream_request(
             fingerprint,
             app_state,
             &user,
             user_session.as_ref(),
             &pli.url,
+            archive_reference,
             pli.virtual_id,
             &input,
             req_headers,

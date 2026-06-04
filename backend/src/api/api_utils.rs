@@ -4505,6 +4505,7 @@ mod tests {
             shared_stream_id: None,
             technical: None,
             epg_channel_id: None,
+            epg_reference_ts: None,
         }
     }
 
@@ -4524,6 +4525,7 @@ mod tests {
             shared_stream_id: None,
             technical: None,
             epg_channel_id: None,
+            epg_reference_ts: None,
         }
     }
 

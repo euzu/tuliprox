@@ -116,6 +116,8 @@ pub struct StreamEpgItemRequest {
     pub epg_channel_id: String,
     #[serde(default)]
     pub target_id: Option<u16>,
+    #[serde(default)]
+    pub reference_ts: Option<i64>,
 }
 
 /// Response DTO for per-stream EPG lookup.

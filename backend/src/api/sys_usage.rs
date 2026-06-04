@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SYSTEM_USAGE_INTERVAL: Duration = Duration::from_secs(5);
+const SYSTEM_USAGE_INTERVAL: Duration = Duration::from_secs(2);
 
 pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<()> {
     let state = Arc::clone(app_state);

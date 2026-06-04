@@ -10,6 +10,35 @@
 
 ## 🌟 New Features
 
+- **Session Expiry Handling**:
+  - The Web UI now schedules a client-side logout when the JWT expires, showing a notification and returning the
+    user to the login screen instead of silently failing with 401 errors.
+
+- **Guided Empty States**:
+  - Empty lists now show a short hint explaining what to do next instead of just "No content",
+    applied to HDHomeRun devices, schedules, the API proxy server list, the playlist explorer, and the EPG viewer.
+
+- **Status Health Banner**:
+  - A single green/amber/red health indicator in the header aggregates the realtime connection, backend status,
+    and provider connection capacity, with a hover breakdown and click-through to the Stats view.
+
+- **Live Metric Sparklines**:
+  - The Stats cards now show interactive time-series sparklines for CPU, memory, network throughput, active users,
+    and active user connections, keeping a rolling history so trends are visible at a glance.
+  - Hovering shows a cursor and tooltip with the value at that point
+  - System metrics are now sampled every 2 seconds (down from 5) for more responsive charts.
+
+- **Bookmarkable Views (Deep Linking)**:
+  - The active view is now reflected in the URL hash (e.g. `#stats`, `#source_editor`), so views can be bookmarked, shared,  
+    and navigated directly via URL.
+  - Browser back/forward navigation and manual hash edits now switch the active view accordingly.
+
+- **Dev Container Support**:
+  - Added a `.devcontainer` setup so the project can be developed in a reproducible container (locally, on a remote
+    Docker host, or in Codespaces). It pins Rust 1.89.0, adds the WASM and musl targets, and installs `trunk`,
+    `wasm-bindgen`, `cross`, `cargo-edit`, `mdbook`, and `markdownlint-cli2`, forwarding the backend (8901) and
+    frontend dev-server (9899) ports.
+
 - **UI Micro-Interactions**:
   - Cards now gently lift with a soft shadow on hover, buttons give a subtle press/ripple feedback when clicked,
     and collapse/accordion chevrons smoothly rotate between open and closed states. All effects honor

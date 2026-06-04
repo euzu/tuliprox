@@ -863,7 +863,10 @@ pub fn PlaylistExplorer() -> Html {
     let render_categories = || {
         if playlist.is_none() {
             html! {
-                <NoContent text={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_TO_VIEW_CONTENT")} />
+                <NoContent
+                    text={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_TO_VIEW_CONTENT")}
+                    hint={translate.t("MESSAGES.PLAYLIST_EXPLORER.SELECT_A_PLAYLIST_HINT")}
+                />
             }
         } else {
             let active_cluster = cluster_visible.intern();

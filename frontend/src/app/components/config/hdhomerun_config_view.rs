@@ -109,7 +109,10 @@ pub fn HdHomerunConfigView() -> Html {
             <div class="tp__hdhomerun-config-view__body tp__config-view-page__body">
                 <Card class="tp__config-view__card">
                   <h1>{translate.t(LABEL_DEVICES)}</h1>
-                  <NoContent />
+                  <NoContent
+                    text={translate.t("MESSAGES.EMPTY_STATE.HDHOMERUN_DEVICES_TITLE")}
+                    hint={translate.t("MESSAGES.EMPTY_STATE.HDHOMERUN_DEVICES_HINT")}
+                  />
                 </Card>
             </div>
         }

@@ -28,6 +28,8 @@ use crate::{
 use log::warn;
 use shared::model::{permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, SourcesConfigDto};
 use std::str::FromStr;
+use wasm_bindgen::{closure::Closure, JsCast};
+use web_sys::BeforeUnloadEvent;
 use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_CONFIG: &str = "LABEL.CONFIG";
@@ -40,6 +42,7 @@ const LABEL_SETUP_FINISH: &str = "SETUP.LABEL.FINISH_SETUP";
 const LABEL_SETUP_WEBUI_USERNAME: &str = "SETUP.LABEL.WEBUI_USERNAME";
 const LABEL_SETUP_WEBUI_PASSWORD: &str = "SETUP.LABEL.WEBUI_PASSWORD";
 const LABEL_SETUP_WEBUI_PASSWORD_REPEAT: &str = "SETUP.LABEL.WEBUI_PASSWORD_REPEAT";
+const DEFAULT_SETUP_USERNAME: &str = "admin";
 
 const ACTION_UPDATE_GEO_IP: &str = "update_geo_ip";
 fn config_form_to_config_page(form: &ConfigForm) -> ConfigPage {
@@ -79,7 +82,7 @@ pub fn ConfigView() -> Html {
     let active_tab = use_state(|| ConfigPage::Main);
     let edit_mode = use_state(|| setup_mode);
     let form_state = use_state(ConfigFormState::default);
-    let setup_username = use_state(|| "admin".to_string());
+    let setup_username = use_state(|| DEFAULT_SETUP_USERNAME.to_string());
     let setup_password = use_state(String::new);
     let setup_password_repeat = use_state(String::new);
 
@@ -442,6 +445,36 @@ pub fn ConfigView() -> Html {
             });
         })
     };
+
+    // Warn before the browser unloads (refresh/close/navigation) while there are
+    // unsaved config edits, so the user does not silently lose their changes.
+    let setup_credentials_dirty = setup_mode
+        && ((*setup_username != DEFAULT_SETUP_USERNAME)
+            || !setup_password.is_empty()
+            || !setup_password_repeat.is_empty());
+    let has_unsaved_changes = (*edit_mode || setup_mode)
+        && (!form_state.slots.collect_modified_forms().is_empty() || setup_credentials_dirty);
+    {
+        use_effect_with(has_unsaved_changes, move |&dirty| {
+            let closure = Closure::<dyn FnMut(BeforeUnloadEvent)>::wrap(Box::new(move |event: BeforeUnloadEvent| {
+                event.prevent_default();
+                event.set_return_value("");
+            }));
+            if dirty {
+                if let Some(win) = web_sys::window() {
+                    let _ = win.add_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
+                }
+            }
+            move || {
+                if dirty {
+                    if let Some(win) = web_sys::window() {
+                        let _ =
+                            win.remove_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
+                    }
+                }
+            }
+        });
+    }
 
     let context = ConfigViewContext {
         edit_mode: edit_mode.clone(),

@@ -55,6 +55,8 @@
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
+  background-color: var(--app-header-background-color);
+  box-shadow: 0 0 0 transparent;
 
   &__scroll {
     flex: 1 1 auto;
@@ -91,16 +93,39 @@
       margin-top: var(--gap-large);
     }
   }
+
+  &__backdrop {
+    display: none;
+  }
 }
 
 @media (max-width: size.$mobile-breakpoint) {
+  .tp__app-sidebar__backdrop {
+    position: fixed;
+    inset: 0;
+    display: block;
+    border: 0;
+    padding: 0;
+    background: var(--dialog-backdrop-color);
+    z-index: 39;
+    cursor: pointer;
+  }
+
   .tp__app-sidebar.mobile {
     transition: width 0.2s ease;
+    z-index: 40;
 
     &.expanded {
-      min-width: var(--sidebar-width-collapsed);
-      max-width: var(--sidebar-width-collapsed);
-      width: var(--sidebar-width-collapsed);
+      position: fixed;
+      inset: 0 auto 0 0;
+      min-width: min(18rem, calc(100vw - 3rem));
+      max-width: min(18rem, calc(100vw - 3rem));
+      width: min(18rem, calc(100vw - 3rem));
+      box-shadow: var(--popup-shadow);
+
+      .tp__app-sidebar__content {
+        padding: var(--padding-default);
+      }
     }
 
     &.collapsed {
@@ -129,7 +154,7 @@
     }
 
     .tp__app-sidebar__header {
-      justify-content: center;
+      justify-content: space-between;
       gap: var(--gap-small);
     }
 

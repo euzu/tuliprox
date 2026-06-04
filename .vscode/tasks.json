@@ -1,0 +1,113 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "backend: run",
+      "type": "shell",
+      "command": "cargo run -p tuliprox --bin tuliprox -- -s -p ${workspaceFolder}/config",
+      "problemMatcher": ["$rustc"],
+      "group": "build",
+      "presentation": {
+        "panel": "dedicated",
+        "group": "dev"
+      }
+    },
+    {
+      "label": "backend: watch",
+      "type": "shell",
+      "command": "cargo watch -i 'data/**' -i 'config/**' -x 'run -p tuliprox --bin tuliprox -- -s -p ${workspaceFolder}/config'",
+      "problemMatcher": ["$rustc"],
+      "isBackground": true,
+      "presentation": {
+        "panel": "dedicated",
+        "group": "dev"
+      }
+    },
+    {
+      "label": "frontend: trunk serve",
+      "type": "shell",
+      "command": "trunk serve",
+      "options": {
+        "cwd": "${workspaceFolder}/frontend"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "panel": "dedicated",
+        "group": "dev"
+      }
+    },
+    {
+      "label": "dev: backend + frontend",
+      "dependsOn": ["backend: watch", "frontend: trunk serve"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "test",
+      "type": "shell",
+      "command": "make test",
+      "problemMatcher": ["$rustc"],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "lint (clippy)",
+      "type": "shell",
+      "command": "make lint",
+      "problemMatcher": ["$rustc"],
+      "group": "build"
+    },
+    {
+      "label": "lint-fix",
+      "type": "shell",
+      "command": "make lint-fix",
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "fmt",
+      "type": "shell",
+      "command": "make fmt",
+      "problemMatcher": []
+    },
+    {
+      "label": "fmt-check",
+      "type": "shell",
+      "command": "make fmt-check",
+      "problemMatcher": []
+    },
+    {
+      "label": "coverage (llvm-cov)",
+      "type": "shell",
+      "command": "cargo llvm-cov --workspace --html",
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "deps: deny",
+      "type": "shell",
+      "command": "cargo deny check",
+      "problemMatcher": []
+    },
+    {
+      "label": "deps: unused (machete)",
+      "type": "shell",
+      "command": "cargo machete",
+      "problemMatcher": []
+    },
+    {
+      "label": "docs: serve",
+      "type": "shell",
+      "command": "make docs-serve",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "markdown-lint",
+      "type": "shell",
+      "command": "make markdown-lint",
+      "problemMatcher": []
+    }
+  ]
+}

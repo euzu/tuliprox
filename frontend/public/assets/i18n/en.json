@@ -1280,6 +1280,18 @@
     "STAR_ON_GITHUB": "If you like this project, star ⭐ us on GitHub",
     "STATS": "Stats",
     "STATUS": "Status",
+    "HEALTH_BANNER": "System health",
+    "HEALTH_HEALTHY": "Healthy",
+    "HEALTH_DEGRADED": "Degraded",
+    "HEALTH_UNHEALTHY": "Unhealthy",
+    "HEALTH_UNKNOWN": "Unknown",
+    "HEALTH_WEBSOCKET": "Realtime connection",
+    "HEALTH_BACKEND": "Backend status",
+    "HEALTH_PROVIDERS": "Provider capacity",
+    "HEALTH_CONNECTED": "Connected",
+    "HEALTH_DISCONNECTED": "Disconnected",
+    "HEALTH_PROVIDERS_OK": "All healthy",
+    "HEALTH_PROVIDERS_NONE": "No active providers",
     "STREAM": "Stream",
     "STREAM_GRACE": "Stream Grace",
     "STREAM_SESSION": "Stream Session",
@@ -1493,17 +1505,30 @@
     "LOGIN": {
       "MESSAGE": "Enter Your Credentials"
     },
+    "SESSION": {
+      "EXPIRED": "Your session has expired. Please log in again."
+    },
     "NO_ACCESS_MESSAGE": "Your account has no permissions assigned. Contact an administrator.",
     "NO_ACCESS_TITLE": "No Access",
     "NO_CONTENT": "No content",
+    "EMPTY_STATE": {
+      "HDHOMERUN_DEVICES_TITLE": "No HDHomeRun devices",
+      "HDHOMERUN_DEVICES_HINT": "Switch to edit mode and add a device to emulate an HDHomeRun tuner for your players.",
+      "SCHEDULES_TITLE": "No schedules",
+      "SCHEDULES_HINT": "Add a schedule to run playlist updates automatically at the times you choose.",
+      "API_PROXY_SERVER_TITLE": "No server endpoints",
+      "API_PROXY_SERVER_HINT": "Add a server entry to define the host and ports your clients use to reach the playlists."
+    },
     "PLAYLIST": {
       "WEBPLAYER_URL_COPY_TO_CLIPBOARD": "The copied WebPlayer url is valid for 30 seconds."
     },
     "PLAYLIST_EXPLORER": {
-      "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content."
+      "SELECT_A_PLAYLIST_TO_VIEW_CONTENT": "Select a playlist to view its content.",
+      "SELECT_A_PLAYLIST_HINT": "Pick a source from the selector above to browse its channels, movies and series."
     },
     "EPG": {
-      "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content."
+      "SELECT_AN_EPG_TO_VIEW_CONTENT": "Select an epg to view its content.",
+      "SELECT_AN_EPG_HINT": "Choose an EPG source above to preview its programme guide."
     },
     "RBAC": {
       "ADMIN_HINT": "User is Admin \u2014 additional groups have no effect.",
