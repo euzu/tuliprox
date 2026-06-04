@@ -1,7 +1,9 @@
 use crate::{
     app::{components::login::Login, AppRoute},
     hooks::use_service_context,
+    i18n::use_translation,
 };
+use gloo_timers::callback::Timeout;
 use shared::model::permission::Permission;
 use std::future;
 use yew::{prelude::*, suspense::use_future};
@@ -11,6 +13,8 @@ use yew_router::prelude::use_navigator;
 fn should_connect_websocket(success: bool, setup_mode: bool, can_read_system: bool) -> bool {
     success && !setup_mode && can_read_system
 }
+
+const SESSION_EXPIRY_SKEW_SECS: i64 = 30;
 
 #[derive(Properties, Clone, PartialEq)]
 pub struct AuthenticationProps {
@@ -23,6 +27,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
     let loading = use_state(|| true);
     let authenticated = use_state(|| false);
     let navigator = use_navigator();
+    let translate = use_translation();
 
     {
         let services_ctx = services.clone();
@@ -70,6 +75,29 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
                 }
             }
             || ()
+        });
+    }
+
+    {
+        let services_ctx = services.clone();
+        let translate = translate.clone();
+        let token_exp = services.auth.token_exp_timestamp();
+        use_effect_with((*authenticated, token_exp), move |(authenticated, token_exp)| {
+            let mut timeout: Option<Timeout> = None;
+            if *authenticated {
+                if let Some(exp) = *token_exp {
+                    let now_secs = js_sys::Date::now() / 1000.0;
+                    let remaining_secs = exp - SESSION_EXPIRY_SKEW_SECS - now_secs as i64;
+                    let delay_ms = u32::try_from(remaining_secs.max(0) * 1000).unwrap_or(u32::MAX);
+                    timeout = Some(Timeout::new(delay_ms, move || {
+                        services_ctx.auth.logout();
+                        services_ctx.toastr.warning(translate.t("MESSAGES.SESSION.EXPIRED"));
+                    }));
+                }
+            }
+            move || {
+                drop(timeout);
+            }
         });
     }
 

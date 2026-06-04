@@ -1505,6 +1505,9 @@
     "LOGIN": {
       "MESSAGE": "Enter Your Credentials"
     },
+    "SESSION": {
+      "EXPIRED": "Your session has expired. Please log in again."
+    },
     "NO_ACCESS_MESSAGE": "Your account has no permissions assigned. Contact an administrator.",
     "NO_ACCESS_TITLE": "No Access",
     "NO_CONTENT": "No content",

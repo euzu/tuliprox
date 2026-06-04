@@ -23,6 +23,7 @@ pub struct AuthService {
     username: RefCell<String>,
     roles: RefCell<Vec<String>>,
     permissions: RefCell<PermissionSet>,
+    token_exp: RefCell<Option<i64>>,
     auth_channel: Mutable<bool>,
 }
 
@@ -35,6 +36,7 @@ impl AuthService {
             auth_channel: Mutable::new(false),
             roles: RefCell::new(vec![]),
             permissions: RefCell::new(PermissionSet::new()),
+            token_exp: RefCell::new(None),
         }
     }
 
@@ -57,6 +59,8 @@ impl AuthService {
 
     pub fn is_authenticated(&self) -> bool { self.auth_channel.get() }
 
+    pub fn token_exp_timestamp(&self) -> Option<i64> { *self.token_exp.borrow() }
+
     pub async fn auth_subscribe<F, U>(&self, callback: &mut F)
     where
         U: Future<Output = ()>,
@@ -71,6 +75,7 @@ impl AuthService {
         self.username.borrow_mut().clear();
         self.roles.borrow_mut().clear();
         *self.permissions.borrow_mut() = PermissionSet::new();
+        *self.token_exp.borrow_mut() = None;
         self.auth_channel.set(false);
     }
 
@@ -78,6 +83,7 @@ impl AuthService {
         self.username.borrow_mut().clear();
         self.roles.borrow_mut().clear();
         *self.permissions.borrow_mut() = PermissionSet::new();
+        *self.token_exp.borrow_mut() = None;
         self.auth_channel.set(false);
         set_token(None);
         Err(Unauthorized)
@@ -123,6 +129,7 @@ impl AuthService {
         roles.clear();
         let mut permissions = self.permissions.borrow_mut();
         *permissions = PermissionSet::new();
+        *self.token_exp.borrow_mut() = None;
 
         if token == TOKEN_NO_AUTH {
             roles.push(ROLE_ADMIN.to_string());
@@ -135,6 +142,7 @@ impl AuthService {
                 roles.push(role.clone());
             }
             *permissions = claims.permissions;
+            *self.token_exp.borrow_mut() = Some(claims.exp);
         } else {
             warn!("no claims");
         }

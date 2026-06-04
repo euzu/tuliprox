@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Session Expiry Handling**:
+  - The Web UI now schedules a client-side logout when the JWT expires, showing a notification and returning the
+    user to the login screen instead of silently failing with 401 errors.
+
 - **Guided Empty States**:
   - Empty lists now show a short hint explaining what to do next instead of just "No content",
     applied to HDHomeRun devices, schedules, the API proxy server list, the playlist explorer, and the EPG viewer.
