@@ -324,8 +324,7 @@ pub fn HealthBanner() -> Html {
         <div
             ref={banner_ref}
             class={classes!("tp__health-banner", health.modifier())}
-            role="status"
-            aria-live="polite"
+            role="button"
             aria-label={aria_label}
             tabindex="0"
             onclick={onclick}
@@ -336,7 +335,7 @@ pub fn HealthBanner() -> Html {
             onblur={onblur}
         >
             <span class="tp__health-banner__dot" aria-hidden="true" />
-            <span class="tp__health-banner__label">{ label }</span>
+            <span class="tp__health-banner__label" role="status" aria-live="polite" aria-atomic="true">{ label }</span>
             <div class="tp__health-banner__popover" role="presentation" style={popover_style}>
                 <div class="tp__health-banner__popover-head">
                     <span class="tp__health-banner__popover-title">{ translate.t("LABEL.HEALTH_BANNER") }</span>

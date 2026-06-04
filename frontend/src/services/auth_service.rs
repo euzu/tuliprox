@@ -70,8 +70,7 @@ impl AuthService {
         fut.await
     }
 
-    pub fn logout(&self) {
-        set_token(None);
+    fn reset_auth_state(&self) {
         self.username.borrow_mut().clear();
         self.roles.borrow_mut().clear();
         *self.permissions.borrow_mut() = PermissionSet::new();
@@ -79,12 +78,13 @@ impl AuthService {
         self.auth_channel.set(false);
     }
 
+    pub fn logout(&self) {
+        self.reset_auth_state();
+        set_token(None);
+    }
+
     fn unauthorized(&self) -> Result<TokenResponse, Error> {
-        self.username.borrow_mut().clear();
-        self.roles.borrow_mut().clear();
-        *self.permissions.borrow_mut() = PermissionSet::new();
-        *self.token_exp.borrow_mut() = None;
-        self.auth_channel.set(false);
+        self.reset_auth_state();
         set_token(None);
         Err(Unauthorized)
     }

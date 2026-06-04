@@ -40,13 +40,14 @@ pub struct StreamDisplayItemProps {
 #[derive(Debug, Clone)]
 struct EpgData {
     channel_id: std::sync::Arc<str>,
+    epg_reference_ts: Option<i64>,
     response: StreamEpgResponse,
     fetched_at_secs: u64,
 }
 
 impl EpgData {
-    fn matches_channel(&self, channel_id: &std::sync::Arc<str>) -> bool {
-        self.channel_id.as_ref() == channel_id.as_ref()
+    fn matches_request(&self, channel_id: &std::sync::Arc<str>, epg_reference_ts: Option<i64>) -> bool {
+        self.channel_id.as_ref() == channel_id.as_ref() && self.epg_reference_ts == epg_reference_ts
     }
 
     fn is_stale(&self, now_secs: u64) -> bool {
@@ -161,7 +162,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
 
                 // Check if cache is valid before fetching
                 if let Some(ref data) = *epg_data {
-                    if !data.matches_channel(&epg_channel_id) {
+                    if !data.matches_request(&epg_channel_id, effect_reference_ts) {
                         current_next.set(None);
                         epg_data.set(None);
                     } else if !force_refetch && !data.is_stale(now_secs) {
@@ -183,6 +184,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         let (current, next) = compute_current_next(&entry.programmes, now_i64);
                         let new_data = Rc::new(EpgData {
                             channel_id: epg_channel_id.clone(),
+                            epg_reference_ts: effect_reference_ts,
                             response,
                             fetched_at_secs: now_secs,
                         });
@@ -236,7 +238,7 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                         let now_secs = current_time_secs();
 
                         if let Some(data) = (*epg_data).as_ref() {
-                            if !data.matches_channel(&channel_id) {
+                            if !data.matches_request(&channel_id, effect_reference_ts) {
                                 current_next.set(None);
                                 epg_data.set(None);
                                 needs_refetch.set(true);
@@ -477,6 +479,7 @@ mod tests {
     fn test_epg_data_is_stale() {
         let data = EpgData {
             channel_id: std::sync::Arc::<str>::from("channel-1"),
+            epg_reference_ts: None,
             response: StreamEpgResponse { entries: vec![] },
             fetched_at_secs: 100,
         };
@@ -486,15 +489,17 @@ mod tests {
     }
 
     #[test]
-    fn test_epg_data_matches_channel() {
+    fn test_epg_data_matches_request() {
         let data = EpgData {
             channel_id: std::sync::Arc::<str>::from("channel-1"),
+            epg_reference_ts: Some(1_700_000_000),
             response: StreamEpgResponse { entries: vec![] },
             fetched_at_secs: 100,
         };
 
-        assert!(data.matches_channel(&std::sync::Arc::<str>::from("channel-1")));
-        assert!(!data.matches_channel(&std::sync::Arc::<str>::from("channel-2")));
+        assert!(data.matches_request(&std::sync::Arc::<str>::from("channel-1"), Some(1_700_000_000)));
+        assert!(!data.matches_request(&std::sync::Arc::<str>::from("channel-1"), Some(1_700_000_600)));
+        assert!(!data.matches_request(&std::sync::Arc::<str>::from("channel-2"), Some(1_700_000_000)));
     }
 
     #[test]
@@ -509,11 +514,13 @@ mod tests {
         let channel_id = Some(std::sync::Arc::<str>::from("channel-1"));
         let first = Rc::new(EpgData {
             channel_id: std::sync::Arc::<str>::from("channel-1"),
+            epg_reference_ts: None,
             response: StreamEpgResponse { entries: vec![] },
             fetched_at_secs: 100,
         });
         let second = Rc::new(EpgData {
             channel_id: std::sync::Arc::<str>::from("channel-1"),
+            epg_reference_ts: None,
             response: StreamEpgResponse { entries: vec![] },
             fetched_at_secs: 200,
         });
@@ -547,6 +554,7 @@ mod tests {
         let channel_id = Some(std::sync::Arc::<str>::from("channel-1"));
         let data = Rc::new(EpgData {
             channel_id: std::sync::Arc::<str>::from("channel-1"),
+            epg_reference_ts: Some(1_700_000_000),
             response: StreamEpgResponse { entries: vec![] },
             fetched_at_secs: 100,
         });

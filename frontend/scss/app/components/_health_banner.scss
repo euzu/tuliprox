@@ -170,11 +170,11 @@
 
 @media (prefers-reduced-motion: no-preference) {
   .tp__health-banner__dot {
-    animation: tp__health-pulse 2.4s ease-in-out infinite;
+    animation: tp-health-pulse 2.4s ease-in-out infinite;
   }
 }
 
-@keyframes tp__health-pulse {
+@keyframes tp-health-pulse {
   0%,
   100% {
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--health-color) 25%, transparent);

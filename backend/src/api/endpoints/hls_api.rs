@@ -51,7 +51,7 @@ fn query_flag_marks_start_context(key: &str) -> bool {
     key.eq_ignore_ascii_case("end") || key.eq_ignore_ascii_case("duration") || key.eq_ignore_ascii_case("lutc")
 }
 
-fn m3u_archive_epg_reference_ts(stream_url: &str) -> Option<i64> {
+pub(in crate::api) fn m3u_archive_epg_reference_ts(stream_url: &str) -> Option<i64> {
     let parsed = Url::parse(stream_url).ok()?;
     let path = parsed.path();
     if let Some(rest) = path.split("/archive-").nth(1) {
@@ -680,6 +680,10 @@ mod tests {
         assert_eq!(
             m3u_archive_epg_reference_ts("http://provider/live/42.m3u8?utc=1700000000&lutc=1700003600"),
             Some(1_700_000_000)
+        );
+        assert_eq!(
+            m3u_archive_epg_reference_ts("http://provider/live/archive-1700003600-1700007200.m3u8"),
+            Some(1_700_003_600)
         );
         assert_eq!(
             m3u_archive_epg_reference_ts("http://provider/live/timeshift_abs-1700007200.ts"),

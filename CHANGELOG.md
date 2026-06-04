@@ -29,7 +29,8 @@
   - System metrics are now sampled every 2 seconds (down from 5) for more responsive charts.
 
 - **Bookmarkable Views (Deep Linking)**:
-  - The active view is now reflected in the URL hash (e.g. `#stats`, `#source_editor`), so views can be
+  - The active view is now reflected in the URL hash (e.g. `#stats`, `#source_editor`), so views can be bookmarked, shared,  
+    and navigated directly via URL.
   - Browser back/forward navigation and manual hash edits now switch the active view accordingly.
 
 - **Dev Container Support**:

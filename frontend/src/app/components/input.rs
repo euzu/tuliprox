@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{AppIcon, FieldLabel, IconButton},
+    app::components::{resolve_field_id, AppIcon, FieldLabel, IconButton},
     html_if,
 };
 use web_sys::{HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent};
@@ -37,6 +37,8 @@ pub struct InputProps {
 pub fn Input(props: &InputProps) -> Html {
     let hide_content = use_state(|| props.hidden);
     let local_ref = props.input_ref.clone().unwrap_or_default();
+    let label_text = props.label.clone().unwrap_or_default();
+    let resolved_field_id = resolve_field_id(&props.field_id, &props.name, &label_text);
 
     {
         let local_ref = local_ref.clone();
@@ -77,14 +79,9 @@ pub fn Input(props: &InputProps) -> Html {
             { if props.label.is_some() {
                    html! {
                        <FieldLabel
-                           label={props.label.clone().unwrap_or_default()}
-                           field_id={props.field_id.clone().unwrap_or_else(|| {
-                               if props.name.trim().is_empty() {
-                                   props.label.clone().unwrap_or_default()
-                               } else {
-                                   props.name.clone()
-                               }
-                           })}
+                           label={label_text.clone()}
+                           field_id={resolved_field_id.clone()}
+                           for_id={Some(resolved_field_id.clone())}
                        />
                    }
                 } else { html!{} }
@@ -94,6 +91,7 @@ pub fn Input(props: &InputProps) -> Html {
                     <AppIcon name={props.icon.as_ref().unwrap().clone()} />
                 })}
                 <input
+                    id={resolved_field_id}
                     ref={local_ref.clone()}
                     type={if *hide_content { "password".to_string() } else { "text".to_string() }}
                     name={props.name.clone()}

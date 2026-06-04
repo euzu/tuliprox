@@ -573,14 +573,14 @@ async fn serve_stream_epg(
 fn stream_epg_programmes_for_channel(
     programmes: &[EpgProgramme],
     epg_processing_options: &EpgProcessingOptions,
-    now: i64,
+    window_start: i64,
     window_end: i64,
 ) -> Vec<EpgProgrammeDto> {
     programmes
         .iter()
         .filter_map(|programme| {
             let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
-            (stop_ts > now && start_ts <= window_end).then(|| {
+            (stop_ts > window_start && start_ts <= window_end).then(|| {
                 let (start_str, stop_str) =
                     format_epg_timeshift_strings(programme, epg_processing_options, start_ts, stop_ts);
                 EpgProgrammeDto {
@@ -894,8 +894,8 @@ mod tests {
 
     #[test]
     fn stream_epg_programmes_for_channel_filters_using_shifted_fixed_times() {
-        let now = 10_000;
-        let window_end = now + 8 * 3600;
+        let window_start = 10_000;
+        let window_end = window_start + 8 * 3600;
         let epg_processing_options = EpgProcessingOptions {
             rewrite_urls: false,
             time_shift: EpgTimeShift::Fixed(120),
@@ -903,16 +903,16 @@ mod tests {
         };
         let programmes = vec![
             EpgProgramme::new_all(
-                now - 7_300,
-                now - 100,
+                window_start - 7_300,
+                window_start - 100,
                 "channel-1".intern(),
                 Some("Shifted Into Window".intern()),
                 None,
                 None,
             ),
             EpgProgramme::new_all(
-                now + 60,
-                now + 600,
+                window_start + 60,
+                window_start + 600,
                 "channel-1".intern(),
                 Some("Already In Window".intern()),
                 None,
@@ -928,14 +928,15 @@ mod tests {
             ),
         ];
 
-        let filtered = stream_epg_programmes_for_channel(&programmes, &epg_processing_options, now, window_end);
+        let filtered =
+            stream_epg_programmes_for_channel(&programmes, &epg_processing_options, window_start, window_end);
 
         assert_eq!(
             filtered.iter().map(|programme| programme.title.as_str()).collect::<Vec<_>>(),
             vec!["Shifted Into Window", "Already In Window"]
         );
-        assert_eq!(filtered[0].start_timestamp, now - 100);
-        assert_eq!(filtered[0].stop_timestamp, now + 7_100);
+        assert_eq!(filtered[0].start_timestamp, window_start - 100);
+        assert_eq!(filtered[0].stop_timestamp, window_start + 7_100);
     }
 
 }
