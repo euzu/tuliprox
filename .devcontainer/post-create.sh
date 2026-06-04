@@ -66,7 +66,22 @@ rustup target add \
 
 if ! command -v cargo-binstall >/dev/null 2>&1; then
   echo "==> Installing cargo-binstall"
-  cargo_binstall_asset="cargo-binstall-x86_64-unknown-linux-musl.tgz"
+  cargo_binstall_arch="$(uname -m)"
+  case "${cargo_binstall_arch}" in
+    x86_64)
+      cargo_binstall_asset="cargo-binstall-x86_64-unknown-linux-musl.tgz"
+      ;;
+    aarch64 | arm64)
+      cargo_binstall_asset="cargo-binstall-aarch64-unknown-linux-gnu.tgz"
+      ;;
+    armv7l)
+      cargo_binstall_asset="cargo-binstall-armv7-unknown-linux-gnueabihf.tgz"
+      ;;
+    *)
+      echo "Unsupported architecture for cargo-binstall release asset: ${cargo_binstall_arch}" >&2
+      exit 1
+      ;;
+  esac
   cargo_binstall_base_url="https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}"
   cargo_binstall_tmpdir="$(mktemp -d)"
   trap 'rm -rf "${cargo_binstall_tmpdir}"' EXIT

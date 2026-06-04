@@ -705,6 +705,11 @@ body {
 
   --custom-dialog-backdrop-color: var(--theme-brand-surface-modal-backdrop);
   --dialog-backdrop-color: var(--theme-brand-surface-dialog-backdrop);
+  /* Shared overlay stacking order: dialogs/loading < popovers < menus < toasts. */
+  --z-index-overlay: 1000;
+  --z-index-popover: 1100;
+  --z-index-menu: 1200;
+  --z-index-toast: 1300;
   --input-autofill-background-color: transparent;
   --tab-header-shadow: var(--theme-brand-tab-header-shadow);
   --setup-sidebar-item-hover-background-color: var(--theme-brand-surface-setup-hover);

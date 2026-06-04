@@ -52,7 +52,7 @@
 
   &__popover {
     position: fixed;
-    z-index: 1000;
+    z-index: var(--z-index-popover);
     min-width: 16rem;
     padding: 0.75rem 0.85rem;
     border-radius: 0.6rem;

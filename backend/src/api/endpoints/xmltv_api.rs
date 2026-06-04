@@ -395,6 +395,10 @@ fn get_applied_epg_timestamps(
     }
 }
 
+fn get_source_epg_timestamps(programme: &EpgProgramme) -> (i64, i64) {
+    (programme.start, programme.stop)
+}
+
 fn format_epg_timeshift_strings(
     programme: &EpgProgramme,
     epg_processing_options: &EpgProcessingOptions,
@@ -579,8 +583,9 @@ fn stream_epg_programmes_for_channel(
     programmes
         .iter()
         .filter_map(|programme| {
-            let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
-            (stop_ts > window_start && start_ts <= window_end).then(|| {
+            let (source_start_ts, source_stop_ts) = get_source_epg_timestamps(programme);
+            (source_stop_ts > window_start && source_start_ts <= window_end).then(|| {
+                let (start_ts, stop_ts) = get_applied_epg_timestamps(programme, epg_processing_options);
                 let (start_str, stop_str) =
                     format_epg_timeshift_strings(programme, epg_processing_options, start_ts, stop_ts);
                 EpgProgrammeDto {
@@ -933,10 +938,10 @@ mod tests {
 
         assert_eq!(
             filtered.iter().map(|programme| programme.title.as_str()).collect::<Vec<_>>(),
-            vec!["Shifted Into Window", "Already In Window"]
+            vec!["Already In Window"]
         );
-        assert_eq!(filtered[0].start_timestamp, window_start - 100);
-        assert_eq!(filtered[0].stop_timestamp, window_start + 7_100);
+        assert_eq!(filtered[0].start_timestamp, window_start + 7_260);
+        assert_eq!(filtered[0].stop_timestamp, window_start + 7_800);
     }
 
 }
