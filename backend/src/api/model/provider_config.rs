@@ -162,6 +162,9 @@ impl ProviderConfig {
     pub fn max_connections(&self) -> usize { self.max_connections }
 
     #[inline]
+    pub fn is_unlimited(&self) -> bool { self.max_connections == 0 }
+
+    #[inline]
     pub(crate) fn exp_date(&self) -> Option<i64> { self.exp_date }
 
     pub fn get_user_info(&self) -> Option<InputUserInfo> {
@@ -304,8 +307,12 @@ impl ProviderConfig {
     pub async fn release(&self) {
         let mut guard = self.connection.write().await;
         // Don't reset grace tracking when current_connections == 1 - this happens during
-        // last connection release and should preserve grace state until after decrement
-        if guard.current_connections > self.max_connections {
+        // last connection release and should preserve grace state until after decrement.
+        // The `max_connections > 0` guard short-circuits the dead branch for unlimited
+        // providers: with `max_connections == 0` the condition `current > max` is
+        // always true but grace was never granted in the first place, so resetting it
+        // here is a no-op that obscures the invariant.
+        if self.max_connections > 0 && guard.current_connections > self.max_connections {
             guard.granted_grace = false;
             guard.grace_ts = 0;
         }
@@ -360,4 +367,74 @@ impl Deref for ProviderConfigWrapper {
     type Target = ProviderConfig;
 
     fn deref(&self) -> &Self::Target { &self.inner }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::{InputFetchMethod, InputType};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn build_test_config(max_connections: u16) -> ProviderConfig {
+        let input = ConfigInput {
+            id: 1,
+            name: Arc::from("test-provider"),
+            url: "http://test".to_string(),
+            username: Some("u".to_string()),
+            password: Some("p".to_string()),
+            max_connections,
+            priority: 0,
+            input_type: InputType::Xtream,
+            headers: HashMap::new(),
+            epg: None,
+            persist: None,
+            enabled: true,
+            options: None,
+            media_server: None,
+            aliases: None,
+            method: InputFetchMethod::default(),
+            staged: None,
+            exp_date: None,
+            t_batch_url: None,
+            panel_api: None,
+            provider_configs: None,
+            cache_duration_seconds: 0,
+        };
+        let conn = Arc::new(RwLock::new(ProviderConfigConnection::default()));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let cb_counter = Arc::clone(&counter);
+        let cb: ProviderConnectionChangeCallback = Arc::new(move |_name, count| {
+            cb_counter.store(count, Ordering::SeqCst);
+        });
+        ProviderConfig::new(&input, conn, cb)
+    }
+
+    #[tokio::test]
+    async fn release_does_not_touch_grace_for_unlimited_provider() {
+        // For unlimited providers (max_connections == 0) the grace-reset branch in
+        // `release` must be a no-op even if the fields contain non-default values.
+        // This is stronger than checking defaults and catches regressions where the
+        // old `current > max` branch would clear grace state for unlimited inputs.
+        let provider = build_test_config(0);
+        assert!(provider.is_unlimited());
+
+        // Drive connection count up so `release` executes its normal path.
+        assert!(provider.force_allocate().await);
+        assert!(provider.force_allocate().await);
+        assert_eq!(provider.get_current_connections().await, 2);
+
+        {
+            let mut guard = provider.connection.write().await;
+            guard.granted_grace = true;
+            guard.grace_ts = 12_345;
+        }
+
+        provider.release().await;
+
+        let guard = provider.connection.read().await;
+        assert_eq!(guard.current_connections, 1, "release must still decrement connection count");
+        assert!(guard.granted_grace, "release must not clear granted_grace for unlimited provider");
+        assert_eq!(guard.grace_ts, 12_345, "release must not clear grace_ts for unlimited provider");
+    }
 }

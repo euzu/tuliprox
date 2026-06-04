@@ -117,6 +117,11 @@ impl ProviderAllocation {
             }
         }
     }
+
+    #[inline]
+    pub fn is_unlimited_provider(&self) -> bool {
+        matches!(self, Self::Available(c) | Self::GracePeriod(c) if c.is_unlimited())
+    }
 }
 
 impl PartialEq for ProviderAllocation {

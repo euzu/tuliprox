@@ -65,6 +65,18 @@ pub struct StreamChannel {
     pub epg_reference_ts: Option<i64>,
 }
 
+impl StreamChannel {
+    /// Returns a copy of this channel with the supplied EPG reference timestamp
+    /// installed. Used by the M3U non-HLS path to thread an archive/catchup
+    /// timestamp parsed from the request URL into the `StreamChannel` that the
+    /// frontend then carries to the `stream_epg` endpoint.
+    #[must_use]
+    pub fn with_epg_reference_ts(mut self, epg_reference_ts: Option<i64>) -> Self {
+        self.epg_reference_ts = epg_reference_ts;
+        self
+    }
+}
+
 pub fn create_stream_channel_with_type(
     target_id: u16,
     pli: &XtreamPlaylistItem,
@@ -346,7 +358,7 @@ impl StreamInfo {
 mod tests {
     use super::create_stream_channel_with_type;
     use crate::{
-        model::{PlaylistItemType, XtreamCluster, XtreamPlaylistItem},
+        model::{M3uPlaylistItem, PlaylistItemType, XtreamCluster, XtreamPlaylistItem},
         utils::Internable,
     };
 
@@ -405,5 +417,76 @@ mod tests {
         let stream_channel = playlist_item.to_stream_channel(1);
 
         assert_eq!(stream_channel.input_name.as_ref(), "provider-input");
+    }
+
+    #[test]
+    fn m3u_to_stream_channel_with_epg_reference_ts_propagates_value() {
+        let pli = M3uPlaylistItem {
+            virtual_id: 42,
+            provider_id: "42".intern(),
+            name: "Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "G".intern(),
+            title: "T".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://provider/live/42.m3u8".intern(),
+            epg_channel_id: Some("ch1".intern()),
+            input_name: "in".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        let channel = pli.to_stream_channel(7).with_epg_reference_ts(Some(1_700_000_000));
+
+        assert_eq!(channel.target_id, 7);
+        assert_eq!(channel.virtual_id, 42);
+        assert_eq!(channel.epg_channel_id.as_deref(), Some("ch1"));
+        assert_eq!(channel.epg_reference_ts, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn m3u_to_stream_channel_with_epg_reference_ts_explicit_none_matches_default() {
+        let pli = M3uPlaylistItem {
+            virtual_id: 42,
+            provider_id: "42".intern(),
+            name: "Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "G".intern(),
+            title: "T".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://provider/live/42.m3u8".intern(),
+            epg_channel_id: None,
+            input_name: "in".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        // to_stream_channel() defaults to None, and with_epg_reference_ts(None)
+        // must keep that invariant.
+        let default_channel = pli.to_stream_channel(7);
+        let cleared_channel = pli.to_stream_channel(7).with_epg_reference_ts(None);
+
+        assert_eq!(default_channel.epg_reference_ts, None);
+        assert_eq!(cleared_channel.epg_reference_ts, None);
     }
 }

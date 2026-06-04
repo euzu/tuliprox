@@ -384,8 +384,13 @@ impl Stream for M3uPlaylistM3uTextIterator {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rewrite, M3uPlaylistIteratorFlags, M3uPlaylistIteratorFlagsSet, UrlRewriteContext};
+    use super::{
+        apply_rewrite, M3uPlaylistIterator, M3uPlaylistIteratorFlags, M3uPlaylistIteratorFlagsSet,
+        M3uPlaylistM3uTextIterator, UrlRewriteContext,
+    };
     use crate::model::{ConfigInput, ConfigProvider, ProviderDnsCache};
+    use crate::repository::LockedReceiverStream;
+    use futures::StreamExt;
     use shared::{
         model::{M3uPlaylistItem, PlaylistItemType, ProviderUrlSelectionPolicy, ProxyType},
         utils::Internable,
@@ -394,6 +399,7 @@ mod tests {
         collections::HashMap,
         sync::{atomic::AtomicUsize, Arc},
     };
+    use tokio::sync::mpsc;
 
     fn provider_input() -> Arc<ConfigInput> {
         Arc::new(ConfigInput {
@@ -527,5 +533,26 @@ mod tests {
         );
 
         assert_eq!(rewritten.t_stream_url.as_ref(), "https://example.com/m3u-stream/user/pass/813294.ts");
+    }
+
+    // Regression lock: the streaming M3U response used by `m3u_api` must emit a
+    // bare `#EXTM3U` header line, never a proxy-rewritten `url-tvg` from the
+    // source playlist. The parser does not capture the source's `url-tvg`
+    // attribute (`M3uPlaylistItem` has no field for it), and the writer must
+    // therefore emit the bare marker regardless of what the upstream feed
+    // declared. The inner channel is closed immediately so the iterator yields
+    // no item lines, which lets the assertion focus on the header line only.
+    #[tokio::test]
+    async fn m3u_text_iterator_emits_bare_extm3u_header_without_proxying_source_url_tvg() {
+        let (tx, rx) = mpsc::channel::<(M3uPlaylistItem, bool)>(1);
+        drop(tx);
+        let inner_iter = M3uPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };
+        let mut text_iter = M3uPlaylistM3uTextIterator { inner: inner_iter, started: false, target_options: None };
+
+        let first = text_iter.next().await;
+        assert_eq!(first.as_deref(), Some("#EXTM3U"), "EXTM3U header must be bare, never contain url-tvg");
+
+        let second = text_iter.next().await;
+        assert_eq!(second, None, "inner channel is closed, so no item lines should follow");
     }
 }
