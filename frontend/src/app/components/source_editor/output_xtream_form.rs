@@ -1,7 +1,7 @@
 use crate::{
     app::components::{
         config::HasFormData, BlockId, BlockInstance, Card, EditMode, FilterInput, IconButton, Panel,
-        SourceEditorContext, TextButton, TitledCard, TraktListItemForm,
+        SourceEditorContext, TextButton, TitledCard, TraktChartItemForm, TraktListItemForm,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_text,
     generate_form_reducer,
@@ -11,7 +11,8 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        TargetOutputDto, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto, XtreamTargetOutputDto,
+        TargetOutputDto, TraktApiConfigDto, TraktChartConfigDto, TraktConfigDto, TraktListConfigDto,
+        XtreamTargetOutputDto,
     },
     utils::Internable,
 };
@@ -31,6 +32,8 @@ const LABEL_TRAKT_API_VERSION: &str = "LABEL.API_VERSION";
 const LABEL_TRAKT_API_URL: &str = "LABEL.API_URL";
 const LABEL_TRAKT_LISTS: &str = "LABEL.TRAKT_LISTS";
 const LABEL_ADD_TRAKT_LIST: &str = "LABEL.ADD_TRAKT_LIST";
+const LABEL_TRAKT_CHARTS: &str = "LABEL.TRAKT_CHARTS";
+const LABEL_ADD_TRAKT_CHART: &str = "LABEL.ADD_TRAKT_CHART";
 const LABEL_API_CONFIGURATION: &str = "LABEL.API_CONFIGURATION";
 const LABEL_USER_AGENT: &str = "LABEL.API_USER_AGENT";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
@@ -121,6 +124,55 @@ pub struct XtreamTargetOutputViewProps {
     pub(crate) allow_write: bool,
 }
 
+fn build_trakt_output_config(
+    enabled: bool,
+    api: TraktApiConfigDto,
+    lists: Vec<TraktListConfigDto>,
+    charts: Vec<TraktChartConfigDto>,
+) -> Option<TraktConfigDto> {
+    if lists.is_empty() && charts.is_empty() {
+        None
+    } else {
+        Some(TraktConfigDto { enabled, api, lists, charts })
+    }
+}
+
+fn trakt_list_summary(item: &TraktListConfigDto) -> String {
+    let mut summary = format!(
+        "{} / {} - {} ({}, {}%)",
+        item.user, item.list_slug, item.category_name, item.content_type, item.fuzzy_match_threshold
+    );
+    if item.tmdb_only {
+        summary.push_str(", TMDB only");
+    }
+    summary
+}
+
+fn trakt_chart_summary(item: &TraktChartConfigDto) -> String {
+    let mut summary =
+        format!("{}/{} - {} ({}%)", item.kind, item.chart, item.category_name, item.fuzzy_match_threshold);
+    if item.tmdb_only {
+        summary.push_str(", TMDB only");
+    }
+    summary
+}
+
+fn upsert_vec_item<T>(items: &mut Vec<T>, index: Option<usize>, item: T) {
+    if let Some(index) = index.filter(|idx| *idx < items.len()) {
+        items[index] = item;
+    } else {
+        items.push(item);
+    }
+}
+
+fn adjust_edit_index_after_remove(current: Option<usize>, removed: usize) -> Option<usize> {
+    match current {
+        Some(index) if index == removed => None,
+        Some(index) if index > removed => Some(index - 1),
+        _ => current,
+    }
+}
+
 #[component]
 pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
     let translate = use_translation();
@@ -135,11 +187,12 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
     let trakt_api_state: UseReducerHandle<TraktApiConfigFormState> =
         use_reducer(|| TraktApiConfigFormState { form: TraktApiConfigDto::default(), modified: false });
 
-    // State for Trakt lists
     let trakt_lists_state = use_state(Vec::<TraktListConfigDto>::new);
-
-    // State for showing trakt list form
+    let trakt_charts_state = use_state(Vec::<TraktChartConfigDto>::new);
     let show_trakt_list_form_state = use_state(|| false);
+    let show_trakt_chart_form_state = use_state(|| false);
+    let editing_trakt_list_index_state = use_state(|| None::<usize>);
+    let editing_trakt_chart_index_state = use_state(|| None::<usize>);
 
     let view_visible = use_state(|| XtreamOutputFormPage::Main);
 
@@ -157,6 +210,11 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
         let trakt_state = trakt_state.clone();
         let trakt_api_state = trakt_api_state.clone();
         let trakt_lists_state = trakt_lists_state.clone();
+        let trakt_charts_state = trakt_charts_state.clone();
+        let editing_trakt_list_index_state = editing_trakt_list_index_state.clone();
+        let editing_trakt_chart_index_state = editing_trakt_chart_index_state.clone();
+        let show_trakt_list_form_state = show_trakt_list_form_state.clone();
+        let show_trakt_chart_form_state = show_trakt_chart_form_state.clone();
 
         let config_output = props.output.clone();
 
@@ -169,17 +227,24 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     trakt_state.dispatch(TraktConfigFormAction::SetAll(trakt.clone()));
                     trakt_api_state.dispatch(TraktApiConfigFormAction::SetAll(trakt.api.clone()));
                     trakt_lists_state.set(trakt.lists.clone());
+                    trakt_charts_state.set(trakt.charts.clone());
                 } else {
                     trakt_state.dispatch(TraktConfigFormAction::SetAll(TraktConfigDto::default()));
                     trakt_api_state.dispatch(TraktApiConfigFormAction::SetAll(TraktApiConfigDto::default()));
                     trakt_lists_state.set(Vec::new());
+                    trakt_charts_state.set(Vec::new());
                 }
             } else {
                 output_form_state.dispatch(XtreamTargetOutputFormAction::SetAll(XtreamTargetOutputDto::default()));
                 trakt_state.dispatch(TraktConfigFormAction::SetAll(TraktConfigDto::default()));
                 trakt_api_state.dispatch(TraktApiConfigFormAction::SetAll(TraktApiConfigDto::default()));
                 trakt_lists_state.set(Vec::new());
+                trakt_charts_state.set(Vec::new());
             }
+            editing_trakt_list_index_state.set(None);
+            editing_trakt_chart_index_state.set(None);
+            show_trakt_list_form_state.set(false);
+            show_trakt_chart_form_state.set(false);
             || ()
         });
     }
@@ -187,39 +252,118 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
     let handle_add_trakt_list_item = {
         let trakt_list = trakt_lists_state.clone();
         let show_trakt_list_form = show_trakt_list_form_state.clone();
+        let editing_trakt_list_index_state = editing_trakt_list_index_state.clone();
 
         Callback::from(move |item: TraktListConfigDto| {
             let mut items = (*trakt_list).clone();
-            items.push(item);
+            upsert_vec_item(&mut items, *editing_trakt_list_index_state, item);
             trakt_list.set(items);
+            editing_trakt_list_index_state.set(None);
             show_trakt_list_form.set(false);
         })
     };
 
     let handle_remove_trakt_list_item = {
         let trakt_list = trakt_lists_state.clone();
+        let editing_trakt_list_index_state = editing_trakt_list_index_state.clone();
         Callback::from(move |(idx, _e): (String, MouseEvent)| {
             if let Ok(index) = idx.parse::<usize>() {
                 let mut items = (*trakt_list).clone();
                 if index < items.len() {
                     items.remove(index);
                     trakt_list.set(items);
+                    editing_trakt_list_index_state
+                        .set(adjust_edit_index_after_remove(*editing_trakt_list_index_state, index));
                 }
+            }
+        })
+    };
+
+    let handle_edit_trakt_list_item = {
+        let show_trakt_list_form = show_trakt_list_form_state.clone();
+        let editing_trakt_list_index_state = editing_trakt_list_index_state.clone();
+        Callback::from(move |(idx, _e): (String, MouseEvent)| {
+            if let Ok(index) = idx.parse::<usize>() {
+                editing_trakt_list_index_state.set(Some(index));
+                show_trakt_list_form.set(true);
+            }
+        })
+    };
+
+    let handle_add_trakt_chart_item = {
+        let trakt_charts = trakt_charts_state.clone();
+        let show_trakt_chart_form = show_trakt_chart_form_state.clone();
+        let editing_trakt_chart_index_state = editing_trakt_chart_index_state.clone();
+
+        Callback::from(move |item: TraktChartConfigDto| {
+            let mut items = (*trakt_charts).clone();
+            upsert_vec_item(&mut items, *editing_trakt_chart_index_state, item);
+            trakt_charts.set(items);
+            editing_trakt_chart_index_state.set(None);
+            show_trakt_chart_form.set(false);
+        })
+    };
+
+    let handle_remove_trakt_chart_item = {
+        let trakt_charts = trakt_charts_state.clone();
+        let editing_trakt_chart_index_state = editing_trakt_chart_index_state.clone();
+        Callback::from(move |(idx, _e): (String, MouseEvent)| {
+            if let Ok(index) = idx.parse::<usize>() {
+                let mut items = (*trakt_charts).clone();
+                if index < items.len() {
+                    items.remove(index);
+                    trakt_charts.set(items);
+                    editing_trakt_chart_index_state
+                        .set(adjust_edit_index_after_remove(*editing_trakt_chart_index_state, index));
+                }
+            }
+        })
+    };
+
+    let handle_edit_trakt_chart_item = {
+        let show_trakt_chart_form = show_trakt_chart_form_state.clone();
+        let editing_trakt_chart_index_state = editing_trakt_chart_index_state.clone();
+        Callback::from(move |(idx, _e): (String, MouseEvent)| {
+            if let Ok(index) = idx.parse::<usize>() {
+                editing_trakt_chart_index_state.set(Some(index));
+                show_trakt_chart_form.set(true);
             }
         })
     };
 
     let handle_close_trakt_list_form = {
         let show_trakt_list_form = show_trakt_list_form_state.clone();
+        let editing_trakt_list_index_state = editing_trakt_list_index_state.clone();
         Callback::from(move |()| {
+            editing_trakt_list_index_state.set(None);
             show_trakt_list_form.set(false);
+        })
+    };
+
+    let handle_close_trakt_chart_form = {
+        let show_trakt_chart_form = show_trakt_chart_form_state.clone();
+        let editing_trakt_chart_index_state = editing_trakt_chart_index_state.clone();
+        Callback::from(move |()| {
+            editing_trakt_chart_index_state.set(None);
+            show_trakt_chart_form.set(false);
         })
     };
 
     let handle_show_trakt_list_form = {
         let show_trakt_list_form = show_trakt_list_form_state.clone();
+        let editing_trakt_list_index_state = editing_trakt_list_index_state.clone();
         Callback::from(move |_name| {
+            editing_trakt_list_index_state.set(None);
             show_trakt_list_form.set(true);
+        })
+    };
+
+    let handle_show_trakt_chart_form = {
+        let show_trakt_chart_form = show_trakt_chart_form_state.clone();
+        let editing_trakt_chart_index_state = editing_trakt_chart_index_state.clone();
+        Callback::from(move |_name| {
+            editing_trakt_chart_index_state.set(None);
+            show_trakt_chart_form.set(true);
         })
     };
 
@@ -265,9 +409,15 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
     let render_trakt = || {
         let trakt_lists = trakt_lists_state.clone();
+        let trakt_charts = trakt_charts_state.clone();
         let trakt_form = trakt_state.clone();
         let trakt_api_form = trakt_api_state.clone();
         let show_trakt_list_form = show_trakt_list_form_state.clone();
+        let show_trakt_chart_form = show_trakt_chart_form_state.clone();
+        let editing_trakt_list_index = *editing_trakt_list_index_state;
+        let editing_trakt_chart_index = *editing_trakt_chart_index_state;
+        let initial_trakt_list = editing_trakt_list_index.and_then(|index| (*trakt_lists).get(index).cloned());
+        let initial_trakt_chart = editing_trakt_chart_index.and_then(|index| (*trakt_charts).get(index).cloned());
 
         html! {
             <Card class="tp__config-view__card">
@@ -275,6 +425,14 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                     <TraktListItemForm
                         on_submit={handle_add_trakt_list_item}
                         on_cancel={handle_close_trakt_list_form}
+                        initial={initial_trakt_list}
+                        readonly={!props.allow_write}
+                    />
+                } else if *show_trakt_chart_form {
+                    <TraktChartItemForm
+                        on_submit={handle_add_trakt_chart_item}
+                        on_cancel={handle_close_trakt_chart_form}
+                        initial={initial_trakt_chart}
                         readonly={!props.allow_write}
                     />
                 } else {
@@ -311,28 +469,20 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                             for item in (*trakt_lists_list).iter().enumerate() {
                                 <div class="tp__form-list__item" key={format!("trakt-{}", item.0)}>
                                     if props.allow_write {
-                                        <IconButton
-                                            name={item.0.to_string()}
-                                            icon="Delete"
-                                            onclick={handle_remove_trakt_list_item.clone()}/>
+                                        <div class="tp__form-list__item-toolbar">
+                                            <IconButton
+                                                class="tp__form-list__item-edit"
+                                                name={item.0.to_string()}
+                                                icon="Edit"
+                                                onclick={handle_edit_trakt_list_item.clone()}/>
+                                            <IconButton
+                                                name={item.0.to_string()}
+                                                icon="Delete"
+                                                onclick={handle_remove_trakt_list_item.clone()}/>
+                                        </div>
                                     }
                                     <div class="tp__form-list__item-content">
-                                        <span>
-                                            <strong>{&item.1.user}</strong>
-                                            {" / "}
-                                            {&item.1.list_slug}
-                                            {" - "}
-                                            {&item.1.category_name}
-                                            {" ("}
-                                            {match item.1.content_type {
-                                                TraktContentType::Vod => "Vod",
-                                                TraktContentType::Series => "Series",
-                                                TraktContentType::Both => "Both",
-                                            }}
-                                            {", "}
-                                            {item.1.fuzzy_match_threshold}
-                                            {"%)"}
-                                        </span>
+                                        <span>{trakt_list_summary(item.1)}</span>
                                     </div>
                                 </div>
                             }
@@ -345,6 +495,45 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                                     icon="Add"
                                     title={translate.t(LABEL_ADD_TRAKT_LIST)}
                                     onclick={handle_show_trakt_list_form}
+                                />
+                            }
+                        </div>
+                    }
+                })}
+                { config_field_child!(translate.t(LABEL_TRAKT_CHARTS), "OUTPUT_XTREAM_FORM.TRAKT_CHARTS", {
+                    let trakt_charts_list = trakt_charts.clone();
+                    html! {
+                        <div class="tp__form-list">
+                            <div class="tp__form-list__items">
+                            for item in (*trakt_charts_list).iter().enumerate() {
+                                <div class="tp__form-list__item" key={format!("trakt-chart-{}", item.0)}>
+                                    if props.allow_write {
+                                        <div class="tp__form-list__item-toolbar">
+                                            <IconButton
+                                                class="tp__form-list__item-edit"
+                                                name={item.0.to_string()}
+                                                icon="Edit"
+                                                onclick={handle_edit_trakt_chart_item.clone()}/>
+                                            <IconButton
+                                                name={item.0.to_string()}
+                                                icon="Delete"
+                                                onclick={handle_remove_trakt_chart_item.clone()}/>
+                                        </div>
+                                    }
+                                    <div class="tp__form-list__item-content">
+                                        <span>{trakt_chart_summary(item.1)}</span>
+                                    </div>
+                                </div>
+                            }
+                            </div>
+
+                            if props.allow_write {
+                                <TextButton
+                                    class="primary"
+                                    name="add_trakt_chart"
+                                    icon="Add"
+                                    title={translate.t(LABEL_ADD_TRAKT_CHART)}
+                                    onclick={handle_show_trakt_chart_form}
                                 />
                             }
                         </div>
@@ -370,7 +559,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
         }
     };
 
-    let button_disabled = *show_trakt_list_form_state;
+    let button_disabled = *show_trakt_list_form_state || *show_trakt_chart_form_state;
 
     let render_sidebar = || {
         let main_class = format!(
@@ -397,21 +586,19 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
         let trakt_state = trakt_state.clone();
         let trakt_api_state = trakt_api_state.clone();
         let trakt_lists_state = trakt_lists_state.clone();
+        let trakt_charts_state = trakt_charts_state.clone();
         let block_id = props.block_id;
         Callback::from(move |_| {
             let mut output = output_form_state.data().clone();
 
-            // Handle Trakt configuration
             let trakt_lists = (*trakt_lists_state).clone();
-            output.trakt = if trakt_lists.is_empty() {
-                None
-            } else {
-                Some(TraktConfigDto {
-                    enabled: trakt_state.data().enabled,
-                    api: trakt_api_state.data().clone(),
-                    lists: trakt_lists,
-                })
-            };
+            let trakt_charts = (*trakt_charts_state).clone();
+            output.trakt = build_trakt_output_config(
+                trakt_state.data().enabled,
+                trakt_api_state.data().clone(),
+                trakt_lists,
+                trakt_charts,
+            );
 
             source_editor_ctx
                 .on_form_change
@@ -445,5 +632,59 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                 { render_edit_mode() }
           </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::{TraktChartKind, TraktChartType};
+
+    #[test]
+    fn build_trakt_output_config_returns_none_when_empty() {
+        let result = build_trakt_output_config(true, TraktApiConfigDto::default(), Vec::new(), Vec::new());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_trakt_output_config_keeps_charts_without_lists() {
+        let charts = vec![TraktChartConfigDto {
+            kind: TraktChartKind::Movies,
+            chart: TraktChartType::Trending,
+            category_name: "Trending Movies".to_string(),
+            tmdb_only: true,
+            fuzzy_match_threshold: 90,
+        }];
+
+        let result = build_trakt_output_config(true, TraktApiConfigDto::default(), Vec::new(), charts.clone())
+            .expect("charts-only trakt config");
+
+        assert!(result.lists.is_empty());
+        assert_eq!(result.charts, charts);
+    }
+
+    #[test]
+    fn upsert_vec_item_replaces_existing_entry() {
+        let mut items = vec!["a".to_string(), "b".to_string()];
+        upsert_vec_item(&mut items, Some(1), "c".to_string());
+        assert_eq!(items, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn upsert_vec_item_appends_when_index_missing() {
+        let mut items = vec!["a".to_string()];
+        upsert_vec_item(&mut items, Some(5), "b".to_string());
+        assert_eq!(items, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn adjust_edit_index_after_remove_clears_exact_match() {
+        assert_eq!(adjust_edit_index_after_remove(Some(2), 2), None);
+    }
+
+    #[test]
+    fn adjust_edit_index_after_remove_shifts_later_item_left() {
+        assert_eq!(adjust_edit_index_after_remove(Some(2), 0), Some(1));
+        assert_eq!(adjust_edit_index_after_remove(Some(3), 1), Some(2));
     }
 }

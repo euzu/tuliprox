@@ -1,4 +1,7 @@
-use shared::model::{PlaylistItem, TraktApiConfigDto, TraktConfigDto, TraktContentType, TraktListConfigDto};
+use shared::model::{
+    PlaylistItem, TraktApiConfigDto, TraktChartConfigDto, TraktChartKind, TraktChartType, TraktConfigDto,
+    TraktContentType, TraktListConfigDto,
+};
 use crate::model::config::trakt_api::TraktMatchItem;
 use crate::model::macros;
 
@@ -39,6 +42,7 @@ pub struct TraktListConfig {
     pub list_slug: String,
     pub category_name: String,
     pub content_type: TraktContentType,
+    pub tmdb_only: bool,
     pub fuzzy_match_threshold: u8, // Percentage (0-100)
 }
 
@@ -50,7 +54,8 @@ impl From<&TraktListConfigDto> for TraktListConfig {
             list_slug: dto.list_slug.clone(),
             category_name: dto.category_name.clone(),
             content_type: dto.content_type,
-            fuzzy_match_threshold: dto.fuzzy_match_threshold
+            tmdb_only: dto.tmdb_only,
+            fuzzy_match_threshold: dto.fuzzy_match_threshold,
         }
     }
 }
@@ -62,7 +67,72 @@ impl From<&TraktListConfig> for TraktListConfigDto {
             list_slug: instance.list_slug.clone(),
             category_name: instance.category_name.clone(),
             content_type: instance.content_type,
-            fuzzy_match_threshold: instance.fuzzy_match_threshold
+            tmdb_only: instance.tmdb_only,
+            fuzzy_match_threshold: instance.fuzzy_match_threshold,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TraktChartConfig {
+    pub kind: TraktChartKind,
+    pub chart: TraktChartType,
+    pub category_name: String,
+    pub tmdb_only: bool,
+    pub fuzzy_match_threshold: u8, // Percentage (0-100)
+}
+
+macros::from_impl!(TraktChartConfig);
+impl From<&TraktChartConfigDto> for TraktChartConfig {
+    fn from(dto: &TraktChartConfigDto) -> Self {
+        Self {
+            kind: dto.kind,
+            chart: dto.chart,
+            category_name: dto.category_name.clone(),
+            tmdb_only: dto.tmdb_only,
+            fuzzy_match_threshold: dto.fuzzy_match_threshold,
+        }
+    }
+}
+
+impl From<&TraktChartConfig> for TraktChartConfigDto {
+    fn from(instance: &TraktChartConfig) -> Self {
+        Self {
+            kind: instance.kind,
+            chart: instance.chart,
+            category_name: instance.category_name.clone(),
+            tmdb_only: instance.tmdb_only,
+            fuzzy_match_threshold: instance.fuzzy_match_threshold,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TraktCategoryConfig {
+    pub category_name: String,
+    pub content_type: TraktContentType,
+    pub tmdb_only: bool,
+    pub fuzzy_match_threshold: u8, // Percentage (0-100)
+}
+
+impl From<&TraktListConfig> for TraktCategoryConfig {
+    fn from(config: &TraktListConfig) -> Self {
+        Self {
+            category_name: config.category_name.clone(),
+            content_type: config.content_type,
+            tmdb_only: config.tmdb_only,
+            fuzzy_match_threshold: config.fuzzy_match_threshold,
+        }
+    }
+}
+
+impl From<&TraktChartConfig> for TraktCategoryConfig {
+    fn from(config: &TraktChartConfig) -> Self {
+        Self {
+            category_name: config.category_name.clone(),
+            content_type: config.kind.content_type(),
+            tmdb_only: config.tmdb_only,
+            fuzzy_match_threshold: config.fuzzy_match_threshold,
         }
     }
 }
@@ -72,6 +142,7 @@ pub struct TraktConfig {
     pub enabled: bool,
     pub api: TraktApiConfig,
     pub lists: Vec<TraktListConfig>,
+    pub charts: Vec<TraktChartConfig>,
 }
 
 macros::from_impl!(TraktConfig);
@@ -81,6 +152,7 @@ impl From<&TraktConfigDto>  for TraktConfig {
             enabled: dto.enabled,
             api: TraktApiConfig::from(&dto.api),
             lists: dto.lists.iter().map(Into::into).collect(),
+            charts: dto.charts.iter().map(Into::into).collect(),
         }
     }
 }
@@ -90,6 +162,7 @@ impl From<&TraktConfig>  for TraktConfigDto {
             enabled: dto.enabled,
             api: TraktApiConfigDto::from(&dto.api),
             lists: dto.lists.iter().map(TraktListConfigDto::from).collect(),
+            charts: dto.charts.iter().map(TraktChartConfigDto::from).collect(),
         }
     }
 }

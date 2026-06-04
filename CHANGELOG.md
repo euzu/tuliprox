@@ -10,6 +10,10 @@
 
 ## 🌟 New Features
 
+- **Trakt Charts**: Xtream Trakt integration can now build virtual categories from public Trakt charts via `trakt.charts[]`.
+  - MVP supports `movies/shows` with `trending` and `popular`.
+  - User-owned Trakt lists remain configured separately under `trakt.lists[]`.
+
 - **Session Expiry Handling**:
   - The Web UI now schedules a client-side logout when the JWT expires, showing a notification and returning the
     user to the login screen instead of silently failing with 401 errors.

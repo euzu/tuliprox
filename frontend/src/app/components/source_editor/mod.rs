@@ -16,6 +16,7 @@ mod provider_item_form;
 mod rules;
 mod sidebar;
 mod target_form;
+mod trakt_chart_item_form;
 mod trakt_list_item_form;
 
 pub(crate) use alias_item_form::*;
@@ -35,4 +36,5 @@ pub(crate) use provider_item_form::*;
 pub(crate) use rules::*;
 pub(crate) use sidebar::*;
 pub(crate) use target_form::*;
+pub(crate) use trakt_chart_item_form::*;
 pub(crate) use trakt_list_item_form::*;

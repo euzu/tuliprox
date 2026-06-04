@@ -1,7 +1,7 @@
 use crate::{
     app::components::{select::Select, Card, DropDownOption, DropDownSelection, TextButton},
-    config_field, config_field_child, config_field_custom, edit_field_number_u8, edit_field_text,
-    generate_form_reducer,
+    config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u8,
+    edit_field_text, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{TraktContentType, TraktListConfigDto};
@@ -11,7 +11,19 @@ const LABEL_TRAKT_USER: &str = "LABEL.TRAKT_USER";
 const LABEL_TRAKT_LIST_SLUG: &str = "LABEL.TRAKT_LIST_SLUG";
 const LABEL_TRAKT_CATEGORY_NAME: &str = "LABEL.TRAKT_CATEGORY_NAME";
 const LABEL_TRAKT_CONTENT_TYPE: &str = "LABEL.TRAKT_CONTENT_TYPE";
+const LABEL_TRAKT_TMDB_ONLY: &str = "LABEL.TRAKT_TMDB_ONLY";
 const LABEL_TRAKT_FUZZY_MATCH_THRESHOLD: &str = "LABEL.TRAKT_FUZZY_MATCH_THRESHOLD";
+const LABEL_TRAKT_CONTENT_TYPE_VOD: &str = "LABEL.TRAKT_CONTENT_TYPE_VOD";
+const LABEL_TRAKT_CONTENT_TYPE_SERIES: &str = "LABEL.TRAKT_CONTENT_TYPE_SERIES";
+const LABEL_TRAKT_CONTENT_TYPE_BOTH: &str = "LABEL.TRAKT_CONTENT_TYPE_BOTH";
+
+fn trakt_content_type_label_key(content_type: TraktContentType) -> &'static str {
+    match content_type {
+        TraktContentType::Vod => LABEL_TRAKT_CONTENT_TYPE_VOD,
+        TraktContentType::Series => LABEL_TRAKT_CONTENT_TYPE_SERIES,
+        TraktContentType::Both => LABEL_TRAKT_CONTENT_TYPE_BOTH,
+    }
+}
 
 generate_form_reducer!(
     state: TraktListFormState { form: TraktListConfigDto },
@@ -21,6 +33,7 @@ generate_form_reducer!(
         ListSlug => list_slug: String,
         CategoryName => category_name: String,
         ContentType => content_type: TraktContentType,
+        TmdbOnly => tmdb_only: bool,
         FuzzyMatchThreshold => fuzzy_match_threshold: u8,
     }
 );
@@ -45,30 +58,34 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             list_slug: String::new(),
             category_name: String::new(),
             content_type: TraktContentType::Both,
+            tmdb_only: false,
             fuzzy_match_threshold: 80,
         }),
         modified: false,
     });
 
-    let content_type_options = use_memo(form_state.form.content_type, |content_type| {
-        let default_ct = content_type;
-        vec![
-            DropDownOption {
-                id: "vod".to_string(),
-                label: html! { "Vod" },
-                selected: default_ct == &TraktContentType::Vod,
-            },
-            DropDownOption {
-                id: "series".to_string(),
-                label: html! { "Series" },
-                selected: default_ct == &TraktContentType::Series,
-            },
-            DropDownOption {
-                id: "both".to_string(),
-                label: html! { "Both" },
-                selected: default_ct == &TraktContentType::Both,
-            },
-        ]
+    let content_type_options = use_memo(form_state.form.content_type, {
+        let translate = translate.clone();
+        move |content_type| {
+            let default_ct = content_type;
+            vec![
+                DropDownOption {
+                    id: TraktContentType::Vod.to_string(),
+                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_VOD) },
+                    selected: default_ct == &TraktContentType::Vod,
+                },
+                DropDownOption {
+                    id: TraktContentType::Series.to_string(),
+                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_SERIES) },
+                    selected: default_ct == &TraktContentType::Series,
+                },
+                DropDownOption {
+                    id: TraktContentType::Both.to_string(),
+                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_BOTH) },
+                    selected: default_ct == &TraktContentType::Both,
+                },
+            ]
+        }
     });
 
     let handle_submit = {
@@ -107,7 +124,7 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
             }
 
             if props.readonly {
-                { config_field_custom!(translate.t(LABEL_TRAKT_CONTENT_TYPE), form_state.form.content_type.to_string()) }
+                { config_field_custom!(translate.t(LABEL_TRAKT_CONTENT_TYPE), translate.t(trakt_content_type_label_key(form_state.form.content_type))) }
             } else {
                 { config_field_child!(translate.t(LABEL_TRAKT_CONTENT_TYPE), "TRAKT_LIST_FORM.TRAKT_CONTENT_TYPE", {
                     let form_state_ct = form_state.clone();
@@ -126,6 +143,12 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
                         />
                     }
                 })}
+            }
+
+            if props.readonly {
+                { config_field_bool!(form_state.form, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only) }
+            } else {
+                { edit_field_bool!(form_state, translate.t(LABEL_TRAKT_TMDB_ONLY), tmdb_only, TraktListFormAction::TmdbOnly) }
             }
 
             if props.readonly {

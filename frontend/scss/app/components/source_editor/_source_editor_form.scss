@@ -65,6 +65,16 @@ $form-width: 520px;
     &-toolbar {
       display: flex;
       flex-flow: row nowrap;
+      gap: 0;
+    }
+
+    &-edit {
+      &:focus,
+      &:hover {
+        color: var(--icon-button-hover-color);
+        fill: var(--icon-button-hover-color);
+        background-color: var(--icon-button-hover-background-color);
+      }
     }
 
     &-content{

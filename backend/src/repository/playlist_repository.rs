@@ -19,7 +19,7 @@ use crate::utils;
 use log::{info, warn};
 use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -265,6 +265,45 @@ fn non_blank_arc(value: &Arc<str>) -> Option<Arc<str>> {
     (!value.trim().is_empty()).then(|| Arc::clone(value))
 }
 
+fn source_series_info_episode_key(channel: &PlaylistItem) -> Option<Arc<str>> {
+    match channel.header.item_type {
+        PlaylistItemType::SeriesInfo => Some(channel.get_uuid().intern()),
+        PlaylistItemType::LocalSeriesInfo => Some(channel.header.id.clone()),
+        _ => None,
+    }
+}
+
+fn header_uuid_episode_key(header: &PlaylistItemHeader) -> Option<Arc<str>> {
+    (header.uuid != UUIDType::default()).then(|| header.uuid.intern())
+}
+
+fn push_unique_key(keys: &mut Vec<Arc<str>>, key: Arc<str>) {
+    if !key.is_empty() && !keys.iter().any(|existing| existing.as_ref() == key.as_ref()) {
+        keys.push(key);
+    }
+}
+
+fn series_info_episode_lookup_keys(channel: &PlaylistItem) -> Vec<Arc<str>> {
+    let mut keys = Vec::with_capacity(2);
+    if let Some(alias_key) = header_uuid_episode_key(&channel.header) {
+        push_unique_key(&mut keys, alias_key);
+    }
+    if let Some(source_key) = source_series_info_episode_key(channel) {
+        push_unique_key(&mut keys, source_key);
+    }
+    keys
+}
+
+fn series_info_parent_keys(channel: &PlaylistItem) -> Vec<(Arc<str>, bool)> {
+    let Some(source_key) = source_series_info_episode_key(channel) else { return Vec::new() };
+    let Some(alias_key) = header_uuid_episode_key(&channel.header) else { return vec![(source_key, true)] };
+    if alias_key.as_ref() == source_key.as_ref() {
+        vec![(source_key, true)]
+    } else {
+        vec![(alias_key, true), (source_key, false)]
+    }
+}
+
 #[allow(clippy::implicit_hasher)]
 fn materialize_media_server_series_info_episodes(
     playlist: &mut [PlaylistGroup],
@@ -276,12 +315,12 @@ fn materialize_media_server_series_info_episodes(
 
     for group in playlist.iter_mut() {
         for channel in &mut group.channels {
-            let header = &mut channel.header;
-            if !is_media_server_series_info_header(header) {
+            if !is_media_server_series_info_header(&channel.header) {
                 continue;
             }
-            let Some(episodes) = media_server_series.get(&header.get_uuid().intern()) else { continue };
-            let Some(StreamProperties::Series(series)) = header.additional_properties.as_mut() else { continue };
+            let lookup_keys = series_info_episode_lookup_keys(channel);
+            let Some(episodes) = lookup_keys.iter().find_map(|key| media_server_series.get(key)) else { continue };
+            let Some(StreamProperties::Series(series)) = channel.header.additional_properties.as_mut() else { continue };
             let details = series.details.get_or_insert(SeriesStreamDetailProperties {
                 year: None,
                 seasons: None,
@@ -296,19 +335,17 @@ fn materialize_media_server_series_info_episodes(
 
 #[allow(clippy::implicit_hasher)]
 fn rewrite_local_series_info_episode_virtual_id(pli: &mut PlaylistItem, local_library_series: &HashMap<Arc<str>, Vec<LocalEpisodeKey>>) {
-    let header = &mut pli.header;
-    // local_library_series key is the Series UUID.
-    // For LocalSeriesInfo items (series description), header.id is the Series UUID.
-    // For LocalSeries items (episodes), header.parent_code is the Series UUID.
-    // We need to use the correct key based on item type.
-    let lookup_key = if header.item_type == PlaylistItemType::LocalSeries {
-        header.parent_code.clone()
+    // local_library_series keys are the Series UUID or a category alias UUID.
+    // For LocalSeriesInfo items, header.id is the source Series UUID; category
+    // aliases use header.uuid so cloned episode rows can point at the alias.
+    let lookup_keys = if pli.header.item_type == PlaylistItemType::LocalSeries {
+        vec![pli.header.parent_code.clone()]
     } else {
-        header.id.clone()
+        series_info_episode_lookup_keys(pli)
     };
 
-    if let Some(episode_keys) = local_library_series.get(&*lookup_key) {
-        if let Some(StreamProperties::Series(series)) = header.additional_properties.as_mut() {
+    if let Some(episode_keys) = lookup_keys.iter().find_map(|key| local_library_series.get(key)) {
+        if let Some(StreamProperties::Series(series)) = pli.header.additional_properties.as_mut() {
             if let Some(episodes) =
                 series.details.as_mut().and_then(|d| d.episodes.as_mut())
             {
@@ -330,17 +367,40 @@ pub fn rewrite_provider_series_info_episode_virtual_id<P>(pli: &mut P, provider_
 where
     P: PlaylistEntry,
 {
-    if let Some(episode_keys) = provider_series.get(&pli.get_uuid().intern()) {
-        if let Some(StreamProperties::Series(series)) = pli.get_additional_properties_mut() {
-            if let Some(episodes) =
-                series.details.as_mut().and_then(|d| d.episodes.as_mut())
-            {
-                for episode in episodes.iter_mut() {
-                    for episode_key in episode_keys {
-                        if episode.id == episode_key.provider_id {
-                            episode.id = episode_key.virtual_id;
-                            break;
-                        }
+    let lookup_key = pli.get_uuid().intern();
+    if let Some(episode_keys) = provider_series.get(&lookup_key) {
+        if let Some(properties) = pli.get_additional_properties_mut() {
+            apply_provider_episode_keys(properties, episode_keys);
+        }
+    }
+}
+
+#[allow(clippy::implicit_hasher)]
+fn rewrite_provider_playlist_item_series_info_episode_virtual_id(
+    pli: &mut PlaylistItem,
+    provider_series: &HashMap<Arc<str>, Vec<ProviderEpisodeKey>>,
+) {
+    let lookup_keys = series_info_episode_lookup_keys(pli);
+    if let Some(episode_keys) = lookup_keys.iter().find_map(|key| provider_series.get(key)) {
+        if let Some(properties) = pli.get_additional_properties_mut() {
+            apply_provider_episode_keys(properties, episode_keys);
+        }
+    }
+}
+
+fn apply_provider_episode_keys(
+    properties: &mut StreamProperties,
+    episode_keys: &[ProviderEpisodeKey],
+) {
+    if let StreamProperties::Series(series) = properties {
+        if let Some(episodes) =
+            series.details.as_mut().and_then(|d| d.episodes.as_mut())
+        {
+            for episode in episodes.iter_mut() {
+                for episode_key in episode_keys {
+                    if episode.id == episode_key.provider_id {
+                        episode.id = episode_key.virtual_id;
+                        break;
                     }
                 }
             }
@@ -358,7 +418,7 @@ fn rewrite_series_info_episode_virtual_id(playlist: &mut [PlaylistGroup],
         for channel in &mut group.channels {
             let item_type = channel.header.item_type;
             if item_type == PlaylistItemType::SeriesInfo {
-                rewrite_provider_series_info_episode_virtual_id(channel, provider_series);
+                rewrite_provider_playlist_item_series_info_episode_virtual_id(channel, provider_series);
             } else if item_type == PlaylistItemType::LocalSeriesInfo {
                 rewrite_local_series_info_episode_virtual_id(channel, local_library_series);
             } else if item_type == PlaylistItemType::LocalSeries {
@@ -371,16 +431,14 @@ fn rewrite_series_info_episode_virtual_id(playlist: &mut [PlaylistGroup],
 fn rewrite_series_episode_parent_virtual_ids(playlist: &mut [PlaylistGroup], target_id_mapping: &mut TargetIdMapping) {
     let mut series_parent_virtual_ids = HashMap::<Arc<str>, u32>::new();
 
-        for group in playlist.iter() {
+    for group in playlist.iter() {
         for channel in &group.channels {
-            let parent_key = match channel.header.item_type {
-                PlaylistItemType::SeriesInfo => Some(channel.get_uuid().intern()),
-                PlaylistItemType::LocalSeriesInfo => Some(channel.header.id.clone()),
-                _ => None,
-            };
-
-            if let Some(parent_key) = parent_key {
-                series_parent_virtual_ids.insert(parent_key, channel.header.virtual_id);
+            for (parent_key, overwrite) in series_info_parent_keys(channel) {
+                if overwrite {
+                    series_parent_virtual_ids.insert(parent_key, channel.header.virtual_id);
+                } else {
+                    series_parent_virtual_ids.entry(parent_key).or_insert(channel.header.virtual_id);
+                }
             }
         }
     }
