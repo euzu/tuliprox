@@ -573,6 +573,7 @@ impl ActiveProviderManager {
         let allocation_id = self.next_allocation_id.fetch_add(1, Ordering::Relaxed);
         let cancel_token = CancellationToken::new();
         let now = Instant::now();
+        let is_unlimited = allocation.is_unlimited_provider();
 
         let mut connections = self.connections.write().await;
         let per_addr = connections.single.entry(*addr).or_default();
@@ -588,17 +589,26 @@ impl ActiveProviderManager {
             },
         );
 
-        connections.by_provider.entry(provider_name.clone()).or_default().insert((*addr, allocation_id));
-        Self::upsert_priority_entry(
-            &mut connections,
-            &provider_name,
-            (priority, Reverse(now), allocation_id),
-            PriorityOwner::Single(*addr),
-            kind,
-        );
+        // Unlimited providers are not subject to preemption, so we deliberately
+        // skip populating the by_provider / priority_index / soft_priority_index
+        // indices. The connection itself is still tracked via `single`, so all
+        // capacity and lifecycle invariants hold. Without this skip, an
+        // unlimited provider's connection can be selected as a preemption victim
+        // even though it cannot be exhausted, contradicting the configured
+        // `max_connections: 0` semantics.
+        if !is_unlimited {
+            connections.by_provider.entry(provider_name.clone()).or_default().insert((*addr, allocation_id));
+            Self::upsert_priority_entry(
+                &mut connections,
+                &provider_name,
+                (priority, Reverse(now), allocation_id),
+                PriorityOwner::Single(*addr),
+                kind,
+            );
+        }
 
         debug_if_enabled!(
-            "Added provider connection {provider_name:?} for {} (prio={}, kind={kind:?})",
+            "Added provider connection {provider_name:?} for {} (prio={}, kind={kind:?}, unlimited={is_unlimited})",
             sanitize_sensitive_info(&addr.to_string()),
             priority
         );
@@ -993,23 +1003,29 @@ impl ActiveProviderManager {
         self.providers.is_exhausted(provider_name).await
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn release_connection(&self, addr: &SocketAddr) {
         // Single connection - all index updates in one lock scope
         let single_allocations = {
             let mut connections = self.connections.write().await;
             if let Some(allocations) = connections.single.remove(addr) {
-                // Remove from by_provider and priority_index while still holding the lock
+                // Remove from by_provider and priority_index while still holding the lock.
+                // Skip these index updates for unlimited providers: they were never
+                // added to the preemption indices by `register_allocation`, so there
+                // is nothing to remove and the keys/values won't be present.
                 for (id, info) in &allocations {
-                    if let Some(name) = info.allocation.get_provider_name() {
-                        if let Some(list) = connections.by_provider.get_mut(&name) {
-                            list.remove(&(*addr, *id));
+                    if !info.allocation.is_unlimited_provider() {
+                        if let Some(name) = info.allocation.get_provider_name() {
+                            if let Some(list) = connections.by_provider.get_mut(&name) {
+                                list.remove(&(*addr, *id));
+                            }
+                            Self::remove_priority_entry(
+                                &mut connections,
+                                &name,
+                                &(info.priority, Reverse(info.created_at), *id),
+                                info.kind,
+                            );
                         }
-                        Self::remove_priority_entry(
-                            &mut connections,
-                            &name,
-                            &(info.priority, Reverse(info.created_at), *id),
-                            info.kind,
-                        );
                     }
                 }
                 Some(allocations)
@@ -1050,45 +1066,53 @@ impl ActiveProviderManager {
             // Always remove stale key-by-addr entry
             connections.shared.key_by_addr.remove(addr);
 
+            let shared_is_unlimited = shared.allocation.is_unlimited_provider();
+
             if shared.connections.is_empty() {
                 // If this was the last user of the shared allocation:
                 connections.shared.by_key.remove(&key);
                 connections.shared.shared_by_allocation_id.remove(&shared.allocation_id);
-                if let Some(name) = shared.allocation.get_provider_name() {
-                    if let Some(list) = connections.by_provider.get_mut(&name) {
-                        list.retain(|(_, i)| *i != shared.allocation_id);
+                if !shared_is_unlimited {
+                    if let Some(name) = shared.allocation.get_provider_name() {
+                        if let Some(list) = connections.by_provider.get_mut(&name) {
+                            list.retain(|(_, i)| *i != shared.allocation_id);
+                        }
+                        Self::remove_priority_entry(
+                            &mut connections,
+                            &name,
+                            &(shared.priority, Reverse(shared.created_at), shared.allocation_id),
+                            shared.kind,
+                        );
                     }
-                    Self::remove_priority_entry(
-                        &mut connections,
-                        &name,
-                        &(shared.priority, Reverse(shared.created_at), shared.allocation_id),
-                        shared.kind,
-                    );
                 }
                 Some(shared.allocation)
             } else {
                 // Recompute shared priority from remaining subscribers so preemption decisions
-                // reflect who is actually still watching the shared stream.
-                let old_priority = shared.priority;
-                let old_kind = shared.kind;
-                shared.kind = Self::shared_effective_kind(&shared.connections);
-                if let Some(new_priority) = Self::shared_effective_priority(&shared.connections, shared.kind) {
-                    shared.priority = new_priority;
-                    if (new_priority, shared.kind) != (old_priority, old_kind) {
-                        if let Some(name) = shared.allocation.get_provider_name() {
-                            Self::remove_priority_entry(
-                                &mut connections,
-                                &name,
-                                &(old_priority, Reverse(shared.created_at), shared.allocation_id),
-                                old_kind,
-                            );
-                            Self::upsert_priority_entry(
-                                &mut connections,
-                                &name,
-                                (new_priority, Reverse(shared.created_at), shared.allocation_id),
-                                PriorityOwner::Shared(shared.allocation_id),
-                                shared.kind,
-                            );
+                // reflect who is actually still watching the shared stream. Unlimited
+                // shared streams are not in the preemption index, so this rebalance
+                // must be skipped for them.
+                if !shared_is_unlimited {
+                    let old_priority = shared.priority;
+                    let old_kind = shared.kind;
+                    shared.kind = Self::shared_effective_kind(&shared.connections);
+                    if let Some(new_priority) = Self::shared_effective_priority(&shared.connections, shared.kind) {
+                        shared.priority = new_priority;
+                        if (new_priority, shared.kind) != (old_priority, old_kind) {
+                            if let Some(name) = shared.allocation.get_provider_name() {
+                                Self::remove_priority_entry(
+                                    &mut connections,
+                                    &name,
+                                    &(old_priority, Reverse(shared.created_at), shared.allocation_id),
+                                    old_kind,
+                                );
+                                Self::upsert_priority_entry(
+                                    &mut connections,
+                                    &name,
+                                    (new_priority, Reverse(shared.created_at), shared.allocation_id),
+                                    PriorityOwner::Shared(shared.allocation_id),
+                                    shared.kind,
+                                );
+                            }
                         }
                     }
                 }
@@ -1124,12 +1148,18 @@ impl ActiveProviderManager {
                         connections.single.remove(&handle.client_id);
                     }
 
-                    // Remove from by_provider index
-                    if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
-                        if let Some(list) = connections.by_provider.get_mut(&name) {
-                            list.remove(&(handle.client_id, handle.allocation_id));
+                    // Remove from by_provider index. Skip for unlimited providers:
+                    // they were never inserted by `register_allocation`, so the
+                    // keys/values are not present and a removal would be a no-op
+                    // at best and could race with concurrent unrelated operations
+                    // on the same HashSet entry at worst.
+                    if !released.as_ref().is_some_and(ProviderAllocation::is_unlimited_provider) {
+                        if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
+                            if let Some(list) = connections.by_provider.get_mut(&name) {
+                                list.remove(&(handle.client_id, handle.allocation_id));
+                            }
+                            released_priority_key = Some((name, pkey, released_kind));
                         }
-                        released_priority_key = Some((name, pkey, released_kind));
                     }
                 }
             }
@@ -1139,15 +1169,18 @@ impl ActiveProviderManager {
                 if let Some(key) = connections.shared.shared_by_allocation_id.remove(&handle.allocation_id) {
                     if let Some(shared) = connections.shared.by_key.remove(&key) {
                         let pkey = (shared.priority, Reverse(shared.created_at), handle.allocation_id);
-                        released = Some(shared.allocation);
+                        released = Some(shared.allocation.clone());
+                        let shared_is_unlimited = shared.allocation.is_unlimited_provider();
                         for addr in shared.connections.keys() {
                             connections.shared.key_by_addr.remove(addr);
                         }
-                        if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
-                            if let Some(list) = connections.by_provider.get_mut(&name) {
-                                list.retain(|(_, i)| *i != handle.allocation_id);
+                        if !shared_is_unlimited {
+                            if let Some(name) = released.as_ref().and_then(ProviderAllocation::get_provider_name) {
+                                if let Some(list) = connections.by_provider.get_mut(&name) {
+                                    list.retain(|(_, i)| *i != handle.allocation_id);
+                                }
+                                released_priority_key = Some((name, pkey, shared.kind));
                             }
-                            released_priority_key = Some((name, pkey, shared.kind));
                         }
                     }
                 }
@@ -1177,7 +1210,14 @@ impl ActiveProviderManager {
                     info.kind = kind;
                     info.priority = priority;
                     let new_key = (info.priority, Reverse(info.created_at), *allocation_id);
-                    index_updates.push((provider_name, old_key, old_kind, new_key, owner, info.kind));
+                    // Skip preemption-index updates for unlimited providers: they
+                    // are intentionally absent from `by_provider` / `priority_index`
+                    // / `soft_priority_index`, so the old entry was never inserted.
+                    // Performing the upsert here would re-introduce them into the
+                    // preemption index and contradict `max_connections: 0`.
+                    if !info.allocation.is_unlimited_provider() {
+                        index_updates.push((provider_name, old_key, old_kind, new_key, owner, info.kind));
+                    }
                 }
             }
             for (provider_name, old_key, old_kind, new_key, owner, new_kind) in index_updates {
@@ -1196,6 +1236,7 @@ impl ActiveProviderManager {
         let Some(subscriber) = shared_allocation.connections.get_mut(addr) else {
             return false;
         };
+        let shared_is_unlimited = shared_allocation.allocation.is_unlimited_provider();
 
         let old_priority = shared_allocation.priority;
         let old_kind = shared_allocation.kind;
@@ -1212,26 +1253,32 @@ impl ActiveProviderManager {
         let provider_name = shared_allocation.allocation.get_provider_name();
         let _ = shared_allocation;
 
-        if let Some(provider_name) = provider_name {
-            let owner = PriorityOwner::Shared(allocation_id);
-            Self::remove_priority_entry(
-                &mut connections,
-                &provider_name,
-                &(old_priority, Reverse(created_at), allocation_id),
-                old_kind,
-            );
-            Self::upsert_priority_entry(
-                &mut connections,
-                &provider_name,
-                (new_priority, Reverse(created_at), allocation_id),
-                owner,
-                new_kind,
-            );
+        // Mirror the single-connection rule: skip priority-index rebuild for
+        // shared allocations backed by an unlimited provider. The kind/priority
+        // transition on the per-subscriber state is still applied above.
+        if !shared_is_unlimited {
+            if let Some(provider_name) = provider_name {
+                let owner = PriorityOwner::Shared(allocation_id);
+                Self::remove_priority_entry(
+                    &mut connections,
+                    &provider_name,
+                    &(old_priority, Reverse(created_at), allocation_id),
+                    old_kind,
+                );
+                Self::upsert_priority_entry(
+                    &mut connections,
+                    &provider_name,
+                    (new_priority, Reverse(created_at), allocation_id),
+                    owner,
+                    new_kind,
+                );
+            }
         }
 
         true
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn make_shared_connection(&self, addr: &SocketAddr, key: &str) {
         let extras = {
             let mut connections = self.connections.write().await;
@@ -1250,30 +1297,37 @@ impl ActiveProviderManager {
                         // Collect others as extras to release
                         let extra_entries: Vec<_> = iter.collect();
 
-                        // Cleanup indices
-                        if let Some(name) = info.allocation.get_provider_name() {
-                            if let Some(list) = connections.by_provider.get_mut(&name) {
-                                list.remove(&(*addr, id));
-                            }
-                            Self::remove_priority_entry(
-                                &mut connections,
-                                &name,
-                                &(info.priority, Reverse(info.created_at), id),
-                                info.kind,
-                            );
-                        }
-                        // Remove extras from provider-specific indexes.
-                        for (extra_id, extra_info) in &extra_entries {
-                            if let Some(extra_provider_name) = extra_info.allocation.get_provider_name() {
-                                if let Some(list) = connections.by_provider.get_mut(&extra_provider_name) {
-                                    list.remove(&(*addr, *extra_id));
+                        // Cleanup indices. Skip for unlimited providers: their
+                        // entries were never inserted into `by_provider` /
+                        // `priority_index` / `soft_priority_index`, so the
+                        // removal would be a no-op.
+                        if !info.allocation.is_unlimited_provider() {
+                            if let Some(name) = info.allocation.get_provider_name() {
+                                if let Some(list) = connections.by_provider.get_mut(&name) {
+                                    list.remove(&(*addr, id));
                                 }
                                 Self::remove_priority_entry(
                                     &mut connections,
-                                    &extra_provider_name,
-                                    &(extra_info.priority, Reverse(extra_info.created_at), *extra_id),
-                                    extra_info.kind,
+                                    &name,
+                                    &(info.priority, Reverse(info.created_at), id),
+                                    info.kind,
                                 );
+                            }
+                        }
+                        // Remove extras from provider-specific indexes.
+                        for (extra_id, extra_info) in &extra_entries {
+                            if !extra_info.allocation.is_unlimited_provider() {
+                                if let Some(extra_provider_name) = extra_info.allocation.get_provider_name() {
+                                    if let Some(list) = connections.by_provider.get_mut(&extra_provider_name) {
+                                        list.remove(&(*addr, *extra_id));
+                                    }
+                                    Self::remove_priority_entry(
+                                        &mut connections,
+                                        &extra_provider_name,
+                                        &(extra_info.priority, Reverse(extra_info.created_at), *extra_id),
+                                        extra_info.kind,
+                                    );
+                                }
                             }
                         }
 
@@ -1330,14 +1384,18 @@ impl ActiveProviderManager {
                     .shared_by_allocation_id
                     .insert(handle.0.allocation_id, shared_key);
 
-                // Insert new shared entry into priority_index
-                Self::upsert_priority_entry(
-                    &mut connections,
-                    &provider_name,
-                    (handle.1, Reverse(handle.3), handle.0.allocation_id),
-                    PriorityOwner::Shared(handle.0.allocation_id),
-                    handle.2,
-                );
+                // Insert new shared entry into priority_index. Skip for
+                // unlimited providers: they are not subject to preemption, so
+                // they must not appear in the priority index.
+                if !handle.0.allocation.is_unlimited_provider() {
+                    Self::upsert_priority_entry(
+                        &mut connections,
+                        &provider_name,
+                        (handle.1, Reverse(handle.3), handle.0.allocation_id),
+                        PriorityOwner::Shared(handle.0.allocation_id),
+                        handle.2,
+                    );
+                }
             }
             extras
         };
@@ -1364,10 +1422,11 @@ impl ActiveProviderManager {
                 s.priority,
                 s.kind,
                 s.created_at,
+                s.allocation.is_unlimited_provider(),
             )
         });
 
-        let Some((alloc_id, provider_name, old_priority, old_kind, created_at)) = metadata else {
+        let Some((alloc_id, provider_name, old_priority, old_kind, created_at, shared_is_unlimited)) = metadata else {
             let err = format!(
                 "Failed to add shared connection for {addr}: url {} not found",
                 sanitize_sensitive_info(key)
@@ -1402,7 +1461,9 @@ impl ActiveProviderManager {
         let updated_priority = shared_allocation.priority;
         let needs_reindex = (updated_priority, updated_kind) != (old_priority, old_kind);
         let _ = shared_allocation;
-        if needs_reindex {
+        // Skip priority-index rebuild for unlimited providers: they are not
+        // subject to preemption and therefore must not be in the index.
+        if !shared_is_unlimited && needs_reindex {
             Self::remove_priority_entry(
                 &mut connections,
                 &provider_name,
@@ -1449,6 +1510,7 @@ mod tests {
         model::{ConfigPaths, InputFetchMethod, InputType},
         utils::Internable,
     };
+    use std::collections::HashSet;
     use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
     use shared::utils::{default_probe_user_priority, default_user_priority};
 
@@ -1517,6 +1579,94 @@ mod tests {
     fn create_test_app_config_single_provider_pool() -> AppConfig { build_test_app_config(None, 1) }
 
     fn create_test_app_config_single_unlimited_provider_pool() -> AppConfig { build_test_app_config(None, 0) }
+
+    #[tokio::test]
+    async fn unlimited_provider_connection_is_not_in_priority_index() {
+        let app_cfg = create_test_app_config_single_unlimited_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let addr_1: SocketAddr = "127.0.0.1:44001".parse().unwrap();
+        let addr_2: SocketAddr = "127.0.0.1:44002".parse().unwrap();
+        let addr_3: SocketAddr = "127.0.0.1:44003".parse().unwrap();
+
+        manager
+            .acquire_connection(&input_name, &addr_1, default_user_priority(), ConnectionKind::Normal)
+            .await
+            .expect("acquire #1 on unlimited provider");
+        manager
+            .acquire_connection(&input_name, &addr_2, default_user_priority(), ConnectionKind::Normal)
+            .await
+            .expect("acquire #2 on unlimited provider");
+        manager
+            .acquire_connection(&input_name, &addr_3, default_user_priority(), ConnectionKind::Normal)
+            .await
+            .expect("acquire #3 on unlimited provider");
+
+        {
+            let connections = manager.connections.read().await;
+            let priority_tree = connections.priority_index.get(&input_name);
+            assert!(
+                priority_tree.is_none_or(std::collections::BTreeMap::is_empty),
+                "unlimited provider must not be present in priority_index, found {priority_tree:?}"
+            );
+            let soft_tree = connections.soft_priority_index.get(&input_name);
+            assert!(
+                soft_tree.is_none_or(std::collections::BTreeMap::is_empty),
+                "unlimited provider must not be present in soft_priority_index, found {soft_tree:?}"
+            );
+            let by_provider = connections.by_provider.get(&input_name);
+            assert!(
+                by_provider.is_none_or(std::collections::HashSet::is_empty),
+                "unlimited provider must not be present in by_provider, found {by_provider:?}"
+            );
+        }
+
+        manager.release_connection(&addr_1).await;
+        manager.release_connection(&addr_2).await;
+        manager.release_connection(&addr_3).await;
+    }
+
+    #[tokio::test]
+    async fn preemption_does_not_select_unlimited_provider_as_victim() {
+        let app_cfg = create_test_app_config_single_unlimited_provider_pool();
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveProviderManager::new(&app_cfg, &event_manager);
+
+        let input_name = "provider_1".intern();
+        let low_addr: SocketAddr = "127.0.0.1:45001".parse().unwrap();
+        let high_addr: SocketAddr = "127.0.0.1:45002".parse().unwrap();
+
+        // Acquire one low-priority and one high-priority connection on the unlimited provider.
+        let low = manager
+            .acquire_connection(&input_name, &low_addr, 50, ConnectionKind::Normal)
+            .await
+            .expect("low-priority acquire on unlimited provider");
+        let low_token = low.cancel_token.clone().expect("cancel token for low-priority connection");
+        let _high = manager
+            .acquire_connection(&input_name, &high_addr, 0, ConnectionKind::Normal)
+            .await
+            .expect("high-priority acquire on unlimited provider");
+
+        // A request at an even higher priority must not be able to preempt the unlimited
+        // provider's connection, because the connection is intentionally absent from the
+        // preemption indices.
+        let candidate = {
+            let connections = manager.connections.read().await;
+            manager.select_preemption_candidate(&connections, &input_name, 0, ConnectionKind::Normal, &HashSet::new())
+        };
+        assert!(
+            candidate.is_none(),
+            "select_preemption_candidate must not return an unlimited-provider connection as a victim, got {candidate:?}"
+        );
+
+        // The low-priority connection is still alive and its cancel token has not been fired.
+        assert!(!low_token.is_cancelled(), "low-priority unlimited-provider connection must not be cancelled by preemption");
+
+        manager.release_connection(&low_addr).await;
+        manager.release_connection(&high_addr).await;
+    }
 
     #[tokio::test]
     async fn test_force_exact_acquire_does_not_overallocate_busy_provider() {

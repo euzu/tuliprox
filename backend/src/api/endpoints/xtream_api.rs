@@ -510,6 +510,7 @@ async fn xtream_player_api_stream(
             fingerprint,
             app_state,
             &user,
+            target.id,
             user_session.as_ref(),
             &stream_url,
             None,
@@ -605,7 +606,7 @@ fn resolve_xtream_playback_extension(stream_ext: Option<&str>, pli: &XtreamPlayl
 
 #[allow(clippy::too_many_lines)]
 // Used by webui
-async fn xtream_player_api_stream_with_token(
+pub(in crate::api) async fn xtream_player_api_stream_with_token(
     fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
     app_state: &Arc<AppState>,
@@ -687,6 +688,7 @@ async fn xtream_player_api_stream_with_token(
                 fingerprint,
                 app_state,
                 &user,
+                target.id,
                 None,
                 &pli.url,
                 None,

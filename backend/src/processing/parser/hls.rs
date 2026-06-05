@@ -50,6 +50,7 @@ pub struct RewriteHlsProps<'a> {
     pub base_url: &'a str,
     pub content: &'a str,
     pub hls_url: String,
+    pub target_id: u16,
     pub virtual_id: u32,
     pub input_id: u16,
     pub user_token: Option<&'a str>,
@@ -84,11 +85,12 @@ fn rewrite_uri_attrib<'a>(line: &'a str, props: &RewriteHlsProps, user: &ProxyUs
         create_hls_url_without_session_token(props.secret, &rewritten)
     };
 
-    let final_uri = format!(
-        "{}/{HLS_PREFIX}/{}/{}/{}/{}/{}",
+        let final_uri = format!(
+        "{}/{HLS_PREFIX}/{}/{}/{}/{}/{}/{}",
         props.base_url,
         user.username,
         user.password,
+        props.target_id,
         props.input_id,
         props.virtual_id,
         token
@@ -124,10 +126,11 @@ pub fn rewrite_hls(user: &ProxyUserCredentials, props: &RewriteHlsProps) -> Stri
             create_hls_url_without_session_token(props.secret, &target_url)
         };
         let url = format!(
-            "{}/{HLS_PREFIX}/{}/{}/{}/{}/{}",
+            "{}/{HLS_PREFIX}/{}/{}/{}/{}/{}/{}",
             props.base_url,
             username,
             password,
+            props.target_id,
             props.input_id,
             props.virtual_id,
             token
@@ -238,6 +241,7 @@ mod test {
             base_url: "http://proxy",
             content: "#EXTM3U\nsegment.ts",
             hls_url: "http://origin/live/main.m3u8".to_string(),
+            target_id: 9,
             virtual_id: 101,
             input_id: 11,
             user_token: None,
@@ -248,6 +252,7 @@ mod test {
             .lines()
             .find(|line| line.contains(&format!("/{HLS_PREFIX}/")))
             .expect("rewritten playlist should contain a segment URL");
+        assert!(segment_line.contains("/hls/u/p/9/11/101/"));
         let token = segment_line
             .rsplit('/')
             .next()

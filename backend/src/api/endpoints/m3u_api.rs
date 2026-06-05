@@ -117,7 +117,7 @@ async fn m3u_api_post(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn m3u_api_stream_loaded(
+pub(in crate::api) async fn m3u_api_stream_loaded(
     user: Arc<ProxyUserCredentials>,
     target: Arc<ConfigTarget>,
     fingerprint: &Fingerprint,
@@ -329,13 +329,20 @@ async fn m3u_api_stream_loaded(
     }
 
     let is_session_request = is_session_based_playback(pli.item_type, Some(extension));
+    // The archive/catchup EPG reference timestamp is parsed from the request
+    // URL once and shared between the HLS and the non-HLS branch. The HLS
+    // handler threads it into its own manifest construction; the non-HLS
+    // branch attaches it to the StreamChannel so the frontend's stream_epg
+    // request can centre its EPG window on the archive timestamp instead of
+    // falling back to `now`.
+    let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::utils::HLS_EXT {
-        let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
         return handle_hls_stream_request(
             fingerprint,
             app_state,
             &user,
+            target.id,
             user_session.as_ref(),
             &pli.url,
             archive_reference,
@@ -359,7 +366,7 @@ async fn m3u_api_stream_loaded(
         app_state,
         &session_key,
         Some(request_class),
-        pli.to_stream_channel(target.id),
+        pli.to_stream_channel(target.id).with_epg_reference_ts(archive_reference),
         &session_url,
         pinned_provider,
         req_headers,

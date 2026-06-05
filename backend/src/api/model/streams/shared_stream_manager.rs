@@ -8,7 +8,7 @@ use crate::{
 };
 use bytes::Bytes;
 use futures::{stream::BoxStream, Stream, StreamExt};
-use log::{debug, trace, warn};
+use log::{debug, warn};
 use shared::utils::sanitize_sensitive_info;
 use std::{
     collections::{HashMap, VecDeque},
@@ -403,6 +403,14 @@ impl SharedStreamState {
                     consecutive_lag_count = 0;
                 }
 
+                trace_if_enabled!(
+                    "shared_stream.subscribe: read {} chunks (next_seq={}, skipped={}) for {}",
+                    read_chunks.len(),
+                    read.next_sequence,
+                    read.skipped,
+                    sanitize_sensitive_info(&address.to_string())
+                );
+
                 if !read_chunks.is_empty() {
                     for data in read_chunks.drain(..) {
                         let chunk_len = data.len();
@@ -444,22 +452,38 @@ impl SharedStreamState {
                     biased;
 
                     () = cancel_token.cancelled() => {
-                        debug!("Client disconnected from shared stream: {address}");
+                        trace_if_enabled!(
+                            "shared_stream.subscribe: cancel_received for {}",
+                            sanitize_sensitive_info(&address.to_string())
+                        );
                         break;
                     }
 
                     () = &mut idle_check => {
                         if last_active.elapsed() > timeout_duration {
-                            debug!("Client timed out due to inactivity: {address}");
+                            trace_if_enabled!(
+                                "shared_stream.subscribe: idle_check_fired (inactivity>={}s) for {}",
+                                timeout_duration.as_secs(),
+                                sanitize_sensitive_info(&address.to_string())
+                            );
                             cancel_token.cancel();
                             break;
                         }
                         idle_check.as_mut().reset(Instant::now() + idle_check_interval);
                     }
 
-                    () = notified_fut => {}
+                    () = notified_fut => {
+                        trace_if_enabled!(
+                            "shared_stream.subscribe: empty_buffer_waiting waker for {}",
+                            sanitize_sensitive_info(&address.to_string())
+                        );
+                    }
 
                     () = preempted_token.cancelled() => {
+                        trace_if_enabled!(
+                            "shared_stream.subscribe: preempted for {}",
+                            sanitize_sensitive_info(&address.to_string())
+                        );
                         if let Some(mut fallback) = low_priority_preempted {
                             debug_if_enabled!(
                                 "Shared stream subscriber {} switching to low_priority_preempted fallback",
@@ -490,7 +514,12 @@ impl SharedStreamState {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn broadcast<S, E>(&self, stream_url: &str, bytes_stream: S, shared_streams: Arc<SharedStreamManager>)
+    fn broadcast<S, E>(
+        self: &Arc<Self>,
+        stream_url: &str,
+        bytes_stream: S,
+        shared_streams: Arc<SharedStreamManager>,
+    )
     where
         S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
         E: std::fmt::Debug + Send,
@@ -511,6 +540,12 @@ impl SharedStreamState {
             let mut startup_chunks_seen = 0_usize;
             let mut startup_bytes_seen = 0_usize;
             let mut startup_stats_logged = false;
+            // Track the time of the most recent upstream push so the broadcast can
+            // detect a stalled source before the global idle timeout fires. This is
+            // the diagnostic signal for H1 (broadcast stall with stale burst replay).
+            let mut last_push_at: Option<Instant> = None;
+            let mut idle_warning_emitted = false;
+            let idle_warn_threshold = idle_timeout / 2;
 
             loop {
                 tokio::select! {
@@ -525,7 +560,11 @@ impl SharedStreamState {
                     }
 
                     () = &mut idle => {
-                        debug!("shared stream idle for too long, closing");
+                        debug_if_enabled!(
+                            "Shared stream source idle timeout after {}s for {}",
+                            STREAM_IDLE_TIMEOUT,
+                            sanitize_sensitive_info(&streaming_url)
+                        );
                         stop_token.cancel();
                         break;
                     }
@@ -534,6 +573,23 @@ impl SharedStreamState {
                         idle.as_mut().reset(Instant::now() + idle_timeout);
                         match chunk {
                             Some(Ok(data)) => {
+                                let chunk_len = data.len();
+                                let push_seq = {
+                                    let mut buffer = burst_buffer.lock().await;
+                                    let seq = buffer.next_sequence;
+                                    buffer.push(data);
+                                    seq
+                                };
+                                live_notification.notify_waiters();
+                                last_push_at = Some(Instant::now());
+                                idle_warning_emitted = false;
+                                trace_if_enabled!(
+                                    "shared_stream.broadcast: push seq={} len={} url={}",
+                                    push_seq,
+                                    chunk_len,
+                                    sanitize_sensitive_info(&streaming_url)
+                                );
+
                                 if !first_source_chunk_logged {
                                     debug_if_enabled!(
                                         "Shared stream source produced first chunk for {} after {} ms",
@@ -544,7 +600,7 @@ impl SharedStreamState {
                                 }
                                 if !startup_stats_logged {
                                     startup_chunks_seen = startup_chunks_seen.saturating_add(1);
-                                    startup_bytes_seen = startup_bytes_seen.saturating_add(data.len());
+                                    startup_bytes_seen = startup_bytes_seen.saturating_add(chunk_len);
                                     if broadcast_started_at.elapsed() >= Duration::from_secs(5) {
                                         debug_if_enabled!(
                                             "Shared stream source startup throughput for {}: chunks={} bytes={} over {} ms",
@@ -556,11 +612,6 @@ impl SharedStreamState {
                                         startup_stats_logged = true;
                                     }
                                 }
-                                {
-                                    let mut buffer = burst_buffer.lock().await;
-                                    buffer.push(data);
-                                }
-                                live_notification.notify_waiters();
 
                                 counter = counter.saturating_add(1);
                                 if counter >= YIELD_COUNTER {
@@ -569,12 +620,16 @@ impl SharedStreamState {
                                 }
                             }
                             Some(Err(e)) => {
-                                trace!("Shared stream received error: {e:?}");
+                                trace_if_enabled!(
+                                    "Shared stream source error for {}: {:?}",
+                                    sanitize_sensitive_info(&streaming_url),
+                                    e
+                                );
                                 tokio::task::yield_now().await;
                             }
                             None => {
                                 debug_if_enabled!(
-                                    "Source stream ended. Closing shared provider stream {}",
+                                    "Shared stream source stream ended for {}",
                                     sanitize_sensitive_info(&streaming_url)
                                 );
                                 break;
@@ -582,11 +637,30 @@ impl SharedStreamState {
                         }
                     }
                 }
+
+                // Edge-triggered stall warning: fires once when the broadcast has
+                // not seen an upstream push for STREAM_IDLE_TIMEOUT/2 seconds, then
+                // resets on the next successful push. Operators correlate this
+                // warning with the "stuck in resending same buffer" symptom (H1).
+                if let Some(last) = last_push_at {
+                    let stalled_for = last.elapsed();
+                    if stalled_for >= idle_warn_threshold && !idle_warning_emitted {
+                        warn!(
+                            "shared_stream.broadcast: no upstream bytes for {}s on url={}; \
+                             source may be stalled. Subscribers will see cached burst until {}s timeout.",
+                            stalled_for.as_secs(),
+                            sanitize_sensitive_info(&streaming_url),
+                            STREAM_IDLE_TIMEOUT
+                        );
+                        idle_warning_emitted = true;
+                    }
+                }
             }
 
             debug_if_enabled!(
-                "Shared stream exhausted. Closing shared provider stream {}",
-                sanitize_sensitive_info(&streaming_url)
+                "Shared stream exiting for {} (last_push_age_secs={})",
+                sanitize_sensitive_info(&streaming_url),
+                last_push_at.map_or(0, |t| t.elapsed().as_secs())
             );
             shared_streams.unregister(&streaming_url, false).await;
         });
@@ -849,7 +923,11 @@ impl SharedStreamManager {
             registration_started_at.elapsed().as_millis()
         );
         if subscribed_stream.is_some() {
-            shared_state.broadcast(stream_url, bytes_stream, Arc::clone(&app_state.shared_stream_manager));
+            shared_state.broadcast(
+                stream_url,
+                bytes_stream,
+                Arc::clone(&app_state.shared_stream_manager),
+            );
             debug_if_enabled!(
                 "Created shared provider stream {} (channel_capacity={buf_size}, burst_buffer_min={min_buffer_bytes} bytes)",
                 sanitize_sensitive_info(stream_url)
@@ -930,6 +1008,7 @@ mod tests {
     use std::borrow::Cow;
     use std::{collections::HashMap, net::SocketAddr, sync::Arc};
     use tokio::{sync::mpsc, time::{timeout, Duration}};
+    use tokio_stream::wrappers::ReceiverStream;
     use tokio_util::sync::CancellationToken;
 
     fn create_test_app_config() -> AppConfig {
@@ -1420,5 +1499,57 @@ mod tests {
             None => panic!("fallback stream ended unexpectedly"),
         };
         assert!(!chunk.is_empty(), "fallback chunk must contain MPEG-TS bytes");
+    }
+
+    #[tokio::test]
+    async fn broadcast_does_not_emit_shared_stream_health_events() {
+        let app_cfg = create_test_app_config();
+        let event_manager = Arc::new(EventManager::new());
+        let provider_manager = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+        let shared_manager = Arc::new(SharedStreamManager::new(provider_manager));
+        let mut events = event_manager.get_event_channel();
+        let stream_url = "https://user:pass@example.invalid/live/health.ts";
+        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024, None));
+        {
+            let mut reg = shared_manager.shared_streams.write().await;
+            reg.by_key.insert(Arc::from(stream_url), Arc::clone(&state));
+        }
+
+        let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
+        state.broadcast(
+            stream_url,
+            ReceiverStream::new(rx),
+            Arc::clone(&shared_manager),
+        );
+
+        assert!(
+            timeout(Duration::from_millis(100), events.recv()).await.is_err(),
+            "broadcast startup must not emit runtime events"
+        );
+
+        // Pushing data must also not emit a per-chunk health event.
+        tx.send(Ok(Bytes::from_static(b"payload-1")))
+            .await
+            .unwrap_or_else(|_| panic!("send chunk should succeed"));
+        assert!(
+            timeout(Duration::from_millis(100), events.recv()).await.is_err(),
+            "pushing a chunk must not emit runtime events"
+        );
+
+        drop(tx);
+        let ended = timeout(Duration::from_secs(2), async {
+            loop {
+                if shared_manager.get_shared_state(stream_url).await.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "broadcast must exit after source end");
+        assert!(
+            timeout(Duration::from_millis(100), events.recv()).await.is_err(),
+            "broadcast shutdown must not emit runtime events"
+        );
     }
 }
