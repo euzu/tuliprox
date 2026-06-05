@@ -1370,6 +1370,9 @@ fn get_stream_alternative_url_m3u(
 
         return Some(url.to_string());
     }
+    if stream_url_has_account_signature(stream_url) {
+        return None;
+    }
     Some(stream_url.to_string())
 }
 
@@ -1508,10 +1511,16 @@ fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) 
         // Same-host fast path: both base URL and account identity must match.
         return stream_url_account_matches(stream_url, &user_info);
     }
+    if !provider_cfg.input_type.is_m3u() {
+        return false;
+    }
     // For M3U inputs, the stored playlist entry itself is the trust anchor.
-    // External hosts are therefore allowed here even when they do not carry
-    // explicit account markers in the stream URL.
-    provider_cfg.input_type.is_m3u()
+    // Open external URLs are therefore allowed, but external URLs that carry
+    // explicit account markers must still match the selected provider account.
+    if stream_url_has_account_signature(stream_url) {
+        return stream_url_account_matches(stream_url, &user_info);
+    }
+    true
 }
 
 fn stream_url_base_matches(stream_url: &str, base_url: &str) -> bool {
@@ -1552,6 +1561,31 @@ fn stream_url_account_matches(stream_url: &str, user_info: &crate::model::InputU
     };
 
     username == Some(user_info.username.as_str()) && password == Some(user_info.password.as_str())
+}
+
+fn stream_url_has_account_signature(stream_url: &str) -> bool {
+    let Ok(url) = Url::parse(stream_url) else {
+        return false;
+    };
+
+    let (url_username, url_password) = get_credentials_from_url(&url);
+    if url_username.is_some() && url_password.is_some() {
+        return true;
+    }
+
+    let mut has_query_username = false;
+    let mut has_query_password = false;
+    for (key, _) in url.query_pairs() {
+        if key.eq_ignore_ascii_case("username") {
+            has_query_username = true;
+        } else if key.eq_ignore_ascii_case("password") {
+            has_query_password = true;
+        }
+    }
+    if has_query_username || has_query_password {
+        return has_query_username && has_query_password;
+    }
+    false
 }
 
 fn select_provider_stream_url(
@@ -4092,6 +4126,21 @@ mod tests {
     }
 
     #[test]
+    fn stream_url_matches_provider_rejects_external_cdn_url_with_wrong_account_signature_for_m3u() {
+        let provider = test_runtime_provider_with_type(
+            "http://provider.example",
+            "selected-user",
+            "selected-pass",
+            InputType::M3u,
+        );
+
+        assert!(!stream_url_matches_provider(
+            "http://cdn.example/segment.ts?username=other-user&password=other-pass",
+            &provider
+        ));
+    }
+
+    #[test]
     fn stream_url_matches_provider_rejects_open_external_cdn_url_without_account_signature_for_xtream() {
         let provider = test_runtime_provider("http://provider.example", "selected-user", "selected-pass");
 
@@ -4202,6 +4251,44 @@ mod tests {
         let stream_url = "https://cnbc-live.akamaized.net/cnbc/master.m3u8";
 
         assert_eq!(get_stream_alternative_url(stream_url, &input, &alias), Some(stream_url.to_string()));
+    }
+
+    #[test]
+    fn get_stream_alternative_url_keeps_open_external_multisegment_playlist_url_for_m3u() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example/playlist.m3u8?username=source-user&password=source-pass".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::M3u,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider_with_type("http://alias.example", "alias-user", "alias-pass", InputType::M3u);
+        let stream_url = "https://hnpsechtsc.turknet.ercdn.net/xpnvudnlsv/cnbc-e/cnbc-e.m3u8";
+
+        assert_eq!(get_stream_alternative_url(stream_url, &input, &alias), Some(stream_url.to_string()));
+    }
+
+    #[test]
+    fn get_stream_alternative_url_rejects_external_m3u_url_with_unmatched_account_signature() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example/playlist.m3u8?username=source-user&password=source-pass".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::M3u,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider_with_type("http://alias.example", "alias-user", "alias-pass", InputType::M3u);
+
+        assert_eq!(
+            get_stream_alternative_url(
+                "http://cdn.example/segment.ts?username=other-user&password=other-pass",
+                &input,
+                &alias,
+            ),
+            None
+        );
     }
 
     #[test]

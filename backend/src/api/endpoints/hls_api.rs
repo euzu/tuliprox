@@ -2,7 +2,7 @@ use crate::{
     api::{
         api_utils::{
             admission_failure_response, connection_priority_for_kind,
-            create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
+            create_api_proxy_user, create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
             get_hls_session_ttl_secs, get_stream_alternative_url, is_seek_request, local_stream_response,
             try_option_bad_request, try_unwrap_body,
             HeaderFilter,
@@ -11,7 +11,7 @@ use crate::{
             AppState, CustomVideoStreamType, ProviderAllocation, UserSession,
         },
     },
-    auth::Fingerprint,
+    auth::{create_access_token, Fingerprint},
     model::{ConfigInput, ConfigInputFlags, ConfigTarget, InputSource, ProxyUserCredentials},
     processing::parser::hls::{get_hls_session_token_and_url_from_token, rewrite_hls, RewriteHlsProps},
     repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
@@ -87,6 +87,7 @@ pub(in crate::api) fn m3u_archive_epg_reference_ts(stream_url: &str) -> Option<i
 struct HlsApiPathParams {
     username: String,
     password: String,
+    target_id: u16,
     input_id: u16,
     stream_id: u32,
     token: String,
@@ -158,6 +159,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
     user: &ProxyUserCredentials,
+    target_id: u16,
     user_session: Option<&UserSession>,
     hls_url: &str,
     archive_reference: Option<i64>,
@@ -349,6 +351,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 base_url: &base_url,
                 content: &content,
                 hls_url: response_url,
+                target_id,
                 virtual_id,
                 input_id: input.id,
                 user_token: session_token.as_deref(),
@@ -367,8 +370,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
 
             let custom_stream_response = app_state.app_config.custom_stream_response.load();
             if custom_stream_response.as_ref().and_then(|c| c.channel_unavailable.as_ref()).is_some() {
+                let custom_stream_token = create_access_token(&app_state.app_config.access_token_secret, 30);
                 let url = format!(
-                    "{}/{CUSTOM_VIDEO_PREFIX}/{}/{}/{}.ts",
+                    "{}/{CUSTOM_VIDEO_PREFIX}/{}/{}/{}.ts?token={custom_stream_token}",
                     server_info.get_base_url(),
                     user.username,
                     user.password,
@@ -449,19 +453,55 @@ async fn hls_api_stream(
     axum::extract::Path(params): axum::extract::Path<HlsApiPathParams>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let Some((user, target)) = app_state.app_config.get_target_for_user(&params.username, &params.password) else {
-        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    let api_proxy_user = create_api_proxy_user(&app_state);
+    let (user, target) = if params.username == api_proxy_user.username && params.password == api_proxy_user.password {
+        let Some(target) = app_state.app_config.get_target_by_id(params.target_id) else {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        };
+        (Arc::new(api_proxy_user), target)
+    } else {
+        let Some((user, target)) = app_state.app_config.get_target_for_user(&params.username, &params.password) else {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        };
+        if target.id != params.target_id {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+        (user, target)
     };
+    hls_api_stream_resolved(
+        fingerprint,
+        req_headers,
+        app_state,
+        user,
+        target,
+        params.input_id,
+        params.stream_id,
+        params.token,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn hls_api_stream_resolved(
+    fingerprint: Fingerprint,
+    req_headers: HeaderMap,
+    app_state: Arc<AppState>,
+    user: Arc<ProxyUserCredentials>,
+    target: Arc<ConfigTarget>,
+    input_id: u16,
+    stream_id: u32,
+    token: String,
+) -> axum::response::Response {
     // Network access check only - permission check is done later with full stream info
     if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state) {
         return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
     let target_name = &target.name;
-    let virtual_id = params.stream_id;
+    let virtual_id = stream_id;
     let input = try_option_bad_request!(
-        app_state.app_config.get_input_by_id(params.input_id),
+        app_state.app_config.get_input_by_id(input_id),
         true,
-        format!("Can't find input {} for target {target_name}, stream_id {virtual_id}, hls", params.input_id)
+        format!("Can't find input {} for target {target_name}, stream_id {virtual_id}, hls", input_id)
     );
 
     if user.permission_denied(&app_state) {
@@ -477,9 +517,9 @@ async fn hls_api_stream(
         );
     }
 
-    debug_if_enabled!("ID chain for hls endpoint: request_stream_id={} -> virtual_id={virtual_id}", params.stream_id);
+    debug_if_enabled!("ID chain for hls endpoint: request_stream_id={stream_id} -> virtual_id={virtual_id}");
     let encrypt_secret = app_state.get_encrypt_secret();
-    let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, &params.token) else {
+    let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, &token) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
     let lookup_session_token = decoded_hls_token
@@ -610,6 +650,7 @@ async fn hls_api_stream(
                 &fingerprint,
                 &app_state,
                 &user,
+                target.id,
                 Some(session),
                 &session.stream_url,
                 archive_reference,
@@ -666,7 +707,7 @@ async fn hls_api_stream(
 
 pub fn hls_api_register() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
-        .route("/hls/{username}/{password}/{input_id}/{stream_id}/{token}", axum::routing::get(hls_api_stream))
+        .route("/hls/{username}/{password}/{target_id}/{input_id}/{stream_id}/{token}", axum::routing::get(hls_api_stream))
     //cfg.service(web::resource("/hls/{token}/{stream}").route(web::get().to(xtream_player_api_hls_stream)));
     //cfg.service(web::resource("/play/{token}/{type}").route(web::get().to(xtream_player_api_play_stream)));
 }

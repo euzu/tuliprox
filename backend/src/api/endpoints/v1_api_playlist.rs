@@ -1,14 +1,15 @@
 use crate::api::api_utils::resource_response;
 use crate::{api::{
-    api_utils::{create_api_proxy_user, json_or_bin_response},
+    api_utils::{create_api_proxy_user, json_or_bin_response, try_option_bad_request, try_result_bad_request},
     endpoints::{
         api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
         extract_accept_header::ExtractAcceptHeader,
+        m3u_api::m3u_api_stream_loaded,
         xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui, stream_epg_api},
-        xtream_api::xtream_get_stream_info_response,
+        xtream_api::{xtream_get_stream_info_response, xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest},
     },
     model::AppState,
-}, auth::{create_access_token, permission_layer}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, processing::parser::xmltv::merge_epg_channels_by_priority, repository::xtream_get_item_for_stream_id, utils::{epg::get_input_raw_epg_file_path, file_exists_async}};
+}, auth::{create_access_token, permission_layer, verify_access_token}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, processing::parser::xmltv::merge_epg_channels_by_priority, repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id}, utils::{epg::get_input_raw_epg_file_path, file_exists_async}};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
@@ -21,7 +22,7 @@ use shared::{
     },
     utils::{concat_path_leading_slash, sanitize_sensitive_info, Internable},
 };
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 use url::Url;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
@@ -112,7 +113,7 @@ fn build_playlist_webplayer_url(
     cluster: XtreamCluster,
 ) -> String {
     format!(
-        "{base_url}/token/{access_token}/{}/{}/{}",
+        "{base_url}/api/v1/playlist/webplayer/{access_token}/{}/{}/{}",
         target_id,
         cluster.as_stream_type(),
         virtual_id
@@ -374,6 +375,55 @@ fn playlist_webplayer(
     build_playlist_webplayer_url(&base_url, &access_token, target_id, virtual_id, cluster).into_response()
 }
 
+async fn playlist_webplayer_stream(
+    fingerprint: crate::auth::Fingerprint,
+    axum::extract::Path((token, target_id, cluster, stream_id)): axum::extract::Path<(String, u16, String, String)>,
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    req_headers: axum::http::HeaderMap,
+) -> impl IntoResponse + Send {
+    if !verify_access_token(&token, &app_state.app_config.access_token_secret) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    let ctxt = try_result_bad_request!(ApiStreamContext::from_str(cluster.as_str()));
+    let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+
+    if target.has_output(TargetType::Xtream) {
+        return xtream_player_api_stream_with_token(
+            &fingerprint,
+            &req_headers,
+            &app_state,
+            target_id,
+            ApiStreamRequest::from_access_token(ctxt, &token, &stream_id, ""),
+        )
+        .await
+        .into_response();
+    }
+
+    if !target.has_output(TargetType::M3u) {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
+
+    let req_virtual_id: u32 = try_result_bad_request!(stream_id.trim().parse());
+    let pli = try_result_bad_request!(
+        m3u_get_item_for_stream_id(req_virtual_id, &app_state, &target).await,
+        true,
+        format!("Failed to read m3u item for stream id {req_virtual_id}")
+    );
+    let input = try_option_bad_request!(
+        app_state.app_config.get_input_by_name(&pli.input_name),
+        true,
+        format!("Can't find input {} for target {}", pli.input_name, target.name)
+    );
+    let user = Arc::new(create_api_proxy_user(&app_state));
+
+    m3u_api_stream_loaded(user, target, &fingerprint, &req_headers, &app_state, pli, input, None, None)
+        .await
+        .into_response()
+}
+
 async fn playlist_epg(
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
@@ -498,7 +548,12 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
 pub fn v1_api_playlist_register_public(
     router: Router<Arc<AppState>>,
 ) -> axum::Router<Arc<AppState>> {
-    router.route("/playlist/resource/{resource}", axum::routing::get(playlist_resource))
+    router
+        .route("/playlist/resource/{resource}", axum::routing::get(playlist_resource))
+        .route(
+            "/playlist/webplayer/{token}/{target_id}/{cluster}/{stream_id}",
+            axum::routing::get(playlist_webplayer_stream),
+        )
 }
 
 pub fn v1_api_playlist_register_with_permissions(
@@ -898,9 +953,9 @@ mod tests {
         let series =
             super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Series);
 
-        assert_eq!(live, "http://player.example/token/token123/1/live/42");
-        assert_eq!(movie, "http://player.example/token/token123/1/movie/42");
-        assert_eq!(series, "http://player.example/token/token123/1/series/42");
+        assert_eq!(live, "http://player.example/api/v1/playlist/webplayer/token123/1/live/42");
+        assert_eq!(movie, "http://player.example/api/v1/playlist/webplayer/token123/1/movie/42");
+        assert_eq!(series, "http://player.example/api/v1/playlist/webplayer/token123/1/series/42");
     }
 
     #[test]

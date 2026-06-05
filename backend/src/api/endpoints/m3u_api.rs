@@ -117,7 +117,7 @@ async fn m3u_api_post(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn m3u_api_stream_loaded(
+pub(in crate::api) async fn m3u_api_stream_loaded(
     user: Arc<ProxyUserCredentials>,
     target: Arc<ConfigTarget>,
     fingerprint: &Fingerprint,
@@ -342,6 +342,7 @@ async fn m3u_api_stream_loaded(
             fingerprint,
             app_state,
             &user,
+            target.id,
             user_session.as_ref(),
             &pli.url,
             archive_reference,
