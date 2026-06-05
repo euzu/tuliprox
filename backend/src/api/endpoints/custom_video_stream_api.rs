@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cvs_api_accepts_internal_api_proxy_user_for_channel_unavailable() {
+    async fn cvs_api_internal_api_proxy_user_returns_bad_request_for_channel_unavailable() {
         let app_state = create_test_app_state();
         let router = cvs_api_register().with_state(app_state);
         let token = crate::auth::create_access_token(&[0; 32], 30);
