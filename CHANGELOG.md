@@ -301,6 +301,9 @@
 
 ## 🐛 Fixes
 
+- **EPG Output Selection In Mixed Targets**: Fixed ambiguous EPG file selection when a target exposes both Xtream and M3U outputs.
+  - Web UI playlist EPG and stream EPG APIs now explicitly prefer M3U EPG data and fall back to Xtream when M3U EPG is unavailable.
+  - Xtream short-EPG now explicitly resolves Xtream EPG data.
 - **Async Local File Serving**: The local-file stream handler now canonicalizes paths with `tokio::fs::canonicalize`
   instead of the blocking `std` call, so the async runtime is no longer blocked while resolving the file path.
 - **Template Expansion Efficiency**: Optimized `template.yml` / `template.d` multi-template expansion so sequence-style templates no longer

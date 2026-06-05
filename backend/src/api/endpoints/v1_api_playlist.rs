@@ -433,7 +433,19 @@ async fn playlist_epg(
         PlaylistEpgRequest::Target(target_id) => {
             if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
                 let config = &app_state.app_config.config.load();
-                if let Some(epg_path) = crate::api::endpoints::xmltv_api::get_epg_path_for_target(config, &target) {
+                let epg_path = crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
+                    config,
+                    &target,
+                    TargetType::M3u,
+                )
+                .or_else(|| {
+                    crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
+                        config,
+                        &target,
+                        TargetType::Xtream,
+                    )
+                });
+                if let Some(epg_path) = epg_path {
                     return serve_epg_web_ui(&app_state, accept.as_deref(), &epg_path, &target).await;
                 }
             }
