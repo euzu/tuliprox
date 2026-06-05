@@ -1,5 +1,3 @@
-use chrono::TimeZone;
-
 pub fn format_duration(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
@@ -37,28 +35,19 @@ pub fn format_transferred(total_kb: u32) -> String { format_rate_unit(total_kb, 
 
 /// Format a UTC unix timestamp as "YYYY-MM-DD HH:MM:SS" in the browser's local timezone.
 pub fn format_ts(ts: u64) -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64 * 1000.0));
-        if !date.get_time().is_finite() {
-            return ts.to_string();
-        }
-        return format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            date.get_full_year(),
-            date.get_month() + 1,
-            date.get_date(),
-            date.get_hours(),
-            date.get_minutes(),
-            date.get_seconds()
-        );
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64 * 1000.0));
+    if !date.get_time().is_finite() {
+        return ts.to_string();
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        chrono::DateTime::from_timestamp(ts as i64, 0)
-            .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| ts.to_string())
-    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        date.get_full_year(),
+        date.get_month() + 1,
+        date.get_date(),
+        date.get_hours(),
+        date.get_minutes(),
+        date.get_seconds()
+    )
 }
 
 /// Convert a calendar date encoded as a UTC-midnight timestamp to the matching
@@ -68,35 +57,25 @@ pub fn format_local_day_boundary_utc(ts: i64, end_of_day: bool) -> String {
         return String::new();
     };
 
-    #[cfg(target_arch = "wasm32")]
-    {
-        let Ok(year) = u32::try_from(chrono::Datelike::year(&date)) else {
-            return String::new();
-        };
-        let (hour, minute, second) = if end_of_day { (23, 59, 59) } else { (0, 0, 0) };
-        let local = js_sys::Date::new_with_year_month_day_hr_min_sec(
-            year,
-            chrono::Datelike::month0(&date).cast_signed(),
-            chrono::Datelike::day(&date).cast_signed(),
-            hour,
-            minute,
-            second,
-        );
-        let utc_millis = local.get_time();
-        if !utc_millis.is_finite() {
-            return String::new();
-        }
-        let utc_ts = (utc_millis / 1000.0) as i64;
-        return chrono::DateTime::from_timestamp(utc_ts, 0)
-            .map_or_else(String::new, |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    let Ok(year) = u32::try_from(chrono::Datelike::year(&date)) else {
+        return String::new();
+    };
+    let (hour, minute, second) = if end_of_day { (23, 59, 59) } else { (0, 0, 0) };
+    let local = js_sys::Date::new_with_year_month_day_hr_min_sec(
+        year,
+        chrono::Datelike::month0(&date).cast_signed(),
+        chrono::Datelike::day(&date).cast_signed(),
+        hour,
+        minute,
+        second,
+    );
+    let utc_millis = local.get_time();
+    if !utc_millis.is_finite() {
+        return String::new();
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let time = if end_of_day { (23, 59, 59) } else { (0, 0, 0) };
-        date.and_hms_opt(time.0, time.1, time.2)
-            .and_then(|ndt| chrono::Local.from_local_datetime(&ndt).earliest())
-            .map_or_else(String::new, |dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string())
-    }
+    let utc_ts = (utc_millis / 1000.0) as i64;
+    chrono::DateTime::from_timestamp(utc_ts, 0)
+        .map_or_else(String::new, |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -116,8 +95,9 @@ pub fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bandwidth, format_local_day_boundary_utc, format_transferred};
-    use chrono::TimeZone;
+    #[cfg(target_arch = "wasm32")]
+    use super::format_local_day_boundary_utc;
+    use super::{format_bandwidth, format_transferred};
 
     fn format_local_with_offset(ts: i64, js_offset_minutes_west: i32, fmt: &str) -> String {
         let utc = match chrono::DateTime::from_timestamp(ts, 0) {
@@ -251,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn format_local_day_boundary_utc_uses_calendar_date() {
         let date_key = utc_ts(2026, 3, 23, 0, 0, 0);
         // The function extracts the calendar date from the UTC timestamp, then

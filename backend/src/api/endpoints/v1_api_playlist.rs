@@ -1,6 +1,6 @@
 use crate::api::api_utils::resource_response;
 use crate::{api::{
-    api_utils::{create_api_proxy_user, json_or_bin_response, try_option_bad_request, try_result_bad_request},
+    api_utils::{create_api_proxy_user, json_or_bin_response, try_option_bad_request, try_result_bad_request, try_unwrap_body},
     endpoints::{
         api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
         extract_accept_header::ExtractAcceptHeader,

@@ -28,7 +28,7 @@ use shared::{
     concat_string,
     model::{
         EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry, StreamEpgItemRequest,
-        StreamEpgRequest, StreamEpgResponse,
+        StreamEpgRequest, StreamEpgResponse, TargetType,
     },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
@@ -40,7 +40,6 @@ use std::{
 use tokio::{io::AsyncWriteExt, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
-use shared::model::TargetType;
 use crate::auth::resolve_api_user_context;
 use crate::model::ApiProxyServerInfo;
 
@@ -859,7 +858,7 @@ mod tests {
         let m3u_epg = crate::repository::m3u_get_epg_file_path_for_target(&m3u_storage);
 
         fs::create_dir_all(xtream_storage).expect("create xtream dir");
-        fs::create_dir_all(m3u_storage).expect("create m3u dir");
+        fs::create_dir_all(m3u_epg.parent().expect("m3u epg parent")).expect("create m3u dir");
         fs::write(&xtream_epg, b"xtream").expect("write xtream epg");
         fs::write(&m3u_epg, b"m3u").expect("write m3u epg");
 
@@ -882,7 +881,7 @@ mod tests {
         let m3u_epg = crate::repository::m3u_get_epg_file_path_for_target(&m3u_storage);
 
         fs::create_dir_all(xtream_storage).expect("create xtream dir");
-        fs::create_dir_all(m3u_storage).expect("create m3u dir");
+        fs::create_dir_all(m3u_epg.parent().expect("m3u epg parent")).expect("create m3u dir");
         fs::write(&xtream_epg, b"xtream").expect("write xtream epg");
         fs::write(&m3u_epg, b"m3u").expect("write m3u epg");
 

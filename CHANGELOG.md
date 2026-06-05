@@ -327,6 +327,9 @@
 
 ## ⚙️ New Settings
 
+- **config.yml (main)**:
+  - Added `interner_gc_interval_secs`: interval in seconds between background string interner GC checks.
+  - Added `interner_gc_min_pool_size`: minimum interned-string pool size required before background interner GC runs.
 - **config.yml (`reverse_proxy.stream`)**:
   - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
     Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  

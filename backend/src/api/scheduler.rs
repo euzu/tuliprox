@@ -294,23 +294,23 @@ pub fn get_process_targets(
     Arc::clone(process_targets)
 }
 
-// TODO Consider making the GC interval configurable.
-// The 180-second interval is hardcoded. For deployments with different memory/performance characteristics, a configurable interval might be useful.
-
-/// Minimum number of interned strings required before GC runs.
-/// Below this threshold the write-lock overhead outweighs the benefit.
-const INTERNER_GC_MIN_POOL_SIZE: usize = 100;
-
 pub fn exec_interner_prune(app_state: &Arc<AppState>) {
     let app_state = Arc::clone(app_state);
     tokio::spawn({
         async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(180)).await;
+                let (interval_secs, min_pool_size) = {
+                    let config = app_state.app_config.config.load();
+                    (
+                        u64::from(config.interner_gc_interval_secs),
+                        usize::try_from(config.interner_gc_min_pool_size).unwrap_or(usize::MAX),
+                    )
+                };
+                tokio::time::sleep(Duration::from_secs(interval_secs)).await;
                 // Skip GC entirely when the pool is too small — acquiring a write
                 // lock on the global interner briefly blocks all concurrent interns,
                 // so the cost only pays off when there are enough strings to clean.
-                if interner_len() < INTERNER_GC_MIN_POOL_SIZE {
+                if interner_len() < min_pool_size {
                     continue;
                 }
                 if let Some(permit) = app_state.update_guard.try_playlist() {

@@ -7,14 +7,15 @@ use crate::{
     },
     utils::{
         default_connect_timeout_secs, default_custom_stream_response_path, default_default_user_agent,
-        default_main_backup_dir, default_main_mapping_path, default_main_storage_dir, default_main_template_path,
-        default_main_user_config_dir, default_supported_video_extensions, is_blank_optional_string,
-        is_blank_or_default_backup_dir, is_blank_or_default_custom_stream_response_path,
-        is_blank_or_default_mapping_path, is_blank_or_default_storage_dir, is_blank_or_default_template_path,
-        is_blank_or_default_user_config_dir, is_default_connect_timeout_secs, is_false,
-        is_none_or_empty_metadata_update, is_none_or_empty_video, is_zero_u32, normalize_optional_config_file_path,
-        normalize_optional_dir, DEFAULT_BACKUP_DIR, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR,
-        DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
+        default_interner_gc_interval_secs, default_interner_gc_min_pool_size, default_main_backup_dir,
+        default_main_mapping_path, default_main_storage_dir, default_main_template_path, default_main_user_config_dir,
+        default_supported_video_extensions, is_blank_optional_string, is_blank_or_default_backup_dir,
+        is_blank_or_default_custom_stream_response_path, is_blank_or_default_mapping_path,
+        is_blank_or_default_storage_dir, is_blank_or_default_template_path, is_blank_or_default_user_config_dir,
+        is_default_connect_timeout_secs, is_default_interner_gc_interval_secs, is_default_interner_gc_min_pool_size,
+        is_false, is_none_or_empty_metadata_update, is_none_or_empty_video, is_zero_u32,
+        normalize_optional_config_file_path, normalize_optional_dir, DEFAULT_BACKUP_DIR,
+        DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR, DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
     },
 };
 
@@ -56,6 +57,16 @@ pub struct ConfigDto {
     pub user_access_control: bool,
     #[serde(default = "default_connect_timeout_secs", skip_serializing_if = "is_default_connect_timeout_secs")]
     pub connect_timeout_secs: u32,
+    #[serde(
+        default = "default_interner_gc_interval_secs",
+        skip_serializing_if = "is_default_interner_gc_interval_secs"
+    )]
+    pub interner_gc_interval_secs: u32,
+    #[serde(
+        default = "default_interner_gc_min_pool_size",
+        skip_serializing_if = "is_default_interner_gc_min_pool_size"
+    )]
+    pub interner_gc_min_pool_size: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_timer_mins: Option<u32>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -101,6 +112,8 @@ impl Default for ConfigDto {
             log: None,
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
+            interner_gc_interval_secs: default_interner_gc_interval_secs(),
+            interner_gc_min_pool_size: default_interner_gc_min_pool_size(),
             sleep_timer_mins: None,
             update_on_boot: false,
             config_hot_reload: false,
@@ -145,6 +158,16 @@ pub struct MainConfigDto {
     pub disk_based_processing: bool,
     #[serde(default = "default_connect_timeout_secs", skip_serializing_if = "is_default_connect_timeout_secs")]
     pub connect_timeout_secs: u32,
+    #[serde(
+        default = "default_interner_gc_interval_secs",
+        skip_serializing_if = "is_default_interner_gc_interval_secs"
+    )]
+    pub interner_gc_interval_secs: u32,
+    #[serde(
+        default = "default_interner_gc_min_pool_size",
+        skip_serializing_if = "is_default_interner_gc_min_pool_size"
+    )]
+    pub interner_gc_min_pool_size: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep_timer_mins: Option<u32>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -170,6 +193,8 @@ impl Default for MainConfigDto {
             custom_stream_response_timeout_secs: 0,
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
+            interner_gc_interval_secs: default_interner_gc_interval_secs(),
+            interner_gc_min_pool_size: default_interner_gc_min_pool_size(),
             sleep_timer_mins: None,
             update_on_boot: false,
             config_hot_reload: false,
@@ -193,6 +218,8 @@ impl From<&ConfigDto> for MainConfigDto {
             custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
             user_access_control: config.user_access_control,
             connect_timeout_secs: config.connect_timeout_secs,
+            interner_gc_interval_secs: config.interner_gc_interval_secs,
+            interner_gc_min_pool_size: config.interner_gc_min_pool_size,
             sleep_timer_mins: config.sleep_timer_mins,
             update_on_boot: config.update_on_boot,
             config_hot_reload: config.config_hot_reload,
@@ -249,6 +276,9 @@ impl ConfigDto {
             if mins == 0 {
                 return Err(TuliproxError::ConfigBase("`sleep_timer_mins` must be > 0 when specified".to_string()));
             }
+        }
+        if self.interner_gc_interval_secs == 0 {
+            return Err(TuliproxError::ConfigBase("`interner_gc_interval_secs` must be > 0".to_string()));
         }
 
         self.prepare_web()?;
@@ -364,6 +394,8 @@ impl ConfigDto {
         self.custom_stream_response_timeout_secs = main_config.custom_stream_response_timeout_secs;
         self.user_access_control = main_config.user_access_control;
         self.connect_timeout_secs = main_config.connect_timeout_secs;
+        self.interner_gc_interval_secs = main_config.interner_gc_interval_secs;
+        self.interner_gc_min_pool_size = main_config.interner_gc_min_pool_size;
         self.sleep_timer_mins = main_config.sleep_timer_mins;
         self.update_on_boot = main_config.update_on_boot;
         self.config_hot_reload = main_config.config_hot_reload;
@@ -387,6 +419,8 @@ mod tests {
     fn default_uses_connect_timeout_default_value() {
         let cfg = ConfigDto::default();
         assert_eq!(cfg.connect_timeout_secs, default_connect_timeout_secs());
+        assert_eq!(cfg.interner_gc_interval_secs, default_interner_gc_interval_secs());
+        assert_eq!(cfg.interner_gc_min_pool_size, default_interner_gc_min_pool_size());
     }
 
     #[test]
