@@ -1,4 +1,5 @@
 pub mod api_utils;
+mod http_layers;
 pub mod model;
 mod panel_api;
 pub mod setup_api;

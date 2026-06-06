@@ -784,3 +784,10 @@ macro_rules! generate_form_reducer {
         }
     };
 }
+
+#[macro_export]
+macro_rules! use_default_form_reducer {
+    ($state_name:ident { $data_field:ident: $value:expr }) => {
+        use_reducer(|| $state_name { $data_field: $value, modified: false })
+    };
+}

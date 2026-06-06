@@ -9,6 +9,7 @@ use crate::{
     },
     config_field_empty, config_field_optional, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::model::IpCheckConfigDto;
 use yew::prelude::*;
@@ -37,7 +38,7 @@ pub fn IpCheckConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
     let form_state: UseReducerHandle<IpCheckConfigFormState> =
-        use_reducer(|| IpCheckConfigFormState { form: IpCheckConfigDto::default(), modified: false });
+        use_default_form_reducer!(IpCheckConfigFormState { form: IpCheckConfigDto::default() });
 
     {
         use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::IpCheck);

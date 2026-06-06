@@ -2173,7 +2173,7 @@ mod tests {
     ///
     /// This test exercises the full `stream_grace_period` path with:
     /// - `grace_kind = Some(Soft)` (passed directly from `create_active_client_stream`)
-    /// - `grace_resolution_context` pointing to [`GraceHoldStream`] (remaining slice is empty)
+    /// - `grace_resolution_context` pointing to `GraceHoldStream` (remaining slice is empty)
     /// - user-grace failure (deadline expires, user still at connection limit)
     /// - remaining strategies exhausted -> `expire_pending_provider` is called
     #[tokio::test(start_paused = true)]

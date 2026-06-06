@@ -1,4 +1,5 @@
 use crate::api::model::AppState;
+use crate::utils::parse_ascii_u64_bytes;
 use shared::model::SystemInfo;
 use std::{
     sync::Arc,
@@ -177,7 +178,7 @@ fn sum_sysinfo_network_bytes(networks: &sysinfo::Networks) -> (u64, u64) {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{CpuTracker, SystemInfo};
+    use super::{parse_ascii_u64_bytes, CpuTracker, SystemInfo};
     use log::debug;
     use std::{
         fs::{read, File},
@@ -279,15 +280,15 @@ mod platform {
         let fields = bytes.get(close_idx + 1..)?;
         let mut parts = split_ascii_whitespace(fields);
         let _state = parts.next()?;
-        let utime = parse_u64_token(parts.nth(10)?)?;
-        let stime = parse_u64_token(parts.next()?)?;
+        let utime = parse_ascii_u64_bytes(parts.nth(10)?)?;
+        let stime = parse_ascii_u64_bytes(parts.next()?)?;
         Some((utime, stime))
     }
 
     pub(super) fn parse_linux_proc_statm(bytes: &[u8]) -> Option<u64> {
         let mut parts = split_ascii_whitespace(bytes);
         let _size = parts.next()?;
-        parse_u64_token(parts.next()?)
+        parse_ascii_u64_bytes(parts.next()?)
     }
 
     pub(super) fn parse_linux_mem_total_kib(bytes: &[u8]) -> Option<u64> {
@@ -295,23 +296,7 @@ mod platform {
             .split(|byte| *byte == b'\n')
             .find(|line| line.starts_with(b"MemTotal:"))
             .and_then(|line| split_ascii_whitespace(line).nth(1))
-            .and_then(parse_u64_token)
-    }
-
-    fn parse_u64_token(token: &[u8]) -> Option<u64> {
-        if token.is_empty() {
-            return None;
-        }
-
-        let mut value = 0_u64;
-        for byte in token {
-            if !byte.is_ascii_digit() {
-                return None;
-            }
-            value = value.checked_mul(10)?.checked_add(u64::from(byte - b'0'))?;
-        }
-
-        Some(value)
+            .and_then(parse_ascii_u64_bytes)
     }
 
     fn split_ascii_whitespace(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -334,11 +319,11 @@ mod platform {
                 None => continue,
             };
             let mut fields = split_ascii_whitespace(after_colon);
-            if let Some(rx) = fields.next().and_then(parse_u64_token) {
+            if let Some(rx) = fields.next().and_then(parse_ascii_u64_bytes) {
                 total_rx = total_rx.saturating_add(rx);
             }
             // field 8 = tx_bytes (skip fields 1..=7)
-            if let Some(tx) = fields.nth(7).and_then(parse_u64_token) {
+            if let Some(tx) = fields.nth(7).and_then(parse_ascii_u64_bytes) {
                 total_tx = total_tx.saturating_add(tx);
             }
         }

@@ -1,4 +1,4 @@
-use crate::{app::components::AppIcon, hooks::use_service_context, model::EventMessage};
+use crate::{app::components::AppIcon, hooks::use_websocket_status};
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq)]
@@ -6,22 +6,7 @@ pub struct WebsocketStatusProps {}
 
 #[component]
 pub fn WebsocketStatus(_props: &WebsocketStatusProps) -> Html {
-    let status = use_state(|| true);
-    let services = use_service_context();
-
-    {
-        let status_clone = status.clone();
-        use_effect_with((), move |_| {
-            let services_ctx = services.clone();
-            let status_clone = status_clone.clone();
-            let subid = services_ctx.event.subscribe(move |msg| {
-                if let EventMessage::WebSocketStatus(active) = msg {
-                    status_clone.set(active);
-                }
-            });
-            move || services_ctx.event.unsubscribe(subid)
-        });
-    }
+    let status = use_websocket_status();
 
     if *status {
         return html! { <></> };

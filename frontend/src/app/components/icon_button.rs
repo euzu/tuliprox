@@ -1,4 +1,4 @@
-use crate::app::components::AppIcon;
+use crate::app::components::{button_utils::prevent_default_and_stop, AppIcon};
 use web_sys::MouseEvent;
 use yew::{classes, component, html, Callback, Html, NodeRef, Properties};
 
@@ -24,10 +24,8 @@ pub fn IconButton(props: &IconButtonProps) -> Html {
     let handle_click = {
         let click = props.onclick.clone();
         let name = props.name.clone();
-        Callback::from(move |e: MouseEvent| {
-            e.prevent_default();
-            e.stop_propagation();
-            click.emit((name.clone(), e));
+        prevent_default_and_stop::<(), _>(move |event: MouseEvent| {
+            click.emit((name.clone(), event));
         })
     };
 

@@ -2,7 +2,7 @@ use crate::media_server::redaction::redact_media_server_text;
 use reqwest::StatusCode;
 use std::{error::Error, fmt};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaServerErrorKind {
     MediaServerAuthDenied,
     MediaServerUnavailable,

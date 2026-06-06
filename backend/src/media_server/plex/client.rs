@@ -4,10 +4,10 @@ use crate::media_server::plex::mapper::{
     plex_video_to_episode, plex_video_to_movie,
 };
 use crate::media_server::{
-    MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
-    MediaServerImageRef, MediaServerKind, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage,
-    MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus,
-    MediaServerStreamRef, MediaServerStreamResponse,
+    encode_url_path_segment, MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind,
+    MediaServerHttpClient, MediaServerImageRef, MediaServerKind, MediaServerLibrary, MediaServerLibraryRef,
+    MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason,
+    MediaServerSeries, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
 };
 use crate::model::{ConfigInput, MediaServerInputConfig};
 use futures::{StreamExt, TryStreamExt};
@@ -18,7 +18,6 @@ use serde::Deserialize;
 use shared::model::{InputType, MediaServerLibrarySelector};
 use std::{
     collections::HashMap,
-    fmt::Write as _,
     sync::{Arc, LazyLock},
 };
 use tokio::sync::Mutex;
@@ -704,78 +703,71 @@ fn pms_url(base_url: &Arc<str>, path: &str) -> Result<String, MediaServerError> 
 }
 
 fn pms_part_url(base_url: &Arc<str>, part_key: &str) -> Result<String, MediaServerError> {
-    let part_key = non_blank(part_key).ok_or_else(|| {
-        MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
-            .provider("plex")
-            .detail("Plex stream ref is missing part_key")
-    })?;
-    if !part_key.starts_with("/library/parts/") || part_key.starts_with("//") || part_key.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
-            .provider("plex")
-            .detail("Plex part_key is not a direct part resource"));
-    }
-
-    let base = Url::parse(base_url).map_err(|_| plex_invalid_pms_url())?;
-    let expected_origin = base.origin().ascii_serialization();
-    let url = base.join(part_key).map_err(|_| {
-        MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
-            .provider("plex")
-            .detail("Plex part_key could not be resolved against the selected PMS")
-    })?;
-    if url.origin().ascii_serialization() != expected_origin || url.fragment().is_some() {
-        return Err(MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
-            .provider("plex")
-            .detail("Plex part_key did not resolve to the selected PMS origin"));
-    }
-    if !url.path().starts_with("/library/parts/") {
-        return Err(MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
-            .provider("plex")
-            .detail("Plex part_key did not resolve to a direct part resource"));
-    }
-    if url.query_pairs().any(|(name, _)| is_sensitive_plex_part_query_name(&name)) {
-        return Err(MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
-            .provider("plex")
-            .detail("Plex part_key must not carry credential query parameters"));
-    }
-    Ok(url.to_string())
+    resolve_pms_resource_url(
+        base_url,
+        part_key,
+        "/library/parts/",
+        MediaServerErrorKind::NoDirectPlayableMediaServerSource,
+        "part_key",
+    )
 }
 
 fn pms_image_url(base_url: &Arc<str>, image_path: &str) -> Result<String, MediaServerError> {
-    let image_path = non_blank(image_path).ok_or_else(|| {
-        MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+    resolve_pms_resource_url(
+        base_url,
+        image_path,
+        "/library/metadata/",
+        MediaServerErrorKind::MediaServerItemNotFound,
+        "image_path",
+    )
+}
+
+/// Shared body of `pms_part_url` and `pms_image_url`. Both resolve a path
+/// from `base_url`, validate the same origin/prefix/credential invariants, and
+/// only differ in the expected PMS path prefix, the `MediaServerErrorKind`
+/// they surface, and the human-readable field name used in error details.
+fn resolve_pms_resource_url(
+    base_url: &Arc<str>,
+    resource_path: &str,
+    expected_prefix: &str,
+    error_kind: MediaServerErrorKind,
+    field_name: &str,
+) -> Result<String, MediaServerError> {
+    let resource_path = non_blank(resource_path).ok_or_else(|| {
+        MediaServerError::new(error_kind)
             .provider("plex")
-            .detail("Plex image ref is missing image_path")
+            .detail(format!("Plex {field_name} is missing"))
     })?;
-    if !image_path.starts_with("/library/metadata/")
-        || image_path.starts_with("//")
-        || image_path.bytes().any(|byte| byte.is_ascii_control())
+    if !resource_path.starts_with(expected_prefix)
+        || resource_path.starts_with("//")
+        || resource_path.bytes().any(|byte| byte.is_ascii_control())
     {
-        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+        return Err(MediaServerError::new(error_kind)
             .provider("plex")
-            .detail("Plex image_path is not a metadata image resource"));
+            .detail(format!("Plex {field_name} is not a {expected_prefix} resource")));
     }
 
     let base = Url::parse(base_url).map_err(|_| plex_invalid_pms_url())?;
     let expected_origin = base.origin().ascii_serialization();
-    let url = base.join(image_path).map_err(|_| {
-        MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+    let url = base.join(resource_path).map_err(|_| {
+        MediaServerError::new(error_kind)
             .provider("plex")
-            .detail("Plex image_path could not be resolved against the selected PMS")
+            .detail(format!("Plex {field_name} could not be resolved against the selected PMS"))
     })?;
     if url.origin().ascii_serialization() != expected_origin || url.fragment().is_some() {
-        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+        return Err(MediaServerError::new(error_kind)
             .provider("plex")
-            .detail("Plex image_path did not resolve to the selected PMS origin"));
+            .detail(format!("Plex {field_name} did not resolve to the selected PMS origin")));
     }
-    if !url.path().starts_with("/library/metadata/") {
-        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+    if !url.path().starts_with(expected_prefix) {
+        return Err(MediaServerError::new(error_kind)
             .provider("plex")
-            .detail("Plex image_path did not resolve to a metadata image resource"));
+            .detail(format!("Plex {field_name} did not resolve to a {expected_prefix} resource")));
     }
     if url.query_pairs().any(|(name, _)| is_sensitive_plex_part_query_name(&name)) {
-        return Err(MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+        return Err(MediaServerError::new(error_kind)
             .provider("plex")
-            .detail("Plex image_path must not carry credential query parameters"));
+            .detail(format!("Plex {field_name} must not carry credential query parameters")));
     }
     Ok(url.to_string())
 }
@@ -797,18 +789,6 @@ fn append_query_pair(url: &mut String, key: &str, value: &str) {
     url.push_str(key);
     url.push('=');
     url.push_str(value);
-}
-
-fn encode_url_path_segment(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(byte as char);
-        } else {
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
 }
 
 fn non_blank(value: &str) -> Option<&str> {
@@ -1045,6 +1025,47 @@ mod tests {
                 .expect_err("part refs must not carry credentials")
                 .kind,
             MediaServerErrorKind::NoDirectPlayableMediaServerSource
+        );
+    }
+
+    /// `pms_image_url` has the same origin/prefix/credential guards as
+    /// `pms_part_url`. This test mirrors the part-key coverage to lock in the
+    /// `MediaServerItemNotFound` error kind and to catch any future regression
+    /// in the shared `resolve_pms_resource_url` helper.
+    #[test]
+    fn pms_image_url_accepts_only_same_origin_metadata_images() {
+        let base = StdArc::<str>::from("http://127.0.0.1:32400/base");
+
+        assert_eq!(
+            pms_image_url(&base, "/library/metadata/rating-redacted/thumb?width=320").expect("image path resolves"),
+            "http://127.0.0.1:32400/library/metadata/rating-redacted/thumb?width=320"
+        );
+        assert_eq!(
+            pms_image_url(&base, "").expect_err("blank paths must be rejected").kind,
+            MediaServerErrorKind::MediaServerItemNotFound
+        );
+        assert_eq!(
+            pms_image_url(&base, "/library/parts/part-redacted/file.mkv")
+                .expect_err("part paths are not metadata images").kind,
+            MediaServerErrorKind::MediaServerItemNotFound
+        );
+        assert_eq!(
+            pms_image_url(&base, "//evil.example.invalid/library/metadata/rating-redacted/thumb")
+                .expect_err("network-path refs must not escape the selected PMS")
+                .kind,
+            MediaServerErrorKind::MediaServerItemNotFound
+        );
+        assert_eq!(
+            pms_image_url(&base, "/library/metadata/../../identity")
+                .expect_err("normalized paths must stay under metadata images")
+                .kind,
+            MediaServerErrorKind::MediaServerItemNotFound
+        );
+        assert_eq!(
+            pms_image_url(&base, "/library/metadata/rating-redacted/thumb?X-Plex-Token=should-not-leak")
+                .expect_err("image refs must not carry credentials")
+                .kind,
+            MediaServerErrorKind::MediaServerItemNotFound
         );
     }
 

@@ -3867,29 +3867,92 @@ struct RangeLeafIterator<'a, K, V> {
     exhausted: bool,
 }
 
+/// Generate the `new`, `load_leaf_from_node`, `skip_items`, and
+/// `key_past_end` methods for the `RangeLeafIterator` and
+/// `RangeLeafIteratorUpdate` impls. These four methods have byte-identical
+/// bodies across both iterators — they only touch shared fields (no
+/// `self.tree.mmap` branching, no `refresh_root_offset_if_due`).
+///
+/// The remaining methods (`initialize`, `descend_to_leaf`, `advance_leaf`)
+/// stay impl-specific because they differ: `BPlusTreeQuery` carries an `mmap`
+/// plus a `refresh_root_offset_if_due` hook that `BPlusTreeUpdate` lacks.
+///
+/// `$lt` is the lifetime token (`'a`) from the enclosing `impl<'a, ...>`
+/// block, threaded into the `new` signature so the function returns `Self`
+/// borrowing from the same lifetime.
+macro_rules! impl_range_leaf_common {
+    ($tree_ty:ty, $lt:tt) => {
+        fn new(tree: &$lt mut $tree_ty, start: Bound<K>, end: Bound<K>) -> Self {
+            Self {
+                tree,
+                start_bound: start,
+                end_bound: end,
+                stack: smallvec![],
+                current_leaf: None,
+                leaf_idx: 0,
+                initialized: false,
+                exhausted: false,
+            }
+        }
+
+        fn load_leaf_from_node(&mut self, node: BPlusTreeNode<K, V>, start_idx: usize) {
+            self.current_leaf = Some(node);
+            self.leaf_idx = start_idx;
+        }
+
+        fn key_past_end(&self, key: &K) -> bool {
+            match &self.end_bound {
+                Bound::Included(end) => key > end,
+                Bound::Excluded(end) => key >= end,
+                Bound::Unbounded => false,
+            }
+        }
+
+        fn skip_items(&mut self, mut remaining: usize) -> Result<(), BPlusTreeError> {
+            if remaining == 0 || self.exhausted {
+                return Ok(());
+            }
+            if !self.initialized {
+                self.initialize().map_err(BPlusTreeError::Io)?;
+            }
+
+            while remaining > 0 && !self.exhausted {
+                let Some(node) = self.current_leaf.as_ref() else {
+                    self.advance_leaf().map_err(BPlusTreeError::Io)?;
+                    continue;
+                };
+
+                while self.leaf_idx < node.keys.len() && remaining > 0 {
+                    let idx = self.leaf_idx;
+                    self.leaf_idx += 1;
+                    let key = &node.keys[idx];
+                    if self.key_past_end(key) {
+                        self.current_leaf = None;
+                        self.exhausted = true;
+                        return Ok(());
+                    }
+                    if self.tree.has_tombstones && node.value_info[idx].is_tombstone() {
+                        continue;
+                    }
+                    remaining -= 1;
+                }
+
+                if self.leaf_idx >= node.keys.len() {
+                    self.current_leaf = None;
+                }
+            }
+
+            Ok(())
+        }
+    };
+}
+
 impl<'a, K, V> RangeLeafIterator<'a, K, V>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
-    fn new(tree: &'a mut BPlusTreeQuery<K, V>, start: Bound<K>, end: Bound<K>) -> Self {
-        Self {
-            tree,
-            start_bound: start,
-            end_bound: end,
-            stack: smallvec![],
-            current_leaf: None,
-            leaf_idx: 0,
-            initialized: false,
-            exhausted: false,
-        }
-    }
-
-    fn load_leaf_from_node(&mut self, node: BPlusTreeNode<K, V>, start_idx: usize) {
-        self.current_leaf = Some(node);
-        self.leaf_idx = 0;
-        self.leaf_idx = start_idx;
-    }
+    impl_range_leaf_common!(BPlusTreeQuery<K, V>, 'a);
 
     fn descend_to_leaf(&mut self, mut offset: u64, mut start_key: Option<&K>) -> io::Result<()> {
         loop {
@@ -3936,43 +3999,6 @@ where
         }
     }
 
-    fn skip_items(&mut self, mut remaining: usize) -> Result<(), BPlusTreeError> {
-        if remaining == 0 || self.exhausted {
-            return Ok(());
-        }
-        if !self.initialized {
-            self.initialize().map_err(BPlusTreeError::Io)?;
-        }
-
-        while remaining > 0 && !self.exhausted {
-            let Some(node) = self.current_leaf.as_ref() else {
-                self.advance_leaf().map_err(BPlusTreeError::Io)?;
-                continue;
-            };
-
-            while self.leaf_idx < node.keys.len() && remaining > 0 {
-                let idx = self.leaf_idx;
-                self.leaf_idx += 1;
-                let key = &node.keys[idx];
-                if self.key_past_end(key) {
-                    self.current_leaf = None;
-                    self.exhausted = true;
-                    return Ok(());
-                }
-                if self.tree.has_tombstones && node.value_info[idx].is_tombstone() {
-                    continue;
-                }
-                remaining -= 1;
-            }
-
-            if self.leaf_idx >= node.keys.len() {
-                self.current_leaf = None;
-            }
-        }
-
-        Ok(())
-    }
-
     fn initialize(&mut self) -> io::Result<()> {
         if self.initialized {
             return Ok(());
@@ -4012,14 +4038,6 @@ where
 
         self.exhausted = true;
         Ok(())
-    }
-
-    fn key_past_end(&self, key: &K) -> bool {
-        match &self.end_bound {
-            Bound::Included(end) => key > end,
-            Bound::Excluded(end) => key >= end,
-            Bound::Unbounded => false,
-        }
     }
 }
 
@@ -4132,24 +4150,7 @@ where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
-    fn new(tree: &'a mut BPlusTreeUpdate<K, V>, start: Bound<K>, end: Bound<K>) -> Self {
-        Self {
-            tree,
-            start_bound: start,
-            end_bound: end,
-            stack: smallvec![],
-            current_leaf: None,
-            leaf_idx: 0,
-            initialized: false,
-            exhausted: false,
-        }
-    }
-
-    fn load_leaf_from_node(&mut self, node: BPlusTreeNode<K, V>, start_idx: usize) {
-        self.current_leaf = Some(node);
-        self.leaf_idx = 0;
-        self.leaf_idx = start_idx;
-    }
+    impl_range_leaf_common!(BPlusTreeUpdate<K, V>, 'a);
 
     fn descend_to_leaf(&mut self, mut offset: u64, mut start_key: Option<&K>) -> io::Result<()> {
         loop {
@@ -4194,43 +4195,6 @@ where
         }
     }
 
-    fn skip_items(&mut self, mut remaining: usize) -> Result<(), BPlusTreeError> {
-        if remaining == 0 || self.exhausted {
-            return Ok(());
-        }
-        if !self.initialized {
-            self.initialize().map_err(BPlusTreeError::Io)?;
-        }
-
-        while remaining > 0 && !self.exhausted {
-            let Some(node) = self.current_leaf.as_ref() else {
-                self.advance_leaf().map_err(BPlusTreeError::Io)?;
-                continue;
-            };
-
-            while self.leaf_idx < node.keys.len() && remaining > 0 {
-                let idx = self.leaf_idx;
-                self.leaf_idx += 1;
-                let key = &node.keys[idx];
-                if self.key_past_end(key) {
-                    self.current_leaf = None;
-                    self.exhausted = true;
-                    return Ok(());
-                }
-                if self.tree.has_tombstones && node.value_info[idx].is_tombstone() {
-                    continue;
-                }
-                remaining -= 1;
-            }
-
-            if self.leaf_idx >= node.keys.len() {
-                self.current_leaf = None;
-            }
-        }
-
-        Ok(())
-    }
-
     fn initialize(&mut self) -> io::Result<()> {
         if self.initialized {
             return Ok(());
@@ -4267,14 +4231,6 @@ where
 
         self.exhausted = true;
         Ok(())
-    }
-
-    fn key_past_end(&self, key: &K) -> bool {
-        match &self.end_bound {
-            Bound::Included(end) => key > end,
-            Bound::Excluded(end) => key >= end,
-            Bound::Unbounded => false,
-        }
     }
 }
 
@@ -4790,7 +4746,7 @@ where
     /// Opens an update handle with lock-acquisition backoff.
     ///
     /// This function is **blocking** and should not run directly on a Tokio worker
-    /// thread. Internally it delegates to [`Self::try_new_with_backoff_stats`],
+    /// thread. Internally it delegates to `Self::try_new_with_backoff_stats`,
     /// which uses `std::thread::sleep` while waiting for the file lock.
     ///
     /// In async contexts (Axum/Tokio), call this inside

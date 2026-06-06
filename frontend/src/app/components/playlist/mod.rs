@@ -15,6 +15,7 @@ mod playlist_settings_view;
 mod playlist_source_selector;
 mod playlist_update_view;
 mod processing;
+mod source_selector_common;
 mod target;
 mod target_table;
 

@@ -1,7 +1,8 @@
 use crate::{
     app::components::{
-        convert_bool_to_chip_style, AppIcon, BatchInputContentView, Chip, EpgConfigView, HideContent, InputHeaders,
-        InputOptions, InputTypeView, RevealContent, StagedInputView, Table, TableDefinition,
+        convert_bool_to_chip_style, make_translated_header_callback, AppIcon, BatchInputContentView, Chip,
+        EpgConfigView, HideContent, InputHeaders, InputOptions, InputTypeView, RevealContent, StagedInputView, Table,
+        TableDefinition,
     },
     html_if,
     i18n::use_translation,
@@ -46,20 +47,7 @@ pub struct InputTableProps {
 pub fn InputTable(props: &InputTableProps) -> Html {
     let translate = use_translation();
 
-    let render_header_cell = {
-        let translator = translate.clone();
-        Callback::<usize, Html>::from(move |col| {
-            html! {
-                {
-                    if col < HEADERS.len() {
-                       translator.t(HEADERS[col])
-                    } else {
-                      String::new()
-                    }
-               }
-            }
-        })
-    };
+    let render_header_cell = make_translated_header_callback(translate.clone(), &HEADERS);
 
     let render_data_cell = {
         let translator = translate.clone();

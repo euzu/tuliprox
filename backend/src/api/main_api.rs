@@ -17,6 +17,7 @@ use crate::{
         },
         hdhomerun_proprietary::spawn_proprietary_tasks,
         hdhomerun_ssdp::spawn_ssdp_discover_task,
+        http_layers::create_cors_layer,
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns,
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue,
@@ -439,18 +440,6 @@ fn is_web_auth_enabled(cfg: &Arc<Config>, web_ui_enabled: bool) -> bool {
     false
 }
 
-fn create_cors_layer() -> tower_http::cors::CorsLayer {
-    tower_http::cors::CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::OPTIONS,
-            axum::http::Method::HEAD,
-        ])
-        .allow_headers(tower_http::cors::Any)
-        .max_age(std::time::Duration::from_secs(3600))
-}
 fn allow_response_compression(
     _status: axum::http::StatusCode,
     _version: axum::http::Version,
@@ -515,7 +504,12 @@ pub(in crate::api) fn start_hdhomerun(
                     let connection_manager = Arc::clone(&app_data.connection_manager);
                     tokio::spawn(async move {
                         let router = axum::Router::<Arc<HdHomerunAppState>>::new()
-                            .layer(create_cors_layer())
+                            .layer(create_cors_layer([
+                                axum::http::Method::GET,
+                                axum::http::Method::POST,
+                                axum::http::Method::OPTIONS,
+                                axum::http::Method::HEAD,
+                            ]))
                             .layer(create_compression_layer())
                             .merge(hdhr_api_register(basic_auth));
 
@@ -659,8 +653,15 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         router = router.merge(index_register_without_path(&web_dir_path));
     }
 
-    router =
-        router.layer(axum::middleware::from_fn(log_req)).layer(create_cors_layer()).layer(create_compression_layer());
+    router = router
+        .layer(axum::middleware::from_fn(log_req))
+        .layer(create_cors_layer([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+            axum::http::Method::HEAD,
+        ]))
+        .layer(create_compression_layer());
 
     let router: axum::Router<()> = router.with_state(shared_data.clone());
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))

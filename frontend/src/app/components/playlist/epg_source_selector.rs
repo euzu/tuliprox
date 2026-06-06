@@ -1,7 +1,9 @@
 use crate::{
     app::components::{
-        collect_provider_buttons, input::Input, Card, CollapsePanel, Panel, PlaylistContext, RadioButtonGroup,
-        TextButton,
+        collect_provider_buttons,
+        input::Input,
+        playlist::source_selector_common::{build_source_type_options, source_selection_callback, submit_on_enter},
+        Card, CollapsePanel, Panel, PlaylistContext, RadioButtonGroup, TextButton,
     },
     hooks::use_service_context,
     html_if,
@@ -9,7 +11,7 @@ use crate::{
     model::ExplorerSourceType,
 };
 use shared::{model::PlaylistEpgRequest, utils::Internable};
-use std::{rc::Rc, str::FromStr};
+use std::rc::Rc;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
@@ -29,23 +31,13 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
     let active_source = use_state(|| ExplorerSourceType::Hosted);
     let url_ref = use_node_ref();
     let source_types = use_memo(props.source_types.clone(), |st| {
-        let st = st.as_ref().map(|v| v.as_slice()).unwrap_or(&[
-            ExplorerSourceType::Hosted,
-            /*ExplorerSourceType::Provider,*/ ExplorerSourceType::Custom,
-        ]);
-        st.iter().map(ToString::to_string).collect::<Vec<String>>()
+        build_source_type_options(
+            st,
+            &[ExplorerSourceType::Hosted, /*ExplorerSourceType::Provider,*/ ExplorerSourceType::Custom],
+        )
     });
 
-    let handle_source_select = {
-        let active_source_clone = active_source.clone();
-        Callback::from(move |source_selection: Rc<Vec<String>>| {
-            if let Some(source_type_str) = source_selection.first() {
-                if let Ok(source_type) = ExplorerSourceType::from_str(source_type_str) {
-                    active_source_clone.set(source_type)
-                }
-            }
-        })
-    };
+    let handle_source_select = source_selection_callback(active_source.clone());
 
     let handle_source_download = {
         let on_select = props.on_select.clone();
@@ -77,14 +69,7 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
         })
     };
 
-    let handle_key_down = {
-        let handle_custom_source = handle_custom_source.clone();
-        Callback::from(move |e: KeyboardEvent| {
-            if e.key() == "Enter" {
-                handle_custom_source.emit("custom".to_owned());
-            }
-        })
-    };
+    let handle_key_down = submit_on_enter(handle_custom_source.clone(), "custom".to_owned());
 
     let render_hosted = {
         let playlist_ctx_clone = playlist_ctx.clone();

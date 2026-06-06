@@ -653,44 +653,35 @@ mod tests {
         PlaylistItem { header: PlaylistItemHeader { name: name.into(), group: group.intern(), ..Default::default() } }
     }
 
+    /// Parse `input` and assert that `Display` round-trips back to `input`
+    /// byte-for-byte. Used by the three filter-parser tests below that only
+    /// exercise the parser and its `Display` impl, not the runtime evaluator.
+    fn assert_filter_round_trip(input: &str) {
+        match get_filter(input, None) {
+            Ok(filter) => assert_eq!(format!("{filter}"), input),
+            Err(e) => panic!("{e}"),
+        }
+    }
+
     #[test]
     fn test_filter_1() {
-        let flt1 = r#"(Group ~ "A" OR Group ~ "B") AND (Name ~ "C" OR Name ~ "D" OR Name ~ "E") OR (NOT (Title ~ "F") AND NOT Title ~ "K")"#;
-        match get_filter(flt1, None) {
-            Ok(filter) => {
-                assert_eq!(format!("{filter}"), flt1);
-            }
-            Err(e) => {
-                panic!("{e}")
-            }
-        }
+        assert_filter_round_trip(
+            r#"(Group ~ "A" OR Group ~ "B") AND (Name ~ "C" OR Name ~ "D" OR Name ~ "E") OR (NOT (Title ~ "F") AND NOT Title ~ "K")"#,
+        );
     }
 
     #[test]
     fn test_filter_2() {
-        let flt2 =
-            r#"Group ~ "d" AND ((Name ~ "e" AND NOT ((Name ~ "c" OR Name ~ "f"))) OR (Name ~ "a" OR Name ~ "b"))"#;
-        match get_filter(flt2, None) {
-            Ok(filter) => {
-                assert_eq!(format!("{filter}"), flt2);
-            }
-            Err(e) => {
-                panic!("{e}")
-            }
-        }
+        assert_filter_round_trip(
+            r#"Group ~ "d" AND ((Name ~ "e" AND NOT ((Name ~ "c" OR Name ~ "f"))) OR (Name ~ "a" OR Name ~ "b"))"#,
+        );
     }
 
     #[test]
     fn test_filter_3() {
-        let flt = r#"Group ~ "d" AND ((Name ~ "e" AND NOT ((Name ~ "c" OR Name ~ "f"))) OR (Name ~ "a" OR Name ~ "b")) AND (Type = movie)"#;
-        match get_filter(flt, None) {
-            Ok(filter) => {
-                assert_eq!(format!("{filter}"), flt);
-            }
-            Err(e) => {
-                panic!("{e}")
-            }
-        }
+        assert_filter_round_trip(
+            r#"Group ~ "d" AND ((Name ~ "e" AND NOT ((Name ~ "c" OR Name ~ "f"))) OR (Name ~ "a" OR Name ~ "b")) AND (Type = movie)"#,
+        );
     }
 
     #[test]

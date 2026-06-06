@@ -228,80 +228,61 @@ mod tests {
         assert_eq!(result, AdmissionDecision::Grace(GraceMode::Hold));
     }
 
-    #[test]
-    fn evict_oldest_same_ip() {
+    /// Build a single-strategy `StrategyContext` whose `client_ip` is fixed to
+    /// `"1.1.1.1"`, run the strategy against `candidates`, and assert that the
+    /// evicted target's port is `expected_port`. Used by the four
+    /// `evict_*_test` cases below.
+    fn assert_evict(strategy: AdmissionStrategy, candidates: &[EvictionCandidate], expected_port: u16) {
         let ctx = StrategyContext {
             username: "user1",
             client_ip: "1.1.1.1",
-            strategies: &[AdmissionStrategy::EvictUserSameIpOldest],
+            strategies: &[strategy],
         };
+        let result = evaluate_admission_strategies(&ctx, candidates);
+        match result {
+            AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(expected_port)),
+            other => panic!("Expected Evict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evict_oldest_same_ip() {
         let candidates = vec![
             candidate(1000, "1.1.1.1", 100),
             candidate(1001, "1.1.1.1", 200),
             candidate(1002, "2.2.2.2", 50),
         ];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
-        match result {
-            AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(1000)),
-            other => panic!("Expected Evict, got {other:?}"),
-        }
+        assert_evict(AdmissionStrategy::EvictUserSameIpOldest, &candidates, 1000);
     }
 
     #[test]
     fn evict_latest_same_ip() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[AdmissionStrategy::EvictUserSameIpLatest],
-        };
         let candidates = vec![
             candidate(1000, "1.1.1.1", 100),
             candidate(1001, "1.1.1.1", 200),
             candidate(1002, "2.2.2.2", 50),
         ];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
-        match result {
-            AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(1001)),
-            other => panic!("Expected Evict, got {other:?}"),
-        }
+        assert_evict(AdmissionStrategy::EvictUserSameIpLatest, &candidates, 1001);
     }
 
     #[test]
     fn evict_oldest_user_regardless_of_ip() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[AdmissionStrategy::EvictUserOldest],
-        };
         let candidates = vec![
             candidate(1000, "2.2.2.2", 300),
             candidate(1001, "1.1.1.1", 200),
             candidate(1002, "3.3.3.3", 100),
         ];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
-        match result {
-            AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(1002)),
-            other => panic!("Expected Evict, got {other:?}"),
-        }
+        assert_evict(AdmissionStrategy::EvictUserOldest, &candidates, 1002);
     }
 
     #[test]
     fn evict_latest_user_regardless_of_ip() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[AdmissionStrategy::EvictUserLatest],
-        };
         let candidates = vec![
             candidate(1000, "2.2.2.2", 300),
             candidate(1001, "1.1.1.1", 200),
             candidate(1002, "3.3.3.3", 100),
         ];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
-        match result {
-            AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(1000)),
-            other => panic!("Expected Evict, got {other:?}"),
-        }
+        assert_evict(AdmissionStrategy::EvictUserLatest, &candidates, 1000);
     }
 
     #[test]

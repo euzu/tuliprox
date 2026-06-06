@@ -14,6 +14,7 @@ use crate::{
     edit_field_bool, edit_field_list_option, edit_field_number, edit_field_number_u64, edit_field_text,
     edit_field_text_option, generate_form_reducer, html_if,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::model::{
     view_type::ViewType, ContentSecurityPolicyConfigDto, StreamInfoConfigDto, WebAuthConfigDto, WebUiConfigDto,
@@ -111,13 +112,13 @@ pub fn WebUiConfigView() -> Html {
 
     // Local form states
     let webui_state: UseReducerHandle<WebUiConfigFormState> =
-        use_reducer(|| WebUiConfigFormState { form: WebUiConfigDto::default(), modified: false });
+        use_default_form_reducer!(WebUiConfigFormState { form: WebUiConfigDto::default() });
     let auth_state: UseReducerHandle<WebUiAuthConfigFormState> =
-        use_reducer(|| WebUiAuthConfigFormState { form: WebAuthConfigDto::default(), modified: false });
+        use_default_form_reducer!(WebUiAuthConfigFormState { form: WebAuthConfigDto::default() });
     let csp_state: UseReducerHandle<CspConfigFormState> =
-        use_reducer(|| CspConfigFormState { form: ContentSecurityPolicyConfigDto::default(), modified: false });
+        use_default_form_reducer!(CspConfigFormState { form: ContentSecurityPolicyConfigDto::default() });
     let stream_info_state: UseReducerHandle<StreamInfoConfigFormState> =
-        use_reducer(|| StreamInfoConfigFormState { form: StreamInfoConfigDto::default(), modified: false });
+        use_default_form_reducer!(StreamInfoConfigFormState { form: StreamInfoConfigDto::default() });
 
     let view_types = use_memo(webui_state.data().landing_page, |landing_page| {
         ViewType::iter()

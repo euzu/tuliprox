@@ -1,8 +1,8 @@
 use crate::{
     app::context::{ConfigContext, StatusContext},
-    hooks::use_service_context,
+    hooks::use_websocket_status,
     i18n::use_translation,
-    model::{EventMessage, ViewType},
+    model::ViewType,
     utils::set_location_hash,
 };
 use gloo_timers::callback::Interval;
@@ -104,9 +104,20 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
+fn open_popover_callback<E: 'static>(
+    popover_open: UseStateHandle<bool>,
+    now_ms: UseStateHandle<f64>,
+    update_popover_pos: Callback<()>,
+) -> Callback<E> {
+    Callback::from(move |_| {
+        popover_open.set(true);
+        now_ms.set(js_sys::Date::now());
+        update_popover_pos.emit(());
+    })
+}
+
 #[component]
 pub fn HealthBanner() -> Html {
-    let services = use_service_context();
     let translate = use_translation();
     let status_ctx = use_context::<StatusContext>();
     let config_ctx = use_context::<ConfigContext>();
@@ -115,26 +126,11 @@ pub fn HealthBanner() -> Html {
     let popover_open = use_state(|| false);
     let now_ms = use_state(js_sys::Date::now);
 
-    let initial_ws_status = services.websocket.is_connected();
-    let ws_connected = use_state(move || Some(initial_ws_status));
-    {
-        let ws_connected = ws_connected.clone();
-        let services = services.clone();
-        use_effect_with((), move |_| {
-            let services_ctx = services.clone();
-            let ws_connected = ws_connected.clone();
-            let subid = services_ctx.event.subscribe(move |msg| {
-                if let EventMessage::WebSocketStatus(active) = msg {
-                    ws_connected.set(Some(active));
-                }
-            });
-            move || services_ctx.event.unsubscribe(subid)
-        });
-    }
+    let ws_connected = use_websocket_status();
 
     let status = status_ctx.as_ref().and_then(|ctx| ctx.status.clone());
     let has_status = status.is_some();
-    let ws_status = *ws_connected;
+    let ws_status = Some(*ws_connected);
     let max_lookup = {
         let config_ctx = config_ctx.clone();
         use_memo(config_ctx, build_provider_capacity_lookup)
@@ -235,26 +231,9 @@ pub fn HealthBanner() -> Html {
             }
         })
     };
-    let onmouseenter = {
-        let update_popover_pos = update_popover_pos.clone();
-        let popover_open = popover_open.clone();
-        let now_ms = now_ms.clone();
-        Callback::from(move |_: MouseEvent| {
-            popover_open.set(true);
-            now_ms.set(js_sys::Date::now());
-            update_popover_pos.emit(());
-        })
-    };
-    let onfocus = {
-        let update_popover_pos = update_popover_pos.clone();
-        let popover_open = popover_open.clone();
-        let now_ms = now_ms.clone();
-        Callback::from(move |_: FocusEvent| {
-            popover_open.set(true);
-            now_ms.set(js_sys::Date::now());
-            update_popover_pos.emit(());
-        })
-    };
+    let onmouseenter =
+        open_popover_callback::<MouseEvent>(popover_open.clone(), now_ms.clone(), update_popover_pos.clone());
+    let onfocus = open_popover_callback::<FocusEvent>(popover_open.clone(), now_ms.clone(), update_popover_pos.clone());
     let onmouseleave = {
         let popover_open = popover_open.clone();
         Callback::from(move |_: MouseEvent| popover_open.set(false))

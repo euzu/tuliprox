@@ -366,31 +366,43 @@ impl AppConfig {
     }
 
     fn set_mapping_path(&self, mapping_path: Option<&str>) {
-        let paths_guard = self.paths.load();
-        let old_path = paths_guard.mapping_file_path.as_deref();
-        let new_path = Some(utils::resolve_mapping_file_path(
-            paths_guard.config_path.as_str(),
+        self.set_optional_path(
             mapping_path,
-        ));
-
-        if old_path != new_path.as_deref() {
-            let mut new_paths = (**paths_guard).clone();
-            new_paths.mapping_file_path = new_path;
-            self.paths.store(Arc::new(new_paths));
-        }
+            utils::resolve_mapping_file_path,
+            |paths| &paths.mapping_file_path,
+            |paths, value| paths.mapping_file_path = value,
+        );
     }
 
     fn set_template_path(&self, template_path: Option<&str>) {
-        let paths_guard = self.paths.load();
-        let old_path = paths_guard.template_file_path.as_deref();
-        let new_path = Some(utils::resolve_template_file_path(
-            paths_guard.config_path.as_str(),
+        self.set_optional_path(
             template_path,
-        ));
+            utils::resolve_template_file_path,
+            |paths| &paths.template_file_path,
+            |paths, value| paths.template_file_path = value,
+        );
+    }
 
-        if old_path != new_path.as_deref() {
+    /// Shared body of `set_mapping_path` / `set_template_path`.
+    /// Resolves a candidate file path, compares it with the current value
+    /// (read via `getter`), and only stores a new `ConfigPaths` when the
+    /// value actually changed.
+    fn set_optional_path<R, G, S>(
+        &self,
+        requested: Option<&str>,
+        resolver: R,
+        getter: G,
+        setter: S,
+    ) where
+        R: Fn(&str, Option<&str>) -> String,
+        G: Fn(&ConfigPaths) -> &Option<String>,
+        S: Fn(&mut ConfigPaths, Option<String>),
+    {
+        let paths_guard = self.paths.load();
+        let new_path = Some(resolver(paths_guard.config_path.as_str(), requested));
+        if getter(&paths_guard).as_deref() != new_path.as_deref() {
             let mut new_paths = (**paths_guard).clone();
-            new_paths.template_file_path = new_path;
+            setter(&mut new_paths, new_path);
             self.paths.store(Arc::new(new_paths));
         }
     }
@@ -612,5 +624,40 @@ mod tests {
 
         app_config.set_mappings("mappings", &empty_mappings());
         assert!(target.mapping.load().is_none(), "empty mapping reload must clear stale target mappings");
+    }
+
+    #[test]
+    fn set_mapping_path_stores_resolved_path_in_paths() {
+        let app_config = test_app_config_with_target(target_with_mapping_id("map1"));
+        app_config.set_mapping_path(Some("custom/mappings.yaml"));
+        let stored = app_config.paths.load().mapping_file_path.clone();
+        assert!(stored.is_some(), "mapping file path should be stored");
+        assert!(
+            stored.as_deref().unwrap_or_default().contains("custom/mappings.yaml"),
+            "stored path should contain requested relative mapping path, got {stored:?}"
+        );
+    }
+
+    #[test]
+    fn set_template_path_stores_resolved_path_in_paths() {
+        let app_config = test_app_config_with_target(target_with_mapping_id("map1"));
+        app_config.set_template_path(Some("custom/templates.yaml"));
+        let stored = app_config.paths.load().template_file_path.clone();
+        assert!(stored.is_some(), "template file path should be stored");
+        assert!(
+            stored.as_deref().unwrap_or_default().contains("custom/templates.yaml"),
+            "stored path should contain requested relative template path, got {stored:?}"
+        );
+    }
+
+    #[test]
+    fn set_mapping_path_unchanged_value_does_not_reallocate_paths() {
+        let app_config = test_app_config_with_target(target_with_mapping_id("map1"));
+        app_config.set_mapping_path(Some("mappings.yaml"));
+        let pointer_before = Arc::as_ptr(&app_config.paths.load()).cast::<u8>();
+        // Calling with the same value must not allocate a new ConfigPaths.
+        app_config.set_mapping_path(Some("mappings.yaml"));
+        let pointer_after = Arc::as_ptr(&app_config.paths.load()).cast::<u8>();
+        assert_eq!(pointer_before, pointer_after, "unchanged path must not reallocate");
     }
 }

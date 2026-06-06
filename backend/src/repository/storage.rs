@@ -25,6 +25,38 @@ pub async fn ensure_target_storage_path(cfg: &Config, target_name: &str) -> Resu
     }
 }
 
+/// Resolve a per-target storage subdirectory via `path_resolver`, create the
+/// directory if missing, and map any failure into a domain-specific
+/// `TuliproxError` variant via `error`.
+///
+/// Used by the per-backend `ensure_*_storage_path` helpers (xtream, m3u) which
+/// differ only in their subdirectory resolver, error variant, and human-readable
+/// label.
+pub async fn ensure_target_storage_subpath<E, F>(
+    cfg: &Config,
+    target_name: &str,
+    label: &str,
+    path_resolver: F,
+    error: E,
+) -> Result<PathBuf, TuliproxError>
+where
+    F: Fn(&Config, &str) -> Option<PathBuf>,
+    E: Fn(String) -> TuliproxError,
+{
+    if let Some(path) = path_resolver(cfg, target_name) {
+        tokio::fs::create_dir_all(&path).await.map_err(|err| {
+            error(format!(
+                "Failed to save {label} data, can't create directory {}: {err}",
+                path.display()
+            ))
+        })?;
+        Ok(path)
+    } else {
+        let msg = format!("Failed to save {label} data, can't create directory for target {target_name}");
+        Err(error(msg))
+    }
+}
+
 pub fn get_target_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> {
     utils::get_file_path(&cfg.storage_dir, Some(std::path::PathBuf::from(target_name.replace(' ', "_"))))
 }

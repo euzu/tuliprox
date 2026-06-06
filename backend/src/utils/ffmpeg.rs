@@ -222,7 +222,7 @@ impl FfmpegExecutor {
         }
     }
 
-    /// Wrapper around [`Self::probe_url`] that races the probe against an optional cancellation token.
+    /// Wrapper around `Self::probe_url` that races the probe against an optional cancellation token.
     pub async fn probe_url_with_cancel(
         &self,
         params: &ProbeParams<'_>,

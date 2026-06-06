@@ -12,6 +12,7 @@ use crate::{
     },
     config_field_bool, config_field_child, edit_field_bool, generate_form_reducer,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::model::{LogConfigDto, RuntimeConfigReportFormat};
 use std::{rc::Rc, str::FromStr};
@@ -50,7 +51,7 @@ pub fn LogConfigView() -> Html {
     });
 
     let form_state: UseReducerHandle<LogConfigFormState> =
-        use_reducer(|| LogConfigFormState { form: LogConfigDto::default(), modified: false });
+        use_default_form_reducer!(LogConfigFormState { form: LogConfigDto::default() });
 
     {
         use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Log);

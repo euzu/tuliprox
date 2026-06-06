@@ -1,6 +1,6 @@
 use crate::{
     app::components::{AppIcon, NoContent},
-    i18n::use_translation,
+    i18n::{use_translation, YewI18n},
 };
 use shared::model::SortOrder;
 use std::rc::Rc;
@@ -215,6 +215,24 @@ mod tests {
 
 /// Page size options for paged tables.
 pub const PAGE_SIZES: &[u16] = &[25, 50, 100, 200];
+
+/// Build a `Callback<usize, Html>` that returns the i18n-translated column
+/// header at the given index, or an empty string when `col` is out of bounds.
+/// Used by every `Table`/`PagedTable` caller to produce a uniform header row
+/// without each component re-implementing the same closure body.
+pub fn make_translated_header_callback(translator: YewI18n, headers: &'static [&'static str]) -> Callback<usize, Html> {
+    Callback::<usize, Html>::from(move |col| {
+        html! {
+            {
+                if col < headers.len() {
+                    translator.t(headers[col])
+                } else {
+                    String::new()
+                }
+            }
+        }
+    })
+}
 
 pub const TP_PAGE_SIZE_KEY: &str = "tp-table-page-size";
 

@@ -1,9 +1,9 @@
 use crate::{
     app::{
         components::{
-            convert_bool_to_chip_style, menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, CellValue, Chip,
-            HideContent, MaxConnections, ProxyTypeView, RevealContent, Table, TableDefinition, UserStatus,
-            UserlistContext, UserlistPage,
+            convert_bool_to_chip_style, make_translated_header_callback, menu_item::MenuItem, popup_menu::PopupMenu,
+            AppIcon, CellValue, Chip, HideContent, MaxConnections, ProxyTypeView, RevealContent, Table,
+            TableDefinition, UserStatus, UserlistContext, UserlistPage,
         },
         context::{target_users_to_api_proxy_users, TargetUser},
         ConfigContext, TargetUserList,
@@ -167,20 +167,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         })
     };
 
-    let render_header_cell = {
-        let translator = translate.clone();
-        Callback::<usize, Html>::from(move |col| {
-            html! {
-                {
-                    if col < HEADERS.len() {
-                       translator.t(HEADERS[col])
-                    } else {
-                      String::new()
-                    }
-               }
-            }
-        })
-    };
+    let render_header_cell = make_translated_header_callback(translate.clone(), &HEADERS);
 
     let render_data_cell = {
         let translator = translate.clone();
