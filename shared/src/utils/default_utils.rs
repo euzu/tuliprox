@@ -42,37 +42,40 @@ pub const fn is_default_runtime_config_report_format(value: &RuntimeConfigReport
 
 pub fn is_cluster_optional(cf: &Option<ClusterFlags>) -> bool { cf.is_none_or(|c| c.is_all()) }
 
+macro_rules! default_eq_fns {
+    ($( $default_fn:ident, $is_default_fn:ident, $ty:ty, $value:expr; )* ) => {
+        $(
+            pub const fn $default_fn() -> $ty { $value }
+            pub const fn $is_default_fn(v: &$ty) -> bool { *v == $default_fn() }
+        )*
+    };
+}
+
 // Default delay values for resolving VOD or Series requests,
 // used to prevent frequent requests that could trigger a provider ban.
-pub const fn default_resolve_delay_secs() -> u16 { 2 }
-pub const fn is_default_resolve_delay_secs(v: &u16) -> bool { *v == default_resolve_delay_secs() }
 // Default delay values for probing streams (ffprobe),
 // used to avoid excessive probing under rapid playlist changes.
-pub const fn default_probe_delay_secs() -> u16 { 2 }
-pub const fn is_default_probe_delay_secs(v: &u16) -> bool { *v == default_probe_delay_secs() }
 // Default grace values to accommodate rapid channel changes and seek requests,
 // helping avoid triggering hard max_connection enforcement.
-pub const fn default_grace_period_millis() -> u64 { 2000 }
-pub const fn is_default_grace_period_millis(v: &u64) -> bool { *v == default_grace_period_millis() }
-pub const fn default_shared_burst_buffer_mb() -> u64 { 12 }
-pub const fn is_default_shared_burst_buffer_mb(v: &u64) -> bool { *v == default_shared_burst_buffer_mb() }
-pub const fn default_grace_period_timeout_secs() -> u64 { 4 }
-pub const fn is_default_grace_period_timeout_secs(v: &u64) -> bool { *v == default_grace_period_timeout_secs() }
-pub const fn default_hls_session_ttl_secs() -> u64 { 15 }
-pub const fn is_default_hls_session_ttl_secs(v: &u64) -> bool { *v == default_hls_session_ttl_secs() }
-pub const fn default_catchup_session_ttl_secs() -> u64 { 45 }
-pub const fn is_default_catchup_session_ttl_secs(v: &u64) -> bool { *v == default_catchup_session_ttl_secs() }
+default_eq_fns!(
+    default_resolve_delay_secs, is_default_resolve_delay_secs, u16, 2;
+    default_probe_delay_secs, is_default_probe_delay_secs, u16, 2;
+    default_grace_period_millis, is_default_grace_period_millis, u64, 2000;
+    default_shared_burst_buffer_mb, is_default_shared_burst_buffer_mb, u64, 12;
+    default_grace_period_timeout_secs, is_default_grace_period_timeout_secs, u64, 4;
+    default_hls_session_ttl_secs, is_default_hls_session_ttl_secs, u64, 15;
+    default_catchup_session_ttl_secs, is_default_catchup_session_ttl_secs, u64, 45;
+);
 pub const fn default_panel_api_provision_timeout_secs() -> u64 { 65 }
 pub const fn default_panel_api_provision_probe_interval_secs() -> u64 { 15 }
 pub const fn default_panel_api_provision_cooldown_secs() -> u64 { 0 }
 pub const fn default_panel_api_alias_pool_min() -> u16 { 1 }
 pub const fn default_panel_api_alias_pool_max() -> u16 { 1 }
-pub const fn default_connect_timeout_secs() -> u32 { 6 }
-pub const fn is_default_connect_timeout_secs(v: &u32) -> bool { *v == default_connect_timeout_secs() }
-pub const fn default_resource_retry_attempts() -> u32 { 3 }
-pub const fn is_default_resource_retry_attempts(v: &u32) -> bool { *v == default_resource_retry_attempts() }
-pub const fn default_resource_retry_backoff_ms() -> u64 { 250 }
-pub const fn is_default_resource_retry_backoff_ms(v: &u64) -> bool { *v == default_resource_retry_backoff_ms() }
+default_eq_fns!(
+    default_connect_timeout_secs, is_default_connect_timeout_secs, u32, 6;
+    default_resource_retry_attempts, is_default_resource_retry_attempts, u32, 3;
+    default_resource_retry_backoff_ms, is_default_resource_retry_backoff_ms, u64, 250;
+);
 pub const fn default_resource_retry_backoff_multiplier() -> f64 { 1.0 }
 pub const F64_DEFAULT_EPSILON: f64 = 1e-9;
 pub const fn is_default_resource_retry_backoff_multiplier(v: &f64) -> bool {
@@ -107,19 +110,14 @@ pub fn generate_default_encrypt_secret() -> [u8; 16] {
 
 pub fn default_secret() -> String { generate_default_encrypt_secret().iter().map(|b| format!("{:02X}", b)).collect() }
 
-pub const fn default_kick_secs() -> u64 { 90 }
-pub const fn is_default_kick_secs(v: &u64) -> bool { *v == default_kick_secs() }
-/// 30 minutes by default; `0` still means “no expiration.”
-pub const fn default_token_ttl_mins() -> u32 { 30 }
-pub const fn is_default_token_ttl_mins(v: &u32) -> bool { *v == default_token_ttl_mins() }
-
-pub const fn default_auth_error_status() -> u16 { 403 }
-pub const fn is_default_auth_error_status(v: &u16) -> bool { *v == default_auth_error_status() }
-
-pub const fn default_epg_match_threshold() -> u16 { 80 }
-pub const fn is_default_epg_match_threshold(v: &u16) -> bool { *v == default_epg_match_threshold() }
-pub const fn default_epg_best_match_threshold() -> u16 { 95 }
-pub const fn is_default_epg_best_match_threshold(v: &u16) -> bool { *v == default_epg_best_match_threshold() }
+// 30 minutes by default; `0` still means “no expiration.”
+default_eq_fns!(
+    default_kick_secs, is_default_kick_secs, u64, 90;
+    default_token_ttl_mins, is_default_token_ttl_mins, u32, 30;
+    default_auth_error_status, is_default_auth_error_status, u16, 403;
+    default_epg_match_threshold, is_default_epg_match_threshold, u16, 80;
+    default_epg_best_match_threshold, is_default_epg_best_match_threshold, u16, 95;
+);
 pub fn default_epg_normalize_regex() -> Option<String> { Some(DEFAULT_EPG_NORMALIZE_REGEX.to_string()) }
 pub fn is_default_epg_normalize_regex(v: &Option<String>) -> bool {
     match v.as_ref().map(|value| value.trim()) {

@@ -10,6 +10,7 @@ use crate::{
     config_field, config_field_optional, config_field_optional_hide, edit_field_text, edit_field_text_option,
     generate_form_reducer,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::model::ProxyConfigDto;
 use yew::prelude::*;
@@ -35,7 +36,7 @@ pub fn ProxyConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
     let form_state: UseReducerHandle<ProxyConfigFormState> =
-        use_reducer(|| ProxyConfigFormState { form: ProxyConfigDto::default(), modified: false });
+        use_default_form_reducer!(ProxyConfigFormState { form: ProxyConfigDto::default() });
 
     {
         use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Proxy);

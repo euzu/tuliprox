@@ -6,7 +6,7 @@ use crate::{
         m3u_playlist_iterator::M3uPlaylistM3uTextIterator,
         open_playlist_reader,
         playlist_repository::get_input_m3u_playlist_file_path,
-        storage::{get_file_path_for_db_index, get_input_storage_path, get_target_storage_path},
+        storage::{ensure_target_storage_subpath, get_file_path_for_db_index, get_input_storage_path, get_target_storage_path},
         storage_const,
         xtream_repository::CategoryKey,
         LockedReceiverStream,
@@ -68,16 +68,14 @@ pub fn m3u_get_storage_path(cfg: &Config, target_name: &str) -> Option<PathBuf> 
 }
 
 pub async fn ensure_m3u_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
-    if let Some(path) = m3u_get_storage_path(cfg, target_name) {
-        if tokio::fs::create_dir_all(&path).await.is_err() {
-            let msg = format!("Failed to save m3u data, can't create directory {}", path.display());
-            return Err(TuliproxError::RepositoryM3u(msg));
-        }
-        Ok(path)
-    } else {
-        let msg = format!("Failed to save m3u data, can't create directory for target {target_name}");
-        Err(TuliproxError::RepositoryM3u(msg))
-    }
+    ensure_target_storage_subpath(
+        cfg,
+        target_name,
+        "m3u",
+        m3u_get_storage_path,
+        TuliproxError::RepositoryM3u,
+    )
+    .await
 }
 
 fn provider_m3u_filename(path: &Path) -> PathBuf {

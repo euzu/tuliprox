@@ -1,5 +1,5 @@
 use crate::{
-    api::api_utils::serve_file,
+    api::{api_utils::serve_file, http_layers::create_cors_layer},
     auth::generate_password_from_input,
     model::validate_library_paths_from_dto,
     utils::{
@@ -854,20 +854,6 @@ async fn setup_complete_inner(
     .into_response()
 }
 
-fn create_cors_layer() -> tower_http::cors::CorsLayer {
-    tower_http::cors::CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PUT,
-            axum::http::Method::OPTIONS,
-            axum::http::Method::HEAD,
-        ])
-        .allow_headers(tower_http::cors::Any)
-        .max_age(std::time::Duration::from_secs(3600))
-}
-
 fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
     let predicate = DefaultPredicate::new().and(|
         _status: axum::http::StatusCode,
@@ -942,7 +928,13 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
         .nest_service("/assets", ServeDir::new(web_dir.join("assets")))
         .nest_service("/static", ServeDir::new(web_dir.join("static")))
         .fallback(axum::routing::get(setup_index))
-        .layer(create_cors_layer())
+        .layer(create_cors_layer([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::OPTIONS,
+            axum::http::Method::HEAD,
+        ]))
         .layer(create_compression_layer())
         .with_state(state);
 

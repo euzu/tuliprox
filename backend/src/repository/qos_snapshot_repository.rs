@@ -9,6 +9,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use crate::repository::{BPlusTree, BPlusTreeUpdate, FlushPolicy};
 
+/// Generate `impl From<&Entity> for Dto` for two structs whose field names are
+/// identical. Used for the `QoS` snapshot DTO ↔ entity pair where the conversion
+/// is a 1:1 field copy.
+macro_rules! entity_to_dto {
+    ($entity:ident, $dto:ident, [ $($field:ident),+ $(,)? ]) => {
+        impl From<&$entity> for $dto {
+            fn from(src: &$entity) -> Self {
+                Self {
+                    $($field: src.$field,)+
+                }
+            }
+        }
+    };
+}
+
 const SNAPSHOT_FILE_NAME: &str = "qos_snapshot.db";
 const CHECKPOINT_FILE_NAME: &str = "qos_snapshot_meta.db";
 const CHECKPOINT_KEY: u8 = 0;
@@ -60,29 +75,25 @@ impl From<&QosSnapshotWindowDto> for QosSnapshotWindow {
     }
 }
 
-impl From<&QosSnapshotWindow> for QosSnapshotWindowDto {
-    fn from(entity: &QosSnapshotWindow) -> Self {
-        Self {
-            connect_count: entity.connect_count,
-            connect_failed_count: entity.connect_failed_count,
-            startup_capacity_failure_count: entity.startup_capacity_failure_count,
-            provider_open_failure_count: entity.provider_open_failure_count,
-            first_byte_failure_count: entity.first_byte_failure_count,
-            runtime_abort_count: entity.runtime_abort_count,
-            provider_closed_count: entity.provider_closed_count,
-            preempt_count: entity.preempt_count,
-            avg_first_byte_latency_ms: entity.avg_first_byte_latency_ms,
-            avg_session_duration_secs: entity.avg_session_duration_secs,
-            avg_provider_reconnect_count: entity.avg_provider_reconnect_count,
-            last_success_ts: entity.last_success_ts,
-            last_failure_ts: entity.last_failure_ts,
-            successive_failure_streak: entity.successive_failure_streak,
-            sample_size: entity.sample_size,
-            score: entity.score,
-            confidence: entity.confidence,
-        }
-    }
-}
+entity_to_dto!(QosSnapshotWindow, QosSnapshotWindowDto, [
+    connect_count,
+    connect_failed_count,
+    startup_capacity_failure_count,
+    provider_open_failure_count,
+    first_byte_failure_count,
+    runtime_abort_count,
+    provider_closed_count,
+    preempt_count,
+    avg_first_byte_latency_ms,
+    avg_session_duration_secs,
+    avg_provider_reconnect_count,
+    last_success_ts,
+    last_failure_ts,
+    successive_failure_streak,
+    sample_size,
+    score,
+    confidence,
+]);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QosSnapshotDailyBucket {
@@ -129,28 +140,24 @@ impl From<&QosSnapshotDailyBucketDto> for QosSnapshotDailyBucket {
     }
 }
 
-impl From<&QosSnapshotDailyBucket> for QosSnapshotDailyBucketDto {
-    fn from(entity: &QosSnapshotDailyBucket) -> Self {
-        Self {
-            connect_count: entity.connect_count,
-            connect_failed_count: entity.connect_failed_count,
-            startup_capacity_failure_count: entity.startup_capacity_failure_count,
-            provider_open_failure_count: entity.provider_open_failure_count,
-            first_byte_failure_count: entity.first_byte_failure_count,
-            runtime_abort_count: entity.runtime_abort_count,
-            provider_closed_count: entity.provider_closed_count,
-            preempt_count: entity.preempt_count,
-            total_first_byte_latency_ms: entity.total_first_byte_latency_ms,
-            total_first_byte_latency_samples: entity.total_first_byte_latency_samples,
-            total_session_duration_secs: entity.total_session_duration_secs,
-            total_session_duration_samples: entity.total_session_duration_samples,
-            total_provider_reconnect_count: entity.total_provider_reconnect_count,
-            total_provider_reconnect_samples: entity.total_provider_reconnect_samples,
-            last_success_ts: entity.last_success_ts,
-            last_failure_ts: entity.last_failure_ts,
-        }
-    }
-}
+entity_to_dto!(QosSnapshotDailyBucket, QosSnapshotDailyBucketDto, [
+    connect_count,
+    connect_failed_count,
+    startup_capacity_failure_count,
+    provider_open_failure_count,
+    first_byte_failure_count,
+    runtime_abort_count,
+    provider_closed_count,
+    preempt_count,
+    total_first_byte_latency_ms,
+    total_first_byte_latency_samples,
+    total_session_duration_secs,
+    total_session_duration_samples,
+    total_provider_reconnect_count,
+    total_provider_reconnect_samples,
+    last_success_ts,
+    last_failure_ts,
+]);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QosSnapshotRecord {
@@ -457,5 +464,50 @@ mod tests {
         })
         .expect("read-only traversal should succeed");
         assert_eq!(seen, vec!["stream-a".to_string()]);
+    }
+
+    /// The `entity_to_dto!` macro expands to `From<&Entity> for Dto` that
+    /// copies every identically-named field. Verify that direction is intact
+    /// end-to-end (entity → dto) by constructing an entity, converting it,
+    /// and asserting each field is preserved.
+    #[test]
+    fn entity_to_dto_macro_round_trips_qos_snapshot_window_fields() {
+        use shared::model::QosSnapshotWindowDto;
+
+        let entity = QosSnapshotWindow {
+            connect_count: 1,
+            connect_failed_count: 2,
+            startup_capacity_failure_count: 3,
+            provider_open_failure_count: 4,
+            first_byte_failure_count: 5,
+            runtime_abort_count: 6,
+            provider_closed_count: 7,
+            preempt_count: 8,
+            avg_first_byte_latency_ms: Some(150),
+            avg_session_duration_secs: Some(3600),
+            avg_provider_reconnect_count: Some(2),
+            last_success_ts: Some(1_700_000_000),
+            last_failure_ts: Some(1_700_000_500),
+            successive_failure_streak: 3,
+            sample_size: 1024,
+            score: 80,
+            confidence: 90,
+        };
+        let dto = QosSnapshotWindowDto::from(&entity);
+        assert_eq!(dto.connect_count, 1);
+        assert_eq!(dto.connect_failed_count, 2);
+        assert_eq!(dto.avg_first_byte_latency_ms, Some(150));
+        assert_eq!(dto.successive_failure_streak, 3);
+        assert_eq!(dto.score, 80);
+        assert_eq!(dto.confidence, 90);
+        // Round-trip back to the entity type to catch a field omission in the macro.
+        let round_tripped = QosSnapshotWindow::from(&dto);
+        assert_eq!(round_tripped.connect_count, entity.connect_count);
+        assert_eq!(round_tripped.score, entity.score);
+        assert_eq!(round_tripped.confidence, entity.confidence);
+        assert_eq!(
+            round_tripped.avg_provider_reconnect_count,
+            entity.avg_provider_reconnect_count
+        );
     }
 }

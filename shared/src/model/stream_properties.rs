@@ -60,6 +60,18 @@ fn format_episode_code(season: u32, episode: u32) -> Option<String> {
 
 fn title_contains_episode_code(title: &str) -> bool { CONSTANTS.re_episode_code.is_match(title) }
 
+fn first_series_episode_value<T, F>(series: &SeriesStreamProperties, selector: F) -> Option<T>
+where
+    F: FnOnce(&SeriesStreamDetailEpisodeProperties) -> Option<T>,
+{
+    series
+        .details
+        .as_ref()
+        .and_then(|details| details.episodes.as_ref())
+        .and_then(|episodes| episodes.first())
+        .and_then(selector)
+}
+
 pub fn normalize_episode_title(raw_title: &Arc<str>, series_name: &Arc<str>, season: u32, episode: u32) -> Arc<str> {
     let title = raw_title.trim();
     let series_name = series_name.trim();
@@ -388,6 +400,16 @@ pub enum StreamProperties {
 }
 
 impl StreamProperties {
+    fn episode_value<T, F>(&self, selector: F) -> Option<T>
+    where
+        F: FnOnce(&EpisodeStreamProperties) -> T,
+    {
+        match self {
+            StreamProperties::Episode(episode) => Some(selector(episode)),
+            StreamProperties::Live(_) | StreamProperties::Video(_) | StreamProperties::Series(_) => None,
+        }
+    }
+
     pub fn has_details(&self) -> bool {
         match self {
             StreamProperties::Video(video) => video.details.is_some(),
@@ -491,11 +513,9 @@ impl StreamProperties {
         match self {
             StreamProperties::Live(_) => None,
             StreamProperties::Video(video) => non_empty_arc(&video.added),
-            StreamProperties::Series(series) => series
-                .details
-                .as_ref()
-                .and_then(|d| d.episodes.as_ref())
-                .and_then(|e| e.first().and_then(|e| non_empty_arc(&e.added))),
+            StreamProperties::Series(series) => {
+                first_series_episode_value(series, |episode| non_empty_arc(&episode.added))
+            }
             StreamProperties::Episode(episode) => episode.added.as_ref().map(Arc::clone),
         }
     }
@@ -504,11 +524,9 @@ impl StreamProperties {
         match self {
             StreamProperties::Live(_) => None,
             StreamProperties::Video(video) => non_empty_arc(&video.container_extension),
-            StreamProperties::Series(series) => series
-                .details
-                .as_ref()
-                .and_then(|d| d.episodes.as_ref())
-                .and_then(|e| e.first().and_then(|e| non_empty_arc(&e.container_extension))),
+            StreamProperties::Series(series) => {
+                first_series_episode_value(series, |episode| non_empty_arc(&episode.container_extension))
+            }
             StreamProperties::Episode(episode) => non_empty_arc(&episode.container_extension),
         }
     }
@@ -517,28 +535,16 @@ impl StreamProperties {
         match self {
             StreamProperties::Live(_) => None,
             StreamProperties::Video(video) => non_empty_arc(&video.direct_source),
-            StreamProperties::Series(series) => series
-                .details
-                .as_ref()
-                .and_then(|d| d.episodes.as_ref())
-                .and_then(|e| e.first().and_then(|e| non_empty_arc(&e.direct_source))),
+            StreamProperties::Series(series) => {
+                first_series_episode_value(series, |episode| non_empty_arc(&episode.direct_source))
+            }
             StreamProperties::Episode(_episode) => None,
         }
     }
 
-    pub fn get_season(&self) -> Option<u32> {
-        match self {
-            StreamProperties::Live(_) | StreamProperties::Video(_) | StreamProperties::Series(_) => None,
-            StreamProperties::Episode(episode) => Some(episode.season),
-        }
-    }
+    pub fn get_season(&self) -> Option<u32> { self.episode_value(|episode| episode.season) }
 
-    pub fn get_episode(&self) -> Option<u32> {
-        match self {
-            StreamProperties::Live(_) | StreamProperties::Video(_) | StreamProperties::Series(_) => None,
-            StreamProperties::Episode(episode) => Some(episode.episode),
-        }
-    }
+    pub fn get_episode(&self) -> Option<u32> { self.episode_value(|episode| episode.episode) }
 
     pub fn get_last_modified(&self) -> Option<u64> {
         match self {

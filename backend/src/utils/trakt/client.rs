@@ -45,55 +45,44 @@ impl TraktClient {
     }
 
     pub async fn get_chart_items(&self, chart_config: &TraktChartConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
-        debug!("Fetching Trakt chart {}:{}", chart_config.kind, chart_config.chart);
-
-        let mut page = 1;
-        let mut items = Vec::new();
-        loop {
-            let mut page_items = self.get_chart_items_page(chart_config, page).await?;
-            let page_count = page_items.page_count;
-            let item_count = page_items.item_count;
-            debug!(
-                "Fetched Trakt chart {}:{} page {page}/{page_count} with {} items",
-                chart_config.kind,
-                chart_config.chart,
-                page_items.items.len()
-            );
-            let is_last_page = page >= page_count || page >= TRAKT_MAX_PAGES || page_items.items.is_empty();
-            items.append(&mut page_items.items);
-            if is_last_page {
-                if page >= TRAKT_MAX_PAGES && page < page_count {
-                    debug!(
-                        "Stopped Trakt chart {}:{} after {TRAKT_MAX_PAGES} pages; reported page count was {page_count}",
-                        chart_config.kind, chart_config.chart
-                    );
-                }
-                info!(
-                    "Successfully fetched {} items from Trakt chart {}:{}{}",
-                    items.len(),
-                    chart_config.kind,
-                    chart_config.chart,
-                    item_count.map(|count| format!(" (reported item count: {count})")).unwrap_or_default()
-                );
-                return Ok(items);
-            }
-            page += 1;
-        }
+        let id_label = format!("{}:{}", chart_config.kind, chart_config.chart);
+        self.paginate_items("chart", id_label, |page| async move {
+            self.get_chart_items_page(chart_config, page).await
+        })
+        .await
     }
 
     pub async fn get_list_items(&self, list_config: &TraktListConfig) -> Result<Vec<TraktListItem>, TuliproxError> {
-        debug!("Fetching Trakt list {}:{}", list_config.user, list_config.list_slug);
+        let id_label = format!("{}:{}", list_config.user, list_config.list_slug);
+        self.paginate_items("list", id_label, |page| async move {
+            self.get_list_items_page(list_config, page).await
+        })
+        .await
+    }
+
+    /// Shared body of `get_chart_items` and `get_list_items`.
+    /// Walks Trakt's paginated response one page at a time via `fetch_page`,
+    /// logging per-page progress with `kind_label` and `id_label` for context.
+    async fn paginate_items<F, Fut>(
+        &self,
+        kind_label: &'static str,
+        id_label: String,
+        mut fetch_page: F,
+    ) -> Result<Vec<TraktListItem>, TuliproxError>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: std::future::Future<Output = Result<TraktListItemsPage, TuliproxError>>,
+    {
+        debug!("Fetching Trakt {kind_label} {id_label}");
 
         let mut page = 1;
         let mut items = Vec::new();
         loop {
-            let mut page_items = self.get_list_items_page(list_config, page).await?;
+            let mut page_items = fetch_page(page).await?;
             let page_count = page_items.page_count;
             let item_count = page_items.item_count;
             debug!(
-                "Fetched Trakt list {}:{} page {page}/{page_count} with {} items",
-                list_config.user,
-                list_config.list_slug,
+                "Fetched Trakt {kind_label} {id_label} page {page}/{page_count} with {} items",
                 page_items.items.len()
             );
             let is_last_page = page >= page_count || page >= TRAKT_MAX_PAGES || page_items.items.is_empty();
@@ -101,15 +90,12 @@ impl TraktClient {
             if is_last_page {
                 if page >= TRAKT_MAX_PAGES && page < page_count {
                     debug!(
-                        "Stopped Trakt list {}:{} after {TRAKT_MAX_PAGES} pages; reported page count was {page_count}",
-                        list_config.user, list_config.list_slug
+                        "Stopped Trakt {kind_label} {id_label} after {TRAKT_MAX_PAGES} pages; reported page count was {page_count}"
                     );
                 }
                 info!(
-                    "Successfully fetched {} items from Trakt list {}:{}{}",
+                    "Successfully fetched {} items from Trakt {kind_label} {id_label}{}",
                     items.len(),
-                    list_config.user,
-                    list_config.list_slug,
                     item_count.map(|count| format!(" (reported item count: {count})")).unwrap_or_default()
                 );
                 return Ok(items);
@@ -125,25 +111,9 @@ impl TraktClient {
     ) -> Result<TraktListItemsPage, TuliproxError> {
         let url = self.build_list_url(&list_config.user, &list_config.list_slug);
         let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
-        let response = self
-            .client
-            .get(&request_url)
-            .headers(self.headers.clone())
-            .send()
-            .await
-            .map_err(|err| TuliproxError::Config(format!("Failed to fetch Trakt list {url}: {err}")))?;
-
-        if !response.status().is_success() {
-            handle_trakt_api_error(response.status(), &list_config.user, &list_config.list_slug)?;
-        }
-
-        let page_count = parse_trakt_pagination_header(response.headers(), "x-pagination-page-count").unwrap_or(page);
-        let item_count = parse_trakt_pagination_header(response.headers(), "x-pagination-item-count");
-        let response_text = response
-            .text()
-            .await
-            .map_err(|error: reqwest::Error| TuliproxError::Config(format!("Failed to read Trakt response: {error}")))?;
-
+        let (response_text, page_count, item_count) = self
+            .fetch_trakt_page(request_url, "list", (&list_config.user, &list_config.list_slug), page)
+            .await?;
         let mut items: Vec<TraktListItem> = serde_json::from_str(&response_text)
             .map_err(|error: serde_json::Error| TuliproxError::Config(format!("Failed to parse Trakt response: {error}")))?;
         items.iter_mut().for_each(TraktListItem::prepare);
@@ -158,16 +128,40 @@ impl TraktClient {
     ) -> Result<TraktListItemsPage, TuliproxError> {
         let url = self.build_chart_url(chart_config);
         let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
+        let (response_text, page_count, item_count) = self
+            .fetch_trakt_page(
+                request_url,
+                "chart",
+                ("charts", &format!("{}:{}", chart_config.kind, chart_config.chart)),
+                page,
+            )
+            .await?;
+        let items = parse_chart_items(&response_text, chart_config, page)
+            .map_err(|error| TuliproxError::Config(format!("Failed to parse Trakt chart response: {error}")))?;
+
+        Ok(TraktListItemsPage { items, page_count, item_count })
+    }
+
+    /// Shared body of `get_list_items_page` / `get_chart_items_page`.
+    /// Issues the GET, validates the status, parses the pagination headers, and
+    /// returns the raw response body. Per-type item parsing stays with the caller.
+    async fn fetch_trakt_page(
+        &self,
+        request_url: String,
+        error_label: &str,
+        error_id: (&str, &str),
+        page: u32,
+    ) -> Result<(String, u32, Option<u32>), TuliproxError> {
         let response = self
             .client
             .get(&request_url)
             .headers(self.headers.clone())
             .send()
             .await
-            .map_err(|err| TuliproxError::Config(format!("Failed to fetch Trakt chart {url}: {err}")))?;
+            .map_err(|err| TuliproxError::Config(format!("Failed to fetch Trakt {error_label} {request_url}: {err}")))?;
 
         if !response.status().is_success() {
-            handle_trakt_api_error(response.status(), "charts", &format!("{}:{}", chart_config.kind, chart_config.chart))?;
+            handle_trakt_api_error(response.status(), error_id.0, error_id.1)?;
         }
 
         let page_count = parse_trakt_pagination_header(response.headers(), "x-pagination-page-count").unwrap_or(page);
@@ -177,10 +171,7 @@ impl TraktClient {
             .await
             .map_err(|error: reqwest::Error| TuliproxError::Config(format!("Failed to read Trakt response: {error}")))?;
 
-        let items = parse_chart_items(&response_text, chart_config, page)
-            .map_err(|error| TuliproxError::Config(format!("Failed to parse Trakt chart response: {error}")))?;
-
-        Ok(TraktListItemsPage { items, page_count, item_count })
+        Ok((response_text, page_count, item_count))
     }
 }
 

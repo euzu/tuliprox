@@ -16,6 +16,7 @@ use crate::{
     config_field, config_field_bool, config_field_empty, edit_field_bool, edit_field_number_u16, edit_field_text,
     generate_form_reducer, html_if,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::{
     concat_string,
@@ -157,10 +158,10 @@ pub fn ApiConfigView() -> Html {
     let server_dialog_error = use_state(|| None::<String>);
 
     let form_state_api_config: UseReducerHandle<ApiConfigFormState> =
-        use_reducer(|| ApiConfigFormState { form: ConfigApiDto::default(), modified: false });
+        use_default_form_reducer!(ApiConfigFormState { form: ConfigApiDto::default() });
 
     let form_state_api_proxy_config: UseReducerHandle<ApiProxyConfigFormState> =
-        use_reducer(|| ApiProxyConfigFormState { form: ApiProxyConfigDto::default(), modified: false });
+        use_default_form_reducer!(ApiProxyConfigFormState { form: ApiProxyConfigDto::default() });
 
     {
         use_emit_config_form(&form_state_api_config, config_view_ctx.on_form_change.clone(), ConfigForm::Api);

@@ -3,6 +3,7 @@ mod accordion_panel;
 mod api_user;
 mod authentication;
 mod breadcrumbs;
+mod button_utils;
 mod card;
 mod cell_value;
 mod chip;

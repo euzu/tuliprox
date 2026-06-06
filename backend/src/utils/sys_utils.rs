@@ -96,16 +96,9 @@ fn parse_linux_proc_status_memory_bytes(bytes: &[u8]) -> Option<(u64, u64)> {
     None
 }
 
-#[cfg(target_os = "linux")]
-fn parse_linux_status_kib_value(line: &[u8]) -> Option<u64> {
-    line.split(u8::is_ascii_whitespace)
-        .filter(|token| !token.is_empty())
-        .nth(1)
-        .and_then(parse_linux_u64)
-}
-
-#[cfg(target_os = "linux")]
-fn parse_linux_u64(token: &[u8]) -> Option<u64> {
+/// Parse an ASCII byte slice as a `u64` with no allocation and saturating semantics on
+/// overflow. Returns `None` for empty input, non-digit bytes, or arithmetic overflow.
+pub fn parse_ascii_u64_bytes(token: &[u8]) -> Option<u64> {
     if token.is_empty() {
         return None;
     }
@@ -119,6 +112,14 @@ fn parse_linux_u64(token: &[u8]) -> Option<u64> {
     }
 
     Some(value)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_status_kib_value(line: &[u8]) -> Option<u64> {
+    line.split(u8::is_ascii_whitespace)
+        .filter(|token| !token.is_empty())
+        .nth(1)
+        .and_then(parse_ascii_u64_bytes)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -138,6 +139,32 @@ fn read_fallback_memory_snapshot() -> Option<(u64, u64)> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use super::parse_ascii_u64_bytes;
+
+    #[test]
+    fn test_parse_ascii_u64_bytes_parses_valid_digits() {
+        assert_eq!(parse_ascii_u64_bytes(b"0"), Some(0));
+        assert_eq!(parse_ascii_u64_bytes(b"42"), Some(42));
+        assert_eq!(parse_ascii_u64_bytes(b"16384256"), Some(16_384_256));
+    }
+
+    #[test]
+    fn test_parse_ascii_u64_bytes_rejects_invalid_input() {
+        assert_eq!(parse_ascii_u64_bytes(b""), None);
+        assert_eq!(parse_ascii_u64_bytes(b" 12"), None);
+        assert_eq!(parse_ascii_u64_bytes(b"12 "), None);
+        assert_eq!(parse_ascii_u64_bytes(b"12a"), None);
+        assert_eq!(parse_ascii_u64_bytes(b"-1"), None);
+    }
+
+    #[test]
+    fn test_parse_ascii_u64_bytes_saturates_on_overflow() {
+        // u64::MAX is 18446744073709551615; any larger digit sequence overflows.
+        assert_eq!(parse_ascii_u64_bytes(b"18446744073709551615"), Some(u64::MAX));
+        assert_eq!(parse_ascii_u64_bytes(b"18446744073709551616"), None);
+        assert_eq!(parse_ascii_u64_bytes(b"99999999999999999999"), None);
+    }
+
     #[test]
     fn test_parse_linux_proc_status_memory_bytes_extracts_rss_and_vmem() {
         let status = b"Name:\ttuliprox\nVmSize:\t  2048 kB\nVmRSS:\t  1024 kB\nThreads:\t3\n";

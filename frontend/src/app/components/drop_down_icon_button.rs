@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{popup_menu::PopupMenu, AppIcon, IconButton},
+    app::components::{button_utils::prevent_default_and_stop, popup_menu::PopupMenu, AppIcon, IconButton},
     html_if,
 };
 use std::{collections::HashSet, rc::Rc};
@@ -65,9 +65,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let button_ref = button_ref.clone();
         let set_anchor_ref = popup_anchor_ref.clone();
         let set_is_open = popup_is_open.clone();
-        Callback::from(move |(_name, event): (String, MouseEvent)| {
-            event.prevent_default();
-            event.stop_propagation();
+        Callback::from(move |(_name, _event): (String, MouseEvent)| {
             if let Some(button) = button_ref.cast::<web_sys::Element>() {
                 set_anchor_ref.set(Some(button));
                 set_is_open.set(true);
@@ -81,9 +79,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let selections = selections.clone();
         let onselect = props.on_select.clone();
         let set_is_open = popup_is_open.clone();
-        Callback::from(move |(id, e): (String, MouseEvent)| {
-            e.prevent_default();
-            e.stop_propagation();
+        Callback::from(move |(id, _event): (String, MouseEvent)| {
             if selections.current().contains(&id) {
                 selections.remove(&id);
             } else {
@@ -113,10 +109,10 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
                 for props.options.iter().map(|o| {
                     let checkbox_id = o.id.clone();
                     let checkbox_handler = handle_option_click.clone();
-                    let option_click = Callback::from({
-                            let id = checkbox_id.clone();
-                            move |e| checkbox_handler.emit((id.clone(), e))
-                        });
+                    let option_click = prevent_default_and_stop::<(), _>({
+                        let id = checkbox_id.clone();
+                        move |event| checkbox_handler.emit((id.clone(), event))
+                    });
                     html! {
                         <div class={classes!("tp__dropdown-icon-button__option", "tp__menu-item", if selections.current().contains(&o.id) {"checked"} else {"unchecked"})} onclick={option_click}>
                             {

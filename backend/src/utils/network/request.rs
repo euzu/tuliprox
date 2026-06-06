@@ -480,7 +480,7 @@ pub async fn send_with_retry_and_provider(
 
 /// Canonical retry and provider-failover entry point for outbound resource requests.
 ///
-/// [`send_with_retry_and_provider`] is a thin wrapper that enables the standard retry policy. Retry attempt counts,
+/// `send_with_retry_and_provider` is a thin wrapper that enables the standard retry policy. Retry attempt counts,
 /// backoff values, and failover redirect patterns are sourced from `AppConfig` (`reverse_proxy.resource_retry`). The
 /// `url` argument is used as the stable logging/context URL; callers should pass the original request target rather
 /// than an already-rotated provider URL.

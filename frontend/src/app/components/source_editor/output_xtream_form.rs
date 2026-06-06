@@ -137,24 +137,28 @@ fn build_trakt_output_config(
     }
 }
 
-fn trakt_list_summary(item: &TraktListConfigDto) -> String {
-    let mut summary = format!(
-        "{} / {} - {} ({}, {}%)",
-        item.user, item.list_slug, item.category_name, item.content_type, item.fuzzy_match_threshold
-    );
-    if item.tmdb_only {
+fn append_trakt_matching_summary_suffix(mut summary: String, tmdb_only: bool) -> String {
+    if tmdb_only {
         summary.push_str(", TMDB only");
     }
     summary
 }
 
+fn trakt_list_summary(item: &TraktListConfigDto) -> String {
+    append_trakt_matching_summary_suffix(
+        format!(
+            "{} / {} - {} ({}, {}%)",
+            item.user, item.list_slug, item.category_name, item.content_type, item.fuzzy_match_threshold
+        ),
+        item.tmdb_only,
+    )
+}
+
 fn trakt_chart_summary(item: &TraktChartConfigDto) -> String {
-    let mut summary =
-        format!("{}/{} - {} ({}%)", item.kind, item.chart, item.category_name, item.fuzzy_match_threshold);
-    if item.tmdb_only {
-        summary.push_str(", TMDB only");
-    }
-    summary
+    append_trakt_matching_summary_suffix(
+        format!("{}/{} - {} ({}%)", item.kind, item.chart, item.category_name, item.fuzzy_match_threshold),
+        item.tmdb_only,
+    )
 }
 
 fn upsert_vec_item<T>(items: &mut Vec<T>, index: Option<usize>, item: T) {

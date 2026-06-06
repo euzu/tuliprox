@@ -153,74 +153,57 @@ pub fn create_channel_unavailable_stream(
     )
 }
 
-pub fn create_user_connections_exhausted_stream(
-    cfg: &AppConfig,
-    headers: &[(String, String)],
-) -> ProviderStreamResponse {
-    let custom_stream_response = cfg.custom_stream_response.load();
-    let video = custom_stream_response.as_ref().and_then(|c| c.user_connections_exhausted.as_ref());
-    create_ok_video_stream(
-        cfg,
-        CustomVideoStreamType::UserConnectionsExhausted,
-        video,
-        headers,
-        "Streaming response user connections exhausted",
-    )
+/// Generate a public factory function that loads the optional custom
+/// fallback video for a given `CustomStreamResponse` field and forwards it to
+/// `create_ok_video_stream` with the matching `CustomVideoStreamType` variant
+/// and human-readable description.
+macro_rules! ok_custom_stream_factory {
+    ($fn_name:ident, $field:ident, $stream_type:expr, $description:expr) => {
+        pub fn $fn_name(
+            cfg: &AppConfig,
+            headers: &[(String, String)],
+        ) -> ProviderStreamResponse {
+            let custom_stream_response = cfg.custom_stream_response.load();
+            let video = custom_stream_response.as_ref().and_then(|c| c.$field.as_ref());
+            create_ok_video_stream(cfg, $stream_type, video, headers, $description)
+        }
+    };
 }
 
-pub fn create_provider_connections_exhausted_stream(
-    cfg: &AppConfig,
-    headers: &[(String, String)],
-) -> ProviderStreamResponse {
-    let custom_stream_response = cfg.custom_stream_response.load();
-    let video = custom_stream_response.as_ref().and_then(|c| c.provider_connections_exhausted.as_ref());
-    create_ok_video_stream(
-        cfg,
-        CustomVideoStreamType::ProviderConnectionsExhausted,
-        video,
-        headers,
-        "Streaming response provider connections exhausted",
-    )
-}
+ok_custom_stream_factory!(
+    create_user_connections_exhausted_stream,
+    user_connections_exhausted,
+    CustomVideoStreamType::UserConnectionsExhausted,
+    "Streaming response user connections exhausted"
+);
 
-pub fn create_low_priority_preempted_stream(
-    cfg: &AppConfig,
-    headers: &[(String, String)],
-) -> ProviderStreamResponse {
-    let custom_stream_response = cfg.custom_stream_response.load();
-    let video = custom_stream_response.as_ref().and_then(|c| c.low_priority_preempted.as_ref());
-    create_ok_video_stream(
-        cfg,
-        CustomVideoStreamType::LowPriorityPreempted,
-        video,
-        headers,
-        "Streaming response low-priority preempted",
-    )
-}
+ok_custom_stream_factory!(
+    create_provider_connections_exhausted_stream,
+    provider_connections_exhausted,
+    CustomVideoStreamType::ProviderConnectionsExhausted,
+    "Streaming response provider connections exhausted"
+);
 
-pub fn create_user_account_expired_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
-    let custom_stream_response = cfg.custom_stream_response.load();
-    let video = custom_stream_response.as_ref().and_then(|c| c.user_account_expired.as_ref());
-    create_ok_video_stream(
-        cfg,
-        CustomVideoStreamType::UserAccountExpired,
-        video,
-        headers,
-        "Streaming response user account expired",
-    )
-}
+ok_custom_stream_factory!(
+    create_low_priority_preempted_stream,
+    low_priority_preempted,
+    CustomVideoStreamType::LowPriorityPreempted,
+    "Streaming response low-priority preempted"
+);
 
-pub fn create_panel_api_provisioning_stream(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
-    let custom_stream_response = cfg.custom_stream_response.load();
-    let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());
-    create_ok_video_stream(
-        cfg,
-        CustomVideoStreamType::Provisioning,
-        video,
-        headers,
-        "Streaming response panel api provisioning",
-    )
-}
+ok_custom_stream_factory!(
+    create_user_account_expired_stream,
+    user_account_expired,
+    CustomVideoStreamType::UserAccountExpired,
+    "Streaming response user account expired"
+);
+
+ok_custom_stream_factory!(
+    create_panel_api_provisioning_stream,
+    panel_api_provisioning,
+    CustomVideoStreamType::Provisioning,
+    "Streaming response panel api provisioning"
+);
 
 pub fn create_panel_api_provisioning_stream_with_stop(
     cfg: &AppConfig,
@@ -371,5 +354,39 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(matches!(stream_type, Some(CustomVideoStreamType::ChannelUnavailable)));
+    }
+
+    /// The `ok_custom_stream_factory!` macro generates a public factory for
+    /// each (field, stream type, description) tuple. Pick one representative
+    /// factory — `create_user_connections_exhausted_stream` — and verify the
+    /// macro forwards the correct `CustomVideoStreamType` to the stream info.
+    #[test]
+    fn test_ok_custom_stream_factory_macro_forwards_video_type() {
+        use super::create_user_connections_exhausted_stream;
+        use crate::api::model::TransportStreamBuffer;
+
+        // Build a config with all 5 ok-stream custom video fields populated so
+        // the macro-generated factory can actually return a stream.
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        let buffer = TransportStreamBuffer::new(ts_packet);
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let current_arc = app_cfg.custom_stream_response.load().clone().expect("custom response set");
+        let mut current = (*current_arc).clone();
+        current.user_connections_exhausted = Some(buffer.clone());
+        current.provider_connections_exhausted = Some(buffer.clone());
+        current.low_priority_preempted = Some(buffer.clone());
+        current.user_account_expired = Some(buffer.clone());
+        current.panel_api_provisioning = Some(buffer);
+        app_cfg.custom_stream_response.store(Some(Arc::new(current)));
+
+        let (_stream, info) = create_user_connections_exhausted_stream(&app_cfg, &[]);
+        let (_headers, _status, _url, stream_type) =
+            info.expect("user connections exhausted custom stream should exist");
+
+        assert!(
+            matches!(stream_type, Some(CustomVideoStreamType::UserConnectionsExhausted)),
+            "macro-generated factory must tag the stream with the matching CustomVideoStreamType"
+        );
     }
 }

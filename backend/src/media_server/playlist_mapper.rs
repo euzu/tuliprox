@@ -1,7 +1,7 @@
 use crate::media_server::{
-    MediaServerAudioTechnicalFacts, MediaServerCatalogSnapshot, MediaServerDescriptiveFacts, MediaServerEpisode,
-    MediaServerImageRef, MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason, MediaServerSeries, MediaServerStreamRef,
-    MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
+    encode_url_path_segment, MediaServerAudioTechnicalFacts, MediaServerCatalogSnapshot, MediaServerDescriptiveFacts,
+    MediaServerEpisode, MediaServerImageRef, MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason,
+    MediaServerSeries, MediaServerStreamRef, MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
 };
 use serde_json::{Map, Number, Value};
 use shared::{
@@ -12,7 +12,7 @@ use shared::{
     },
     utils::{generate_provider_playlist_uuid, Internable},
 };
-use std::{collections::HashMap, fmt::Write as _, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSnapshot) -> Vec<PlaylistGroup> {
     let mut groups = Vec::new();
@@ -132,9 +132,9 @@ fn media_server_movie_to_playlist_item(movie: &MediaServerMovie) -> PlaylistItem
         || {
             format!(
                 "media-server://unavailable/{}/{}/{}",
-                escape_internal_url_component(&movie.server_id),
-                escape_internal_url_component(&movie.library_id),
-                escape_internal_url_component(&movie.item_id)
+                encode_url_path_segment(&movie.server_id),
+                encode_url_path_segment(&movie.library_id),
+                encode_url_path_segment(&movie.item_id)
             )
         },
         media_server_stream_ref_to_internal_url,
@@ -182,9 +182,9 @@ fn media_server_series_to_playlist_item(series: &MediaServerSeries, seasons: &[&
     let stable_id = stable_media_server_item_id(&series.server_id, &series.library_id, &series.item_id, "series");
     let url = format!(
         "media-server://unavailable/{}/{}/{}",
-        escape_internal_url_component(&series.server_id),
-        escape_internal_url_component(&series.library_id),
-        escape_internal_url_component(&series.item_id)
+        encode_url_path_segment(&series.server_id),
+        encode_url_path_segment(&series.library_id),
+        encode_url_path_segment(&series.item_id)
     );
     let uuid = generate_provider_playlist_uuid(&series.input_name, &stable_id, PlaylistItemType::SeriesInfo);
     let release_date = series.release_date.clone().or_else(|| release_date_from_year(series.year));
@@ -234,9 +234,9 @@ fn media_server_episode_to_playlist_item(episode: &MediaServerEpisode, parent_co
         || {
             format!(
                 "media-server://unavailable/{}/{}/{}",
-                escape_internal_url_component(&episode.server_id),
-                escape_internal_url_component(&episode.library_id),
-                escape_internal_url_component(&episode.item_id)
+                encode_url_path_segment(&episode.server_id),
+                encode_url_path_segment(&episode.library_id),
+                encode_url_path_segment(&episode.item_id)
             )
         },
         media_server_stream_ref_to_internal_url,
@@ -484,30 +484,30 @@ pub fn media_server_stream_ref_to_internal_url(stream_ref: &MediaServerStreamRef
         MediaServerStreamRef::Emby { server_id, item_id, media_source_id, .. } => {
             format!(
                 "media-server://emby/{}/{}{}",
-                escape_internal_url_component(server_id),
-                escape_internal_url_component(item_id),
+                encode_url_path_segment(server_id),
+                encode_url_path_segment(item_id),
                 media_source_id
                     .as_ref()
-                    .map(|id| format!("?media_source_id={}", escape_internal_url_component(id)))
+                    .map(|id| format!("?media_source_id={}", encode_url_path_segment(id)))
                     .unwrap_or_default()
             )
         }
         MediaServerStreamRef::Jellyfin { server_id, item_id, media_source_id, .. } => {
             format!(
                 "media-server://jellyfin/{}/{}{}",
-                escape_internal_url_component(server_id),
-                escape_internal_url_component(item_id),
+                encode_url_path_segment(server_id),
+                encode_url_path_segment(item_id),
                 media_source_id
                     .as_ref()
-                    .map(|id| format!("?media_source_id={}", escape_internal_url_component(id)))
+                    .map(|id| format!("?media_source_id={}", encode_url_path_segment(id)))
                     .unwrap_or_default()
             )
         }
         MediaServerStreamRef::Plex { server_id, rating_key, part_key, .. } => format!(
             "media-server://plex/{}/{}?part_key={}",
-            escape_internal_url_component(server_id),
-            escape_internal_url_component(rating_key),
-            escape_internal_url_component(part_key)
+            encode_url_path_segment(server_id),
+            encode_url_path_segment(rating_key),
+            encode_url_path_segment(part_key)
         ),
     }
 }
@@ -522,12 +522,12 @@ pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -
             tag,
         } => format!(
             "media-server://image/emby/{}/{}/{}?image_kind={}{}",
-            escape_internal_url_component(input_name),
-            escape_internal_url_component(server_id),
-            escape_internal_url_component(item_id),
-            escape_internal_url_component(image_kind),
+            encode_url_path_segment(input_name),
+            encode_url_path_segment(server_id),
+            encode_url_path_segment(item_id),
+            encode_url_path_segment(image_kind),
             tag.as_ref()
-                .map(|tag| format!("&tag={}", escape_internal_url_component(tag)))
+                .map(|tag| format!("&tag={}", encode_url_path_segment(tag)))
                 .unwrap_or_default()
         ),
         MediaServerImageRef::Jellyfin {
@@ -538,12 +538,12 @@ pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -
             tag,
         } => format!(
             "media-server://image/jellyfin/{}/{}/{}?image_kind={}{}",
-            escape_internal_url_component(input_name),
-            escape_internal_url_component(server_id),
-            escape_internal_url_component(item_id),
-            escape_internal_url_component(image_kind),
+            encode_url_path_segment(input_name),
+            encode_url_path_segment(server_id),
+            encode_url_path_segment(item_id),
+            encode_url_path_segment(image_kind),
             tag.as_ref()
-                .map(|tag| format!("&tag={}", escape_internal_url_component(tag)))
+                .map(|tag| format!("&tag={}", encode_url_path_segment(tag)))
                 .unwrap_or_default()
         ),
         MediaServerImageRef::Plex {
@@ -553,25 +553,14 @@ pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -
             image_path,
         } => format!(
             "media-server://image/plex/{}/{}/{}?image_path={}",
-            escape_internal_url_component(input_name),
-            escape_internal_url_component(server_id),
-            escape_internal_url_component(rating_key),
-            escape_internal_url_component(image_path)
+            encode_url_path_segment(input_name),
+            encode_url_path_segment(server_id),
+            encode_url_path_segment(rating_key),
+            encode_url_path_segment(image_path)
         ),
     }
 }
 
-fn escape_internal_url_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(byte as char);
-        } else {
-            let _ = write!(encoded, "%{byte:02X}");
-        }
-    }
-    encoded
-}
 
 #[cfg(test)]
 mod tests {

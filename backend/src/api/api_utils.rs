@@ -8458,6 +8458,31 @@ mod tests {
     // evaluate_network_access tests
     // =========================================================================================
 
+    /// Run `evaluate_network_access` for a synthetic user built from
+    /// `network_access` and assert the decision matches `expected`. Centralizes
+    /// the boilerplate (`user_with_network_access` + geoip setup + call +
+    /// assert) shared by every `evaluate_network_access` test below.
+    fn assert_network_decision(
+        network_access: Option<NetworkAccess>,
+        geoip: &Arc<ArcSwapOption<GeoIp>>,
+        ip: &str,
+        expected: NetworkAccessDecision,
+    ) {
+        let user = user_with_network_access(network_access);
+        assert_eq!(evaluate_network_access(&user, ip, geoip, GeoIpUnavailablePolicy::Deny), expected);
+    }
+
+    /// `Arc<ArcSwapOption<GeoIp>>` with no `GeoIP` database loaded.
+    fn empty_geoip() -> Arc<ArcSwapOption<GeoIp>> {
+        Arc::new(ArcSwapOption::<GeoIp>::default())
+    }
+
+    /// `Arc<ArcSwapOption<GeoIp>>` with a mock `GeoIP` that always reports the
+    /// given country for any lookup.
+    fn mock_geoip(country: &str) -> Arc<ArcSwapOption<GeoIp>> {
+        Arc::new(ArcSwapOption::from(Some(Arc::new(GeoIp::test_new(country)))))
+    }
+
     /// Helper to create a test user with specific network access
     fn user_with_network_access(network_access: Option<NetworkAccess>) -> ProxyUserCredentials {
         ProxyUserCredentials {
@@ -8485,114 +8510,121 @@ mod tests {
 
     #[test]
     fn no_config_allows_all() {
-        let user = user_with_network_access(None);
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(evaluate_network_access(&user, "192.168.1.1", &geoip, GeoIpUnavailablePolicy::Deny), NetworkAccessDecision::Allowed);
+        assert_network_decision(None, &empty_geoip(), "192.168.1.1", NetworkAccessDecision::Allowed);
     }
 
     #[test]
     fn empty_config_allows_all() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec![],
-            allowed_networks: vec![],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(evaluate_network_access(&user, "192.168.1.1", &geoip, GeoIpUnavailablePolicy::Deny), NetworkAccessDecision::Allowed);
+        assert_network_decision(
+            Some(NetworkAccess { allowed_countries: vec![], allowed_networks: vec![] }),
+            &empty_geoip(),
+            "192.168.1.1",
+            NetworkAccessDecision::Allowed,
+        );
     }
 
     #[test]
     fn cidr_match_allows() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec![],
-            allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(evaluate_network_access(&user, "192.168.1.42", &geoip, GeoIpUnavailablePolicy::Deny), NetworkAccessDecision::Allowed);
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec![],
+                allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
+            }),
+            &empty_geoip(),
+            "192.168.1.42",
+            NetworkAccessDecision::Allowed,
+        );
     }
 
     #[test]
     fn cidr_miss_denies() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec![],
-            allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(
-            evaluate_network_access(&user, "10.0.0.1", &geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch)
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec![],
+                allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
+            }),
+            &empty_geoip(),
+            "10.0.0.1",
+            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch),
         );
     }
 
     #[test]
     fn country_match_allows() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec!["DE".to_string()],
-            allowed_networks: vec![],
-        }));
-        let mock_geoip = Arc::new(ArcSwapOption::from(Some(Arc::new(GeoIp::test_new("DE")))));
-        assert_eq!(evaluate_network_access(&user, "8.8.8.8", &mock_geoip, GeoIpUnavailablePolicy::Deny), NetworkAccessDecision::Allowed);
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec!["DE".to_string()],
+                allowed_networks: vec![],
+            }),
+            &mock_geoip("DE"),
+            "8.8.8.8",
+            NetworkAccessDecision::Allowed,
+        );
     }
 
     #[test]
     fn country_miss_denies() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec!["DE".to_string()],
-            allowed_networks: vec![],
-        }));
-        let mock_geoip = Arc::new(ArcSwapOption::from(Some(Arc::new(GeoIp::test_new("US")))));
-        assert_eq!(
-            evaluate_network_access(&user, "8.8.8.8", &mock_geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCountryMatch)
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec!["DE".to_string()],
+                allowed_networks: vec![],
+            }),
+            &mock_geoip("US"),
+            "8.8.8.8",
+            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCountryMatch),
         );
     }
 
     #[test]
     fn no_geoip_denies_on_country_restriction() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec!["DE".to_string()],
-            allowed_networks: vec![],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(
-            evaluate_network_access(&user, "8.8.8.8", &geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::GeoIpUnavailable)
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec!["DE".to_string()],
+                allowed_networks: vec![],
+            }),
+            &empty_geoip(),
+            "8.8.8.8",
+            NetworkAccessDecision::Denied(NetworkAccessDenyReason::GeoIpUnavailable),
         );
     }
 
     #[test]
     fn ipv4_vs_ipv6_denies_gracefully() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec![],
-            allowed_networks: vec!["2001:db8::/32".parse().unwrap()],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(
-            evaluate_network_access(&user, "192.168.1.1", &geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch)
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec![],
+                allowed_networks: vec!["2001:db8::/32".parse().unwrap()],
+            }),
+            &empty_geoip(),
+            "192.168.1.1",
+            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch),
         );
     }
 
     #[test]
     fn ipv6_vs_ipv4_denies_gracefully() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec![],
-            allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(
-            evaluate_network_access(&user, "2001:db8::1", &geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch)
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec![],
+                allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
+            }),
+            &empty_geoip(),
+            "2001:db8::1",
+            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch),
         );
     }
 
     #[test]
     fn either_cidr_or_country_match_allows() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec!["US".to_string()],
-            allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
-        }));
-        let mock_geoip = Arc::new(ArcSwapOption::from(Some(Arc::new(GeoIp::test_new("DE")))));
-        assert_eq!(evaluate_network_access(&user, "192.168.1.42", &mock_geoip, GeoIpUnavailablePolicy::Deny), NetworkAccessDecision::Allowed);
+        assert_network_decision(
+            Some(NetworkAccess {
+                allowed_countries: vec!["US".to_string()],
+                allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
+            }),
+            &mock_geoip("DE"),
+            "192.168.1.42",
+            NetworkAccessDecision::Allowed,
+        );
     }
 
     #[test]
@@ -8601,8 +8633,11 @@ mod tests {
             allowed_countries: vec![],
             allowed_networks: vec!["192.168.1.1/32".parse().unwrap()],
         }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(evaluate_network_access(&user, "192.168.1.1", &geoip, GeoIpUnavailablePolicy::Deny), NetworkAccessDecision::Allowed);
+        let geoip = empty_geoip();
+        assert_eq!(
+            evaluate_network_access(&user, "192.168.1.1", &geoip, GeoIpUnavailablePolicy::Deny),
+            NetworkAccessDecision::Allowed
+        );
         assert_eq!(
             evaluate_network_access(&user, "192.168.1.2", &geoip, GeoIpUnavailablePolicy::Deny),
             NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch)
@@ -8613,44 +8648,11 @@ mod tests {
     // network denied reason tests
     // =========================================================================================
 
-    #[test]
-    fn network_denied_reason_cidr_no_match() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec![],
-            allowed_networks: vec!["192.168.1.0/24".parse().unwrap()],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(
-            evaluate_network_access(&user, "10.0.0.1", &geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCidrMatch)
-        );
-    }
-
-    #[test]
-    fn network_denied_reason_country_no_match() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec!["DE".to_string()],
-            allowed_networks: vec![],
-        }));
-        let mock_geoip = Arc::new(ArcSwapOption::from(Some(Arc::new(GeoIp::test_new("US")))));
-        assert_eq!(
-            evaluate_network_access(&user, "8.8.8.8", &mock_geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::NoCountryMatch)
-        );
-    }
-
-    #[test]
-    fn network_denied_reason_geoip_unavailable() {
-        let user = user_with_network_access(Some(NetworkAccess {
-            allowed_countries: vec!["DE".to_string()],
-            allowed_networks: vec![],
-        }));
-        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
-        assert_eq!(
-            evaluate_network_access(&user, "8.8.8.8", &geoip, GeoIpUnavailablePolicy::Deny),
-            NetworkAccessDecision::Denied(NetworkAccessDenyReason::GeoIpUnavailable)
-        );
-    }
+    // The three `network_denied_reason_*` cases below duplicate the assertions
+    // in the matching `cidr_miss_denies` / `country_miss_denies` /
+    // `no_geoip_denies_on_country_restriction` tests above (which already assert
+    // the exact deny reason). They are kept removed to avoid duplicate coverage;
+    // see those tests for the canonical deny-reason coverage.
 
     #[test]
     fn network_denied_reason_country_unknown_when_geoip_loaded_but_unknown_ip() {

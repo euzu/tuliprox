@@ -139,35 +139,52 @@ pub fn write_file_magic<W: Write>(writer: &mut W) -> io::Result<()> {
     writer.write_all(&FILE_MAGIC)
 }
 
-/// Read and verify the file magic bytes.
-pub fn read_and_verify_file_magic<R: Read>(reader: &mut R) -> io::Result<()> {
-    let mut magic = [0u8; 8];
-    reader.read_exact(&mut magic)?;
-    if magic != FILE_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid file magic: {magic:02X?}"),
-        ));
-    }
-    Ok(())
-}
-
 /// Write the block magic bytes before a block header.
 pub fn write_block_magic<W: Write>(writer: &mut W) -> io::Result<()> {
     writer.write_all(&BLOCK_MAGIC)
 }
 
+/// Shared body of the four `read_and_verify_*_magic` entry points below.
+/// Sync and async are kept as separate macros because the `read_exact` trait
+/// is in scope differently for `std::io::Read` and `tokio::io::AsyncRead`.
+macro_rules! read_and_verify_magic_sync {
+    ($reader:expr, $expected:expr, $kind:literal) => {{
+        let mut magic = [0u8; $expected.len()];
+        $reader.read_exact(&mut magic)?;
+        if magic != $expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid {} magic: {magic:02X?}", $kind),
+            ));
+        }
+        Ok(())
+    }};
+}
+
+macro_rules! read_and_verify_magic_async {
+    ($reader:expr, $expected:expr, $kind:literal) => {{
+        let mut magic = [0u8; $expected.len()];
+        $reader.read_exact(&mut magic).await?;
+        if magic != $expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid {} magic: {magic:02X?}", $kind),
+            ));
+        }
+        Ok(())
+    }};
+}
+
+/// Read and verify the file magic bytes.
+#[inline]
+pub fn read_and_verify_file_magic<R: Read>(reader: &mut R) -> io::Result<()> {
+    read_and_verify_magic_sync!(reader, FILE_MAGIC, "file")
+}
+
 /// Read and verify the block magic bytes.
+#[inline]
 pub fn read_and_verify_block_magic<R: Read>(reader: &mut R) -> io::Result<()> {
-    let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic)?;
-    if magic != BLOCK_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid block magic: {magic:02X?}"),
-        ));
-    }
-    Ok(())
+    read_and_verify_magic_sync!(reader, BLOCK_MAGIC, "block")
 }
 
 // ---------------------------------------------------------------------------
@@ -178,29 +195,15 @@ pub fn read_and_verify_block_magic<R: Read>(reader: &mut R) -> io::Result<()> {
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Async version of `read_and_verify_file_magic` for `tokio::io::AsyncRead`.
+#[inline]
 pub async fn async_read_and_verify_file_magic<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<()> {
-    let mut magic = [0u8; 8];
-    reader.read_exact(&mut magic).await?;
-    if magic != FILE_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid file magic: {magic:02X?}"),
-        ));
-    }
-    Ok(())
+    read_and_verify_magic_async!(reader, FILE_MAGIC, "file")
 }
 
 /// Async version of `read_and_verify_block_magic` for `tokio::io::AsyncRead`.
+#[inline]
 pub async fn async_read_and_verify_block_magic<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<()> {
-    let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).await?;
-    if magic != BLOCK_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid block magic: {magic:02X?}"),
-        ));
-    }
-    Ok(())
+    read_and_verify_magic_async!(reader, BLOCK_MAGIC, "block")
 }
 
 /// Async version of `read_framed` for `tokio::io::AsyncRead`.
@@ -496,5 +499,66 @@ mod tests {
         let decoded: FileHeaderBody = deserialize_named(&bytes).expect("deserialize");
         assert_eq!(decoded.container_format_version, 1);
         assert_eq!(decoded.record_schema_version, 1);
+    }
+
+    #[test]
+    fn read_and_verify_block_magic_accepts_valid_magic() {
+        let mut buf = Vec::new();
+        write_block_magic(&mut buf).expect("write block magic");
+        let mut cursor = Cursor::new(buf.as_slice());
+        read_and_verify_block_magic(&mut cursor).expect("valid block magic must be accepted");
+    }
+
+    #[test]
+    fn read_and_verify_block_magic_rejects_invalid_magic() {
+        let bad_magic: [u8; 4] = *b"NOPE";
+        let mut cursor = Cursor::new(bad_magic.as_slice());
+        let result = read_and_verify_block_magic(&mut cursor);
+        assert!(result.is_err(), "invalid block magic must be rejected");
+    }
+
+    #[test]
+    fn read_and_verify_file_magic_accepts_valid_magic() {
+        let mut buf = Vec::new();
+        write_file_magic(&mut buf).expect("write file magic");
+        let mut cursor = Cursor::new(buf.as_slice());
+        read_and_verify_file_magic(&mut cursor).expect("valid file magic must be accepted");
+    }
+
+    #[test]
+    fn read_and_verify_file_magic_rejects_truncated_input() {
+        let truncated: [u8; 4] = *b"STRH";
+        let mut cursor = Cursor::new(truncated.as_slice());
+        let result = read_and_verify_file_magic(&mut cursor);
+        assert!(result.is_err(), "truncated input must surface an io error");
+    }
+
+    #[tokio::test]
+    async fn async_read_and_verify_file_magic_accepts_valid_magic() {
+        use tokio::io::BufReader;
+        let mut buf = Vec::new();
+        write_file_magic(&mut buf).expect("write file magic");
+        let mut reader = BufReader::new(buf.as_slice());
+        async_read_and_verify_file_magic(&mut reader)
+            .await
+            .expect("valid file magic must be accepted via async reader");
+    }
+
+    #[tokio::test]
+    async fn async_read_and_verify_file_magic_rejects_invalid_magic() {
+        use tokio::io::BufReader;
+        let bad: [u8; 8] = *b"WRONGMAG";
+        let mut reader = BufReader::new(bad.as_slice());
+        let result = async_read_and_verify_file_magic(&mut reader).await;
+        assert!(result.is_err(), "invalid file magic must be rejected via async reader");
+    }
+
+    #[tokio::test]
+    async fn async_read_and_verify_block_magic_rejects_invalid_magic() {
+        use tokio::io::BufReader;
+        let bad: [u8; 4] = *b"NOPE";
+        let mut reader = BufReader::new(bad.as_slice());
+        let result = async_read_and_verify_block_magic(&mut reader).await;
+        assert!(result.is_err(), "invalid block magic must be rejected via async reader");
     }
 }

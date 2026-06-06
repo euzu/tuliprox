@@ -7,7 +7,7 @@ use crate::processing::parser::xtream;
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 use crate::repository::open_playlist_reader;
 use crate::repository::playlist_scratch::PlaylistScratch;
-use crate::repository::storage::{ensure_input_storage_path, get_file_path_for_db_index, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
+use crate::repository::storage::{ensure_input_storage_path, ensure_target_storage_subpath, get_file_path_for_db_index, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
@@ -67,19 +67,14 @@ pub fn get_series_cat_collection_path(path: &Path) -> PathBuf {
 }
 
 pub async fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Result<PathBuf, TuliproxError> {
-    if let Some(path) = xtream_get_storage_path(cfg, target_name) {
-        if tokio::fs::create_dir_all(&path).await.is_err() {
-            let msg = format!(
-                "Failed to save xtream data, can't create directory {}",
-                path.display()
-            );
-            return Err(TuliproxError::RepositoryXtream(msg));
-        }
-        Ok(path)
-    } else {
-        let msg = format!("Failed to save xtream data, can't create directory for target {target_name}");
-        Err(TuliproxError::RepositoryXtream(msg))
-    }
+    ensure_target_storage_subpath(
+        cfg,
+        target_name,
+        "xtream",
+        xtream_get_storage_path,
+        TuliproxError::RepositoryXtream,
+    )
+    .await
 }
 
 #[derive(Debug, Copy, Clone)]

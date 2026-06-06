@@ -13,6 +13,7 @@ use crate::{
     config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
     edit_field_number_f64, edit_field_number_u64, edit_field_number_u8, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
 use std::collections::HashMap;
@@ -69,9 +70,9 @@ pub fn VideoConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
     let download_state: UseReducerHandle<VideoDownloadConfigFormState> =
-        use_reducer(|| VideoDownloadConfigFormState { form: VideoDownloadConfigDto::default(), modified: false });
+        use_default_form_reducer!(VideoDownloadConfigFormState { form: VideoDownloadConfigDto::default() });
     let video_state: UseReducerHandle<VideoConfigFormState> =
-        use_reducer(|| VideoConfigFormState { form: VideoConfigDto::default(), modified: false });
+        use_default_form_reducer!(VideoConfigFormState { form: VideoConfigDto::default() });
 
     let handle_headers = {
         let download_state = download_state.clone();

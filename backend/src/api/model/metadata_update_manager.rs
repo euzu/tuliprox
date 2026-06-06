@@ -1219,6 +1219,117 @@ struct ProcessTaskOutcome {
     probe_pending: bool,
 }
 
+/// Generate `collect_{vod,series,live}_virtual_updates` from a single body.
+/// The three methods differ only in the `BatchResultCollector` field they
+/// walk (`vod` / `series` / `live`), the per-kind stream properties type,
+/// and the `PlaylistItemType` discriminator used to build provider UUIDs.
+macro_rules! collect_virtual_updates {
+    ($fn_name:ident, $field:ident, $props_ty:ty, $item_type:expr) => {
+        fn $fn_name<'a>(
+            mapping: &TargetIdMapping,
+            input_name: &str,
+            batch: &'a BatchResultCollector,
+            provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
+            uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
+        ) -> HashMap<u32, &'a $props_ty> {
+            let mut virtual_updates: HashMap<u32, &'a $props_ty> = HashMap::new();
+            if batch.$field.is_empty() {
+                return virtual_updates;
+            }
+
+            for (pid, props) in &batch.$field {
+                match pid {
+                    ProviderIdType::Id(provider_id) => {
+                        let virtual_ids = provider_virtual_ids
+                            .entry(*provider_id)
+                            .or_insert_with(|| mapping.find_virtual_ids(*provider_id));
+                        for virtual_id in virtual_ids {
+                            virtual_updates.insert(*virtual_id, props);
+                        }
+                    }
+                    ProviderIdType::Text(provider_id_text) => {
+                        let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, $item_type);
+                        if let Some(virtual_id) =
+                            Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
+                        {
+                            virtual_updates.insert(virtual_id, props);
+                        }
+                    }
+                }
+            }
+
+            virtual_updates
+        }
+    };
+}
+
+/// Generate `apply_{vod,series,live}_cascade_updates` from a single body.
+/// The three methods differ only in the per-kind stream properties type,
+/// the `XtreamCluster` enum variant, the `StreamProperties` enum variant
+/// used to wrap the boxed property value, and the human-readable label
+/// used in error and log messages.
+macro_rules! apply_cascade_updates {
+    ($fn_name:ident, $props_ty:ty, $cluster:expr, $variant:ident, $log_label:literal) => {
+        async fn $fn_name(
+            app_state: &Arc<AppState>,
+            target: &crate::model::ConfigTarget,
+            storage_path: &std::path::Path,
+            virtual_updates: HashMap<u32, &$props_ty>,
+        ) {
+            if virtual_updates.is_empty() {
+                return;
+            }
+
+            let target_name = target.name.as_str();
+            let xtream_path = xtream_get_file_path(storage_path, $cluster);
+            let updates_input: Vec<(u32, $props_ty)> =
+                virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
+
+            let updates = {
+                // Scope read lock to read-only query phase so write phase can acquire lock.
+                let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+                let xtream_path_clone = xtream_path.clone();
+                match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
+                    let mut updates = Vec::with_capacity(updates_input.len());
+                    let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
+                        return updates;
+                    };
+                    for (virtual_id, props) in updates_input {
+                        if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                            item.additional_properties = Some(shared::model::StreamProperties::$variant(Box::new(props)));
+                            updates.push(item);
+                        }
+                    }
+                    updates
+                })
+                    .await
+                {
+                    Ok(updates) => updates,
+                    Err(err) => {
+                        error!("Failed to read {} updates from disk for {target_name}: {err}", $log_label);
+                        Vec::new()
+                    }
+                }
+            };
+
+            if updates.is_empty() {
+                return;
+            }
+
+            if let Err(e) =
+                write_playlist_batch_item_upsert(&app_state.app_config, target_name, $cluster, &updates).await
+            {
+                error!("Failed to cascade {} updates to target {target_name}: {e}", $log_label);
+                return;
+            }
+
+            if target.use_memory_cache {
+                Self::update_memory_cache(app_state, target_name, $cluster, updates).await;
+            }
+        }
+    };
+}
+
 impl InputWorker {
     #[allow(clippy::too_many_lines)]
     async fn run(mut self) {
@@ -2777,281 +2888,16 @@ impl InputWorker {
         resolved
     }
 
-    fn collect_vod_virtual_updates<'a>(
-        mapping: &TargetIdMapping,
-        input_name: &str,
-        batch: &'a BatchResultCollector,
-        provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
-        uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
-    ) -> HashMap<u32, &'a VideoStreamProperties> {
-        let mut virtual_updates: HashMap<u32, &'a VideoStreamProperties> = HashMap::new();
-        if batch.vod.is_empty() {
-            return virtual_updates;
-        }
+    // Three associated functions generated by the `collect_virtual_updates!`
+    // macro below. The macro body walks a single `BatchResultCollector` field
+    // and builds a `HashMap<virtual_id, &Props>` of pending per-virtual updates.
+    collect_virtual_updates!(collect_vod_virtual_updates, vod, VideoStreamProperties, PlaylistItemType::Video);
+    collect_virtual_updates!(collect_series_virtual_updates, series, SeriesStreamProperties, PlaylistItemType::SeriesInfo);
+    collect_virtual_updates!(collect_live_virtual_updates, live, LiveStreamProperties, PlaylistItemType::Live);
 
-        for (pid, props) in &batch.vod {
-            match pid {
-                ProviderIdType::Id(provider_id) => {
-                    let virtual_ids = provider_virtual_ids
-                        .entry(*provider_id)
-                        .or_insert_with(|| mapping.find_virtual_ids(*provider_id));
-                    for virtual_id in virtual_ids {
-                        virtual_updates.insert(*virtual_id, props);
-                    }
-                }
-                ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Video);
-                    if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
-                        virtual_updates.insert(virtual_id, props);
-                    }
-                }
-            }
-        }
-
-        virtual_updates
-    }
-
-    fn collect_series_virtual_updates<'a>(
-        mapping: &TargetIdMapping,
-        input_name: &str,
-        batch: &'a BatchResultCollector,
-        provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
-        uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
-    ) -> HashMap<u32, &'a SeriesStreamProperties> {
-        let mut virtual_updates: HashMap<u32, &'a SeriesStreamProperties> = HashMap::new();
-        if batch.series.is_empty() {
-            return virtual_updates;
-        }
-
-        for (pid, props) in &batch.series {
-            match pid {
-                ProviderIdType::Id(provider_id) => {
-                    let virtual_ids = provider_virtual_ids
-                        .entry(*provider_id)
-                        .or_insert_with(|| mapping.find_virtual_ids(*provider_id));
-                    for virtual_id in virtual_ids {
-                        virtual_updates.insert(*virtual_id, props);
-                    }
-                }
-                ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::SeriesInfo);
-                    if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
-                        virtual_updates.insert(virtual_id, props);
-                    }
-                }
-            }
-        }
-
-        virtual_updates
-    }
-
-    fn collect_live_virtual_updates<'a>(
-        mapping: &TargetIdMapping,
-        input_name: &str,
-        batch: &'a BatchResultCollector,
-        provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
-        uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
-    ) -> HashMap<u32, &'a LiveStreamProperties> {
-        let mut virtual_updates: HashMap<u32, &'a LiveStreamProperties> = HashMap::new();
-        if batch.live.is_empty() {
-            return virtual_updates;
-        }
-
-        for (pid, props) in &batch.live {
-            match pid {
-                ProviderIdType::Id(provider_id) => {
-                    let virtual_ids = provider_virtual_ids
-                        .entry(*provider_id)
-                        .or_insert_with(|| mapping.find_virtual_ids(*provider_id));
-                    for virtual_id in virtual_ids {
-                        virtual_updates.insert(*virtual_id, props);
-                    }
-                }
-                ProviderIdType::Text(provider_id_text) => {
-                    let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, PlaylistItemType::Live);
-                    if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
-                        virtual_updates.insert(virtual_id, props);
-                    }
-                }
-            }
-        }
-
-        virtual_updates
-    }
-
-    async fn apply_vod_cascade_updates(
-        app_state: &Arc<AppState>,
-        target: &crate::model::ConfigTarget,
-        storage_path: &std::path::Path,
-        virtual_updates: HashMap<u32, &VideoStreamProperties>,
-    ) {
-        if virtual_updates.is_empty() {
-            return;
-        }
-
-        let target_name = target.name.as_str();
-        let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Video);
-        let updates_input: Vec<(u32, VideoStreamProperties)> =
-            virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
-
-        let updates = {
-            // Scope read lock to read-only query phase so write phase can acquire lock.
-            let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-            let xtream_path_clone = xtream_path.clone();
-            match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
-                let mut updates = Vec::with_capacity(updates_input.len());
-                let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
-                    return updates;
-                };
-                for (virtual_id, props) in updates_input {
-                    if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                        item.additional_properties = Some(shared::model::StreamProperties::Video(Box::new(props)));
-                        updates.push(item);
-                    }
-                }
-                updates
-            })
-                .await
-            {
-                Ok(updates) => updates,
-                Err(err) => {
-                    error!("Failed to read VOD updates from disk for {target_name}: {err}");
-                    Vec::new()
-                }
-            }
-        };
-
-        if updates.is_empty() {
-            return;
-        }
-
-        if let Err(e) =
-            write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Video, &updates).await
-        {
-            error!("Failed to cascade VOD updates to target {target_name}: {e}");
-            return;
-        }
-
-        if target.use_memory_cache {
-            Self::update_memory_cache(app_state, target_name, XtreamCluster::Video, updates).await;
-        }
-    }
-
-    async fn apply_series_cascade_updates(
-        app_state: &Arc<AppState>,
-        target: &crate::model::ConfigTarget,
-        storage_path: &std::path::Path,
-        virtual_updates: HashMap<u32, &SeriesStreamProperties>,
-    ) {
-        if virtual_updates.is_empty() {
-            return;
-        }
-
-        let target_name = target.name.as_str();
-        let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Series);
-        let updates_input: Vec<(u32, SeriesStreamProperties)> =
-            virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
-
-        let updates = {
-            // Scope read lock to read-only query phase so write phase can acquire lock.
-            let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-            let xtream_path_clone = xtream_path.clone();
-            match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
-                let mut updates = Vec::with_capacity(updates_input.len());
-                let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
-                    return updates;
-                };
-                for (virtual_id, props) in updates_input {
-                    if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                        item.additional_properties = Some(shared::model::StreamProperties::Series(Box::new(props)));
-                        updates.push(item);
-                    }
-                }
-                updates
-            })
-                .await
-            {
-                Ok(updates) => updates,
-                Err(err) => {
-                    error!("Failed to read Series updates from disk for {target_name}: {err}");
-                    Vec::new()
-                }
-            }
-        };
-
-        if updates.is_empty() {
-            return;
-        }
-
-        if let Err(e) =
-            write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Series, &updates).await
-        {
-            error!("Failed to cascade Series updates to target {target_name}: {e}");
-            return;
-        }
-
-        if target.use_memory_cache {
-            Self::update_memory_cache(app_state, target_name, XtreamCluster::Series, updates).await;
-        }
-    }
-
-    async fn apply_live_cascade_updates(
-        app_state: &Arc<AppState>,
-        target: &crate::model::ConfigTarget,
-        storage_path: &std::path::Path,
-        virtual_updates: HashMap<u32, &LiveStreamProperties>,
-    ) {
-        if virtual_updates.is_empty() {
-            return;
-        }
-
-        let target_name = target.name.as_str();
-        let xtream_path = xtream_get_file_path(storage_path, XtreamCluster::Live);
-        let updates_input: Vec<(u32, LiveStreamProperties)> =
-            virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
-
-        let updates = {
-            // Scope read lock to read-only query phase so write phase can acquire lock.
-            let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
-            let xtream_path_clone = xtream_path.clone();
-            match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
-                let mut updates = Vec::with_capacity(updates_input.len());
-                let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
-                    return updates;
-                };
-                for (virtual_id, props) in updates_input {
-                    if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
-                        item.additional_properties = Some(shared::model::StreamProperties::Live(Box::new(props)));
-                        updates.push(item);
-                    }
-                }
-                updates
-            })
-                .await
-            {
-                Ok(updates) => updates,
-                Err(err) => {
-                    error!("Failed to read Live updates from disk for {target_name}: {err}");
-                    Vec::new()
-                }
-            }
-        };
-
-        if updates.is_empty() {
-            return;
-        }
-
-        if let Err(e) =
-            write_playlist_batch_item_upsert(&app_state.app_config, target_name, XtreamCluster::Live, &updates).await
-        {
-            error!("Failed to cascade Live updates to target {target_name}: {e}");
-            return;
-        }
-
-        if target.use_memory_cache {
-            Self::update_memory_cache(app_state, target_name, XtreamCluster::Live, updates).await;
-        }
-    }
+    apply_cascade_updates!(apply_vod_cascade_updates, VideoStreamProperties, XtreamCluster::Video, Video, "VOD");
+    apply_cascade_updates!(apply_series_cascade_updates, SeriesStreamProperties, XtreamCluster::Series, Series, "Series");
+    apply_cascade_updates!(apply_live_cascade_updates, LiveStreamProperties, XtreamCluster::Live, Live, "Live");
 
     async fn update_memory_cache(
         app_state: &Arc<AppState>,
@@ -4303,79 +4149,71 @@ mod tests {
         assert!(InputWorker::task_needs_provider_connection(&task, InputType::Library));
     }
 
+    /// Run the `collect_*_virtual_updates` text-id resolution test for any
+    /// cluster (vod / series / live). The macro emits the shared tempdir +
+    /// mapping + batch + collect + assert scaffolding; the cluster-specific
+    /// bits (`$fn_name`, `$item_type`, `$input_name`, `$text_id`,
+    /// `$add_method`, `$props`) are passed by the caller.
+    macro_rules! assert_collect_resolves_text_id {
+        ($fn_name:ident, $item_type:expr, $input_name:expr, $text_id:expr, $add_method:ident, $props:expr) => {
+            let dir = tempdir().expect("tempdir should be created");
+            let mapping_path = dir.path().join("target_id_mapping.db");
+            let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
+            let uuid = generate_provider_playlist_uuid($input_name, $text_id, $item_type);
+            let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, $item_type, 0);
+            mapping.persist().expect("mapping should persist");
+
+            let mut batch = BatchResultCollector::new();
+            batch.$add_method(ProviderIdType::from($text_id), $props);
+
+            let mut provider_virtual_ids = HashMap::new();
+            let mut uuid_virtual_ids = HashMap::new();
+            let updates = InputWorker::$fn_name(
+                &mapping,
+                $input_name,
+                &batch,
+                &mut provider_virtual_ids,
+                &mut uuid_virtual_ids,
+            );
+
+            assert!(updates.contains_key(&virtual_id));
+        };
+    }
+
     #[test]
     fn collect_series_virtual_updates_resolves_text_ids_via_series_info_uuid() {
-        let dir = tempdir().expect("tempdir should be created");
-        let mapping_path = dir.path().join("target_id_mapping.db");
-        let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
-        let uuid = generate_provider_playlist_uuid("input_series", "series-text-id", PlaylistItemType::SeriesInfo);
-        let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, PlaylistItemType::SeriesInfo, 0);
-        mapping.persist().expect("mapping should persist");
-
-        let mut batch = BatchResultCollector::new();
-        batch.add_series(ProviderIdType::from("series-text-id"), SeriesStreamProperties::default());
-
-        let mut provider_virtual_ids = HashMap::new();
-        let mut uuid_virtual_ids = HashMap::new();
-        let updates = InputWorker::collect_series_virtual_updates(
-            &mapping,
+        assert_collect_resolves_text_id!(
+            collect_series_virtual_updates,
+            PlaylistItemType::SeriesInfo,
             "input_series",
-            &batch,
-            &mut provider_virtual_ids,
-            &mut uuid_virtual_ids,
+            "series-text-id",
+            add_series,
+            SeriesStreamProperties::default()
         );
-
-        assert!(updates.contains_key(&virtual_id));
     }
 
     #[test]
     fn collect_vod_virtual_updates_resolves_text_ids_via_video_uuid() {
-        let dir = tempdir().expect("tempdir should be created");
-        let mapping_path = dir.path().join("target_id_mapping.db");
-        let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
-        let uuid = generate_provider_playlist_uuid("input_vod", "vod-text-id", PlaylistItemType::Video);
-        let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, PlaylistItemType::Video, 0);
-        mapping.persist().expect("mapping should persist");
-
-        let mut batch = BatchResultCollector::new();
-        batch.add_vod(ProviderIdType::from("vod-text-id"), VideoStreamProperties::default());
-
-        let mut provider_virtual_ids = HashMap::new();
-        let mut uuid_virtual_ids = HashMap::new();
-        let updates = InputWorker::collect_vod_virtual_updates(
-            &mapping,
+        assert_collect_resolves_text_id!(
+            collect_vod_virtual_updates,
+            PlaylistItemType::Video,
             "input_vod",
-            &batch,
-            &mut provider_virtual_ids,
-            &mut uuid_virtual_ids,
+            "vod-text-id",
+            add_vod,
+            VideoStreamProperties::default()
         );
-
-        assert!(updates.contains_key(&virtual_id));
     }
 
     #[test]
     fn collect_live_virtual_updates_resolves_text_ids_via_live_uuid() {
-        let dir = tempdir().expect("tempdir should be created");
-        let mapping_path = dir.path().join("target_id_mapping.db");
-        let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
-        let uuid = generate_provider_playlist_uuid("input_live", "live-text-id", PlaylistItemType::Live);
-        let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, PlaylistItemType::Live, 0);
-        mapping.persist().expect("mapping should persist");
-
-        let mut batch = BatchResultCollector::new();
-        batch.add_live(ProviderIdType::from("live-text-id"), LiveStreamProperties::default());
-
-        let mut provider_virtual_ids = HashMap::new();
-        let mut uuid_virtual_ids = HashMap::new();
-        let updates = InputWorker::collect_live_virtual_updates(
-            &mapping,
+        assert_collect_resolves_text_id!(
+            collect_live_virtual_updates,
+            PlaylistItemType::Live,
             "input_live",
-            &batch,
-            &mut provider_virtual_ids,
-            &mut uuid_virtual_ids,
+            "live-text-id",
+            add_live,
+            LiveStreamProperties::default()
         );
-
-        assert!(updates.contains_key(&virtual_id));
     }
 
     #[test]

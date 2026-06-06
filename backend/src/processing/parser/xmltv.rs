@@ -833,6 +833,16 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    /// Run an async test body on a freshly-created single-threaded tokio
+    /// runtime. Centralizes the `Runtime::new()...block_on(...)` boilerplate
+    /// shared by every test in this module that exercises async EPG code.
+    fn run_async_test<F>(future: F)
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        tokio::runtime::Runtime::new().unwrap().block_on(future);
+    }
+
     #[test]
     /// Tests normalization of a channel name using the default smart match configuration.
     ///
@@ -1072,7 +1082,7 @@ mod tests {
 
     #[test]
     fn epg_priority_merge_preserves_exact_id_match_when_smart_match_is_enabled() {
-        let run_test = async move {
+        run_async_test(async move {
             let dir = tempdir().unwrap();
             let epg_path = dir.path().join("smart-exact.xml");
 
@@ -1111,14 +1121,12 @@ mod tests {
             assert_eq!(merged.children.len(), 1);
             assert_eq!(merged.children[0].id.as_ref(), "demo.channel");
             assert_eq!(merged.children[0].programmes.len(), 1);
-        };
-
-        tokio::runtime::Runtime::new().unwrap().block_on(run_test);
+        });
     }
 
     #[test]
     fn epg_priority_merge_filter_accepts_later_source_for_already_processed_channel() {
-        let run_test = async move {
+        run_async_test(async move {
             let dir = tempdir().unwrap();
             let high_path = dir.path().join("high.xml");
             let low_path = dir.path().join("low.xml");
@@ -1171,9 +1179,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec!["High Source", "Low Source"],
             );
-        };
-
-        tokio::runtime::Runtime::new().unwrap().block_on(run_test);
+        });
     }
 
 

@@ -1,8 +1,8 @@
 use crate::{
     app::components::{
-        convert_bool_to_chip_style, menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, FilterView,
-        PlaylistMappings, PlaylistProcessing, RevealContent, Table, TableDefinition, TargetOptions, TargetOutput,
-        TargetRename, TargetSort, TargetWatch, ToggleSwitch,
+        convert_bool_to_chip_style, make_translated_header_callback, menu_item::MenuItem, popup_menu::PopupMenu,
+        AppIcon, Chip, FilterView, PlaylistMappings, PlaylistProcessing, RevealContent, Table, TableDefinition,
+        TargetOptions, TargetOutput, TargetRename, TargetSort, TargetWatch, ToggleSwitch,
     },
     hooks::use_service_context,
     html_if,
@@ -66,20 +66,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
         })
     };
 
-    let render_header_cell = {
-        let translator = translate.clone();
-        Callback::<usize, Html>::from(move |col| {
-            html! {
-                {
-                    if col < HEADERS.len() {
-                       translator.t(HEADERS[col])
-                    } else {
-                      String::new()
-                    }
-               }
-            }
-        })
-    };
+    let render_header_cell = make_translated_header_callback(translate.clone(), &HEADERS);
 
     let render_data_cell = {
         let translator = translate.clone();

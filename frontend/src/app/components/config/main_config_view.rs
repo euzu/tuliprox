@@ -10,6 +10,7 @@ use crate::{
     config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number,
     edit_field_number_option_u32, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
+    use_default_form_reducer,
 };
 use shared::model::{ConfigDto, MainConfigDto};
 use yew::prelude::*;
@@ -61,7 +62,7 @@ pub fn MainConfigView() -> Html {
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
     let form_state: UseReducerHandle<MainConfigFormState> =
-        use_reducer(|| MainConfigFormState { form: MainConfigDto::default(), modified: false });
+        use_default_form_reducer!(MainConfigFormState { form: MainConfigDto::default() });
 
     {
         use_emit_config_form(&form_state, config_view_ctx.on_form_change.clone(), ConfigForm::Main);
