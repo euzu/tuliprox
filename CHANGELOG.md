@@ -79,6 +79,12 @@
   - The shared `IconButton` and `TextButton` primitives now render with `type="button"`, preventing accidental
     form submission when used inside forms.
 
+- **Shift+Click Range Selection For API-User Playlist Categories**:
+  - In the API-user playlist editor, holding `Shift` while clicking a category now selects or deselects the whole
+    range between the last anchor and the clicked item.
+  - Plain mouse drag without `Shift` still allows normal text selection, while `Shift+drag` no longer shows a brief
+    browser text highlight before the range selection is applied.
+
 - **Descriptive Image Alt Text**:
   - Logo images on the login screen and sidebar now use the configured app title for their alt text, and playlist
     channel logos use the channel title, improving screen-reader accessibility.

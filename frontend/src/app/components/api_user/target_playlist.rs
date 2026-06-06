@@ -28,6 +28,21 @@ fn sort_opt_vec(v: &mut Option<Vec<String>>) {
     }
 }
 
+fn resolve_category_element(target: Option<web_sys::EventTarget>) -> Option<web_sys::Element> {
+    let mut current = target.and_then(|target| target.dyn_into::<web_sys::Node>().ok());
+    while let Some(node) = current {
+        if let Ok(element) = node.clone().dyn_into::<web_sys::Element>() {
+            if element.has_attribute("data-cluster") && element.has_attribute("data-category") {
+                return Some(element);
+            }
+            current = element.parent_element().map(Into::into);
+        } else {
+            current = node.parent_node();
+        }
+    }
+    None
+}
+
 macro_rules! create_selection {
     ($bouquet:expr, $categories:expr, $selections:expr, $field: ident) => {
         if let Some(selects) = $bouquet.$field.as_ref() {
@@ -107,10 +122,38 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
     let collapse_state = use_state(HashMap::<XtreamCluster, bool>::new);
     let force_update = use_state(|| 0);
     let search_filter = use_state::<SearchRequest, _>(|| SearchRequest::Clear);
+    // Anchor for shift+click range selection: the last single-clicked category per cluster.
+    let anchor = use_state(HashMap::<XtreamCluster, String>::new);
+    // Mousedown position of the last category press, used by the click handler to tell a
+    // real click apart from a click+drag (text selection) so dragging over the text to
+    // highlight it does not also toggle the category.
+    let mousedown_info = use_state::<Option<(XtreamCluster, String, i32, i32)>, _>(|| None);
 
     let handle_search = {
         let search_filter = search_filter.clone();
         Callback::from(move |req: SearchRequest| search_filter.set(req))
+    };
+
+    // Record the mousedown position so the click handler can tell a real click apart
+    // from a click+drag (text selection).
+    let handle_category_mousedown = {
+        let mousedown_info = mousedown_info.clone();
+        Callback::from(move |e: MouseEvent| {
+            if e.shift_key() {
+                // Shift+click is reserved for range selection; block native text selection
+                // before the browser starts highlighting text.
+                e.prevent_default();
+            }
+            if let Some(element) = resolve_category_element(e.target()) {
+                if let Some(cluster_attr) = element.get_attribute("data-cluster") {
+                    if let Ok(cluster_enum) = XtreamCluster::from_str(cluster_attr.as_str()) {
+                        if let Some(category) = element.get_attribute("data-category") {
+                            mousedown_info.set(Some((cluster_enum, category, e.client_x(), e.client_y())));
+                        }
+                    }
+                }
+            }
+        })
     };
 
     {
@@ -158,32 +201,93 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
         let on_change = props.on_change.clone();
         let bouquet_selection = bouquet_selection.clone();
         let force_update = force_update.clone();
+        let anchor = anchor.clone();
+        let playlist_categories = playlist_categories.clone();
+        let mousedown_info = mousedown_info.clone();
         Callback::from(move |e: MouseEvent| {
-            e.prevent_default();
-            e.stop_propagation();
-            if let Some(target) = e.target() {
-                if let Ok(element) = target.dyn_into::<web_sys::Element>() {
-                    if let Some(cluster) = element.get_attribute("data-cluster") {
-                        if let Ok(cluster) = XtreamCluster::from_str(cluster.as_str()) {
-                            if let Some(category) = element.get_attribute("data-category") {
-                                let mut selections = bouquet_selection.borrow_mut();
-                                match cluster {
-                                    XtreamCluster::Live => {
-                                        let selected = *selections.live.get(&category).unwrap_or(&false);
-                                        selections.live.insert(category, !selected);
-                                    }
-                                    XtreamCluster::Video => {
-                                        let selected = *selections.vod.get(&category).unwrap_or(&false);
-                                        selections.vod.insert(category, !selected);
-                                    }
-                                    XtreamCluster::Series => {
-                                        let selected = *selections.series.get(&category).unwrap_or(&false);
-                                        selections.series.insert(category, !selected);
-                                    }
-                                }
-                                on_change.emit(bouquet_selection.clone());
-                                force_update.set(*force_update + 1);
+            if let Some(element) = resolve_category_element(e.target()) {
+                if let Some(cluster_attr) = element.get_attribute("data-cluster") {
+                    if let Ok(cluster_enum) = XtreamCluster::from_str(cluster_attr.as_str()) {
+                        if let Some(category) = element.get_attribute("data-category") {
+                            // Distinguish a real click from a drag (text selection):
+                            // only toggle/range-select if the mouse hasn't moved more than
+                            // a few pixels between mousedown and mouseup and the press
+                            // happened on the same category/cluster. Anything else is a
+                            // text-selection drag and must not toggle the category.
+                            let is_drag =
+                                (*mousedown_info).as_ref().is_some_and(|(mousedown_cluster, mousedown_cat, x, y)| {
+                                    *mousedown_cluster != cluster_enum
+                                        || mousedown_cat != &category
+                                        || (e.client_x() - x).abs() > 2
+                                        || (e.client_y() - y).abs() > 2
+                                });
+                            // mousedown_info is only valid for one click cycle.
+                            mousedown_info.set(None);
+
+                            if is_drag {
+                                return;
                             }
+
+                            e.prevent_default();
+                            e.stop_propagation();
+
+                            let shift = e.shift_key();
+                            {
+                                let mut selections = bouquet_selection.borrow_mut();
+                                let map = match cluster_enum {
+                                    XtreamCluster::Live => &mut selections.live,
+                                    XtreamCluster::Video => &mut selections.vod,
+                                    XtreamCluster::Series => &mut selections.series,
+                                };
+                                if shift {
+                                    // Range-select: set every category between the anchor
+                                    // (last single-clicked) and the clicked one to the same
+                                    // state as the clicked one — so shift+click extends the
+                                    // selection in either direction.
+                                    if let Some(anchor_cat) = anchor.get(&cluster_enum).cloned() {
+                                        let all_cats: Option<&Vec<String>> = match cluster_enum {
+                                            XtreamCluster::Live => playlist_categories.live.as_ref(),
+                                            XtreamCluster::Video => playlist_categories.vod.as_ref(),
+                                            XtreamCluster::Series => playlist_categories.series.as_ref(),
+                                        };
+                                        if let Some(cats) = all_cats {
+                                            if let (Some(start), Some(end)) = (
+                                                cats.iter().position(|c| c == &anchor_cat),
+                                                cats.iter().position(|c| c == &category),
+                                            ) {
+                                                let (from, to) = if start < end { (start, end) } else { (end, start) };
+                                                let target_state = !*map.get(&category).unwrap_or(&false);
+                                                for cat in &cats[from..=to] {
+                                                    map.insert(cat.clone(), target_state);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // No anchor for this cluster: fall back to a plain toggle.
+                                        let selected = *map.get(&category).unwrap_or(&false);
+                                        map.insert(category.clone(), !selected);
+                                    }
+                                    // Clear any text selection that shift+click may have
+                                    // triggered (e.g. extending an existing selection) so
+                                    // the range-select is the only visible effect.
+                                    if let Some(window) = web_sys::window() {
+                                        if let Some(document) = window.document() {
+                                            if let Ok(Some(selection)) = document.get_selection() {
+                                                let _ = selection.remove_all_ranges();
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Plain click: update anchor and toggle the clicked category.
+                                    let mut new_anchor = (*anchor).clone();
+                                    new_anchor.insert(cluster_enum, category.clone());
+                                    anchor.set(new_anchor);
+                                    let selected = *map.get(&category).unwrap_or(&false);
+                                    map.insert(category.clone(), !selected);
+                                }
+                            }
+                            on_change.emit(bouquet_selection.clone());
+                            force_update.set(*force_update + 1);
                         }
                     }
                 }
@@ -340,6 +444,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                             let selected = *selections.get(cat).unwrap_or(&false);
                             html! {
                             <div key={cat.clone()} data-cluster={cluster.to_string()} data-category={cat.clone()} class={classes!("tp__api-user-target-playlist__categories-category", if selected {"selected"} else {""})}
+                                onmousedown={handle_category_mousedown.clone()}
                                 onclick={handle_category_click.clone()}>
                                 <AppIcon name={if selected {"Checked"} else {"Unchecked"}}/> { &cat }
                             </div>
