@@ -833,7 +833,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    /// Run an async test body on a freshly-created single-threaded tokio
+    /// Run an async test body on a freshly-created multi-threaded tokio
     /// runtime. Centralizes the `Runtime::new()...block_on(...)` boilerplate
     /// shared by every test in this module that exercises async EPG code.
     fn run_async_test<F>(future: F)

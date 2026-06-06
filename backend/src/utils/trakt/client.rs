@@ -128,11 +128,12 @@ impl TraktClient {
     ) -> Result<TraktListItemsPage, TuliproxError> {
         let url = self.build_chart_url(chart_config);
         let request_url = format!("{url}?page={page}&limit={TRAKT_PAGE_LIMIT}");
+        let chart_id = format!("{}:{}", chart_config.kind, chart_config.chart);
         let (response_text, page_count, item_count) = self
             .fetch_trakt_page(
                 request_url,
                 "chart",
-                ("charts", &format!("{}:{}", chart_config.kind, chart_config.chart)),
+                ("charts", &chart_id),
                 page,
             )
             .await?;

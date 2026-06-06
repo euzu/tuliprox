@@ -370,7 +370,10 @@ mod tests {
     use tempfile::tempdir;
     use shared::model::PlaylistItemType;
     use shared::utils::Internable;
-    use super::{QosAggregationCheckpoint, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow};
+    use super::{
+        QosAggregationCheckpoint, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository,
+        QosSnapshotWindow,
+    };
 
     fn make_test_snapshot(identity_key: &str, score: u8) -> QosSnapshotRecord {
         QosSnapshotRecord {
@@ -509,5 +512,48 @@ mod tests {
             round_tripped.avg_provider_reconnect_count,
             entity.avg_provider_reconnect_count
         );
+    }
+
+    #[test]
+    fn entity_to_dto_macro_round_trips_qos_snapshot_daily_bucket_fields() {
+        use shared::model::QosSnapshotDailyBucketDto;
+
+        let entity = QosSnapshotDailyBucket {
+            connect_count: 11,
+            connect_failed_count: 12,
+            startup_capacity_failure_count: 13,
+            provider_open_failure_count: 14,
+            first_byte_failure_count: 15,
+            runtime_abort_count: 16,
+            provider_closed_count: 17,
+            preempt_count: 18,
+            total_first_byte_latency_ms: 5_000,
+            total_first_byte_latency_samples: 25,
+            total_session_duration_secs: 86_400,
+            total_session_duration_samples: 42,
+            total_provider_reconnect_count: 9,
+            total_provider_reconnect_samples: 7,
+            last_success_ts: Some(1_700_000_000),
+            last_failure_ts: Some(1_700_000_500),
+        };
+
+        let dto = QosSnapshotDailyBucketDto::from(&entity);
+        assert_eq!(dto.connect_count, entity.connect_count);
+        assert_eq!(dto.provider_open_failure_count, entity.provider_open_failure_count);
+        assert_eq!(dto.total_first_byte_latency_ms, entity.total_first_byte_latency_ms);
+        assert_eq!(dto.total_session_duration_samples, entity.total_session_duration_samples);
+        assert_eq!(dto.last_success_ts, entity.last_success_ts);
+        assert_eq!(dto.last_failure_ts, entity.last_failure_ts);
+
+        let round_tripped = QosSnapshotDailyBucket::from(&dto);
+        assert_eq!(round_tripped.connect_count, entity.connect_count);
+        assert_eq!(round_tripped.preempt_count, entity.preempt_count);
+        assert_eq!(round_tripped.total_first_byte_latency_ms, entity.total_first_byte_latency_ms);
+        assert_eq!(
+            round_tripped.total_provider_reconnect_samples,
+            entity.total_provider_reconnect_samples
+        );
+        assert_eq!(round_tripped.last_success_ts, entity.last_success_ts);
+        assert_eq!(round_tripped.last_failure_ts, entity.last_failure_ts);
     }
 }

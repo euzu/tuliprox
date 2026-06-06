@@ -1289,22 +1289,28 @@ macro_rules! apply_cascade_updates {
                 // Scope read lock to read-only query phase so write phase can acquire lock.
                 let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
                 let xtream_path_clone = xtream_path.clone();
-                match spawn_blocking_limited(move || -> Vec<XtreamPlaylistItem> {
+                match spawn_blocking_limited(move || -> Result<Vec<XtreamPlaylistItem>, String> {
                     let mut updates = Vec::with_capacity(updates_input.len());
-                    let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone) else {
-                        return updates;
-                    };
+                    let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone)
+                        .map_err(|err| format!("failed to open {} query at {}: {err}", $log_label, xtream_path_clone.display()))?;
                     for (virtual_id, props) in updates_input {
-                        if let Ok(Some(mut item)) = query.query_zero_copy(&virtual_id) {
+                        if let Some(mut item) = query
+                            .query_zero_copy(&virtual_id)
+                            .map_err(|err| format!("failed to query {} {} item {virtual_id}: {err}", $log_label, stringify!($variant)))?
+                        {
                             item.additional_properties = Some(shared::model::StreamProperties::$variant(Box::new(props)));
                             updates.push(item);
                         }
                     }
-                    updates
+                    Ok(updates)
                 })
                     .await
                 {
-                    Ok(updates) => updates,
+                    Ok(Ok(updates)) => updates,
+                    Ok(Err(err)) => {
+                        error!("Failed to read {} updates from disk for {target_name}: {err}", $log_label);
+                        Vec::new()
+                    }
                     Err(err) => {
                         error!("Failed to read {} updates from disk for {target_name}: {err}", $log_label);
                         Vec::new()

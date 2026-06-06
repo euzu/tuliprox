@@ -750,7 +750,7 @@ fn resolve_pms_resource_url(
     let base = Url::parse(base_url).map_err(|_| plex_invalid_pms_url())?;
     let expected_origin = base.origin().ascii_serialization();
     let url = base.join(resource_path).map_err(|_| {
-        MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
+        MediaServerError::new(error_kind)
             .provider("plex")
             .detail(format!("Plex {field_name} could not be resolved against the selected PMS"))
     })?;

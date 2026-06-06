@@ -96,8 +96,8 @@ fn parse_linux_proc_status_memory_bytes(bytes: &[u8]) -> Option<(u64, u64)> {
     None
 }
 
-/// Parse an ASCII byte slice as a `u64` with no allocation and saturating semantics on
-/// overflow. Returns `None` for empty input, non-digit bytes, or arithmetic overflow.
+/// Parse an ASCII byte slice as a `u64` with no allocation.
+/// Returns `None` for empty input, non-digit bytes, or arithmetic overflow.
 pub fn parse_ascii_u64_bytes(token: &[u8]) -> Option<u64> {
     if token.is_empty() {
         return None;

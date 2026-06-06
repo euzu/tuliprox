@@ -8648,11 +8648,13 @@ mod tests {
     // network denied reason tests
     // =========================================================================================
 
-    // The three `network_denied_reason_*` cases below duplicate the assertions
-    // in the matching `cidr_miss_denies` / `country_miss_denies` /
-    // `no_geoip_denies_on_country_restriction` tests above (which already assert
-    // the exact deny reason). They are kept removed to avoid duplicate coverage;
-    // see those tests for the canonical deny-reason coverage.
+    // The three `network_denied_reason_*` cases remain because they cover the
+    // `NetworkAccessDenyReason`-focused API surface directly, while
+    // `cidr_miss_denies`, `country_miss_denies`, and
+    // `no_geoip_denies_on_country_restriction` above assert the same deny
+    // reasons through broader `evaluate_network_access(...)` behavior. The
+    // overlap is intentional so both the general decision path and the
+    // reason-reporting-focused path stay pinned by tests.
 
     #[test]
     fn network_denied_reason_country_unknown_when_geoip_loaded_but_unknown_ip() {
