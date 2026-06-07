@@ -5,7 +5,10 @@ use crate::{
     },
     hooks::use_service_context,
     i18n::use_translation,
-    utils::{format_bytes, format_duration, format_ts, get_local_storage_item, set_local_storage_item},
+    utils::{
+        format_bytes, format_duration, format_local_day_boundary_utc, format_ts, get_local_storage_item,
+        set_local_storage_item,
+    },
 };
 use futures::join;
 use shared::{
@@ -60,14 +63,20 @@ struct QosDetailRow {
 }
 
 fn today_start_ts() -> i64 {
-    let now = chrono::Utc::now();
-    let today = now.date_naive();
-    today.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp()).unwrap_or(0)
+    #[cfg(target_arch = "wasm32")]
+    let today = {
+        let now = js_sys::Date::new_0();
+        i32::try_from(now.get_full_year())
+            .ok()
+            .and_then(|year| chrono::NaiveDate::from_ymd_opt(year, now.get_month() + 1, now.get_date()))
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let today = Some(chrono::Utc::now().date_naive());
+
+    today.and_then(|date| date.and_hms_opt(0, 0, 0)).map(|dt| dt.and_utc().timestamp()).unwrap_or(0)
 }
 
-fn ts_to_date_str(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0).map_or_else(String::new, |dt| dt.format("%Y-%m-%d").to_string())
-}
+fn ts_to_filter_str(ts: i64, end_of_day: bool) -> String { format_local_day_boundary_utc(ts, end_of_day) }
 
 fn optional_record_text_str(value: Option<&str>) -> &str { value.unwrap_or("-") }
 fn optional_record_text(value: Option<String>) -> String { value.unwrap_or_else(|| String::from("-")) }
@@ -263,8 +272,8 @@ pub fn StreamHistoryView() -> Html {
             let paged_response = paged_response.clone();
             let loading = loading.clone();
             let request_id = request_id.clone();
-            let from_str = (*from_date).map(ts_to_date_str);
-            let to_str = (*to_date).map(ts_to_date_str);
+            let from_str = (*from_date).map(|ts| ts_to_filter_str(ts, false));
+            let to_str = (*to_date).map(|ts| ts_to_filter_str(ts, true));
             let (search_text, search_mode, search_fields) = search_request_parts(&request);
             let next_request_id = {
                 let mut current = request_id.borrow_mut();
@@ -317,8 +326,8 @@ pub fn StreamHistoryView() -> Html {
             let selected_qos_snapshot = selected_qos_snapshot.clone();
             let loading = loading.clone();
             let request_id = request_id.clone();
-            let from_str = (*from_date).map(ts_to_date_str);
-            let to_str = (*to_date).map(ts_to_date_str);
+            let from_str = (*from_date).map(|ts| ts_to_filter_str(ts, false));
+            let to_str = (*to_date).map(|ts| ts_to_filter_str(ts, true));
             let next_request_id = {
                 let mut current = request_id.borrow_mut();
                 *current = current.saturating_add(1);

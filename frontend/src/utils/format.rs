@@ -33,10 +33,68 @@ pub fn format_bandwidth(rate_kbps: u32) -> String { format_rate_unit(rate_kbps, 
 #[inline]
 pub fn format_transferred(total_kb: u32) -> String { format_rate_unit(total_kb, 2, "") }
 
+/// Format a UTC unix timestamp as "YYYY-MM-DD HH:MM:SS" in the browser's local timezone.
 pub fn format_ts(ts: u64) -> String {
-    chrono::DateTime::from_timestamp(ts as i64, 0)
-        .map_or_else(|| ts.to_string(), |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+    #[cfg(target_arch = "wasm32")]
+    {
+        let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64 * 1000.0));
+        if !date.get_time().is_finite() {
+            return ts.to_string();
+        }
+        return format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            date.get_full_year(),
+            date.get_month() + 1,
+            date.get_date(),
+            date.get_hours(),
+            date.get_minutes(),
+            date.get_seconds()
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        chrono::DateTime::from_timestamp(ts as i64, 0)
+            .map_or_else(|| ts.to_string(), |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    }
 }
+
+/// Convert a calendar date encoded as a UTC-midnight timestamp to the matching
+/// local day boundary, then serialize that instant as UTC for the backend.
+pub fn format_local_day_boundary_utc(ts: i64, end_of_day: bool) -> String {
+    let Some(date) = chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.date_naive()) else {
+        return String::new();
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Ok(year) = u32::try_from(chrono::Datelike::year(&date)) else {
+            return String::new();
+        };
+        let (hour, minute, second) = if end_of_day { (23, 59, 59) } else { (0, 0, 0) };
+        let local = js_sys::Date::new_with_year_month_day_hr_min_sec(
+            year,
+            chrono::Datelike::month0(&date).cast_signed(),
+            chrono::Datelike::day(&date).cast_signed(),
+            hour,
+            minute,
+            second,
+        );
+        let utc_millis = local.get_time();
+        if !utc_millis.is_finite() {
+            return String::new();
+        }
+        let utc_ts = (utc_millis / 1000.0) as i64;
+        return chrono::DateTime::from_timestamp(utc_ts, 0)
+            .map_or_else(String::new, |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let time = if end_of_day { (23, 59, 59) } else { (0, 0, 0) };
+        date.and_hms_opt(time.0, time.1, time.2)
+            .map_or_else(String::new, |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    }
+}
+
 pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -54,7 +112,19 @@ pub fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bandwidth, format_transferred};
+    use super::{format_bandwidth, format_local_day_boundary_utc, format_transferred};
+
+    fn format_local_with_offset(ts: i64, js_offset_minutes_west: i32, fmt: &str) -> String {
+        let utc = match chrono::DateTime::from_timestamp(ts, 0) {
+            Some(dt) => dt,
+            None => return ts.to_string(),
+        };
+        let east_secs = -(js_offset_minutes_west as i64) * 60;
+        match i32::try_from(east_secs).ok().and_then(chrono::FixedOffset::east_opt) {
+            Some(offset) => utc.with_timezone(&offset).format(fmt).to_string(),
+            None => utc.format(fmt).to_string(),
+        }
+    }
 
     #[test]
     fn format_bandwidth_below_kb_threshold_uses_kbps() {
@@ -104,5 +174,81 @@ mod tests {
     #[test]
     fn format_transferred_zero_shows_dash() {
         assert_eq!(format_transferred(0), "-");
+    }
+
+    // 2026-04-12 12:30:45 UTC
+    fn ref_ts() -> i64 { utc_ts(2026, 4, 12, 12, 30, 45) }
+
+    fn utc_ts(year: i32, month: u32, day: u32, h: u32, m: u32, s: u32) -> i64 {
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .and_then(|d| d.and_hms_opt(h, m, s))
+            .map(|dt| dt.and_utc().timestamp())
+            .expect("test timestamp must be a valid date")
+    }
+
+    #[test]
+    fn format_local_with_offset_utc_passes_through_unchanged() {
+        // 0 minutes west of UTC = UTC
+        assert_eq!(format_local_with_offset(ref_ts(), 0, "%Y-%m-%d %H:%M:%S"), "2026-04-12 12:30:45");
+    }
+
+    #[test]
+    fn format_local_with_offset_cest_shifts_two_hours_east() {
+        // Berlin in summer: getTimezoneOffset returns -120 (120 min west), so
+        // local is 2h ahead of UTC.
+        assert_eq!(format_local_with_offset(ref_ts(), -120, "%Y-%m-%d %H:%M:%S"), "2026-04-12 14:30:45");
+    }
+
+    #[test]
+    fn format_local_with_offset_est_shifts_five_hours_west() {
+        // New York in winter: getTimezoneOffset returns +300 (300 min west),
+        // so local is 5h behind UTC.
+        assert_eq!(format_local_with_offset(ref_ts(), 300, "%Y-%m-%d %H:%M:%S"), "2026-04-12 07:30:45");
+    }
+
+    #[test]
+    fn format_local_with_offset_handles_date_rollover_east() {
+        // 23:30 UTC + 2h east rolls over to the next local day.
+        let late_ts = utc_ts(2026, 4, 12, 23, 30, 0);
+        assert_eq!(format_local_with_offset(late_ts, -120, "%Y-%m-%d %H:%M:%S"), "2026-04-13 01:30:00");
+    }
+
+    #[test]
+    fn format_local_with_offset_handles_date_rollover_west() {
+        // 01:30 UTC - 5h west rolls back to the previous local day.
+        let early_ts = utc_ts(2026, 4, 12, 1, 30, 0);
+        assert_eq!(format_local_with_offset(early_ts, 300, "%Y-%m-%d %H:%M:%S"), "2026-04-11 20:30:00");
+    }
+
+    #[test]
+    fn format_local_with_offset_falls_back_to_utc_on_out_of_range_offset() {
+        // An offset that overflows i32 should fall back to UTC, not panic.
+        assert_eq!(format_local_with_offset(ref_ts(), i32::MAX, "%Y-%m-%d %H:%M:%S"), "2026-04-12 12:30:45");
+        // Likewise, an offset that fits in i32 but is outside chrono's ±14h
+        // window falls back to UTC.
+        assert_eq!(format_local_with_offset(ref_ts(), 60 * 24, "%Y-%m-%d %H:%M:%S"), "2026-04-12 12:30:45");
+    }
+
+    #[test]
+    fn format_local_with_offset_invalid_timestamp_returns_raw_int() {
+        // 0 is a valid timestamp (1970-01-01), so use a clearly out-of-range value.
+        let bad = i64::MIN / 2;
+        let out = format_local_with_offset(bad, 0, "%Y-%m-%d %H:%M:%S");
+        assert_eq!(out, bad.to_string());
+    }
+
+    #[test]
+    fn format_local_with_offset_date_only_format() {
+        assert_eq!(format_local_with_offset(ref_ts(), -120, "%Y-%m-%d"), "2026-04-12");
+        // Late-evening UTC becomes the next local day in CEST.
+        let late_ts = utc_ts(2026, 4, 12, 23, 30, 0);
+        assert_eq!(format_local_with_offset(late_ts, -120, "%Y-%m-%d"), "2026-04-13");
+    }
+
+    #[test]
+    fn format_local_day_boundary_utc_uses_calendar_date() {
+        let date_key = utc_ts(2026, 3, 23, 0, 0, 0);
+        assert_eq!(format_local_day_boundary_utc(date_key, false), "2026-03-23 00:00:00");
+        assert_eq!(format_local_day_boundary_utc(date_key, true), "2026-03-23 23:59:59");
     }
 }
