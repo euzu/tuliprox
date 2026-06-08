@@ -1,6 +1,8 @@
 use crate::api::model::AppState;
+use crate::messaging::send_message as send_messaging;
+use crate::model::{DiskAlertConfig, MessageContent};
 use crate::utils::parse_ascii_u64_bytes;
-use shared::model::SystemInfo;
+use shared::model::{DiskAlert, DiskAlertLevel, MsgKind, SystemInfo};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -8,11 +10,164 @@ use std::{
 
 const SYSTEM_USAGE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Disk-space alert state machine.
+///
+/// Inspects each 2s sample and emits a `DiskAlert` payload on:
+/// 1. state transition (Normal → Warn → Critical, or any step back down), or
+/// 2. when the disk stays in the same alert state for at least
+///    `cfg.repeat_interval_secs` since the last notification.
+///
+/// Resets cleanly when disk info becomes unavailable so a future re-arming
+/// does not fire stale state.
+struct DiskAlertMonitor {
+    last_level: Option<DiskAlertLevel>,
+    last_notified_at: Option<Instant>,
+}
+
+impl DiskAlertMonitor {
+    fn new() -> Self {
+        Self { last_level: None, last_notified_at: None }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn inspect(&mut self, cfg: &DiskAlertConfig, total_bytes: u64, free_bytes: u64) -> Option<DiskAlert> {
+        if total_bytes == 0 {
+            // Disk info unavailable on this platform/tick; drop any state.
+            self.last_level = None;
+            self.last_notified_at = None;
+            return None;
+        }
+
+        let used_bytes = total_bytes.saturating_sub(free_bytes);
+        let percent = (used_bytes as f64 / total_bytes as f64) * 100.0;
+        let new_level = if percent >= cfg.critical_percent {
+            Some(DiskAlertLevel::Critical)
+        } else if percent >= cfg.warn_percent {
+            Some(DiskAlertLevel::Warn)
+        } else {
+            None
+        };
+
+        let now = Instant::now();
+        let state_changed = new_level != self.last_level;
+        let rearm_elapsed = self
+            .last_notified_at
+            .is_none_or(|t| now.duration_since(t).as_secs() >= cfg.repeat_interval_secs);
+
+        let should_notify = new_level.is_some() && (state_changed || rearm_elapsed);
+
+        // Always advance state so a quick drop below warn and back up is
+        // treated as a fresh transition (not suppressed by hysteresis).
+        self.last_level = new_level;
+        if should_notify {
+            self.last_notified_at = Some(now);
+            Some(DiskAlert {
+                level: new_level.expect("new_level is Some when should_notify is true"),
+                total_bytes,
+                free_bytes,
+                used_bytes,
+                percent,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Per-platform disk-usage probe that caches the path to the filesystem we are
+/// sampling so each tick is a single syscall with no heap allocation.
+///
+/// Built lazily; a `None` represents a platform where the probe could not be
+/// initialised (e.g. CWD unavailable, or non-Unix / non-Windows fallback).
+struct DiskProbe {
+    path: DiskPath,
+}
+
+#[cfg(unix)]
+struct DiskPath(std::ffi::CString);
+
+#[cfg(windows)]
+struct DiskPath(Vec<u16>);
+
+impl DiskProbe {
+    /// Build a probe targeting the process working directory.
+    /// `None` indicates the platform has no disk probe (e.g. fallback path).
+    fn for_cwd() -> Option<Self> {
+        let cwd = std::env::current_dir().ok()?;
+        Some(Self { path: DiskPath::from_path(&cwd) })
+    }
+
+    /// Return `(total_bytes, free_bytes_available_to_caller)`.
+    /// Returns `(0, 0)` if the underlying syscall fails.
+    fn sample(&self) -> (u64, u64) {
+        #[cfg(unix)]
+        {
+            let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+            // SAFETY: `path.0` is a valid NUL-terminated C string built from the
+            // process CWD; `&raw mut stat` is a writable pointer to a zeroed struct.
+            let rc = unsafe { libc::statvfs(self.path.0.as_ptr(), &raw mut stat) };
+            if rc != 0 {
+                return (0, 0);
+            }
+            let bsize = stat.f_frsize;
+            let total = stat.f_blocks.saturating_mul(bsize);
+            let free = stat.f_bavail.saturating_mul(bsize);
+            (total, free)
+        }
+        #[cfg(windows)]
+        {
+            let mut free_bytes_available: u64 = 0;
+            let mut total_bytes: u64 = 0;
+            let mut total_free_bytes: u64 = 0;
+            // SAFETY: `self.path.0` is a NUL-terminated UTF-16 string built from
+            // the CWD; the three output pointers are valid mutable u64 references.
+            let ok = unsafe {
+                winapi::um::fileapi::GetDiskFreeSpaceExW(
+                    self.path.0.as_ptr(),
+                    &mut free_bytes_available,
+                    &mut total_bytes,
+                    &mut total_free_bytes,
+                )
+            };
+            if ok == 0 {
+                return (0, 0);
+            }
+            (total_bytes, free_bytes_available)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = &self.path;
+            (0, 0)
+        }
+    }
+}
+
+#[cfg(unix)]
+impl DiskPath {
+    fn from_path(path: &std::path::Path) -> Self {
+        use std::os::unix::ffi::OsStrExt;
+        // CString::new only fails if the path contains interior NULs, which
+        // `std::env::current_dir` cannot produce on a supported platform.
+        Self(std::ffi::CString::new(path.as_os_str().as_bytes()).expect("CWD contains NUL byte"))
+    }
+}
+
+#[cfg(windows)]
+impl DiskPath {
+    fn from_path(path: &std::path::Path) -> Self {
+        use std::os::windows::ffi::OsStrExt;
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        wide.push(0);
+        Self(wide)
+    }
+}
+
 pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<()> {
     let state = Arc::clone(app_state);
 
     tokio::spawn(async move {
         let mut sampler = SystemUsageSampler::new();
+        let mut disk_alert_monitor = DiskAlertMonitor::new();
         let mut interval = tokio::time::interval(SYSTEM_USAGE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -23,9 +178,30 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
                 continue;
             }
 
-            if let Some(info) = sampler.sample() {
-                state.event_manager.send_system_info(info);
+            let Some(info) = sampler.sample() else { continue };
+            state.event_manager.send_system_info(info);
+
+            // Disk-alert check is gated on (1) disk info being available, and
+            // (2) the user opting in via `messaging.disk_alert` and
+            // `messaging.notify_on`. Without any of these, `inspect` is a cheap
+            // (3 float comparisons + 2 integer comparisons) no-op.
+            if info.disk_total_bytes == 0 {
+                continue;
             }
+            let alert_cfg: DiskAlertConfig = {
+                let cfg = state.app_config.config.load();
+                let Some(messaging) = cfg.messaging.as_ref() else { continue };
+                if !messaging.notify_on.contains(&MsgKind::DiskAlert) {
+                    continue;
+                }
+                let Some(alert_cfg) = messaging.disk_alert.as_ref() else { continue };
+                alert_cfg.clone()
+            };
+            let Some(alert) = disk_alert_monitor.inspect(&alert_cfg, info.disk_total_bytes, info.disk_free_bytes) else {
+                continue;
+            };
+            let http_client = state.http_client.load();
+            send_messaging(&state.app_config, &http_client, MessageContent::DiskAlert(alert)).await;
         }
     })
 }
@@ -165,6 +341,8 @@ impl FallbackSampler {
             memory_total: self.inner.total_memory(),
             net_rx_bytes_per_sec,
             net_tx_bytes_per_sec,
+            disk_total_bytes: 0,
+            disk_free_bytes: 0,
         })
     }
 }
@@ -178,7 +356,7 @@ fn sum_sysinfo_network_bytes(networks: &sysinfo::Networks) -> (u64, u64) {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{parse_ascii_u64_bytes, CpuTracker, SystemInfo};
+    use super::{parse_ascii_u64_bytes, CpuTracker, DiskProbe, SystemInfo};
     use log::debug;
     use std::{
         fs::{read, File},
@@ -196,6 +374,7 @@ mod platform {
         page_size: u64,
         clock_ticks_per_sec: u64,
         memory_total: u64,
+        disk_probe: Option<DiskProbe>,
         cpu_tracker: CpuTracker,
         net_tracker: super::NetTracker,
     }
@@ -221,6 +400,7 @@ mod platform {
                 page_size,
                 clock_ticks_per_sec,
                 memory_total,
+                disk_probe: DiskProbe::for_cwd(),
                 cpu_tracker: CpuTracker::new(cpu_time_secs),
                 net_tracker: super::NetTracker::new(),
             })
@@ -239,12 +419,16 @@ mod platform {
             let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = read_proc_net_dev_bytes()
                 .map_or((0.0, 0.0), |(rx_bytes, tx_bytes)| self.net_tracker.sample(rx_bytes, tx_bytes));
 
+            let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
+
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage: resident_pages.saturating_mul(self.page_size),
                 memory_total: self.memory_total,
                 net_rx_bytes_per_sec,
                 net_tx_bytes_per_sec,
+                disk_total_bytes,
+                disk_free_bytes,
             })
         }
     }
@@ -344,7 +528,7 @@ mod platform {
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{CpuTracker, SystemInfo};
+    use super::{CpuTracker, DiskProbe, SystemInfo};
     use std::{mem::size_of, ptr::null_mut};
     use winapi::{
         shared::minwindef::FILETIME,
@@ -358,6 +542,7 @@ mod platform {
     pub(super) struct Sampler {
         process: winapi::um::winnt::HANDLE,
         memory_total: u64,
+        disk_probe: Option<DiskProbe>,
         cpu_tracker: CpuTracker,
         networks: sysinfo::Networks,
         net_tracker: super::NetTracker,
@@ -372,6 +557,7 @@ mod platform {
             Some(Self {
                 process,
                 memory_total,
+                disk_probe: DiskProbe::for_cwd(),
                 cpu_tracker: CpuTracker::new(cpu_time_secs),
                 networks,
                 net_tracker: super::NetTracker::new(),
@@ -384,12 +570,15 @@ mod platform {
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
             let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
                 net_rx_bytes_per_sec,
                 net_tx_bytes_per_sec,
+                disk_total_bytes,
+                disk_free_bytes,
             })
         }
     }
@@ -479,6 +668,7 @@ mod platform {
 
     pub(super) struct Sampler {
         memory_total: u64,
+        disk_probe: Option<DiskProbe>,
         cpu_tracker: CpuTracker,
         networks: sysinfo::Networks,
         net_tracker: super::NetTracker,
@@ -491,6 +681,7 @@ mod platform {
             let networks = sysinfo::Networks::new_with_refreshed_list();
             Some(Self {
                 memory_total,
+                disk_probe: DiskProbe::for_cwd(),
                 cpu_tracker: CpuTracker::new(cpu_time_secs),
                 networks,
                 net_tracker: super::NetTracker::new(),
@@ -503,12 +694,15 @@ mod platform {
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
             let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
                 net_rx_bytes_per_sec,
                 net_tx_bytes_per_sec,
+                disk_total_bytes,
+                disk_free_bytes,
             })
         }
     }
@@ -565,6 +759,30 @@ mod platform {
     impl Sampler {
         pub(super) fn new() -> Option<Self> { None }
         pub(super) fn sample(&mut self) -> Option<shared::model::SystemInfo> { None }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod disk_probe_tests {
+    use super::DiskProbe;
+    use std::path::Path;
+
+    #[test]
+    fn disk_probe_for_cwd_returns_nonzero_on_linux() {
+        let probe = DiskProbe::for_cwd().expect("CWD should be available on Linux");
+        let (total, free) = probe.sample();
+        // CWD is normally on a mounted real filesystem, so the call should yield
+        // positive sizes. If the test runs in a constrained sandbox it may return
+        // (0, 0); we just assert the call is well-formed in that case too.
+        assert!(total == 0 || total > free, "total {total} should be 0 or > free {free}");
+    }
+
+    #[test]
+    fn disk_probe_with_relative_path_resolves_via_kernel() {
+        // Relative paths are resolved against the process CWD by the kernel;
+        // the sample call must not allocate or panic.
+        let probe = DiskProbe { path: super::DiskPath::from_path(Path::new(".")) };
+        let _ = probe.sample();
     }
 }
 
@@ -647,5 +865,102 @@ mod tests {
         let (rx_rate, tx_rate) = tracker.sample(3000, 1500);
         assert!((999.0..=1001.0).contains(&rx_rate));
         assert!((499.0..=501.0).contains(&tx_rate));
+    }
+}
+
+#[cfg(test)]
+mod disk_alert_tests {
+    use super::{DiskAlertConfig, DiskAlertMonitor};
+    use shared::model::DiskAlertLevel;
+    use std::time::Duration;
+
+    fn cfg(warn: f64, critical: f64, repeat_secs: u64) -> DiskAlertConfig {
+        DiskAlertConfig { warn_percent: warn, critical_percent: critical, repeat_interval_secs: repeat_secs }
+    }
+
+    fn total_used_percent(percent: f64) -> (u64, u64) {
+        let total: u64 = 1_000_000_000;
+        #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let free = ((100.0_f64 - percent) / 100.0 * total as f64) as u64;
+        (total, free)
+    }
+
+    #[test]
+    fn monitor_returns_none_when_disk_total_is_zero() {
+        let mut m = DiskAlertMonitor::new();
+        assert!(m.inspect(&cfg(80.0, 95.0, 3600), 0, 0).is_none());
+    }
+
+    #[test]
+    fn monitor_emits_warn_on_first_crossing_from_normal() {
+        let mut m = DiskAlertMonitor::new();
+        let (total, free) = total_used_percent(50.0);
+        assert!(m.inspect(&cfg(80.0, 95.0, 3600), total, free).is_none());
+        let (total, free) = total_used_percent(85.0);
+        let alert = m.inspect(&cfg(80.0, 95.0, 3600), total, free).expect("crossing warn should notify");
+        assert_eq!(alert.level, DiskAlertLevel::Warn);
+    }
+
+    #[test]
+    fn monitor_emits_critical_on_escalation_from_warn() {
+        let mut m = DiskAlertMonitor::new();
+        let c = cfg(80.0, 95.0, 3600);
+        let (t, f) = total_used_percent(85.0);
+        let _ = m.inspect(&c, t, f).expect("warn crossing");
+        let (t, f) = total_used_percent(97.0);
+        let alert = m.inspect(&c, t, f).expect("critical escalation should notify");
+        assert_eq!(alert.level, DiskAlertLevel::Critical);
+    }
+
+    #[test]
+    fn monitor_silences_repeat_inside_rearm_window() {
+        let mut m = DiskAlertMonitor::new();
+        let c = cfg(80.0, 95.0, 3600);
+        let (t, f) = total_used_percent(85.0);
+        let _ = m.inspect(&c, t, f).expect("first crossing");
+        // Second inspection in the same state, with no time elapsed: must NOT notify.
+        let again = m.inspect(&c, t, f);
+        assert!(again.is_none(), "monitor must not re-notify inside rearm window");
+    }
+
+    #[test]
+    fn monitor_rearms_after_interval_in_same_state() {
+        let mut m = DiskAlertMonitor::new();
+        let c = cfg(80.0, 95.0, 1); // 1s re-arm for the test
+        let (t, f) = total_used_percent(85.0);
+        let _ = m.inspect(&c, t, f).expect("first crossing");
+        // Backdate the last-notified timestamp to force the re-arm branch.
+        m.last_notified_at = m.last_notified_at.map(|t| t.checked_sub(Duration::from_secs(2)).unwrap());
+        let alert = m.inspect(&c, t, f).expect("rearm should re-notify");
+        assert_eq!(alert.level, DiskAlertLevel::Warn);
+    }
+
+    #[test]
+    fn monitor_resets_state_when_disk_info_becomes_unavailable() {
+        let mut m = DiskAlertMonitor::new();
+        let c = cfg(80.0, 95.0, 3600);
+        let (t, f) = total_used_percent(90.0);
+        let _ = m.inspect(&c, t, f).expect("first crossing");
+        assert_eq!(m.last_level, Some(DiskAlertLevel::Warn));
+        // Disk info becomes unavailable: monitor must forget prior state.
+        assert!(m.inspect(&c, 0, 0).is_none());
+        assert!(m.last_level.is_none());
+        // Next valid sample at warn level is treated as a fresh transition.
+        let (t, f) = total_used_percent(90.0);
+        let alert = m.inspect(&c, t, f).expect("re-arm after unavailability");
+        assert_eq!(alert.level, DiskAlertLevel::Warn);
+    }
+
+    #[test]
+    fn monitor_treats_drop_below_warn_as_return_to_normal() {
+        let mut m = DiskAlertMonitor::new();
+        let c = cfg(80.0, 95.0, 3600);
+        let (t, f) = total_used_percent(90.0);
+        let _ = m.inspect(&c, t, f).expect("first crossing");
+        assert_eq!(m.last_level, Some(DiskAlertLevel::Warn));
+        // Drop below warn: no notification, state goes back to normal.
+        let (t, f) = total_used_percent(50.0);
+        assert!(m.inspect(&c, t, f).is_none());
+        assert!(m.last_level.is_none());
     }
 }

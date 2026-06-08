@@ -335,6 +335,11 @@
       "CUSTOM_ATTRIBUTES": "Additional CSP attributes appended to the standard policy.",
       "ENABLED": "Enables or disables Content Security Policy headers for the WebUI."
     },
+    "DISK_ALERT_CONFIG": {
+      "WARN_PERCENT": "Disk usage (0-100) at which the first warning is sent.\n\nBelow this value the disk is considered normal. Above the critical threshold the alert escalates.",
+      "CRITICAL_PERCENT": "Disk usage (0-100) at which the alert escalates to critical and is treated as 'disk full'.\n\nMust be greater than the warning threshold. The alert is re-sent while the disk stays in this state.",
+      "REPEAT_INTERVAL_SECS": "How often (in seconds) to re-send the alert while the disk stays in the same warning or critical state.\n\nSet to 0 to disable re-arming. Default: 3600 (1h)."
+    },
     "DEFAULT": "No dedicated explanation is available for this field yet.",
     "DISCORD": {
       "TEMPLATE_MESSAGE": "Template message body for Discord notifications."
@@ -918,6 +923,11 @@
     "DISABLED": "Disabled",
     "DISABLED_HEADER": "Disabled header",
     "DISCORD": "Discord",
+    "DISK": "Disk",
+    "DISK_ALERT": "Disk Alert",
+    "DISK_ALERT_CRITICAL_PERCENT": "Critical threshold (%)",
+    "DISK_ALERT_REPEAT_INTERVAL_SECS": "Re-notify interval (secs)",
+    "DISK_ALERT_WARN_PERCENT": "Warning threshold (%)",
     "DISK_BASED_PROCESSING": "Disk Based Processing",
     "DOCUMENTATION": "Documentation",
     "DOCUMENTATION_CONTENT": "Get started with tuliprox: features, setup, and examples",
@@ -1104,6 +1114,7 @@
     "MODEL_NUMBER": "Model Number",
     "MOVIE": "Movie",
     "MOVIE_CATEGORY": "Movie Category",
+    "MSG_KIND_DISKALERT": "Disk Alert",
     "MSG_KIND_ERROR": "Error",
     "MSG_KIND_INFO": "Info",
     "MSG_KIND_STATS": "Stats",

@@ -11,6 +11,8 @@ pub enum MsgKind {
     Error,
     #[serde(rename = "watch")]
     Watch,
+    #[serde(rename = "disk_alert")]
+    DiskAlert,
 }
 impl MsgKind {
     pub fn template_filename(&self, prefix: &str) -> String {
@@ -25,6 +27,7 @@ impl fmt::Display for MsgKind {
             MsgKind::Stats => "Stats",
             MsgKind::Error => "Error",
             MsgKind::Watch => "Watch",
+            MsgKind::DiskAlert => "DiskAlert",
         };
         write!(f, "{s}")
     }
@@ -42,8 +45,10 @@ impl FromStr for MsgKind {
             Ok(Self::Error)
         } else if s.eq_ignore_ascii_case("watch") {
             Ok(Self::Watch)
+        } else if s.eq_ignore_ascii_case("disk_alert") {
+            Ok(Self::DiskAlert)
         } else {
-            Err(TuliproxError::Config(format!("Unknown MsgKind: {}", s)))
+            Err(TuliproxError::Config(format!("Unknown MsgKind: {s}")))
         }
     }
 }

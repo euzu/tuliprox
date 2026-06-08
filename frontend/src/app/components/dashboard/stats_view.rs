@@ -14,6 +14,7 @@ struct StatsSparklineData {
     memory: Rc<[SparklineSeries]>,
     cpu: Rc<[SparklineSeries]>,
     network: Rc<[SparklineSeries]>,
+    disk: Rc<[SparklineSeries]>,
     users: Rc<[SparklineSeries]>,
     connections: Rc<[SparklineSeries]>,
 }
@@ -40,13 +41,23 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 .with_class("tp__sparkline--net-tx")
                 .with_label("\u{2191}"),
         ]),
+        disk: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.disk))]),
         users: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.users))]),
         connections: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.connections))]),
     });
 
-    let (mem, cpu, net) = status_ctx.system_info.as_ref().map_or_else(
-        || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
+    let (mem, cpu, net, disk) = status_ctx.system_info.as_ref().map_or_else(
+        || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
         |system| {
+            let disk = if system.disk_total_bytes > 0 {
+                format!(
+                    "{} / {}",
+                    human_readable_byte_size(system.disk_total_bytes.saturating_sub(system.disk_free_bytes)),
+                    human_readable_byte_size(system.disk_total_bytes),
+                )
+            } else {
+                "n/a".to_string()
+            };
             (
                 format!(
                     "{} / {}",
@@ -59,6 +70,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                     human_readable_byte_size(system.net_rx_bytes_per_sec as u64),
                     human_readable_byte_size(system.net_tx_bytes_per_sec as u64),
                 ),
+                disk,
             )
         },
     );
@@ -66,16 +78,17 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
     let render_system_stats = |cache| {
         html! {
            <div class="tp__stats__body-group">
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.MEMORY")} data={mem.clone()}
+               <Card class="tp__stats__system"><StatusCard icon="Memory" title={translate.t("LABEL.MEMORY")} data={mem.clone()}
                    chart={Some(html! { <Sparkline class="tp__sparkline--memory" format={SparklineFormat::Percent}
                        series={sparkline_data.memory.clone()} /> })} /></Card>
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CACHE")} data={cache} /></Card>
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.CPU")} data={cpu.clone()}
+               <Card class="tp__stats__system"><StatusCard icon="Cache" title={translate.t("LABEL.CACHE")} data={cache} /></Card>
+               <Card class="tp__stats__system"><StatusCard icon="CPU" title={translate.t("LABEL.CPU")} data={cpu.clone()}
                    chart={Some(html! { <Sparkline class="tp__sparkline--cpu" format={SparklineFormat::Percent}
                        series={sparkline_data.cpu.clone()} /> })} /></Card>
-               <Card class="tp__stats__system"><StatusCard title={translate.t("LABEL.NETWORK")} data={net.clone()}
+               <Card class="tp__stats__system"><StatusCard icon="NetworkSpeed" title={translate.t("LABEL.NETWORK")} data={net.clone()}
                    chart={Some(html! { <Sparkline class="tp__sparkline--network" format={SparklineFormat::BytesPerSec}
                        series={sparkline_data.network.clone()} /> })} /></Card>
+               <Card class="tp__stats__system"><StatusCard icon="Storage" title={translate.t("LABEL.DISK")} data={disk.clone()} /></Card>
             </div>
         }
     };

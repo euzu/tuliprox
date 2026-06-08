@@ -36,6 +36,7 @@ mod video_download;
 mod web_auth;
 mod web_ui;
 
+mod disk_alert;
 mod favourites;
 mod library;
 mod media_server_catalog;
@@ -51,6 +52,7 @@ pub use app_config::*;
 pub use base::*;
 pub use cache::*;
 pub use config_type::*;
+pub use disk_alert::*;
 pub use epg::*;
 pub use epg_smart_match::*;
 pub use favourites::*;
