@@ -26,6 +26,7 @@ use shared::{
     utils::concat_path_leading_slash,
 };
 use std::{collections::BTreeMap, sync::Arc};
+use crate::api::endpoints::rbac_api::rbac_api_register_unprotected;
 
 pub const API_V1_PATH: &str = "api/v1";
 
@@ -169,7 +170,8 @@ pub fn v1_api_register(
             .merge(v1_api_config_register(axum::routing::Router::new()))
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
-            .merge(library_api_register(axum::routing::Router::new(), None));
+            .merge(library_api_register(axum::routing::Router::new(), None))
+            .merge(rbac_api_register_unprotected(Arc::clone(app_state)));
     }
 
     let config = app_state.app_config.config.load();

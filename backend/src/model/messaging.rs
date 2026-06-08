@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use shared::model::{MsgKind, SourceStats, InputStats};
+use shared::model::{DiskAlert, MsgKind, SourceStats, InputStats};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchChanges {
@@ -34,6 +34,7 @@ pub enum MessageContent {
    Error(String),
    Watch(WatchChanges),
    ProcessingStats(ProcessingStats),
+   DiskAlert(DiskAlert),
 }
 
 impl MessageContent {
@@ -44,7 +45,7 @@ impl MessageContent {
     pub fn event_error(error: String) -> Self {
         Self::ProcessingStats(ProcessingStats::new_error(error))
     }
-    
+
     pub fn kind(&self) -> MsgKind {
         match self {
             Self::Info(_) => MsgKind::Info,
@@ -57,6 +58,7 @@ impl MessageContent {
                     MsgKind::Stats
                 }
             }
+            Self::DiskAlert(_) => MsgKind::DiskAlert,
         }
     }
 }
@@ -74,6 +76,8 @@ pub struct TemplateContext<'a> {
     // For manual error json or other json events embedded in string
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing: Option<ProcessingStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk: Option<&'a DiskAlert>,
     // Flattened stats for first input convenience
     #[serde(flatten)]
     pub flat_stats: Option<InputStats>,
