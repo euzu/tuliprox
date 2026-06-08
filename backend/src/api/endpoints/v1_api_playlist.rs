@@ -436,13 +436,13 @@ async fn playlist_epg(
                 let epg_path = crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
                     config,
                     &target,
-                    TargetType::M3u,
+                    TargetType::Xtream,
                 )
                 .or_else(|| {
                     crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
                         config,
                         &target,
-                        TargetType::Xtream,
+                        TargetType::M3u,
                     )
                 });
                 if let Some(epg_path) = epg_path {

@@ -9,7 +9,7 @@ use crate::{
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
     },
     auth::Fingerprint,
-    model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, TargetType, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
+    model::{Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
         epg_query_channels, get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
         xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
@@ -40,6 +40,7 @@ use std::{
 use tokio::{io::AsyncWriteExt, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use shared::model::TargetType;
 use crate::auth::resolve_api_user_context;
 use crate::model::ApiProxyServerInfo;
 
