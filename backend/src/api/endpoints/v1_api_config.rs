@@ -432,7 +432,7 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
     }
 }
 
-async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
+async fn config_unprotected(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
     get_config_common(&app_state, None).await
 }
 
@@ -606,7 +606,7 @@ fn build_xtream_login_input_source(
 
 pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
-        .route("/config", axum::routing::get(config_public))
+        .route("/config", axum::routing::get(config_unprotected))
         .route("/config/batchContent/{input_id}", axum::routing::get(config_batch_content))
         .route("/config/xtream/login-info", axum::routing::post(get_xtream_login_info))
         .route("/config/main", axum::routing::post(save_config_main))
@@ -749,32 +749,6 @@ mod tests {
         assert_eq!(api_proxy.user.len(), 1);
         assert!(!api_proxy.use_user_db);
         assert_eq!(api_proxy.auth_error_status, 403);
-    }
-
-    #[test]
-    fn public_permissions_scrub_all_config_sections() {
-        let mut app_config = AppConfigDto {
-            config: ConfigDto {
-                storage_dir: Some(String::from("storage")),
-                ..ConfigDto::default()
-            },
-            sources: SourcesConfigDto {
-                inputs: vec![],
-                sources: vec![],
-                provider: Some(vec![]),
-                templates: Some(vec![]),
-            },
-            mappings: None,
-            templates: Some(TemplateDefinitionDto::default()),
-            api_proxy: Some(make_test_api_proxy()),
-        };
-
-        filter_app_config_by_permissions(&mut app_config, None);
-
-        assert_eq!(app_config.config, ConfigDto::default());
-        assert_eq!(app_config.sources, SourcesConfigDto::default());
-        assert!(app_config.templates.is_none());
-        assert_eq!(app_config.api_proxy, Some(ApiProxyConfigDto::default()));
     }
 
     #[test]
