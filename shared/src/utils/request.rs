@@ -29,7 +29,7 @@ pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
         (&CONSTANTS.re_credentials, "$1***"),
         (&CONSTANTS.re_ipv4, "$1***"),
         (&CONSTANTS.re_ipv6, "$1***"),
-        (&CONSTANTS.re_stream_url, "$1***/$2/***"),
+        (&CONSTANTS.re_stream_url, "$1***/$2/***/"),
         (&CONSTANTS.re_url, "$1***/$2"),
         (&CONSTANTS.re_password, "$1***"),
     ] {
@@ -178,4 +178,23 @@ pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str),
     }
 
     Ok((host, path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_sensitive_info, set_sanitize_sensitive_info};
+
+    #[test]
+    fn sanitize_sensitive_info_masks_xtream_path_credentials_for_all_supported_schemes() {
+        let previous = super::is_sanitize_sensitive_info_enabled();
+        set_sanitize_sensitive_info(true);
+
+        for scheme in ["http", "https", "provider", "batch"] {
+            let input = format!("{scheme}://example/live/myuser/mypass/15373.ts");
+            let expected = format!("{scheme}://***/live/***/15373.ts");
+            assert_eq!(sanitize_sensitive_info(&input), expected);
+        }
+
+        set_sanitize_sensitive_info(previous);
+    }
 }

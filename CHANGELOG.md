@@ -301,6 +301,12 @@
 
 ## 🐛 Fixes
 
+- **EPG Output Selection In Mixed Targets**: Fixed ambiguous EPG file selection when a target exposes both Xtream and M3U outputs.
+  - Web UI playlist EPG and stream EPG APIs now explicitly prefer M3U EPG data and fall back to Xtream when M3U EPG is unavailable.
+  - Xtream short-EPG now explicitly resolves Xtream EPG data.
+- **Playlist Series Info For Input/Custom Xtream**: Completed `series_info` handling for input-based and custom Xtream playlist requests.
+  - Input and custom Xtream requests now resolve series details via provider `series_id` instead of returning empty (`204`) responses.
+  - Target-based `series_info` behavior is unchanged.
 - **Async Local File Serving**: The local-file stream handler now canonicalizes paths with `tokio::fs::canonicalize`
   instead of the blocking `std` call, so the async runtime is no longer blocked while resolving the file path.
 - **Template Expansion Efficiency**: Optimized `template.yml` / `template.d` multi-template expansion so sequence-style templates no longer
@@ -321,6 +327,9 @@
 
 ## ⚙️ New Settings
 
+- **config.yml (main)**:
+  - Added `interner_gc_interval_secs`: interval in seconds between background string interner GC checks.
+  - Added `interner_gc_min_pool_size`: minimum interned-string pool size required before background interner GC runs.
 - **config.yml (`reverse_proxy.stream`)**:
   - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
     Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  

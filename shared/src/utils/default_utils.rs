@@ -65,17 +65,19 @@ default_eq_fns!(
     default_grace_period_timeout_secs, is_default_grace_period_timeout_secs, u64, 4;
     default_hls_session_ttl_secs, is_default_hls_session_ttl_secs, u64, 15;
     default_catchup_session_ttl_secs, is_default_catchup_session_ttl_secs, u64, 45;
+    default_connect_timeout_secs, is_default_connect_timeout_secs, u32, 6;
+    default_resource_retry_attempts, is_default_resource_retry_attempts, u32, 3;
+    default_resource_retry_backoff_ms, is_default_resource_retry_backoff_ms, u64, 250;
+    default_interner_gc_interval_secs, is_default_interner_gc_interval_secs, u32, 180;
+    default_interner_gc_min_pool_size, is_default_interner_gc_min_pool_size, u32, 100;
 );
 pub const fn default_panel_api_provision_timeout_secs() -> u64 { 65 }
 pub const fn default_panel_api_provision_probe_interval_secs() -> u64 { 15 }
 pub const fn default_panel_api_provision_cooldown_secs() -> u64 { 0 }
 pub const fn default_panel_api_alias_pool_min() -> u16 { 1 }
 pub const fn default_panel_api_alias_pool_max() -> u16 { 1 }
-default_eq_fns!(
-    default_connect_timeout_secs, is_default_connect_timeout_secs, u32, 6;
-    default_resource_retry_attempts, is_default_resource_retry_attempts, u32, 3;
-    default_resource_retry_backoff_ms, is_default_resource_retry_backoff_ms, u64, 250;
-);
+
+//_----------
 pub const fn default_resource_retry_backoff_multiplier() -> f64 { 1.0 }
 pub const F64_DEFAULT_EPSILON: f64 = 1e-9;
 pub const fn is_default_resource_retry_backoff_multiplier(v: &f64) -> bool {

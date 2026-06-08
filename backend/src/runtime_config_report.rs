@@ -101,6 +101,8 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         log: config.log.as_ref().map(LogConfigDto::from),
         user_access_control: config.user_access_control,
         connect_timeout_secs: config.connect_timeout_secs,
+        interner_gc_interval_secs: config.interner_gc_interval_secs,
+        interner_gc_min_pool_size: config.interner_gc_min_pool_size,
         sleep_timer_mins: config.sleep_timer_mins,
         update_on_boot: config.update_on_boot,
         config_hot_reload: config.config_hot_reload,

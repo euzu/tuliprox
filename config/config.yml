@@ -8,6 +8,8 @@ working_dir: ${env:TULIPROX_HOME}/data
 backup_dir: ${env:TULIPROX_HOME}/backup
 custom_stream_response_path: ${env:TULIPROX_HOME}/resources
 connect_timeout_secs: 10
+interner_gc_interval_secs: 180
+interner_gc_min_pool_size: 100
 # Used when no `User-Agent` is provided by the client request and none is set in input headers.
 # If omitted, the built-in default is used.
 default_user_agent: "VLC/3.0.16 LibVLC/3.0.16"

@@ -6,7 +6,7 @@ use crate::{
     app::components::{country::display_country_code, AppIcon, Chip, Country, RevealContent, ToggleSwitch},
     i18n::use_translation,
     services::PlaylistService,
-    utils::format_duration,
+    utils::{format_duration, format_ts},
 };
 use shared::{
     model::{
@@ -20,10 +20,22 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
-fn only_time(ts: &str) -> String {
-    match ts.split_once(' ') {
-        Some((_date, time)) => time.to_string(),
-        None => ts.to_string(),
+/// Render an EPG start time in the browser's local timezone as `HH:MM`.
+/// Takes the raw UTC timestamp from `EpgProgrammeDto::start_timestamp`
+/// rather than the backend's pre-formatted display string, so the time
+/// shown matches the user's wall clock regardless of the timeshift
+/// configured for the stream's cluster.
+fn only_time(ts: i64) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
+    // Use the shared local-time formatter and keep just the `HH:MM`
+    // portion. Seconds are dropped to match the compact EPG card layout
+    // and stay consistent with the full EPG view's time columns.
+    let full = format_ts(ts as u64);
+    match full.split_once(' ') {
+        Some((_, time)) => time.get(..5).map_or_else(String::new, str::to_string),
+        None => String::new(),
     }
 }
 
@@ -332,14 +344,14 @@ pub fn StreamDisplayItem(props: &StreamDisplayItemProps) -> Html {
                                 if !current.title.is_empty() {
                                     <div class="tp__stream-display__epg">
                                         <span class="tp__stream-display__epg-now">
-                                            <span class="tp__stream-display__epg-time">{only_time(&current.start)}</span>
+                                            <span class="tp__stream-display__epg-time">{only_time(current.start_timestamp)}</span>
                                             {" "}
                                             <span class="tp__stream-display__epg-title">{&current.title}</span>
                                         </span>
                                         if let Some(next) = next_opt.as_ref() {
                                             <span class="tp__stream-display__epg-next">
                                                 <span class="tp__stream-display__epg-separator">{" ↦ "}</span>
-                                                <span class="tp__stream-display__epg-time">{only_time(&next.start)}</span>
+                                                <span class="tp__stream-display__epg-time">{only_time(next.start_timestamp)}</span>
                                                 {" "}
                                                 <span class="tp__stream-display__epg-title">{&next.title}</span>
                                             </span>
