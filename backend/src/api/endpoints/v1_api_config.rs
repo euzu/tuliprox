@@ -2,7 +2,7 @@ use crate::{api::{
     api_utils::{internal_server_error, try_unwrap_body},
     config_file::ConfigFile,
     model::AppState,
-}, auth::{verify_token, AuthBearer, permission_layer}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource}, utils, utils::{
+}, auth::{permission_layer, verify_token, AuthBearer}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource}, utils, utils::{
     persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file,
     request::download_text_content,
     xtream::{get_xtream_stream_url_base, xtream_login},
@@ -14,6 +14,7 @@ use axum::{
 };
 use log::error;
 use serde_json::json;
+use shared::model::InputFetchMethod;
 use shared::{
     error::TuliproxError,
     model::permission::{Permission, PermissionSet},
@@ -23,7 +24,6 @@ use shared::{
         HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, PROVIDER_SCHEME_PREFIX,
     },
 };
-use shared::model::InputFetchMethod;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -104,25 +104,27 @@ fn filter_api_proxy_by_permissions(api_proxy: &mut ApiProxyConfigDto, permission
     }
 }
 
-fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: PermissionSet) {
-    if !permissions.contains(Permission::ConfigRead) {
-        app_config.config = ConfigDto::default();
-        if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-            api_proxy.server.clear();
-            api_proxy.use_user_db = false;
-            api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
+fn filter_app_config_by_permissions(app_config: &mut shared::model::AppConfigDto, permissions: Option<PermissionSet>) {
+    if let Some(permissions) = permissions {
+        if !permissions.contains(Permission::ConfigRead) {
+            app_config.config = ConfigDto::default();
+            if let Some(api_proxy) = app_config.api_proxy.as_mut() {
+                api_proxy.server.clear();
+                api_proxy.use_user_db = false;
+                api_proxy.auth_error_status = ApiProxyConfigDto::default().auth_error_status;
+            }
         }
-    }
 
-    if !permissions.contains(Permission::SourceRead) {
-        app_config.sources = SourcesConfigDto::default();
-        app_config.mappings = None;
-        app_config.templates = None;
-    }
+        if !permissions.contains(Permission::SourceRead) {
+            app_config.sources = SourcesConfigDto::default();
+            app_config.mappings = None;
+            app_config.templates = None;
+        }
 
-    if let Some(api_proxy) = app_config.api_proxy.as_mut() {
-        if !permissions.contains(Permission::UserRead) {
-            api_proxy.user.clear();
+        if let Some(api_proxy) = app_config.api_proxy.as_mut() {
+            if !permissions.contains(Permission::UserRead) {
+                api_proxy.user.clear();
+            }
         }
     }
 }
@@ -353,7 +355,7 @@ async fn save_config_api_proxy_config(
         &ApiProxyConfigDto::from(&updated_api_proxy),
         &api_proxy_file_path,
     )
-    .await
+        .await
     {
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
             .into_response();
@@ -371,7 +373,7 @@ async fn save_config_api_proxy_config(
     response_with_revision_header(StatusCode::OK.into_response(), HEADER_CONFIG_API_PROXY_REVISION, &updated_revision)
 }
 
-async fn get_config_common(app_state: &Arc<AppState>, permissions: PermissionSet) -> axum::response::Response {
+async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<PermissionSet>) -> axum::response::Response {
     let (config_file_path, sources_file_path, api_proxy_file_path) = {
         let paths = app_state.app_config.paths.load();
         (
@@ -431,7 +433,7 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: PermissionSet
 }
 
 async fn config_public(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
-    get_config_common(&app_state, PermissionSet::new()).await
+    get_config_common(&app_state, None).await
 }
 
 async fn config(
@@ -448,7 +450,7 @@ async fn config(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    get_config_common(&app_state, permissions).await
+    get_config_common(&app_state, Some(permissions)).await
 }
 
 async fn get_config_api_proxy_config(
@@ -504,7 +506,7 @@ async fn config_batch_content(
                 None,
                 false,
             )
-            .await
+                .await
             {
                 Ok((content, _path)) => {
                     // Return CSV with explicit content-type
@@ -644,8 +646,9 @@ mod tests {
         build_xtream_login_input_source, filter_api_proxy_by_permissions, filter_app_config_by_permissions,
         require_matching_revision,
     };
-    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use crate::model::ConfigProvider;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use shared::model::TemplateDefinitionDto;
     use shared::{
         model::{
             ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigDto, ConfigProviderDto, Permission,
@@ -654,7 +657,6 @@ mod tests {
         utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH},
     };
     use std::sync::Arc;
-    use shared::model::TemplateDefinitionDto;
 
     #[test]
     fn require_matching_revision_rejects_missing_if_match_header() {
@@ -665,7 +667,7 @@ mod tests {
             HEADER_CONFIG_SOURCES_REVISION,
             "source.yml",
         )
-        .expect("missing if-match header must fail");
+            .expect("missing if-match header must fail");
         assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
     }
 
@@ -724,7 +726,7 @@ mod tests {
             api_proxy: Some(make_test_api_proxy()),
         };
 
-        filter_app_config_by_permissions(&mut app_config, permissions);
+        filter_app_config_by_permissions(&mut app_config, Some(permissions));
 
         assert_eq!(app_config.config.storage_dir.as_deref(), Some("storage"));
         assert_eq!(app_config.sources, SourcesConfigDto::default());
@@ -767,7 +769,7 @@ mod tests {
             api_proxy: Some(make_test_api_proxy()),
         };
 
-        filter_app_config_by_permissions(&mut app_config, PermissionSet::new());
+        filter_app_config_by_permissions(&mut app_config, None);
 
         assert_eq!(app_config.config, ConfigDto::default());
         assert_eq!(app_config.sources, SourcesConfigDto::default());

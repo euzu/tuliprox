@@ -14,7 +14,6 @@ struct StatsSparklineData {
     memory: Rc<[SparklineSeries]>,
     cpu: Rc<[SparklineSeries]>,
     network: Rc<[SparklineSeries]>,
-    disk: Rc<[SparklineSeries]>,
     users: Rc<[SparklineSeries]>,
     connections: Rc<[SparklineSeries]>,
 }
@@ -41,7 +40,6 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 .with_class("tp__sparkline--net-tx")
                 .with_label("\u{2191}"),
         ]),
-        disk: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.disk))]),
         users: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.users))]),
         connections: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.connections))]),
     });

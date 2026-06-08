@@ -1114,7 +1114,7 @@
     "MODEL_NUMBER": "Model Number",
     "MOVIE": "Movie",
     "MOVIE_CATEGORY": "Movie Category",
-    "MSG_KIND_DISKALERT": "Disk Alert",
+    "MSG_KIND_DISK_ALERT": "Disk Alert",
     "MSG_KIND_ERROR": "Error",
     "MSG_KIND_INFO": "Info",
     "MSG_KIND_STATS": "Stats",

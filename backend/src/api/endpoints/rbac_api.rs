@@ -365,6 +365,11 @@ async fn list_users(State(app_state): State<Arc<AppState>>) -> impl IntoResponse
     Json(users)
 }
 
+async fn list_users_unprotected() -> impl IntoResponse {
+    let users: Vec<WebUiUserDto> = vec![];
+    Json(users)
+}
+
 async fn list_groups(State(app_state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = app_state.app_config.config.load();
     let mut groups = vec![RbacGroupDto {
@@ -394,6 +399,16 @@ async fn list_groups(State(app_state): State<Arc<AppState>>) -> impl IntoRespons
 
     Json(groups)
 }
+
+async fn list_groups_unprotected() -> impl IntoResponse {
+    let groups = vec![RbacGroupDto {
+        name: "admin".to_string(),
+        permissions: vec!["*".to_string()],
+        builtin: true,
+    }];
+    Json(groups)
+}
+
 
 async fn list_permissions() -> impl IntoResponse {
     let permissions = PERMISSION_NAMES
@@ -750,6 +765,20 @@ pub fn rbac_api_register(app_state: Arc<AppState>) -> Router<Arc<AppState>> {
                 .layer(axum::middleware::from_fn_with_state(app_state, validator_user_read)),
         )
 }
+
+pub fn rbac_api_register_unprotected(_app_state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/rbac/users", axum::routing::get(list_users_unprotected)
+        )
+        .route(
+            "/rbac/groups", axum::routing::get(list_groups_unprotected)
+        )
+        .route(
+            "/rbac/permissions", axum::routing::get(list_permissions)
+        )
+}
+
 
 #[cfg(test)]
 mod tests {

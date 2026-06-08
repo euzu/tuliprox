@@ -28,11 +28,10 @@ impl Default for DiskAlertConfig {
 macros::from_impl!(DiskAlertConfig);
 impl From<&DiskAlertConfigDto> for DiskAlertConfig {
     fn from(dto: &DiskAlertConfigDto) -> Self {
-        let defaults = DiskAlertConfigDto::default();
         Self {
-            warn_percent: if dto.warn_percent > 0.0 { dto.warn_percent } else { defaults.warn_percent },
-            critical_percent: if dto.critical_percent > 0.0 { dto.critical_percent } else { defaults.critical_percent },
-            repeat_interval_secs: if dto.repeat_interval_secs > 0 { dto.repeat_interval_secs } else { defaults.repeat_interval_secs },
+            warn_percent: dto.warn_percent,
+            critical_percent: dto.critical_percent,
+            repeat_interval_secs: dto.repeat_interval_secs,
         }
     }
 }

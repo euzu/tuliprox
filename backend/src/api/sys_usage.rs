@@ -185,9 +185,6 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
             // (2) the user opting in via `messaging.disk_alert` and
             // `messaging.notify_on`. Without any of these, `inspect` is a cheap
             // (3 float comparisons + 2 integer comparisons) no-op.
-            if info.disk_total_bytes == 0 {
-                continue;
-            }
             let alert_cfg: DiskAlertConfig = {
                 let cfg = state.app_config.config.load();
                 let Some(messaging) = cfg.messaging.as_ref() else { continue };

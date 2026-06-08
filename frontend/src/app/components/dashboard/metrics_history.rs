@@ -19,7 +19,6 @@ fn push_capped(buffer: &mut VecDeque<f64>, value: f64) {
 pub struct MetricsHistory {
     pub cpu: VecDeque<f64>,
     pub memory: VecDeque<f64>,
-    pub disk: VecDeque<f64>,
     pub net_rx: VecDeque<f64>,
     pub net_tx: VecDeque<f64>,
     pub users: VecDeque<f64>,
@@ -32,13 +31,6 @@ impl MetricsHistory {
         let mem_pct =
             if info.memory_total > 0 { (info.memory_usage as f64 / info.memory_total as f64) * 100.0 } else { 0.0 };
         push_capped(&mut self.memory, mem_pct);
-        let disk_pct = if info.disk_total_bytes > 0 {
-            let used = info.disk_total_bytes.saturating_sub(info.disk_free_bytes);
-            (used as f64 / info.disk_total_bytes as f64) * 100.0
-        } else {
-            0.0
-        };
-        push_capped(&mut self.disk, disk_pct);
         push_capped(&mut self.net_rx, info.net_rx_bytes_per_sec);
         push_capped(&mut self.net_tx, info.net_tx_bytes_per_sec);
     }
@@ -134,7 +126,6 @@ mod tests {
 
         assert_eq!(history.cpu.len(), 2);
         assert_eq!(history.memory.len(), 2);
-        assert_eq!(history.disk.len(), 2);
         assert_eq!(history.net_rx.len(), 2);
         assert_eq!(history.net_tx.len(), 2);
         assert_eq!(history.cpu[0], history.cpu[1]);
@@ -154,20 +145,6 @@ mod tests {
         };
 
         history.record_system(&info);
-
-        assert_eq!(history.disk.len(), 1);
-        assert!((history.disk[0] - 75.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn record_system_records_zero_disk_when_total_unavailable() {
-        let mut history = MetricsHistory::default();
-        let info = sample_system(0.0, 0, 0.0, 0.0);
-
-        history.record_system(&info);
-
-        assert_eq!(history.disk.len(), 1);
-        assert_eq!(history.disk[0], 0.0);
     }
 
     #[test]

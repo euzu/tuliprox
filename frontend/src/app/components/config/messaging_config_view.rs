@@ -231,7 +231,7 @@ pub fn MessagingConfigView() -> Html {
                 .iter()
                 .map(|(kind, template)| {
                     config_field_custom!(
-                        translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase())),
+                        translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase())),
                         template.clone()
                     )
                 })
@@ -342,15 +342,16 @@ pub fn MessagingConfigView() -> Html {
         },
     };
 
-    let render_disk_alert = |disk_alert: &DiskAlertConfigDto| {
-        html! {
+    let render_disk_alert = |disk_alert: Option<&DiskAlertConfigDto>| match disk_alert {
+        Some(disk_alert) => html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_DISK_ALERT)}</h1>
                 { config_field!(disk_alert, translate.t(LABEL_DISK_ALERT_WARN_PERCENT), warn_percent) }
                 { config_field!(disk_alert, translate.t(LABEL_DISK_ALERT_CRITICAL_PERCENT), critical_percent) }
                 { config_field!(disk_alert, translate.t(LABEL_DISK_ALERT_REPEAT_INTERVAL_SECS), repeat_interval_secs) }
             </Card>
-        }
+        },
+        None => html! {},
     };
 
     let render_view_mode = || {
@@ -378,7 +379,7 @@ pub fn MessagingConfigView() -> Html {
           {render_rest(msg_state.form.rest.as_ref())}
           {render_pushover(msg_state.form.pushover.as_ref())}
           {render_discord(msg_state.form.discord.as_ref())}
-          {render_disk_alert(&disk_alert_state.form)}
+          {render_disk_alert(msg_state.form.disk_alert.as_ref())}
         </div>
         </>
         }
@@ -390,14 +391,14 @@ pub fn MessagingConfigView() -> Html {
         let telegram_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
                 let current_val = telegram_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let telegram_state = telegram_state.clone();
                 let kind = *kind;
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -416,14 +417,14 @@ pub fn MessagingConfigView() -> Html {
         let rest_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
                 let current_val = rest_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let rest_state = rest_state.clone();
                 let kind = *kind;
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -442,14 +443,14 @@ pub fn MessagingConfigView() -> Html {
         let discord_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
                 let current_val = discord_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let discord_state = discord_state.clone();
                 let kind = *kind;
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
