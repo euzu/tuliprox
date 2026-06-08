@@ -17,7 +17,7 @@ use crate::{
         },
         endpoints::{
             hls_api::handle_hls_stream_request,
-            xmltv_api::{get_empty_epg_response, get_epg_path_for_target, serve_short_epg},
+            xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
         },
         model::{
             create_custom_video_stream_response, AppState, CustomVideoStreamType, UserApiRequest,
@@ -1082,7 +1082,10 @@ async fn xtream_get_short_epg(
 
         if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
             let config = &app_state.app_config.config.load();
-            if let (Some(epg_path), Some(channel_id)) = (get_epg_path_for_target(config, target), &pli.epg_channel_id) {
+            if let (Some(epg_path), Some(channel_id)) = (
+                get_epg_path_for_target_by_type(config, target, TargetType::Xtream),
+                &pli.epg_channel_id,
+            ) {
                 if file_exists_async(&epg_path).await {
                     return serve_short_epg(
                         app_state,

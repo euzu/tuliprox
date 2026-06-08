@@ -9,7 +9,7 @@ use crate::{
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
     },
     auth::Fingerprint,
-    model::{Config, ConfigTarget, ProxyUserCredentials, TargetOutput, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
+    model::{Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
         epg_query_channels, get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
         xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
@@ -28,7 +28,7 @@ use shared::{
     concat_string,
     model::{
         EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry, StreamEpgItemRequest,
-        StreamEpgRequest, StreamEpgResponse,
+        StreamEpgRequest, StreamEpgResponse, TargetType,
     },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
@@ -64,27 +64,39 @@ pub(in crate::api) fn get_epg_path_for_target(config: &Config, target: &ConfigTa
 
     // TODO if we share the same virtual_id for epg, can we store an epg file for the target ?
     for output in &target.output {
-        match output {
-            TargetOutput::Xtream(_) => {
-                if let Some(storage_path) = xtream_get_storage_path(config, &target.name) {
-                    return get_epg_path_for_target_of_type(
-                        &target.name,
-                        xtream_get_epg_file_path_for_target(&storage_path),
-                    );
-                }
-            }
-            TargetOutput::M3u(_) => {
-                if let Some(target_path) = get_target_storage_path(config, &target.name) {
-                    return get_epg_path_for_target_of_type(
-                        &target.name,
-                        m3u_get_epg_file_path_for_target(&target_path),
-                    );
-                }
-            }
-            TargetOutput::Strm(_) | TargetOutput::HdHomeRun(_) => {}
+        if let Some(epg_path) = get_epg_path_for_target_by_type(config, target, TargetType::from(output)) {
+            return Some(epg_path);
         }
     }
     None
+}
+
+pub(in crate::api) fn get_epg_path_for_target_by_type(
+    config: &Config,
+    target: &ConfigTarget,
+    output_type: TargetType,
+) -> Option<PathBuf> {
+    match output_type {
+        TargetType::Xtream => {
+            if let Some(storage_path) = xtream_get_storage_path(config, &target.name) {
+                return get_epg_path_for_target_of_type(
+                    &target.name,
+                    xtream_get_epg_file_path_for_target(&storage_path),
+                );
+            }
+            None
+        }
+        TargetType::M3u => {
+            if let Some(target_path) = get_target_storage_path(config, &target.name) {
+                return get_epg_path_for_target_of_type(
+                    &target.name,
+                    m3u_get_epg_file_path_for_target(&target_path),
+                );
+            }
+            None
+        }
+        TargetType::Strm | TargetType::HdHomeRun => None,
+    }
 }
 
 pub async fn serve_epg(
@@ -662,7 +674,9 @@ pub(crate) async fn stream_epg_api(
             return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
         };
 
-        let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {
+        let epg_path = get_epg_path_for_target_by_type(config.as_ref(), &target, TargetType::M3u)
+            .or_else(|| get_epg_path_for_target_by_type(config.as_ref(), &target, TargetType::Xtream));
+        let Some(epg_path) = epg_path else {
             entries.extend(empty_stream_epg_entries(target_id, &items));
             continue;
         };
@@ -774,12 +788,106 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_stream_epg_items, rewrite_epg_channel_resource_url, stream_epg_programmes_for_channel, stream_epg_reference_map};
+    use super::{
+        get_epg_path_for_target,
+        get_epg_path_for_target_by_type,
+        group_stream_epg_items,
+        rewrite_epg_channel_resource_url,
+        stream_epg_programmes_for_channel,
+        stream_epg_reference_map,
+    };
+    use crate::model::{Config, ConfigTarget, M3uTargetOutput, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput};
     use crate::utils::{EpgProcessingOptions, EpgTimeShift};
+    use arc_swap::ArcSwapOption;
     use shared::{
-        model::{EpgChannel, EpgProgramme, StreamEpgItemRequest},
+        foundation::Filter,
+        model::{EpgChannel, EpgProgramme, ProcessingOrder, StreamEpgItemRequest, TargetType},
         utils::{concat_path, obfuscate_text, Internable},
     };
+    use std::fs;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn test_target_with_xtream_and_m3u() -> ConfigTarget {
+        ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "mixed-target".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![
+                TargetOutput::Xtream(XtreamTargetOutput {
+                    flags: XtreamTargetFlagsSet::new(),
+                    trakt: None,
+                    filter: None,
+                }),
+                TargetOutput::M3u(M3uTargetOutput {
+                    filename: None,
+                    include_type_in_url: false,
+                    mask_redirect_url: false,
+                    filter: None,
+                }),
+            ],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::new(None)),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        }
+    }
+
+    fn test_config_with_storage(storage_dir: &str) -> Config {
+        Config {
+            storage_dir: storage_dir.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn get_epg_path_for_target_by_type_prefers_requested_output() {
+        let dir = tempdir().expect("temp dir");
+        let config = test_config_with_storage(dir.path().to_string_lossy().as_ref());
+        let target = test_target_with_xtream_and_m3u();
+
+        let xtream_storage = crate::repository::xtream_get_storage_path(&config, &target.name).expect("xtream storage");
+        let m3u_storage = crate::repository::get_target_storage_path(&config, &target.name).expect("m3u storage");
+        let xtream_epg = crate::repository::xtream_get_epg_file_path_for_target(&xtream_storage);
+        let m3u_epg = crate::repository::m3u_get_epg_file_path_for_target(&m3u_storage);
+
+        fs::create_dir_all(xtream_storage).expect("create xtream dir");
+        fs::create_dir_all(m3u_epg.parent().expect("m3u epg parent")).expect("create m3u dir");
+        fs::write(&xtream_epg, b"xtream").expect("write xtream epg");
+        fs::write(&m3u_epg, b"m3u").expect("write m3u epg");
+
+        let picked_xtream = get_epg_path_for_target_by_type(&config, &target, TargetType::Xtream).expect("xtream path");
+        let picked_m3u = get_epg_path_for_target_by_type(&config, &target, TargetType::M3u).expect("m3u path");
+
+        assert_eq!(picked_xtream, xtream_epg);
+        assert_eq!(picked_m3u, m3u_epg);
+    }
+
+    #[test]
+    fn get_epg_path_for_target_keeps_output_order_fallback() {
+        let dir = tempdir().expect("temp dir");
+        let config = test_config_with_storage(dir.path().to_string_lossy().as_ref());
+        let target = test_target_with_xtream_and_m3u();
+
+        let xtream_storage = crate::repository::xtream_get_storage_path(&config, &target.name).expect("xtream storage");
+        let m3u_storage = crate::repository::get_target_storage_path(&config, &target.name).expect("m3u storage");
+        let xtream_epg = crate::repository::xtream_get_epg_file_path_for_target(&xtream_storage);
+        let m3u_epg = crate::repository::m3u_get_epg_file_path_for_target(&m3u_storage);
+
+        fs::create_dir_all(xtream_storage).expect("create xtream dir");
+        fs::create_dir_all(m3u_epg.parent().expect("m3u epg parent")).expect("create m3u dir");
+        fs::write(&xtream_epg, b"xtream").expect("write xtream epg");
+        fs::write(&m3u_epg, b"m3u").expect("write m3u epg");
+
+        let picked = get_epg_path_for_target(&config, &target).expect("fallback path");
+        assert_eq!(picked, xtream_epg);
+    }
 
     #[test]
     fn test_group_stream_epg_items_rejects_empty_requests() {

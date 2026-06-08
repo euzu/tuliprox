@@ -1933,50 +1933,50 @@ mod tests {
 
     #[test]
     fn test_keep_vhost_false_uses_ip_host_header_for_http() {
-        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1"]);
         let url = Url::parse("http://example.com:8080/stream").expect("url parse should work");
 
         let target = resolve_attempt_target(&url, Some(&provider));
-        assert_eq!(target.effective_url.host_str(), Some("203.0.113.10"));
-        assert_eq!(target.host_header.as_deref(), Some("203.0.113.10:8080"));
+        assert_eq!(target.effective_url.host_str(), Some("192.168.0.1"));
+        assert_eq!(target.host_header.as_deref(), Some("192.168.0.1:8080"));
     }
 
     #[test]
     fn test_keep_vhost_true_uses_hostname_host_header_for_http() {
-        let provider = make_provider_with_dns(true, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let provider = make_provider_with_dns(true, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1"]);
         let url = Url::parse("http://example.com:8080/stream").expect("url parse should work");
 
         let target = resolve_attempt_target(&url, Some(&provider));
-        assert_eq!(target.effective_url.host_str(), Some("203.0.113.10"));
+        assert_eq!(target.effective_url.host_str(), Some("192.168.0.1"));
         assert_eq!(target.host_header.as_deref(), Some("example.com:8080"));
     }
 
     #[test]
     fn test_preview_request_diagnostics_for_logging_includes_effective_target_and_host_details() {
-        let provider = make_provider_with_dns(true, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let provider = make_provider_with_dns(true, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1"]);
         let url = Url::parse("http://example.com:8080/stream").expect("url parse should work");
 
         let diagnostics = preview_request_diagnostics_for_logging(&url, Some(&provider));
 
         assert_eq!(
             diagnostics,
-            "request_url=http://***/stream, effective_url=http://***/stream, host_header=example.com:8080, connect_ip=113.***"
+            "request_url=http://***/stream, effective_url=http://***/stream, host_header=example.com:8080, connect_ip=0.***"
         );
     }
 
     #[test]
     fn test_preview_request_diagnostics_for_logging_sanitizes_each_stream_url() -> Result<(), url::ParseError> {
-        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
-        let url = Url::parse("http://xxx-bldkde.net/live/MQ12FK/YH56CT/1092671.ts")?;
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1"]);
+        let url = Url::parse("http://example.com/live/abcd/efgh/1092671.ts")?;
 
         let diagnostics = preview_request_diagnostics_for_logging(&url, Some(&provider));
 
-        assert!(!diagnostics.contains("xxx-bldkde.net"));
-        assert!(!diagnostics.contains("MQ12FK"));
-        assert!(!diagnostics.contains("YH56CT"));
+        assert!(!diagnostics.contains("example.com"));
+        assert!(!diagnostics.contains("abcd"));
+        assert!(!diagnostics.contains("efgh"));
         assert_eq!(
             diagnostics,
-            "request_url=http://***/live/***1092671.ts, effective_url=http://***/live/***1092671.ts"
+            "request_url=http://***/live/***/1092671.ts, effective_url=http://***/live/***/1092671.ts, host_header=0.***, connect_ip=0.***"
         );
         Ok(())
     }
@@ -1996,19 +1996,19 @@ mod tests {
 
     #[test]
     fn test_https_attempt_keeps_hostname_and_sets_sni() {
-        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10"]);
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1"]);
         let url = Url::parse("https://example.com/live").expect("url parse should work");
 
         let target = resolve_attempt_target(&url, Some(&provider));
         assert_eq!(target.effective_url.host_str(), Some("example.com"));
         assert_eq!(target.sni_host.as_deref(), Some("example.com"));
-        assert_eq!(target.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.10".to_string()));
-        assert_eq!(target.host_header.as_deref(), Some("203.0.113.10"));
+        assert_eq!(target.connect_ip.map(|ip| ip.to_string()), Some("192.168.0.1".to_string()));
+        assert_eq!(target.host_header.as_deref(), Some("192.168.0.1"));
     }
 
     #[test]
     fn test_try_next_ip_policy_uses_next_ip_until_exhausted() {
-        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10", "203.0.113.11"]);
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
         let url = Url::parse("http://example.com/live").expect("url parse should work");
         let mut tried = HashSet::new();
 
@@ -2021,27 +2021,27 @@ mod tests {
 
     #[test]
     fn test_preview_request_target_for_logging_does_not_advance_dns_rotation() {
-        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10", "203.0.113.11"]);
+        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
         let url = Url::parse("http://example.com/live").expect("url parse should work");
 
         let preview = preview_request_target_for_logging(&url, Some(&provider));
         let first = resolve_attempt_target(&url, Some(&provider));
         let second = resolve_attempt_target(&url, Some(&provider));
 
-        assert_eq!(preview, "http://203.0.113.10/live");
-        assert_eq!(first.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.10".to_string()));
-        assert_eq!(second.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.11".to_string()));
+        assert_eq!(preview, "http://192.168.0.1/live");
+        assert_eq!(first.connect_ip.map(|ip| ip.to_string()), Some("192.168.0.1".to_string()));
+        assert_eq!(second.connect_ip.map(|ip| ip.to_string()), Some("192.168.0.2".to_string()));
 
-        let provider_https = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.10", "203.0.113.11"]);
+        let provider_https = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
         let https_url = Url::parse("https://example.com/live").expect("url parse should work");
 
         let https_preview = preview_request_target_for_logging(&https_url, Some(&provider_https));
         let https_first = resolve_attempt_target(&https_url, Some(&provider_https));
         let https_second = resolve_attempt_target(&https_url, Some(&provider_https));
 
-        assert_eq!(https_preview, "https://example.com/live (connect_ip=203.0.113.10)");
-        assert_eq!(https_first.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.10".to_string()));
-        assert_eq!(https_second.connect_ip.map(|ip| ip.to_string()), Some("203.0.113.11".to_string()));
+        assert_eq!(https_preview, "https://example.com/live (connect_ip=192.168.0.1)");
+        assert_eq!(https_first.connect_ip.map(|ip| ip.to_string()), Some("192.168.0.1".to_string()));
+        assert_eq!(https_second.connect_ip.map(|ip| ip.to_string()), Some("192.168.0.2".to_string()));
     }
 
     #[test]
@@ -2359,7 +2359,7 @@ mod tests {
         let url = Url::parse(format!("http://example.com:{}/ok", addr.port()).as_str()).expect("url parse should work");
 
         let provider_rotate =
-            make_provider_with_dns(false, OnConnectErrorPolicy::RotateProviderUrl, vec!["203.0.113.1", "127.0.0.1"]);
+            make_provider_with_dns(false, OnConnectErrorPolicy::RotateProviderUrl, vec!["192.168.0.1", "127.0.0.1"]);
         let result_rotate = send_with_retry_and_provider(&app_config, &url, Some(&provider_rotate), false, |resolved_url| {
             client.get(resolved_url.clone())
         })
@@ -2367,7 +2367,7 @@ mod tests {
         assert!(result_rotate.is_err(), "without try_next_ip policy the request should fail");
 
         let provider_try_next =
-            make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["203.0.113.1", "127.0.0.1"]);
+            make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "127.0.0.1"]);
         let result_try_next =
             send_with_retry_and_provider(&app_config, &url, Some(&provider_try_next), false, |resolved_url| {
                 client.get(resolved_url.clone())

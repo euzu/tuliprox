@@ -1,6 +1,6 @@
 use crate::api::api_utils::resource_response;
 use crate::{api::{
-    api_utils::{create_api_proxy_user, json_or_bin_response, try_option_bad_request, try_result_bad_request},
+    api_utils::{create_api_proxy_user, json_or_bin_response, try_option_bad_request, try_result_bad_request, try_unwrap_body},
     endpoints::{
         api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
         extract_accept_header::ExtractAcceptHeader,
@@ -9,7 +9,7 @@ use crate::{api::{
         xtream_api::{xtream_get_stream_info_response, xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest},
     },
     model::AppState,
-}, auth::{create_access_token, permission_layer, verify_access_token}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions}, processing::parser::xmltv::merge_epg_channels_by_priority, repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id}, utils::{epg::get_input_raw_epg_file_path, file_exists_async}};
+}, auth::{create_access_token, permission_layer, verify_access_token}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions, InputSource}, processing::parser::xmltv::merge_epg_channels_by_priority, repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id}, utils::{epg::get_input_raw_epg_file_path, file_exists_async, xtream}};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
@@ -314,10 +314,12 @@ create_player_api_for_cluster!(playlist_content_vod, XtreamCluster::Video);
 create_player_api_for_cluster!(playlist_content_series, XtreamCluster::Series);
 
 async fn playlist_series_info(
-    axum::extract::Path((virtual_id, _provider_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((virtual_id, provider_id)): axum::extract::Path<(String, String)>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(playlist_req): axum::extract::Json<PlaylistRequest>,
 ) -> impl IntoResponse + Send {
+    let provider_id = provider_id.trim().parse::<u32>().ok();
+
     match playlist_req {
         PlaylistRequest::Target(target_id) => {
             if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
@@ -340,14 +342,58 @@ async fn playlist_series_info(
         PlaylistRequest::Input(input_name) => {
             if let Some(input) = app_state.app_config.get_input_by_name(&input_name.intern()) {
                 if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
-                    // TODO: Implement series info retrieval for input-based requests
-                    debug!("TODO: Implement series info retrieval for input-based requests");
+                    // We cannot call `xtream_get_stream_info_response` directly here because that path
+                    // depends on target-local virtual-id mapping (`xtream_get_item_for_stream_id`).
+                    // Input/custom requests only provide provider_id, so we resolve series info from
+                    // the upstream Xtream API using provider_id.
+                    if let Some(provider_id) = provider_id {
+                        if let Some(info_url) = xtream::get_xtream_player_api_info_url(
+                            input.as_ref(),
+                            XtreamCluster::Series,
+                            provider_id,
+                        ) {
+                            let Ok(resolved_url) = input.resolve_url(&info_url) else {
+                                return axum::http::StatusCode::NO_CONTENT.into_response();
+                            };
+                            let input_source = InputSource::from(input.as_ref()).with_url(resolved_url.to_string());
+                            if let Ok(content) = xtream::get_xtream_stream_info_content(
+                                &app_state.app_config,
+                                &app_state.http_client.load(),
+                                &input_source,
+                                false,
+                            )
+                            .await
+                            {
+                                return try_unwrap_body!(axum::response::Response::builder()
+                                    .status(axum::http::StatusCode::OK)
+                                    .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+                                    .body(axum::body::Body::from(content)));
+                            }
+                        }
+                    }
                 }
             }
         }
-        PlaylistRequest::CustomXtream(_xtream) => {
-            // TODO: Implement series info retrieval for custom Xtream requests
-            debug!("TODO: Implement series info retrieval for custom Xtream requests");
+        PlaylistRequest::CustomXtream(xtream_req) => {
+            if let Some(provider_id) = provider_id {
+                let input = create_config_input_for_xtream(&xtream_req.username, &xtream_req.password, &xtream_req.url);
+                if let Some(info_url) = xtream::get_xtream_player_api_info_url(&input, XtreamCluster::Series, provider_id) {
+                    let input_source = InputSource::from(&input).with_url(info_url);
+                    if let Ok(content) = xtream::get_xtream_stream_info_content(
+                        &app_state.app_config,
+                        &app_state.http_client.load(),
+                        &input_source,
+                        false,
+                    )
+                    .await
+                    {
+                        return try_unwrap_body!(axum::response::Response::builder()
+                            .status(axum::http::StatusCode::OK)
+                            .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+                            .body(axum::body::Body::from(content)));
+                    }
+                }
+            }
         }
         PlaylistRequest::CustomM3u(_) => {}
     }
@@ -433,7 +479,19 @@ async fn playlist_epg(
         PlaylistEpgRequest::Target(target_id) => {
             if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
                 let config = &app_state.app_config.config.load();
-                if let Some(epg_path) = crate::api::endpoints::xmltv_api::get_epg_path_for_target(config, &target) {
+                let epg_path = crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
+                    config,
+                    &target,
+                    TargetType::Xtream,
+                )
+                .or_else(|| {
+                    crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
+                        config,
+                        &target,
+                        TargetType::M3u,
+                    )
+                });
+                if let Some(epg_path) = epg_path {
                     return serve_epg_web_ui(&app_state, accept.as_deref(), &epg_path, &target).await;
                 }
             }
