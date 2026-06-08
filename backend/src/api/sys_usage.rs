@@ -174,17 +174,22 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
         loop {
             interval.tick().await;
 
-            if !state.event_manager.has_event_receivers() {
-                continue;
-            }
+            let has_receivers = state.event_manager.has_event_receivers();
 
             let Some(info) = sampler.sample() else { continue };
-            state.event_manager.send_system_info(info);
+            if has_receivers {
+                state.event_manager.send_system_info(info);
+            }
 
             // Disk-alert check is gated on (1) disk info being available, and
             // (2) the user opting in via `messaging.disk_alert` and
             // `messaging.notify_on`. Without any of these, `inspect` is a cheap
             // (3 float comparisons + 2 integer comparisons) no-op.
+            //
+            // The state-machine evaluation runs every tick regardless of
+            // whether anyone is currently listening on the WS event stream,
+            // so the monitor's hysteresis/rearm semantics stay correct across
+            // transient disconnects.
             let alert_cfg: DiskAlertConfig = {
                 let cfg = state.app_config.config.load();
                 let Some(messaging) = cfg.messaging.as_ref() else { continue };
@@ -620,7 +625,7 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{CpuTracker, SystemInfo};
+    use super::{CpuTracker, DiskProbe, SystemInfo};
     use libc::{c_char, c_int, c_void, getrusage, gettimeofday, rusage, sysctlbyname, timeval, RUSAGE_SELF};
     use std::{
         ffi::CString,
