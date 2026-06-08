@@ -280,6 +280,9 @@ impl ConfigDto {
         if self.interner_gc_interval_secs == 0 {
             return Err(TuliproxError::ConfigBase("`interner_gc_interval_secs` must be > 0".to_string()));
         }
+        if self.interner_gc_min_pool_size == 0 {
+            return Err(TuliproxError::ConfigBase("`interner_gc_min_pool_size` must be > 0".to_string()));
+        }
 
         self.prepare_web()?;
         self.prepare_hdhomerun(include_computed)?;
