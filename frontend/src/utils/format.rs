@@ -1,3 +1,5 @@
+use chrono::TimeZone;
+
 pub fn format_duration(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
@@ -54,7 +56,8 @@ pub fn format_ts(ts: u64) -> String {
     #[cfg(not(target_arch = "wasm32"))]
     {
         chrono::DateTime::from_timestamp(ts as i64, 0)
-            .map_or_else(|| ts.to_string(), |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| ts.to_string())
     }
 }
 
@@ -91,7 +94,8 @@ pub fn format_local_day_boundary_utc(ts: i64, end_of_day: bool) -> String {
     {
         let time = if end_of_day { (23, 59, 59) } else { (0, 0, 0) };
         date.and_hms_opt(time.0, time.1, time.2)
-            .map_or_else(String::new, |dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .and_then(|ndt| chrono::Local.from_local_datetime(&ndt).earliest())
+            .map_or_else(String::new, |dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string())
     }
 }
 
@@ -113,6 +117,7 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{format_bandwidth, format_local_day_boundary_utc, format_transferred};
+    use chrono::TimeZone;
 
     fn format_local_with_offset(ts: i64, js_offset_minutes_west: i32, fmt: &str) -> String {
         let utc = match chrono::DateTime::from_timestamp(ts, 0) {
@@ -248,7 +253,25 @@ mod tests {
     #[test]
     fn format_local_day_boundary_utc_uses_calendar_date() {
         let date_key = utc_ts(2026, 3, 23, 0, 0, 0);
-        assert_eq!(format_local_day_boundary_utc(date_key, false), "2026-03-23 00:00:00");
-        assert_eq!(format_local_day_boundary_utc(date_key, true), "2026-03-23 23:59:59");
+        // The function extracts the calendar date from the UTC timestamp, then
+        // computes the local day boundary for that date and serializes it as UTC.
+        let utc = chrono::DateTime::from_timestamp(date_key, 0).expect("valid timestamp");
+        let local_date = utc.with_timezone(&chrono::Local).date_naive();
+        let start_local = local_date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|ndt| chrono::Local.from_local_datetime(&ndt).earliest())
+            .expect("valid local datetime");
+        let end_local = local_date
+            .and_hms_opt(23, 59, 59)
+            .and_then(|ndt| chrono::Local.from_local_datetime(&ndt).earliest())
+            .expect("valid local datetime");
+        assert_eq!(
+            format_local_day_boundary_utc(date_key, false),
+            start_local.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string()
+        );
+        assert_eq!(
+            format_local_day_boundary_utc(date_key, true),
+            end_local.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string()
+        );
     }
 }
