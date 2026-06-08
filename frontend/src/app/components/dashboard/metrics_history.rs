@@ -105,7 +105,15 @@ mod tests {
         net_rx_bytes_per_sec: f64,
         net_tx_bytes_per_sec: f64,
     ) -> SystemInfo {
-        SystemInfo { cpu_usage, memory_usage, memory_total: 1_000, net_rx_bytes_per_sec, net_tx_bytes_per_sec }
+        SystemInfo {
+            cpu_usage,
+            memory_usage,
+            memory_total: 1_000,
+            net_rx_bytes_per_sec,
+            net_tx_bytes_per_sec,
+            disk_total_bytes: 0,
+            disk_free_bytes: 0,
+        }
     }
 
     #[test]
@@ -121,6 +129,22 @@ mod tests {
         assert_eq!(history.net_rx.len(), 2);
         assert_eq!(history.net_tx.len(), 2);
         assert_eq!(history.cpu[0], history.cpu[1]);
+    }
+
+    #[test]
+    fn record_system_records_disk_percentage_from_used_and_total() {
+        let mut history = MetricsHistory::default();
+        let info = SystemInfo {
+            cpu_usage: 0.0,
+            memory_usage: 0,
+            memory_total: 0,
+            net_rx_bytes_per_sec: 0.0,
+            net_tx_bytes_per_sec: 0.0,
+            disk_total_bytes: 1_000,
+            disk_free_bytes: 250,
+        };
+
+        history.record_system(&info);
     }
 
     #[test]

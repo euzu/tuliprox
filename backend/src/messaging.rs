@@ -5,8 +5,8 @@ use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContex
 use log::{debug, error};
 use reqwest::{header, Method};
 use serde_json::json;
-use shared::model::{InputFetchMethod, MsgKind};
-use shared::utils::{escape_markdown_v2, json_str_to_markdown, Internable};
+use shared::model::{DiskAlert, InputFetchMethod, MsgKind};
+use shared::utils::{escape_markdown_v2, human_readable_byte_size, json_str_to_markdown, Internable};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -15,6 +15,18 @@ use crate::utils::request::download_text_content;
 
 fn is_enabled(kind: MsgKind, cfg: &MessagingConfig) -> bool {
     cfg.notify_on.contains(&kind)
+}
+
+/// Default fallback string for a disk alert when no template is configured.
+fn default_disk_alert_text(alert: &DiskAlert) -> String {
+    format!(
+        "Disk usage {}: {:.1}% used ({} of {}), {} free.",
+        alert.level,
+        alert.percent,
+        human_readable_byte_size(alert.used_bytes),
+        human_readable_byte_size(alert.total_bytes),
+        human_readable_byte_size(alert.free_bytes),
+    )
 }
 
 static HANDLEBARS: LazyLock<Handlebars> = LazyLock::new(|| {
@@ -41,6 +53,7 @@ async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Cli
         stats: None,
         watch: None,
         processing: None,
+        disk: None,
         flat_stats: None,
     };
 
@@ -65,6 +78,9 @@ async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Cli
                 template_context.message = Some(errors);
             }
         }
+        MessageContent::DiskAlert(alert) => {
+            template_context.disk = Some(alert);
+        }
     }
 
     match template {
@@ -75,21 +91,20 @@ async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Cli
                 Ok(rendered) => rendered,
                 Err(e) => {
                     error!("Failed to render template: {e}");
-                    match content {
-                        MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-                        MessageContent::Watch(w) => serde_json::to_string(w).unwrap_or_default(),
-                        MessageContent::ProcessingStats(ps) => serde_json::to_string(ps).unwrap_or_default(),
-                    }
+                    default_text_for(content)
                 }
             }
         }
-        None => {
-             match content {
-                MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-                MessageContent::Watch(w) => serde_json::to_string(w).unwrap_or_default(),
-                MessageContent::ProcessingStats(ps) => serde_json::to_string(ps).unwrap_or_default(),
-            }
-        }
+        None => default_text_for(content),
+    }
+}
+
+fn default_text_for(content: &MessageContent) -> String {
+    match content {
+        MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
+        MessageContent::Watch(w) => serde_json::to_string(w).unwrap_or_default(),
+        MessageContent::ProcessingStats(ps) => serde_json::to_string(ps).unwrap_or_default(),
+        MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
     }
 }
 
@@ -128,17 +143,13 @@ async fn send_discord_message(app_config: &Arc<AppConfig>, client: &reqwest::Cli
     if let Some(discord) = &messaging.discord {
         let kind = content.kind();
         let template = discord.templates.get(&kind).map(String::as_str);
-        
+
         let body = if let Some(templ) = template {
             render_template(app_config, client, Some(templ), content).await
         } else {
              // Default json formatting
-             let msg_str = match content {
-                MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-                MessageContent::Watch(s) => serde_json::to_string(s).unwrap_or_default(),
-                MessageContent::ProcessingStats(ps) => serde_json::to_string(ps).unwrap_or_default(),
-            };
-            json!({ "content": msg_str }).to_string()
+             let msg_str = default_text_for(content);
+             json!({ "content": msg_str }).to_string()
         };
 
         match client
@@ -180,6 +191,7 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
                      serialized = serde_json::to_string_pretty(ps).unwrap_or_default();
                      serialized
                  }
+                 MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
             }
         };
 
@@ -217,11 +229,7 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
 
 async fn send_pushover_message(_app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) {
     if let Some(pushover) = &messaging.pushover {
-        let msg = match content {
-             MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-             MessageContent::Watch(s) => serde_json::to_string_pretty(s).unwrap_or_default(),
-             MessageContent::ProcessingStats(ps) => serde_json::to_string_pretty(ps).unwrap_or_default(),
-        };
+        let msg = default_text_for(content);
 
         let encoded_message: String = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("token", pushover.token.as_str())
@@ -515,5 +523,53 @@ mod tests {
         assert!(output.contains("❌ Errors: `2`"));
         assert!(output.contains("Target T1"));
         assert!(output.contains("An error occurred during sync"));
+    }
+
+    #[test]
+    fn disk_alert_kind_is_msg_kind_disk_alert() {
+        let alert = shared::model::DiskAlert {
+            level: shared::model::DiskAlertLevel::Critical,
+            total_bytes: 1_000,
+            free_bytes: 50,
+            used_bytes: 950,
+            percent: 95.0,
+        };
+        let content = MessageContent::DiskAlert(alert);
+        assert_eq!(content.kind(), shared::model::MsgKind::DiskAlert);
+    }
+
+    #[tokio::test]
+    async fn test_render_disk_alert_template_exposes_fields() {
+        let alert = shared::model::DiskAlert {
+            level: shared::model::DiskAlertLevel::Critical,
+            total_bytes: 1_000_000_000,
+            free_bytes: 50_000_000,
+            used_bytes: 950_000_000,
+            percent: 95.0,
+        };
+        let content = MessageContent::DiskAlert(alert);
+        let app_cfg = create_app_config();
+        let client = reqwest::Client::new();
+        let template = r"[{{kind}}] {{disk.level}} - {{disk.percent}}% used";
+        let output = render_template(&app_cfg, &client, Some(template), &content).await;
+        assert!(output.starts_with("[DiskAlert] critical - "));
+        assert!(output.ends_with("% used"));
+    }
+
+    #[tokio::test]
+    async fn test_render_disk_alert_falls_back_to_default_text() {
+        let alert = shared::model::DiskAlert {
+            level: shared::model::DiskAlertLevel::Warn,
+            total_bytes: 1_000_000_000,
+            free_bytes: 150_000_000,
+            used_bytes: 850_000_000,
+            percent: 85.0,
+        };
+        let content = MessageContent::DiskAlert(alert);
+        let app_cfg = create_app_config();
+        let client = reqwest::Client::new();
+        let output = render_template(&app_cfg, &client, None, &content).await;
+        assert!(output.contains("warning"), "fallback must mention alert level, got {output}");
+        assert!(output.contains("85.0%"), "fallback must include percent, got {output}");
     }
 }

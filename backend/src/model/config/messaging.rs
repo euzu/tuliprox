@@ -1,7 +1,50 @@
 use log::warn;
 use crate::model::macros;
-use shared::model::{DiscordMessagingConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto, RestMessagingConfigDto, TelegramMessagingConfigDto};
+use shared::model::{DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto, RestMessagingConfigDto, TelegramMessagingConfigDto};
 use std::path::{Path, PathBuf};
+
+/// Runtime configuration for the threshold-driven disk-space alert.
+#[derive(Debug, Clone)]
+pub struct DiskAlertConfig {
+    /// Disk usage at or above this percentage triggers the warning state.
+    pub warn_percent: f64,
+    /// Disk usage at or above this percentage triggers the critical state.
+    pub critical_percent: f64,
+    /// Re-send the alert after this many seconds if the disk is still in
+    /// the same alert state.
+    pub repeat_interval_secs: u64,
+}
+
+impl Default for DiskAlertConfig {
+    fn default() -> Self {
+        Self {
+            warn_percent: DiskAlertConfigDto::default().warn_percent,
+            critical_percent: DiskAlertConfigDto::default().critical_percent,
+            repeat_interval_secs: DiskAlertConfigDto::default().repeat_interval_secs,
+        }
+    }
+}
+
+macros::from_impl!(DiskAlertConfig);
+impl From<&DiskAlertConfigDto> for DiskAlertConfig {
+    fn from(dto: &DiskAlertConfigDto) -> Self {
+        Self {
+            warn_percent: dto.warn_percent,
+            critical_percent: dto.critical_percent,
+            repeat_interval_secs: dto.repeat_interval_secs,
+        }
+    }
+}
+
+impl From<&DiskAlertConfig> for DiskAlertConfigDto {
+    fn from(instance: &DiskAlertConfig) -> Self {
+        Self {
+            warn_percent: instance.warn_percent,
+            critical_percent: instance.critical_percent,
+            repeat_interval_secs: instance.repeat_interval_secs,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TelegramMessagingConfig {
@@ -154,6 +197,8 @@ pub struct MessagingConfig {
     pub rest: Option<RestMessagingConfig>,
     pub pushover: Option<PushoverMessagingConfig>,
     pub discord: Option<DiscordMessagingConfig>,
+    /// Optional disk-space alert config. When `None`, no alert is fired.
+    pub disk_alert: Option<DiskAlertConfig>,
 }
 
 impl MessagingConfig {
@@ -180,6 +225,7 @@ impl From<&MessagingConfigDto> for MessagingConfig {
             rest: dto.rest.as_ref().map(Into::into),
             pushover: dto.pushover.as_ref().map(Into::into),
             discord: dto.discord.as_ref().map(Into::into),
+            disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
     }
 }
@@ -192,12 +238,13 @@ impl From<&MessagingConfig> for MessagingConfigDto {
             rest: instance.rest.as_ref().map(Into::into),
             pushover: instance.pushover.as_ref().map(Into::into),
             discord: instance.discord.as_ref().map(Into::into),
+            disk_alert: instance.disk_alert.as_ref().map(Into::into),
         }
     }
 }
 
 fn discover_templates(prefix: &str, templates: &mut std::collections::HashMap<MsgKind, String>, templates_dir: &Path) {
-    let variants = [MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch];
+    let variants = [MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch, MsgKind::DiskAlert];
     for kind in variants {
         if let std::collections::hash_map::Entry::Vacant(e) = templates.entry(kind) {
             let filename = kind.template_filename(prefix);

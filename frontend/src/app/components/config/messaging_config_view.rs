@@ -11,13 +11,13 @@ use crate::{
         ConfigContext,
     },
     config_field, config_field_bool, config_field_bool_empty, config_field_child, config_field_custom,
-    config_field_empty, config_field_hide, config_field_optional, edit_field_bool, edit_field_list, edit_field_text,
-    edit_field_text_option, generate_form_reducer,
+    config_field_empty, config_field_hide, config_field_optional, edit_field_bool, edit_field_list,
+    edit_field_number_f64, edit_field_number_u64, edit_field_text, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
 };
 use shared::model::{
-    DiscordMessagingConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto, RestMessagingConfigDto,
-    TelegramMessagingConfigDto,
+    DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, MsgKind, PushoverMessagingConfigDto,
+    RestMessagingConfigDto, TelegramMessagingConfigDto,
 };
 use std::{rc::Rc, str::FromStr};
 use yew::prelude::*;
@@ -37,6 +37,10 @@ const LABEL_METHOD: &str = "LABEL.METHOD";
 const LABEL_HEADERS: &str = "LABEL.HEADERS";
 const LABEL_WEBHOOK_URL: &str = "LABEL.WEBHOOK_URL";
 const LABEL_ADD_HEADER: &str = "LABEL.ADD_HEADER";
+const LABEL_DISK_ALERT: &str = "LABEL.DISK_ALERT";
+const LABEL_DISK_ALERT_WARN_PERCENT: &str = "LABEL.DISK_ALERT_WARN_PERCENT";
+const LABEL_DISK_ALERT_CRITICAL_PERCENT: &str = "LABEL.DISK_ALERT_CRITICAL_PERCENT";
+const LABEL_DISK_ALERT_REPEAT_INTERVAL_SECS: &str = "LABEL.DISK_ALERT_REPEAT_INTERVAL_SECS";
 
 generate_form_reducer!(
     state: TelegramMessagingConfigFormState { form: TelegramMessagingConfigDto },
@@ -80,6 +84,16 @@ generate_form_reducer!(
 );
 
 generate_form_reducer!(
+    state: DiskAlertConfigFormState { form: DiskAlertConfigDto },
+    action_name: DiskAlertConfigFormAction,
+    fields {
+        WarnPercent => warn_percent: f64,
+        CriticalPercent => critical_percent: f64,
+        RepeatIntervalSecs => repeat_interval_secs: u64,
+    }
+);
+
+generate_form_reducer!(
     state: MessagingConfigFormState { form: MessagingConfigDto },
     action_name: MessagingConfigFormAction,
     fields {
@@ -108,10 +122,14 @@ pub fn MessagingConfigView() -> Html {
     let discord_state =
         use_reducer(|| DiscordMessagingConfigFormState { form: DiscordMessagingConfigDto::default(), modified: false });
 
+    let disk_alert_state =
+        use_reducer(|| DiskAlertConfigFormState { form: DiskAlertConfigDto::default(), modified: false });
+
     let messaging_state =
         use_reducer(|| MessagingConfigFormState { form: MessagingConfigDto::default(), modified: false });
 
-    let notify_on_options = use_memo((), |_| vec![MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch]);
+    let notify_on_options =
+        use_memo((), |_| vec![MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch, MsgKind::DiskAlert]);
 
     let notify_on_options_text = use_memo((*notify_on_options).clone(), |options: &Vec<MsgKind>| {
         options.iter().map(ToString::to_string).collect::<Vec<String>>()
@@ -124,22 +142,35 @@ pub fn MessagingConfigView() -> Html {
             rest_state.form.clone(),
             pushover_state.form.clone(),
             discord_state.form.clone(),
+            disk_alert_state.form.clone(),
             messaging_state.modified,
             telegram_state.modified,
             rest_state.modified,
             pushover_state.modified,
             discord_state.modified,
+            disk_alert_state.modified,
         );
-        use_emit_mapped(dependencies, config_view_ctx.on_form_change.clone(), |(m, t, r, p, d, mm, tm, rm, pm, dm)| {
-            let mut form = m;
-            form.telegram = Some(t);
-            form.rest = Some(r);
-            form.pushover = Some(p);
-            form.discord = Some(d);
+        use_emit_mapped(
+            dependencies,
+            config_view_ctx.on_form_change.clone(),
+            |(m, t, r, p, d, da, mm, tm, rm, pm, dm, dam)| {
+                let mut form = m;
+                form.telegram = Some(t);
+                form.rest = Some(r);
+                form.pushover = Some(p);
+                form.discord = Some(d);
+                // `disk_alert` is opt-in: only set when the user has touched
+                // the form. Persisting the always-default struct on every
+                // edit would silently overwrite the user's empty
+                // (i.e. disabled) config on save.
+                if dam {
+                    form.disk_alert = Some(da);
+                }
 
-            let modified = mm || tm || rm || pm || dm;
-            ConfigForm::Messaging(modified, form)
-        });
+                let modified = mm || tm || rm || pm || dm || dam;
+                ConfigForm::Messaging(modified, form)
+            },
+        );
     }
 
     {
@@ -179,6 +210,13 @@ pub fn MessagingConfigView() -> Html {
             || ()
         });
 
+        let disk_alert_state = disk_alert_state.clone();
+        let disk_alert_cfg = msg_config.disk_alert.as_ref().map_or_else(DiskAlertConfigDto::default, |d| d.clone());
+        use_effect_with((disk_alert_cfg, *config_view_ctx.edit_mode), move |(disk_alert_cfg, _mode)| {
+            disk_alert_state.dispatch(DiskAlertConfigFormAction::SetAll(disk_alert_cfg.clone()));
+            || ()
+        });
+
         use_effect_with((msg_config, *config_view_ctx.edit_mode), move |(msg_config, _mode)| {
             msg_state.dispatch(MessagingConfigFormAction::SetAll(msg_config.clone()));
             || ()
@@ -193,7 +231,7 @@ pub fn MessagingConfigView() -> Html {
                 .iter()
                 .map(|(kind, template)| {
                     config_field_custom!(
-                        translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase())),
+                        translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase())),
                         template.clone()
                     )
                 })
@@ -304,6 +342,18 @@ pub fn MessagingConfigView() -> Html {
         },
     };
 
+    let render_disk_alert = |disk_alert: Option<&DiskAlertConfigDto>| match disk_alert {
+        Some(disk_alert) => html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_DISK_ALERT)}</h1>
+                { config_field!(disk_alert, translate.t(LABEL_DISK_ALERT_WARN_PERCENT), warn_percent) }
+                { config_field!(disk_alert, translate.t(LABEL_DISK_ALERT_CRITICAL_PERCENT), critical_percent) }
+                { config_field!(disk_alert, translate.t(LABEL_DISK_ALERT_REPEAT_INTERVAL_SECS), repeat_interval_secs) }
+            </Card>
+        },
+        None => html! {},
+    };
+
     let render_view_mode = || {
         let msg_state = messaging_state.clone();
         let notify_on_chips = notify_on_options
@@ -329,6 +379,7 @@ pub fn MessagingConfigView() -> Html {
           {render_rest(msg_state.form.rest.as_ref())}
           {render_pushover(msg_state.form.pushover.as_ref())}
           {render_discord(msg_state.form.discord.as_ref())}
+          {render_disk_alert(msg_state.form.disk_alert.as_ref())}
         </div>
         </>
         }
@@ -340,14 +391,14 @@ pub fn MessagingConfigView() -> Html {
         let telegram_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
                 let current_val = telegram_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let telegram_state = telegram_state.clone();
                 let kind = *kind;
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("TELEGRAM_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -366,14 +417,14 @@ pub fn MessagingConfigView() -> Html {
         let rest_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
                 let current_val = rest_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let rest_state = rest_state.clone();
                 let kind = *kind;
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("REST_MESSAGING_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -392,14 +443,14 @@ pub fn MessagingConfigView() -> Html {
         let discord_template_fields = notify_on_options
             .iter()
             .map(|kind| {
-                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.to_string().to_uppercase()));
+                let kind_str = translate.t(&format!("LABEL.MSG_KIND_{}", kind.wire_name().to_uppercase()));
                 let current_val = discord_state.form.templates.get(kind).cloned().unwrap_or_default();
                 let discord_state = discord_state.clone();
                 let kind = *kind;
                 html! {
                     <TextArea
                         label={kind_str}
-                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", kind.to_string().to_uppercase()))}
+                        field_id={Some(format!("DISCORD_MESSAGING_CONFIG.TEMPLATES.{}", kind.wire_name().to_uppercase()))}
                         value={current_val}
                         collapse_on_empty={true}
                         on_change={Callback::from(move |val: String| {
@@ -467,6 +518,13 @@ pub fn MessagingConfigView() -> Html {
                         <h3>{translate.t("LABEL.TEMPLATES")}</h3>
                         { discord_template_fields }
                     </div>
+                </Card>
+
+                <Card class="tp__config-view__card">
+                    <h1>{translate.t(LABEL_DISK_ALERT)}</h1>
+                    { edit_field_number_f64!(disk_alert_state, translate.t(LABEL_DISK_ALERT_WARN_PERCENT), warn_percent, DiskAlertConfigFormAction::WarnPercent) }
+                    { edit_field_number_f64!(disk_alert_state, translate.t(LABEL_DISK_ALERT_CRITICAL_PERCENT), critical_percent, DiskAlertConfigFormAction::CriticalPercent) }
+                    { edit_field_number_u64!(disk_alert_state, translate.t(LABEL_DISK_ALERT_REPEAT_INTERVAL_SECS), repeat_interval_secs, DiskAlertConfigFormAction::RepeatIntervalSecs) }
                 </Card>
             </div>
             </>

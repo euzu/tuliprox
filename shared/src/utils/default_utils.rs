@@ -477,3 +477,7 @@ pub const fn is_default_media_server_catalog_page_size(value: &u16) -> bool {
 pub const fn is_default_media_server_catalog_request_delay_ms(value: &u64) -> bool {
     *value == default_media_server_catalog_request_delay_ms()
 }
+
+pub fn default_warn_percent() -> f64 { 80.0 }
+pub fn default_critical_percent() -> f64 { 95.0 }
+pub fn default_repeat_interval_secs() -> u64 { 3600 }
