@@ -4,7 +4,7 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream,
-            is_custom_video_stream_enabled, get_custom_stream_response_error_status, get_stream_response_with_headers,
+            get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
             tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamFactoryOptions, ProviderStreamInfo,
             ProviderStreamState, SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream,
@@ -2261,6 +2261,16 @@ fn is_hop_by_hop_response_header(name: &HeaderName) -> bool {
     )
 }
 
+fn no_custom_video_fallback_status(app_config: &AppConfig) -> StatusCode {
+    if is_custom_video_stream_enabled(app_config) {
+        // No custom video response available but custom video response enabled
+        StatusCode::BAD_REQUEST
+    } else {
+        // reverse proxy with `proxy_intercept_errors on;` can sever the socket.
+        get_custom_stream_response_error_status(app_config)
+    }
+}
+
 /// # Panics
 #[allow(clippy::too_many_lines)]
 pub async fn force_provider_stream_response(
@@ -2430,13 +2440,7 @@ pub async fn force_provider_stream_response(
         mark_response_as_uncompressed(&mut response);
         response
     } else {
-        // No custom video response available but custom video response enabbled
-        // reverse proxy with `proxy_intercept_errors on;` can sever the socket.
-        if is_custom_video_stream_enabled(&app_state.app_config) {
-            StatusCode::BAD_REQUEST.into_response()
-        } else {
-            get_custom_stream_response_error_status(&app_state.app_config).into_response()
-        }
+        no_custom_video_fallback_status(&app_state.app_config).into_response()
     }
 }
 
@@ -2821,12 +2825,7 @@ pub(crate) async fn stream_response(
             activation.placeholder_transition_version.is_some(),
         )
         .await;
-    // No custom video stream response available, but enabled
-    if is_custom_video_stream_enabled(&app_state.app_config) {
-        StatusCode::BAD_REQUEST.into_response()
-    } else {
-        get_custom_stream_response_error_status(&app_state.app_config).into_response()
-    }
+    no_custom_video_fallback_status(&app_state.app_config).into_response()
 }
 
 fn get_stream_throttle(app_state: &Arc<AppState>) -> u64 {
