@@ -1,11 +1,11 @@
 use crate::{
     error::TuliproxError,
     utils::{
-        default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
+        default_as_true, default_catchup_session_ttl_secs, default_fallback_error_status, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
-        is_blank_optional_string, is_default_catchup_session_ttl_secs, is_default_grace_period_millis,
-        is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
-        is_true, parse_to_kbps,
+        is_blank_optional_string, is_default_catchup_session_ttl_secs, is_default_fallback_error_status,
+        is_default_grace_period_millis, is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs,
+        is_default_shared_burst_buffer_mb, is_false, is_true, parse_to_kbps,
     },
 };
 use std::{
@@ -15,6 +15,8 @@ use std::{
 
 const STREAM_QUEUE_SIZE: usize = 1024; // mpsc channel holding messages. with 8192byte chunks and 2Mbit/s approx 8MB
 const MIN_SHARED_BURST_BUFFER_MB: u64 = 1;
+const MIN_FALLBACK_ERROR_STATUS: u16 = 400;
+const MAX_FALLBACK_ERROR_STATUS: u16 = 599;
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum AdmissionStrategy {
@@ -120,6 +122,18 @@ pub struct StreamConfigDto {
     pub shared_burst_buffer_mb: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
+    /// When true, the 6 fallback factories (`channel_unavailable`,
+    /// `user_connections_exhausted`, `provider_connections_exhausted`,
+    /// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`)
+    /// skip the configured MPEG-TS video and return the HTTP status
+    /// `fallback_error_status` instead. Use this behind a reverse proxy with
+    /// `proxy_intercept_errors on;` so dead channels do not pin sockets open.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disable_fallback_videos: bool,
+    /// HTTP status returned when `disable_fallback_videos` is true. Must be
+    /// 4xx or 5xx. Defaults to 502 Bad Gateway.
+    #[serde(default = "default_fallback_error_status", skip_serializing_if = "is_default_fallback_error_status")]
+    pub fallback_error_status: u16,
 }
 
 impl Default for StreamConfigDto {
@@ -137,6 +151,8 @@ impl Default for StreamConfigDto {
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
             admission_strategies: None,
+            disable_fallback_videos: false,
+            fallback_error_status: default_fallback_error_status(),
         }
     }
 }
@@ -155,6 +171,8 @@ impl StreamConfigDto {
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
             && self.admission_strategies.is_none()
+            && !self.disable_fallback_videos
+            && is_default_fallback_error_status(&self.fallback_error_status)
     }
 
     pub(crate) fn prepare(&mut self) -> Result<(), TuliproxError> {
@@ -189,6 +207,15 @@ impl StreamConfigDto {
             if let Err(err) = validate_admission_strategies(strategies, self.grace_period_millis) {
                 return Err(TuliproxError::ConfigStream(err));
             }
+        }
+
+        if self.fallback_error_status == 0 {
+            self.fallback_error_status = default_fallback_error_status();
+        } else if !(MIN_FALLBACK_ERROR_STATUS..=MAX_FALLBACK_ERROR_STATUS).contains(&self.fallback_error_status) {
+            return Err(TuliproxError::ConfigStream(format!(
+                "`fallback_error_status` must be a 4xx or 5xx HTTP status, got {}",
+                self.fallback_error_status
+            )));
         }
 
         Ok(())
@@ -421,5 +448,56 @@ mod tests {
 
         let serialized = serde_json::to_string(&dto).unwrap_or_default();
         assert!(serialized.contains("admission_strategies"), "serialized: {serialized}");
+    }
+
+    #[test]
+    fn test_disable_fallback_videos_default_is_false_and_status_default_is_502() {
+        let dto = StreamConfigDto::default();
+        assert!(!dto.disable_fallback_videos);
+        assert_eq!(dto.fallback_error_status, 502);
+    }
+
+    #[test]
+    fn test_prepare_rejects_non_4xx_5xx_fallback_error_status() {
+        // 200 OK and 600 are both outside the 400-599 range.
+        for bad in [200u16, 100, 399, 600, 1000] {
+            let mut dto = StreamConfigDto { fallback_error_status: bad, ..StreamConfigDto::default() };
+            let err = dto.prepare().expect_err(&format!("status {bad} must be rejected"));
+            let msg = format!("{err}");
+            assert!(msg.contains("fallback_error_status"), "status {bad} msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_prepare_accepts_4xx_and_5xx_fallback_error_status() {
+        for ok in [400u16, 404, 500, 502, 503, 599] {
+            let mut dto = StreamConfigDto { fallback_error_status: ok, ..StreamConfigDto::default() };
+            assert!(dto.prepare().is_ok(), "status {ok} must be accepted");
+        }
+    }
+
+    #[test]
+    fn test_prepare_clamps_zero_fallback_error_status_to_default() {
+        let mut dto = StreamConfigDto { fallback_error_status: 0, ..StreamConfigDto::default() };
+        dto.prepare().expect("zero must be silently clamped, not rejected");
+        assert_eq!(dto.fallback_error_status, 502);
+    }
+
+    #[test]
+    fn test_is_empty_with_default_fallback_fields() {
+        let dto = StreamConfigDto::default();
+        assert!(dto.is_empty(), "default DTO with default fallback fields must be empty");
+    }
+
+    #[test]
+    fn test_is_empty_with_disable_fallback_videos_set_is_not_empty() {
+        let dto = StreamConfigDto { disable_fallback_videos: true, ..StreamConfigDto::default() };
+        assert!(!dto.is_empty());
+    }
+
+    #[test]
+    fn test_is_empty_with_non_default_fallback_error_status_is_not_empty() {
+        let dto = StreamConfigDto { fallback_error_status: 503, ..StreamConfigDto::default() };
+        assert!(!dto.is_empty());
     }
 }

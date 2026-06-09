@@ -79,6 +79,17 @@
   - The shared `IconButton` and `TextButton` primitives now render with `type="button"`, preventing accidental
     form submission when used inside forms.
 
+- **Disk-Space Alerts**:
+  - Added a threshold-based disk-usage monitor (Normal / Warn / Critical) with hysteresis in a 2-second loop.
+  - Surfaces a new `DiskAlert` message kind via the existing messaging channels (Telegram, Discord, Pushover, REST),
+    so operators get notified before the disk fills up.
+  - Operators can opt out of disk-alert messages by simply not declaring a `disk_alert` block under `messaging`,
+    keeping the feature strictly opt-in and backward compatible.
+  - Custom message templates per channel are supported via the standard `messaging.<channel>.templates.disk_alert_*`
+    Handlebars hooks (e.g. `messaging.telegram.templates.disk_alert_warn`,
+    `messaging.discord.templates.disk_alert_critical`). A clear plain-text fallback is used when no template is
+    configured.
+
 - **Shift+Click Range Selection For API-User Playlist Categories**:
   - In the API-user playlist editor, holding `Shift` while clicking a category now selects or deselects the whole
     range between the last anchor and the clicked item.
@@ -324,6 +335,18 @@
 - **Refactored Playlist And EPG Explorer**: Playlist Explorer and EPG Explorer have been refactored for improved reliability and UX.
 - HLS session info now reports accurate duration and total transferred data.
 - Removed open-ssl dependency
+- **Infinite Fallback Video Behind Reverse Proxy**: The 6 fallback custom videos (`channel_unavailable`,
+  `user_connections_exhausted`, `provider_connections_exhausted`, `low_priority_preempted`,
+  `user_account_expired`, `panel_api_provisioning`) used to be served with an HTTP 200 OK header even when they
+  represented a stream failure. A reverse proxy with `proxy_intercept_errors on;` therefore could not sever the
+  socket, and the connection would hang open for hours ("ghost connections" / socket exhaustion under scraper
+  load).
+  - The new `reverse_proxy.stream.disable_fallback_videos: true` switch turns the 6 fallback factories into
+    no-op responses so the call sites return a real HTTP error code (default `502 Bad Gateway`,
+    `fallback_error_status: <4xx|5xx>`) instead of the infinite MPEG-TS loop.
+  - The default behavior is unchanged when the flag is not set: the configured fallback video is still served.
+  - All 6 factories are routed through a single helper (`create_video_stream`) so the new behavior is centralized
+    and applies uniformly without per-call-site changes.
 
 ## ⚙️ New Settings
 
@@ -334,6 +357,24 @@
   - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
     Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  
     `grace_instant_stream`, `grace_hold_stream`.
+  - Added `disable_fallback_videos` (`bool`, default `false`): when `true`, the 6 fallback custom-video factories
+    skip the configured MPEG-TS video and the call sites return `fallback_error_status` instead of an
+    infinite 200 OK loop. Use this behind a reverse proxy with `proxy_intercept_errors on;` to allow dead channels
+    to be severed instead of pinning sockets open.
+  - Added `fallback_error_status` (`u16`, default `502`): HTTP status code returned when
+    `disable_fallback_videos` is `true`. Must be a 4xx or 5xx code (`prepare()` rejects anything else;
+    `0` is silently clamped to the default `502`).
+- **config.yml (`messaging.disk_alert`)**:
+  - Added optional `disk_alert` block to enable per-mount disk-usage alerts via the existing messaging channels.
+  - Fields:
+    - `mounts` (optional list, default `["/"]`): which paths to monitor. On Windows each entry is treated as a
+      drive root; on Linux/macOS the path is sampled via `statvfs`.
+    - `warn_threshold_percent` (`u8`, default `80`): percent-used at which the `Warn` level is reached.
+    - `critical_threshold_percent` (`u8`, default `90`): percent-used at which the `Critical` level is reached.
+    - `poll_interval_secs` (`u64`, default `2`): sampling interval for the background monitor loop.
+  - When the level transitions up or down, a `DiskAlert` message is sent through every messaging channel that
+    has not been disabled. Templates can override the default text via
+    `messaging.<channel>.templates.disk_alert_warn` / `disk_alert_critical` / `disk_alert_normal`.
 - **api-proxy.yml (`user.credentials[]`)**:
   - Added `output_clusters` (optional list, default effective behavior `all`): restricts a user to `live`, `vod`,
     and/or `series` on the assigned target. If no cluster is selected, the filter is inactive and all clusters are

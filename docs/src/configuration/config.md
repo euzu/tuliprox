@@ -538,6 +538,71 @@ populated:
 }
 ```
 
+### 5.3 Disk-Space Alerts (`messaging.disk_alert`)
+
+Tuliprox can monitor the free space on one or more mount points and notify you via the standard messaging
+channels (Telegram, Discord, Pushover, REST) before the disk fills up. The feature is **opt-in**: no `disk_alert`
+block means no monitoring and no notifications.
+
+**How it works:** A background monitor samples the configured mounts every `poll_interval_secs` (default `2s`)
+and compares the percent-used against two thresholds. With hysteresis, the level transitions are:
+
+| Level      | Default Trigger                                | Operator Action                                |
+|:-----------|:-----------------------------------------------|:-----------------------------------------------|
+| `Normal`   | < `warn_threshold_percent`                     | All good.                                      |
+| `Warn`     | ≥ `warn_threshold_percent` (default `80%`)     | Plan a cleanup.                                |
+| `Critical` | ≥ `critical_threshold_percent` (default `90%`) | Cleanup is urgent; stream generation may fail. |
+
+A `DiskAlert` message is emitted **only on level transitions** (Normal → Warn, Warn → Critical, and back
+down). This prevents notification flooding while the level is stable.
+
+```yaml
+messaging:
+  notify_on: [ "info", "stats", "error", "watch" ]
+
+  # Disk-space alerts are sent through the channels above. Configure the
+  # threshold monitor and the mounts to watch here.
+  disk_alert:
+    # Paths to monitor. On Linux/macOS these are statvfs roots. On Windows
+    # each entry is treated as a drive root (e.g. "C:"). Defaults to ["/"].
+    mounts:
+      - "/"
+      - "/var/lib/tuliprox"
+    # Percent-used at which the Warn level is reached. Default: 80.
+    warn_threshold_percent: 80
+    # Percent-used at which the Critical level is reached. Default: 90.
+    critical_threshold_percent: 90
+    # Sampling interval for the background monitor. Default: 2 (seconds).
+    poll_interval_secs: 2
+
+  telegram:
+    bot_token: "<TOKEN>"
+    chat_ids: [ "<CHAT_ID>" ]
+    templates:
+      # Custom templates per level. Plain-text defaults are used if omitted.
+      disk_alert_warn: "⚠️ Disk {{mount}} is {{percent}}% full (Warn threshold)."
+      disk_alert_critical: "🚨 Disk {{mount}} is {{percent}}% full — cleanup now!"
+      disk_alert_normal: "✅ Disk {{mount}} back to normal at {{percent}}%."
+```
+
+**Available Handlebars Variables** (all `disk_alert_*` templates):
+
+* `{{mount}}` — The mount path that crossed the threshold.
+* `{{level}}` — The new level after the transition (`Warn`, `Critical`, or `Normal`).
+* `{{percent}}` — Current percent-used, rounded to one decimal place.
+* `{{free_bytes}}` / `{{total_bytes}}` — Raw byte counts for the mount.
+* `{{timestamp}}` — Event time in UTC (ISO 8601 / RFC3339).
+
+**Available template keys per channel** (Handlebars): `disk_alert_warn`, `disk_alert_critical`,
+`disk_alert_normal`. If a template is not configured for a level, Tuliprox falls back to a clear plain-text
+default line, e.g.:
+
+> `[WARN] Disk / is 82.3% full (free=3.4GB total=19.0GB).`
+> **Note:** Disk alerts are sent through **every** configured messaging channel. If you want a channel to
+> ignore disk alerts, simply do not declare the matching `disk_alert_*` template key for it and it will still
+> receive the plain-text default. Use the standard `notify_on` list to control which event kinds are sent at
+> all.
+
 ---
 
 ## 6. Video & Web Search (`video`)

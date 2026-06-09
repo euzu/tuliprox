@@ -70,6 +70,7 @@ default_eq_fns!(
     default_resource_retry_backoff_ms, is_default_resource_retry_backoff_ms, u64, 250;
     default_interner_gc_interval_secs, is_default_interner_gc_interval_secs, u32, 180;
     default_interner_gc_min_pool_size, is_default_interner_gc_min_pool_size, u32, 100;
+    default_fallback_error_status, is_default_fallback_error_status, u16, 502;
 );
 pub const fn default_panel_api_provision_timeout_secs() -> u64 { 65 }
 pub const fn default_panel_api_provision_probe_interval_secs() -> u64 { 15 }

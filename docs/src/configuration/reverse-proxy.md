@@ -109,6 +109,13 @@ reverse_proxy:
     catchup_session_ttl_secs: 45
     shared_burst_buffer_mb: 12
     metrics_enabled: false
+    # When true, the 6 fallback videos (channel_unavailable, *_exhausted,
+    # low_priority_preempted, user_account_expired, panel_api_provisioning)
+    # are skipped and the configured `fallback_error_status` is returned
+    # instead. Use this behind a reverse proxy with `proxy_intercept_errors on;`
+    # so dead channels do not pin sockets open.
+    disable_fallback_videos: false
+    fallback_error_status: 502
 ```
 
 ### Stream Parameters in Detail
@@ -126,6 +133,8 @@ reverse_proxy:
 | `hls_session_ttl_secs` | Int | `15` | Keeps virtual provider slot open between HLS segment (`.ts`) requests to prevent provider bans for "Account Hopping". |
 | `catchup_session_ttl_secs` | Int | `45` | Same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
 | `shared_burst_buffer_mb` | Int | `12` | Minimum burst buffer size (in MB) used for shared live streams to immediately synchronize new clients without Keyframe dropouts. See notes on section [Shared Live Streams](#shared-live-streams) for details. |
+| `disable_fallback_videos` | Bool | `false` | **Reverse-proxy integration:** When `true`, the 6 fallback video factories (`channel_unavailable`, `user_connections_exhausted`, `provider_connections_exhausted`, `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`) skip the configured infinite MPEG-TS video and return the configured `fallback_error_status` instead. Use this behind a reverse proxy with `proxy_intercept_errors on;` so dead channels do not pin sockets open for hours. |
+| `fallback_error_status` | Int | `502` | HTTP status code returned when `disable_fallback_videos` is `true`. Must be a 4xx or 5xx code. Common choices: `404` (channel not found), `502` (bad gateway — upstream failed), `503` (service unavailable — overloaded). |
 
 ### 1.1 `retry` & `buffer` (Deep Dive)
 

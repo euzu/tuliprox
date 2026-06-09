@@ -105,6 +105,33 @@ fn apply_custom_stream_timeout(cfg: &AppConfig, stream: BoxedProviderStream) -> 
     }
 }
 
+/// Returns `true` when the operator has set `reverse_proxy.stream.disable_fallback_videos`.
+/// In that mode the custom-video factories return `(None, None)` so callers fall through to a real HTTP
+/// error code, allowing a downstream Nginx with `proxy_intercept_errors on;` to sever the
+/// socket instead of seeing an infinite 200 OK loop.
+pub(crate) fn is_fallback_videos_disabled(cfg: &AppConfig) -> bool {
+    cfg.config
+        .load()
+        .reverse_proxy
+        .as_ref()
+        .and_then(|rp| rp.stream.as_ref())
+        .is_some_and(|s| s.disable_fallback_videos)
+}
+
+/// Returns the HTTP status code that the fallback factories should produce when
+/// `disable_fallback_videos` is true. The configured value is validated as a 4xx/5xx in
+/// `StreamConfigDto::prepare`, so the only fallbacks here are defensive.
+pub(crate) fn get_fallback_error_status(cfg: &AppConfig) -> StatusCode {
+    let raw = cfg
+        .config
+        .load()
+        .reverse_proxy
+        .as_ref()
+        .and_then(|rp| rp.stream.as_ref())
+        .map_or(502, |s| s.fallback_error_status);
+    StatusCode::from_u16(raw).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
 fn create_video_stream(
     cfg: &AppConfig,
     stream_type: CustomVideoStreamType,
@@ -113,6 +140,13 @@ fn create_video_stream(
     status: StatusCode,
     log_message: &str,
 ) -> ProviderStreamResponse {
+    // Honour `disable_fallback_videos` even when the operator left a custom video
+    // configured. The factory returns the same `(None, None)` shape it already uses when
+    // no video is configured, so existing call sites that fall through to an error
+    // status on `(None, None)` keep working unchanged.
+    if is_fallback_videos_disabled(cfg) {
+        return (None, None);
+    }
     if let Some(video) = video_buffer {
         trace!("{log_message}");
         let stream =
@@ -210,6 +244,9 @@ pub fn create_panel_api_provisioning_stream_with_stop(
     headers: &[(String, String)],
     stop_signal: CancellationToken,
 ) -> ProviderStreamResponse {
+    if is_fallback_videos_disabled(cfg) {
+        return (None, None);
+    }
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());
     if let Some(video) = video {
@@ -255,7 +292,11 @@ pub fn create_custom_video_stream_response(
         mark_response_as_uncompressed(&mut response);
         return response;
     }
-    axum::http::StatusCode::FORBIDDEN.into_response()
+    // No custom video is configured, or the operator set
+    // `reverse_proxy.stream.disable_fallback_videos: true`. In both cases we surface the
+    // configured `fallback_error_status` (default 502) instead of a hard-coded 403,
+    // so a reverse proxy with `proxy_intercept_errors on;` can sever the socket.
+    get_fallback_error_status(config).into_response()
 }
 pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFilter {
     match item_type {
@@ -268,7 +309,7 @@ pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFil
 
 #[cfg(test)]
 mod tests {
-    use super::{create_channel_unavailable_stream, CustomVideoStreamType};
+    use super::{create_channel_unavailable_stream, get_fallback_error_status, is_fallback_videos_disabled, CustomVideoStreamType};
     use crate::{
         api::model::TransportStreamBuffer,
         model::{AppConfig, Config, ConfigInput, CustomStreamResponse, MediaToolCapabilities, SourcesConfig},
@@ -387,6 +428,103 @@ mod tests {
         assert!(
             matches!(stream_type, Some(CustomVideoStreamType::UserConnectionsExhausted)),
             "macro-generated factory must tag the stream with the matching CustomVideoStreamType"
+        );
+    }
+
+    /// Build a config with `reverse_proxy.stream.disable_fallback_videos = true`
+    /// and a configured `channel_unavailable` buffer. Used by the disable-flag tests.
+    fn create_test_app_config_with_disable_fallback_videos() -> AppConfig {
+        use shared::model::{ReverseProxyConfigDto, StreamConfigDto};
+
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let mut dto_cfg = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            ..Default::default()
+        };
+        dto_cfg.stream = Some(StreamConfigDto {
+            disable_fallback_videos: true,
+            fallback_error_status: 503,
+            ..StreamConfigDto::default()
+        });
+        // Note: we skip `ReverseProxyConfigDto::prepare()` here because it is `pub(crate)`
+        // in the `shared` crate and not callable from the `backend` test. The 503 status
+        // passes `prepare`'s 4xx/5xx range check by definition, so bypassing `prepare` is
+        // safe for this test.
+        let cfg = Config {
+            reverse_proxy: Some(dto_cfg.into()),
+            ..Config::default()
+        };
+        app_cfg.config.store(Arc::new(cfg));
+        app_cfg
+    }
+
+    /// `is_fallback_videos_disabled` should report the flag set in the config.
+    #[test]
+    fn test_is_fallback_videos_disabled_reflects_config() {
+        let disabled = create_test_app_config_with_disable_fallback_videos();
+        assert!(is_fallback_videos_disabled(&disabled));
+
+        let enabled = create_test_app_config_with_channel_unavailable();
+        assert!(!is_fallback_videos_disabled(&enabled));
+    }
+
+    /// `get_fallback_error_status` should return the configured 4xx/5xx code.
+    #[test]
+    fn test_get_fallback_error_status_uses_configured_value() {
+        let cfg = create_test_app_config_with_disable_fallback_videos();
+        assert_eq!(get_fallback_error_status(&cfg), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Default (no stream config) falls back to 502 Bad Gateway.
+        let default_cfg = create_test_app_config_with_channel_unavailable();
+        assert_eq!(get_fallback_error_status(&default_cfg), StatusCode::BAD_GATEWAY);
+    }
+
+    /// With `disable_fallback_videos: true`, the factory must return `(None, None)`
+    /// so the response builder falls through to the configured error status instead
+    /// of serving the configured infinite MPEG-TS video with 200 OK.
+    #[test]
+    fn test_disable_fallback_videos_returns_none_tuple() {
+        let app_cfg = create_test_app_config_with_disable_fallback_videos();
+        let (stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
+        assert!(stream.is_none(), "stream must be None when disable_fallback_videos is set");
+        assert!(info.is_none(), "info must be None when disable_fallback_videos is set");
+    }
+
+    /// The centralisation in `create_video_stream` must apply to the macro-generated
+    /// factories as well (`user_connections_exhausted`, `provider_connections_exhausted`,
+    /// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`).
+    #[test]
+    fn test_disable_fallback_videos_applies_to_macro_factory() {
+        use super::create_user_connections_exhausted_stream;
+        use crate::api::model::TransportStreamBuffer;
+
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        let buffer = TransportStreamBuffer::new(ts_packet);
+        let app_cfg = create_test_app_config_with_disable_fallback_videos();
+        let current_arc = app_cfg.custom_stream_response.load().clone().expect("custom response set");
+        let mut current = (*current_arc).clone();
+        current.user_connections_exhausted = Some(buffer);
+        app_cfg.custom_stream_response.store(Some(Arc::new(current)));
+
+        let (stream, info) = create_user_connections_exhausted_stream(&app_cfg, &[]);
+        assert!(stream.is_none(), "macro factory stream must be None when disable_fallback_videos is set");
+        assert!(info.is_none(), "macro factory info must be None when disable_fallback_videos is set");
+    }
+
+    /// Regression guard: when `disable_fallback_videos` is false (the default), the
+    /// factory must still return the configured video with the supplied status code.
+    #[test]
+    fn test_fallback_videos_enabled_serves_video_with_supplied_status() {
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let (stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
+        assert!(stream.is_some(), "stream must be produced when fallback videos are enabled");
+        let (headers, status, _url, stream_type) = info.expect("info must be present");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(matches!(stream_type, Some(CustomVideoStreamType::ChannelUnavailable)));
+        assert!(
+            headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")),
+            "prepared headers must include content-type"
         );
     }
 }
