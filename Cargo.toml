@@ -9,18 +9,18 @@ rust-version = "1.89.0"
 
 [workspace.dependencies]
 serde         = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json    = { version = "1.0.149" }
+serde_json    = { version = "1.0.150" }
 regex         = "1.12.3"
-log           = "0.4.29"
-chrono        = "0.4.44"
+log           = "0.4.32"
+chrono        = "0.4.45"
 bytes         = "1.11.1"
 base64        = "0.22.1"
 blake3        = "1.8.5"
 fastrand      = "2.4.1"
 lz4_flex      = "0.13.1"
-brotli        = "8.0.2"
+brotli        = "8.0.3"
 indexmap      = "2.14.0"
-dashmap       = "6.1.0"
+dashmap       = "6.2.1"
 arc-swap      = "1.9.1"
 paste         = "1.0.15"
 pest          = "2.8.6"

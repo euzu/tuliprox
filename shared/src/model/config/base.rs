@@ -6,14 +6,16 @@ use crate::{
         WebUiConfigDto,
     },
     utils::{
-        default_connect_timeout_secs, default_custom_stream_response_path, default_default_user_agent,
-        default_interner_gc_interval_secs, default_interner_gc_min_pool_size, default_main_backup_dir,
-        default_main_mapping_path, default_main_storage_dir, default_main_template_path, default_main_user_config_dir,
+        default_as_true, default_connect_timeout_secs, default_custom_stream_response_error_status,
+        default_custom_stream_response_path, default_default_user_agent, default_interner_gc_interval_secs,
+        default_interner_gc_min_pool_size, default_main_backup_dir, default_main_mapping_path,
+        default_main_storage_dir, default_main_template_path, default_main_user_config_dir,
         default_supported_video_extensions, is_blank_optional_string, is_blank_or_default_backup_dir,
         is_blank_or_default_custom_stream_response_path, is_blank_or_default_mapping_path,
         is_blank_or_default_storage_dir, is_blank_or_default_template_path, is_blank_or_default_user_config_dir,
-        is_default_connect_timeout_secs, is_default_interner_gc_interval_secs, is_default_interner_gc_min_pool_size,
-        is_false, is_none_or_empty_metadata_update, is_none_or_empty_video, is_zero_u32,
+        is_default_connect_timeout_secs, is_default_custom_stream_response_error_status,
+        is_default_interner_gc_interval_secs, is_default_interner_gc_min_pool_size, is_false,
+        is_none_or_empty_metadata_update, is_none_or_empty_video, is_true, is_zero_u32,
         normalize_optional_config_file_path, normalize_optional_dir, DEFAULT_BACKUP_DIR,
         DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_STORAGE_DIR, DEFAULT_USER_CONFIG_DIR, MAPPING_FILE, TEMPLATE_FILE,
     },
@@ -45,6 +47,23 @@ pub struct ConfigDto {
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub custom_stream_response_timeout_secs: u32,
+    /// When `true` (default), serve the configured
+    /// MPEG-TS video. When `false`, the factories skip the video and the call
+    /// sites return `custom_stream_response_error_status` instead of an
+    /// infinite 200 OK loop. Use this behind a reverse proxy with
+    /// `proxy_intercept_errors on;` to allow dead channels to be severed
+    /// instead of pinning sockets open.
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub custom_stream_response_enabled: bool,
+    /// HTTP status code returned when `custom_stream_response_enabled` is
+    /// `false`. Must be a 4xx or 5xx code; the `prepare()` step rejects
+    /// anything outside that range, and a configured `0` is silently
+    /// clamped to the default `502`.
+    #[serde(
+        default = "default_custom_stream_response_error_status",
+        skip_serializing_if = "is_default_custom_stream_response_error_status"
+    )]
+    pub custom_stream_response_error_status: u16,
     #[serde(default, skip_serializing_if = "is_none_or_empty_video")]
     pub video: Option<VideoConfigDto>,
     #[serde(default, skip_serializing_if = "is_none_or_empty_metadata_update")]
@@ -106,6 +125,8 @@ impl Default for ConfigDto {
             template_path: None,
             custom_stream_response_path: None,
             custom_stream_response_timeout_secs: 0,
+            custom_stream_response_enabled: true,
+            custom_stream_response_error_status: default_custom_stream_response_error_status(),
             video: None,
             metadata_update: None,
             schedules: None,
@@ -152,6 +173,13 @@ pub struct MainConfigDto {
     pub custom_stream_response_path: Option<String>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub custom_stream_response_timeout_secs: u32,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub custom_stream_response_enabled: bool,
+    #[serde(
+        default = "default_custom_stream_response_error_status",
+        skip_serializing_if = "is_default_custom_stream_response_error_status"
+    )]
+    pub custom_stream_response_error_status: u16,
     #[serde(default, skip_serializing_if = "is_false")]
     pub user_access_control: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -191,6 +219,8 @@ impl Default for MainConfigDto {
             template_path: default_main_template_path(),
             custom_stream_response_path: None,
             custom_stream_response_timeout_secs: 0,
+            custom_stream_response_enabled: true,
+            custom_stream_response_error_status: default_custom_stream_response_error_status(),
             user_access_control: false,
             connect_timeout_secs: default_connect_timeout_secs(),
             interner_gc_interval_secs: default_interner_gc_interval_secs(),
@@ -216,6 +246,8 @@ impl From<&ConfigDto> for MainConfigDto {
             template_path: config.template_path.clone(),
             custom_stream_response_path: config.custom_stream_response_path.clone(),
             custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
+            custom_stream_response_enabled: config.custom_stream_response_enabled,
+            custom_stream_response_error_status: config.custom_stream_response_error_status,
             user_access_control: config.user_access_control,
             connect_timeout_secs: config.connect_timeout_secs,
             interner_gc_interval_secs: config.interner_gc_interval_secs,
@@ -282,6 +314,15 @@ impl ConfigDto {
         }
         if self.interner_gc_min_pool_size == 0 {
             return Err(TuliproxError::ConfigBase("`interner_gc_min_pool_size` must be > 0".to_string()));
+        }
+
+        if self.custom_stream_response_error_status == 0 {
+            self.custom_stream_response_error_status = default_custom_stream_response_error_status();
+        } else if !(400..=599).contains(&self.custom_stream_response_error_status) {
+            return Err(TuliproxError::ConfigBase(format!(
+                "`custom_stream_response_error_status` must be a 4xx or 5xx HTTP status, got {}",
+                self.custom_stream_response_error_status
+            )));
         }
 
         self.prepare_web()?;
@@ -395,6 +436,8 @@ impl ConfigDto {
         self.custom_stream_response_path =
             normalize_optional_dir(&main_config.custom_stream_response_path, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH);
         self.custom_stream_response_timeout_secs = main_config.custom_stream_response_timeout_secs;
+        self.custom_stream_response_enabled = main_config.custom_stream_response_enabled;
+        self.custom_stream_response_error_status = main_config.custom_stream_response_error_status;
         self.user_access_control = main_config.user_access_control;
         self.connect_timeout_secs = main_config.connect_timeout_secs;
         self.interner_gc_interval_secs = main_config.interner_gc_interval_secs;
@@ -424,6 +467,38 @@ mod tests {
         assert_eq!(cfg.connect_timeout_secs, default_connect_timeout_secs());
         assert_eq!(cfg.interner_gc_interval_secs, default_interner_gc_interval_secs());
         assert_eq!(cfg.interner_gc_min_pool_size, default_interner_gc_min_pool_size());
+    }
+
+    #[test]
+    fn custom_video_stream_defaults_are_true_and_502() {
+        let cfg = ConfigDto::default();
+        assert!(cfg.custom_stream_response_enabled);
+        assert_eq!(cfg.custom_stream_response_error_status, 502);
+    }
+
+    #[test]
+    fn prepare_rejects_non_4xx_5xx_custom_stream_response_error_status() {
+        for bad in [200u16, 100, 399, 600, 1000] {
+            let mut cfg = ConfigDto { custom_stream_response_error_status: bad, ..ConfigDto::default() };
+            let err = cfg.prepare(false).expect_err(&format!("status {bad} must be rejected"));
+            let msg = format!("{err}");
+            assert!(msg.contains("custom_stream_response_error_status"), "status {bad} msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn prepare_accepts_4xx_and_5xx_custom_stream_response_error_status() {
+        for ok in [400u16, 404, 500, 502, 503, 599] {
+            let mut cfg = ConfigDto { custom_stream_response_error_status: ok, ..ConfigDto::default() };
+            assert!(cfg.prepare(false).is_ok(), "status {ok} must be accepted");
+        }
+    }
+
+    #[test]
+    fn prepare_clamps_zero_custom_stream_response_error_status_to_default() {
+        let mut cfg = ConfigDto { custom_stream_response_error_status: 0, ..ConfigDto::default() };
+        cfg.prepare(false).expect("zero must be silently clamped, not rejected");
+        assert_eq!(cfg.custom_stream_response_error_status, 502);
     }
 
     #[test]

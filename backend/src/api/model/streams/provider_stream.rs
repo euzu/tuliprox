@@ -105,6 +105,27 @@ fn apply_custom_stream_timeout(cfg: &AppConfig, stream: BoxedProviderStream) -> 
     }
 }
 
+/// Returns the value of `custom_stream_response_enabled` from the main config.
+/// When `false`, the 6 custom-video factories (`channel_unavailable`,
+/// `user_connections_exhausted`, `provider_connections_exhausted`,
+/// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`) skip
+/// the configured MPEG-TS video and the call sites return
+/// `custom_stream_response_error_status` instead. This allows a downstream Nginx
+/// with `proxy_intercept_errors on;` to sever the socket instead of seeing an
+/// infinite 200 OK loop.
+pub(crate) fn is_custom_video_stream_enabled(cfg: &AppConfig) -> bool {
+    cfg.config.load().custom_stream_response_enabled
+}
+
+/// Returns the HTTP status code the custom-video factories should produce when
+/// `custom_stream_response_enabled` is `false`. The configured value is validated
+/// as a 4xx/5xx in `ConfigDto::prepare`, so the only fallbacks here are
+/// defensive.
+pub(crate) fn get_custom_stream_response_error_status(cfg: &AppConfig) -> StatusCode {
+    let raw = cfg.config.load().custom_stream_response_error_status;
+    StatusCode::from_u16(raw).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
 fn create_video_stream(
     cfg: &AppConfig,
     stream_type: CustomVideoStreamType,
@@ -113,6 +134,13 @@ fn create_video_stream(
     status: StatusCode,
     log_message: &str,
 ) -> ProviderStreamResponse {
+    // Honour `custom_stream_response_enabled: false` even when the operator left a
+    // custom video configured. The factory returns the same `(None, None)` shape it
+    // already uses when no video is configured, so existing call sites that fall
+    // through to an error status on `(None, None)` keep working unchanged.
+    if !is_custom_video_stream_enabled(cfg) {
+        return (None, None);
+    }
     if let Some(video) = video_buffer {
         trace!("{log_message}");
         let stream =
@@ -210,6 +238,9 @@ pub fn create_panel_api_provisioning_stream_with_stop(
     headers: &[(String, String)],
     stop_signal: CancellationToken,
 ) -> ProviderStreamResponse {
+    if !is_custom_video_stream_enabled(cfg) {
+        return (None, None);
+    }
     let custom_stream_response = cfg.custom_stream_response.load();
     let video = custom_stream_response.as_ref().and_then(|c| c.panel_api_provisioning.as_ref());
     if let Some(video) = video {
@@ -255,7 +286,12 @@ pub fn create_custom_video_stream_response(
         mark_response_as_uncompressed(&mut response);
         return response;
     }
-    axum::http::StatusCode::FORBIDDEN.into_response()
+    // No custom video is configured, or the operator set
+    // `custom_stream_response_enabled: false`. In both cases we surface the
+    // configured `custom_stream_response_error_status` (default 502) instead of a
+    // hard-coded 403, so a reverse proxy with `proxy_intercept_errors on;` can sever
+    // the socket.
+    get_custom_stream_response_error_status(config).into_response()
 }
 pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFilter {
     match item_type {
@@ -268,7 +304,10 @@ pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFil
 
 #[cfg(test)]
 mod tests {
-    use super::{create_channel_unavailable_stream, CustomVideoStreamType};
+    use super::{
+        create_channel_unavailable_stream, is_custom_video_stream_enabled, get_custom_stream_response_error_status,
+        CustomVideoStreamType,
+    };
     use crate::{
         api::model::TransportStreamBuffer,
         model::{AppConfig, Config, ConfigInput, CustomStreamResponse, MediaToolCapabilities, SourcesConfig},
@@ -301,7 +340,7 @@ mod tests {
         let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
 
         let app_cfg = AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            config: Arc::new(ArcSwap::from_pointee(Config { custom_stream_response_enabled: true, ..Config::default()})),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
             api_proxy: Arc::new(ArcSwapOption::default()),
@@ -387,6 +426,89 @@ mod tests {
         assert!(
             matches!(stream_type, Some(CustomVideoStreamType::UserConnectionsExhausted)),
             "macro-generated factory must tag the stream with the matching CustomVideoStreamType"
+        );
+    }
+
+    /// Build a config with `custom_stream_response_enabled: false` and a configured
+    /// `channel_unavailable` buffer. Used by the hide-flag tests.
+    fn create_test_app_config_with_hiding_custom_video_streams() -> AppConfig {
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let cfg = Config {
+            custom_stream_response_enabled: false,
+            custom_stream_response_error_status: 503,
+            ..Config::default()
+        };
+        app_cfg.config.store(Arc::new(cfg));
+        app_cfg
+    }
+
+    /// `custom_stream_response_enabled` should report the flag set in the config.
+    #[test]
+    fn test_display_custom_video_streams_reflects_config() {
+        let hidden = create_test_app_config_with_hiding_custom_video_streams();
+        assert!(!is_custom_video_stream_enabled(&hidden));
+
+        let visible = create_test_app_config_with_channel_unavailable();
+        assert!(is_custom_video_stream_enabled(&visible));
+    }
+
+    /// `get_custom_stream_response_error_status` should return the configured 4xx/5xx code.
+    #[test]
+    fn test_get_custom_stream_response_error_status_uses_configured_value() {
+        let cfg = create_test_app_config_with_hiding_custom_video_streams();
+        assert_eq!(get_custom_stream_response_error_status(&cfg), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Default (no main-config override) falls back to 502 Bad Gateway.
+        let default_cfg = create_test_app_config_with_channel_unavailable();
+        assert_eq!(get_custom_stream_response_error_status(&default_cfg), StatusCode::BAD_GATEWAY);
+    }
+
+    /// With `custom_stream_response_enabled: false`, the factory must return `(None, None)`
+    /// so the response builder falls through to the configured error status instead
+    /// of serving the configured infinite MPEG-TS video with 200 OK.
+    #[test]
+    fn test_hiding_custom_video_streams_returns_none_tuple() {
+        let app_cfg = create_test_app_config_with_hiding_custom_video_streams();
+        let (stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
+        assert!(stream.is_none(), "stream must be None when custom_stream_response_enabled is false");
+        assert!(info.is_none(), "info must be None when custom_stream_response_enabled is false");
+    }
+
+    /// The centralisation in `create_video_stream` must apply to the macro-generated
+    /// factories as well (`user_connections_exhausted`, `provider_connections_exhausted`,
+    /// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`).
+    #[test]
+    fn test_hiding_custom_video_streams_applies_to_macro_factory() {
+        use super::create_user_connections_exhausted_stream;
+        use crate::api::model::TransportStreamBuffer;
+
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        let buffer = TransportStreamBuffer::new(ts_packet);
+        let app_cfg = create_test_app_config_with_hiding_custom_video_streams();
+        let current_arc = app_cfg.custom_stream_response.load().clone().expect("custom response set");
+        let mut current = (*current_arc).clone();
+        current.user_connections_exhausted = Some(buffer);
+        app_cfg.custom_stream_response.store(Some(Arc::new(current)));
+
+        let (stream, info) = create_user_connections_exhausted_stream(&app_cfg, &[]);
+        assert!(stream.is_none(), "macro factory stream must be None when custom_stream_response_enabled is false");
+        assert!(info.is_none(), "macro factory info must be None when custom_stream_response_enabled is false");
+    }
+
+    /// Regression guard: when `custom_stream_response_enabled` is true (the default), the
+    /// factory must still return the configured video with the supplied status code.
+    #[test]
+    fn test_displaying_custom_video_streams_serves_video_with_supplied_status() {
+        let app_cfg = create_test_app_config_with_channel_unavailable();
+        let (stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
+        assert!(stream.is_some(), "stream must be produced when custom_stream_response_enabled is true");
+        let (headers, status, _url, stream_type) = info.expect("info must be present");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(matches!(stream_type, Some(CustomVideoStreamType::ChannelUnavailable)));
+        assert!(
+            headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")),
+            "prepared headers must include content-type"
         );
     }
 }

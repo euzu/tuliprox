@@ -79,6 +79,25 @@
   - The shared `IconButton` and `TextButton` primitives now render with `type="button"`, preventing accidental
     form submission when used inside forms.
 
+- **Disk-Space Alerts**:
+  - Added a threshold-based disk-usage monitor (Normal / Warn / Critical) implemented in
+    `backend/src/api/sys_usage.rs::DiskAlertMonitor`. The background sampler ticks every 2 seconds (fixed,
+    not configurable — see `SYSTEM_USAGE_INTERVAL` in that file) and the state machine decides when to emit
+    a `DiskAlert` to the existing messaging channels (Telegram, Discord, Pushover, REST).
+  - The state machine emits a `DiskAlert` whenever the level is non-Normal **and** (`state_changed` **or**
+    `repeat_interval_secs` elapsed since the last notification). Long-running full-disk situations therefore
+    re-notify periodically instead of going silent after the initial transition.
+  - Configurable thresholds: `messaging.disk_alert.warn_percent` (default `80.0`),
+    `messaging.disk_alert.critical_percent` (default `95.0`), and the re-arm interval
+    `messaging.disk_alert.repeat_interval_secs` (default `3600`, i.e. 1 hour). The sampling interval is
+    **not** configurable.
+  - Operators can opt out of disk-alert messages by simply not declaring a `disk_alert` block under
+    `messaging`, keeping the feature strictly opt-in and backward compatible.
+  - Custom message templates per channel are supported via the standard
+    `messaging.<channel>.templates.disk_alert_*` Handlebars hooks (e.g.
+    `messaging.telegram.templates.disk_alert_warn`, `messaging.discord.templates.disk_alert_critical`).
+    A clear plain-text fallback is used when no template is configured.
+
 - **Shift+Click Range Selection For API-User Playlist Categories**:
   - In the API-user playlist editor, holding `Shift` while clicking a category now selects or deselects the whole
     range between the last anchor and the clicked item.
@@ -324,16 +343,62 @@
 - **Refactored Playlist And EPG Explorer**: Playlist Explorer and EPG Explorer have been refactored for improved reliability and UX.
 - HLS session info now reports accurate duration and total transferred data.
 - Removed open-ssl dependency
+- **Infinite Fallback Video Behind Reverse Proxy**: The 6 fallback custom videos (`channel_unavailable`,
+  `user_connections_exhausted`, `provider_connections_exhausted`, `low_priority_preempted`,
+  `user_account_expired`, `panel_api_provisioning`) used to be served with an HTTP 200 OK header even when they
+  represented a stream failure. A reverse proxy with `proxy_intercept_errors on;` therefore could not sever the
+  socket, and the connection would hang open for hours ("ghost connections" / socket exhaustion under scraper
+  load).
+  - The new top-level `custom_stream_response_enabled: false` switch turns the 6 fallback factories into no-op
+    responses so the call sites return a real HTTP error code (default `502 Bad Gateway`,
+    `custom_stream_response_error_status: <4xx|5xx>`) instead of the infinite MPEG-TS loop.
+  - The default `true` is unchanged behaviour: the configured fallback video is still served.
+  - All 6 factories are routed through a single helper (`create_video_stream`) so the new behavior is centralized
+    and applies uniformly without per-call-site changes.
 
 ## ⚙️ New Settings
 
 - **config.yml (main)**:
   - Added `interner_gc_interval_secs`: interval in seconds between background string interner GC checks.
   - Added `interner_gc_min_pool_size`: minimum interned-string pool size required before background interner GC runs.
+  - Added `custom_stream_response_enabled` (`bool`, default `true`): when `false`, the 6 fallback custom-video
+    factories (`channel_unavailable`, `user_connections_exhausted`, `provider_connections_exhausted`,
+    `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`) skip the configured
+    MPEG-TS video and the call sites return `custom_stream_response_error_status` instead of an infinite
+    200 OK loop. Use this behind a reverse proxy with `proxy_intercept_errors on;` to allow dead channels
+    to be severed instead of pinning sockets open. The field lives in the main config (next to
+    `custom_stream_response_path` / `custom_stream_response_timeout_secs`) rather than under
+    `reverse_proxy.stream` because it is a custom-stream-response behaviour toggle, not a reverse-proxy
+    behaviour setting.
+  - Added `custom_stream_response_error_status` (`u16`, default `502`): HTTP status code returned when
+    `custom_stream_response_enabled` is `false`. Must be a 4xx or 5xx code (`ConfigDto::prepare()` rejects
+    anything else; `0` is silently clamped to the default `502`). Operators can match the code to their
+    Nginx `proxy_intercept_errors on;` rules.
 - **config.yml (`reverse_proxy.stream`)**:
   - Added `admission_strategies` (optional list): ordered list of admission strategy rules.
     Available strategies: `evict_user_same_ip_oldest`, `evict_user_same_ip_latest`, `evict_user_oldest`, `evict_user_latest`,  
     `grace_instant_stream`, `grace_hold_stream`.
+- **config.yml (`messaging.disk_alert`)**:
+  - Added optional `disk_alert` block to enable disk-usage alerts via the existing messaging channels. The
+    background monitor in `backend/src/api/sys_usage.rs` samples the current working directory's mount on
+    every fixed 2-second tick and feeds each sample to the `DiskAlertMonitor` state machine
+    (`backend/src/api/sys_usage.rs::DiskAlertMonitor`).
+  - Fields:
+    - `warn_percent` (`f64`, default `80.0`): percent-used at or above which the `Warn` level is reached.
+      Must be in `[0, 100]`.
+    - `critical_percent` (`f64`, default `95.0`): percent-used at or above which the `Critical` level is
+      reached. Must be `> warn_percent` and in `[0, 100]`. The `prepare()` step rejects values that violate
+      these bounds.
+    - `repeat_interval_secs` (`u64`, default `3600`): re-arm interval in seconds. While the disk stays in
+      the same alert state, the alert is **re-sent** after this many seconds. This is **not** the sampling
+      interval — sampling is a fixed 2s and is not currently configurable. So if the disk is at 87% for 3
+      hours with the default `repeat_interval_secs: 3600`, three `Warn` notifications are sent (one per
+      hour), not one transition-only notification.
+  - The state machine emits a `DiskAlert` whenever the level is non-Normal **and** (`state_changed` **or**
+    `rearm_elapsed`); the level-transition-only behaviour of the original prototype was intentionally
+    removed because long-running full-disk situations were going unnoticed.
+  - Templates can override the default text per channel via
+    `messaging.<channel>.templates.disk_alert_warn` / `disk_alert_critical` / `disk_alert_normal`.
 - **api-proxy.yml (`user.credentials[]`)**:
   - Added `output_clusters` (optional list, default effective behavior `all`): restricts a user to `live`, `vod`,
     and/or `series` on the assigned target. If no cluster is selected, the filter is inactive and all clusters are

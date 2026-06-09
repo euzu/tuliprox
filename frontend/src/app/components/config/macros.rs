@@ -108,6 +108,18 @@ macro_rules! config_field {
             </div>
         }
     };
+    ($config:expr, $label:expr, $field:ident, $hint:expr) => {
+        html! {
+            <div class="tp__form-field tp__form-field__text">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&$config, stringify!($field))}
+                    hint_key={$hint}
+                />
+                <span class="tp__form-field__value">{$config.$field.to_string()}</span>
+            </div>
+        }
+    };
 }
 
 #[macro_export]

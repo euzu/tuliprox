@@ -89,6 +89,8 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         template_path: config.template_path.clone(),
         custom_stream_response_path: config.custom_stream_response_path.clone(),
         custom_stream_response_timeout_secs: config.custom_stream_response_timeout_secs,
+        custom_stream_response_enabled: config.custom_stream_response_enabled,
+        custom_stream_response_error_status: config.custom_stream_response_error_status,
         video: config.video.as_ref().map(shared::model::VideoConfigDto::from),
         metadata_update: config
             .metadata_update
