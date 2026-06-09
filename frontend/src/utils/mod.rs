@@ -16,6 +16,13 @@ macro_rules! html_if {
             yew::Html::default()
         }
     };
+   ($cond:expr, $body:tt, $else:tt) => {
+        if $cond {
+            yew::html! $body
+        } else {
+            yew::html! $else
+        }
+    };
 }
 
 pub use html_if;

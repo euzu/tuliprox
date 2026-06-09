@@ -417,6 +417,8 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
 
                        <label class="tp__form-field__label">{ translate.t("LABEL.RBAC_PERMISSIONS") }</label>
                         <Card>
+                            <div class={"tp__table"}>
+                            <div class={"tp__table__container"}>
                             <table class="tp__table__table">
                                 <thead>
                                     <tr>
@@ -459,13 +461,16 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                                                         value={write_checked}
                                                         on_change={on_write}
                                                     />
-                                                  })}
+                                                  },
+                                                  { <span></span> })}
                                                 </td>
                                             </tr>
                                         }
                                     })}
                                 </tbody>
                             </table>
+                            </div>
+                            </div>
                         </Card>
 
                         { if !write_without_read_warnings.is_empty() {
