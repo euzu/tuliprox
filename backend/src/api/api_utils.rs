@@ -7379,6 +7379,7 @@ mod tests {
         let mut app_cfg = create_test_provider_app_config();
         app_cfg.config = Arc::new(ArcSwap::from_pointee(Config {
             user_access_control: true,
+            custom_stream_response_enabled: true,
             ..Config::default()
         }));
         let app_state = create_test_app_state_for_config(Arc::new(app_cfg));

@@ -340,7 +340,7 @@ mod tests {
         let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
 
         let app_cfg = AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            config: Arc::new(ArcSwap::from_pointee(Config { custom_stream_response_enabled: true, ..Config::default()})),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
             api_proxy: Arc::new(ArcSwapOption::default()),
