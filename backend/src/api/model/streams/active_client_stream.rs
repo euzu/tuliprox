@@ -2192,7 +2192,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         });
 
         let provider_name = "provider_1".intern();

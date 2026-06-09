@@ -76,16 +76,16 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
     let render_system_stats = |cache| {
         html! {
            <div class="tp__stats__body-group">
-               <Card class="tp__stats__system"><StatusCard icon="Memory" title={translate.t("LABEL.MEMORY")} data={mem.clone()}
-                   chart={Some(html! { <Sparkline class="tp__sparkline--memory" format={SparklineFormat::Percent}
-                       series={sparkline_data.memory.clone()} /> })} /></Card>
-               <Card class="tp__stats__system"><StatusCard icon="Cache" title={translate.t("LABEL.CACHE")} data={cache} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="CPU" title={translate.t("LABEL.CPU")} data={cpu.clone()}
                    chart={Some(html! { <Sparkline class="tp__sparkline--cpu" format={SparklineFormat::Percent}
                        series={sparkline_data.cpu.clone()} /> })} /></Card>
+               <Card class="tp__stats__system"><StatusCard icon="Memory" title={translate.t("LABEL.MEMORY")} data={mem.clone()}
+                   chart={Some(html! { <Sparkline class="tp__sparkline--memory" format={SparklineFormat::Percent}
+                       series={sparkline_data.memory.clone()} /> })} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="NetworkSpeed" title={translate.t("LABEL.NETWORK")} data={net.clone()}
                    chart={Some(html! { <Sparkline class="tp__sparkline--network" format={SparklineFormat::BytesPerSec}
                        series={sparkline_data.network.clone()} /> })} /></Card>
+               <Card class="tp__stats__system"><StatusCard icon="Cache" title={translate.t("LABEL.CACHE")} data={cache} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="Storage" title={translate.t("LABEL.DISK")} data={disk.clone()} /></Card>
             </div>
         }

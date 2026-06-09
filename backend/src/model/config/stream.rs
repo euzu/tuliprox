@@ -44,8 +44,6 @@ pub struct StreamConfig {
     pub throttle_kbps: u64,
     pub shared_burst_buffer_mb: u64,
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
-    pub disable_fallback_videos: bool,
-    pub fallback_error_status: u16,
 }
 
 macros::from_impl!(StreamConfig);
@@ -64,8 +62,6 @@ impl Default for StreamConfig {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 12,
             admission_strategies: None,
-            disable_fallback_videos: false,
-            fallback_error_status: 502,
         }
     }
 }
@@ -84,8 +80,6 @@ impl From<&StreamConfigDto> for StreamConfig {
             throttle_kbps: dto.throttle.as_ref().map_or(0u64, |throttle| parse_to_kbps(throttle).unwrap_or(0u64)),
             shared_burst_buffer_mb: dto.shared_burst_buffer_mb,
             admission_strategies: dto.admission_strategies.clone(),
-            disable_fallback_videos: dto.disable_fallback_videos,
-            fallback_error_status: dto.fallback_error_status,
         }
     }
 }
@@ -105,8 +99,6 @@ impl From<&StreamConfig> for StreamConfigDto {
             throttle_kbps: instance.throttle_kbps,
             shared_burst_buffer_mb: instance.shared_burst_buffer_mb,
             admission_strategies: instance.admission_strategies.clone(),
-            disable_fallback_videos: instance.disable_fallback_videos,
-            fallback_error_status: instance.fallback_error_status,
         }
     }
 }
@@ -150,8 +142,6 @@ mod tests {
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::EvictUserLatest,
             ]),
-            disable_fallback_videos: false,
-            fallback_error_status: 502,
         };
 
         let dto = StreamConfigDto::from(&domain);
@@ -163,23 +153,6 @@ mod tests {
                 AdmissionStrategy::EvictUserLatest,
             ])
         );
-    }
-
-    #[test]
-    fn stream_config_roundtrips_disable_fallback_videos_and_status() {
-        let dto = StreamConfigDto {
-            disable_fallback_videos: true,
-            fallback_error_status: 503,
-            ..StreamConfigDto::default()
-        };
-        let domain = StreamConfig::from(&dto);
-        assert!(domain.disable_fallback_videos);
-        assert_eq!(domain.fallback_error_status, 503);
-
-        // Roundtrip back to DTO.
-        let back = StreamConfigDto::from(&domain);
-        assert!(back.disable_fallback_videos);
-        assert_eq!(back.fallback_error_status, 503);
     }
 }
 

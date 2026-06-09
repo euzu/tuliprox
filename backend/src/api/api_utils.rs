@@ -3,11 +3,12 @@ use crate::{
         endpoints::xtream_api::{get_xtream_player_api_stream_url, ApiStreamContext},
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
-            create_provider_connections_exhausted_stream, create_provider_stream, get_fallback_error_status,
-            get_stream_response_with_headers, is_fallback_videos_disabled, tee_stream, AppState, BoxedProviderStream,
-            CustomVideoStreamType, PendingProviderReason, ProviderAllocation, ProviderConfig, ProviderHandle,
-            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamManager, StreamDetails,
-            StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
+            create_provider_connections_exhausted_stream, create_provider_stream,
+            is_custom_video_stream_enabled, get_custom_stream_response_error_status, get_stream_response_with_headers,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
+            ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamFactoryOptions, ProviderStreamInfo,
+            ProviderStreamState, SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream,
+            UserApiRequest, UserSession,
         },
     },
     auth::Fingerprint,
@@ -2429,14 +2430,12 @@ pub async fn force_provider_stream_response(
         mark_response_as_uncompressed(&mut response);
         response
     } else {
-        // No custom video was produced (either none is configured, or the operator set
-        // `reverse_proxy.stream.disable_fallback_videos: true`). In the latter case the
-        // operator wants a real HTTP error code so a reverse proxy with
-        // `proxy_intercept_errors on;` can sever the socket.
-        if is_fallback_videos_disabled(&app_state.app_config) {
-            get_fallback_error_status(&app_state.app_config).into_response()
-        } else {
+        // No custom video response available but custom video response enabbled
+        // reverse proxy with `proxy_intercept_errors on;` can sever the socket.
+        if is_custom_video_stream_enabled(&app_state.app_config) {
             StatusCode::BAD_REQUEST.into_response()
+        } else {
+            get_custom_stream_response_error_status(&app_state.app_config).into_response()
         }
     }
 }
@@ -2822,15 +2821,11 @@ pub(crate) async fn stream_response(
             activation.placeholder_transition_version.is_some(),
         )
         .await;
-    // No custom video stream was produced. If the operator set
-    // `reverse_proxy.stream.disable_fallback_videos: true`, surface the configured
-    // `fallback_error_status` (default 502) so a reverse proxy with
-    // `proxy_intercept_errors on;` can sever the socket. Otherwise fall through to
-    // the legacy 400 Bad Request response.
-    if is_fallback_videos_disabled(&app_state.app_config) {
-        get_fallback_error_status(&app_state.app_config).into_response()
-    } else {
+    // No custom video stream response available, but enabled
+    if is_custom_video_stream_enabled(&app_state.app_config) {
         StatusCode::BAD_REQUEST.into_response()
+    } else {
+        get_custom_stream_response_error_status(&app_state.app_config).into_response()
     }
 }
 
@@ -5101,7 +5096,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
-            ..crate::model::StreamConfig::default()
         });
         let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
         let fingerprint = create_test_fingerprint(addr);
@@ -5188,7 +5182,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
-            ..crate::model::StreamConfig::default()
         });
         let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
         let fingerprint = create_test_fingerprint(addr);
@@ -5260,7 +5253,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
-            ..crate::model::StreamConfig::default()
         });
         let addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
         let fingerprint = create_test_fingerprint(addr);
@@ -5338,7 +5330,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         });
         let addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
         let fingerprint = create_test_fingerprint(addr);
@@ -5414,7 +5405,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
-            ..crate::model::StreamConfig::default()
         });
         let addr: SocketAddr = "127.0.0.1:55222".parse().unwrap_or_else(|_| unreachable!());
         let fingerprint = create_test_fingerprint(addr);
@@ -5467,7 +5457,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         });
         let addr: SocketAddr = "127.0.0.1:55223".parse().unwrap_or_else(|_| unreachable!());
         let fingerprint = create_test_fingerprint(addr);
@@ -5512,7 +5501,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         });
         let addr: SocketAddr = "127.0.0.1:55224".parse().unwrap_or_else(|_| unreachable!());
         let fingerprint = create_test_fingerprint(addr);
@@ -5597,7 +5585,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         };
         let mut app_cfg = create_test_app_config();
         app_cfg.config = Arc::new(ArcSwap::from_pointee(Config {
@@ -5701,7 +5688,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: None,
-            ..crate::model::StreamConfig::default()
         };
         let mut app_cfg = create_test_app_config();
         app_cfg.config = Arc::new(ArcSwap::from_pointee(Config {
@@ -5818,7 +5804,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: None,
-            ..crate::model::StreamConfig::default()
         });
 
         assert_eq!(
@@ -5842,7 +5827,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![]),
-            ..crate::model::StreamConfig::default()
         });
 
         assert!(get_effective_admission_strategies(&app_state).is_empty());
@@ -5869,7 +5853,6 @@ mod tests {
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::EvictUserOldest,
             ]),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr1: SocketAddr = "127.0.0.1:55401".parse().unwrap_or_else(|_| unreachable!());
@@ -5973,7 +5956,6 @@ mod tests {
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::EvictUserOldest,
             ]),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr1: SocketAddr = "127.0.0.1:55701".parse().unwrap_or_else(|_| unreachable!());
@@ -6077,7 +6059,6 @@ mod tests {
                 AdmissionStrategy::EvictUserSameIpOldest,
                 AdmissionStrategy::EvictUserOldest,
             ]),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr1: SocketAddr = "127.0.0.1:55801".parse().unwrap_or_else(|_| unreachable!());
@@ -6170,7 +6151,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr: SocketAddr = "10.0.0.5:55901".parse().unwrap_or_else(|_| unreachable!());
@@ -6220,7 +6200,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr: SocketAddr = "10.0.0.6:55902".parse().unwrap_or_else(|_| unreachable!());
@@ -6281,7 +6260,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(strategies_for_config),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr1: SocketAddr = "127.0.0.1:56001".parse().unwrap_or_else(|_| unreachable!());
@@ -6376,7 +6354,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr: SocketAddr = "10.0.0.7:55903".parse().unwrap_or_else(|_| unreachable!());
@@ -6438,7 +6415,6 @@ mod tests {
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::GraceInstantStream,
             ]),
-            ..crate::model::StreamConfig::default()
         });
 
         let addr1: SocketAddr = "127.0.0.1:55710".parse().unwrap_or_else(|_| unreachable!());
@@ -6539,7 +6515,6 @@ mod tests {
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::EvictUserOldest,
             ]),
-            ..crate::model::StreamConfig::default()
         });
 
         let first_addr: std::net::SocketAddr = "127.0.0.1:55151".parse().unwrap_or_else(|_| unreachable!());
@@ -6732,7 +6707,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
-            ..crate::model::StreamConfig::default()
         });
 
         let victim_addr: std::net::SocketAddr = "127.0.0.1:55181".parse().unwrap_or_else(|_| unreachable!());
@@ -6829,7 +6803,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
-            ..crate::model::StreamConfig::default()
         });
 
         let victim_addr: std::net::SocketAddr = "127.0.0.1:55184".parse().unwrap_or_else(|_| unreachable!());
@@ -6954,7 +6927,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
-            ..crate::model::StreamConfig::default()
         });
 
         let victim_addr: std::net::SocketAddr = "127.0.0.1:55190".parse().unwrap_or_else(|_| unreachable!());
@@ -7079,7 +7051,6 @@ mod tests {
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
-            ..crate::model::StreamConfig::default()
         });
 
         let victim_addr: std::net::SocketAddr = "127.0.0.1:55187".parse().unwrap_or_else(|_| unreachable!());
@@ -7911,7 +7882,6 @@ mod tests {
                 AdmissionStrategy::EvictUserOldest,
                 AdmissionStrategy::EvictUserLatest,
             ]),
-            ..crate::model::StreamConfig::default()
         });
 
         let hls_addr: std::net::SocketAddr = "127.0.0.1:55176".parse().unwrap_or_else(|_| unreachable!());
@@ -8196,7 +8166,6 @@ mod tests {
                         AdmissionStrategy::EvictUserOldest,
                         AdmissionStrategy::EvictUserLatest,
                     ]),
-                    ..crate::model::StreamConfig::default()
                 }),
                 cache: None,
                 rate_limit: None,

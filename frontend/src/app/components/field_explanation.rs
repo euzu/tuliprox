@@ -54,12 +54,26 @@ fn label_key_candidates(field_id: &str) -> Vec<String> {
     keys
 }
 
-pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &DialogService, translate: &YewI18n) {
-    // Caller is expected to pass a normalized key-compatible field_id.
-    let candidates = explanation_key_candidates(field_id);
-    let looked_up = candidates.iter().map(|key| (key.clone(), t_safe(translate, key))).collect::<Vec<_>>();
-    let (_matched_key, explanation) =
-        match looked_up.iter().find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone()))) {
+pub fn show_field_explanation(
+    hint_key: Option<&str>,
+    field_id: &str,
+    field_label: &str,
+    dialog: &DialogService,
+    translate: &YewI18n,
+) {
+    let mut explanation = None;
+    if let Some(hint_key) = hint_key {
+        explanation = t_safe(translate, &format!("EXPLANATION.{hint_key}"));
+    }
+
+    if explanation.is_none() {
+        // Caller is expected to pass a normalized key-compatible field_id.
+        let candidates = explanation_key_candidates(field_id);
+        let looked_up = candidates.iter().map(|key| (key.clone(), t_safe(translate, key))).collect::<Vec<_>>();
+        let (_matched_key, matched_explanation) = match looked_up
+            .iter()
+            .find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
+        {
             Some(found) => (Some(found.0), found.1),
             None => {
                 // Log the requested field_id and every candidate key that was tried
@@ -73,7 +87,8 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
                 (None, "No explanation available for this field.".to_string())
             }
         };
-
+        explanation = Some(matched_explanation);
+    }
     let title = if field_label.trim().is_empty() {
         label_key_candidates(field_id)
             .into_iter()
@@ -95,6 +110,7 @@ pub fn show_field_explanation(field_id: &str, field_label: &str, dialog: &Dialog
     };
 
     let dialog = dialog.clone();
+    let explanation = explanation.unwrap_or_else(|| "No explanation available for this field.".to_string());
     spawn_local(async move {
         let mut elements = Vec::new();
         let parts: Vec<&str> = explanation.split("```").collect();
@@ -142,6 +158,8 @@ pub struct FieldLabelProps {
     pub label: String,
     pub field_id: String,
     #[prop_or_default]
+    pub hint_key: Option<String>,
+    #[prop_or_default]
     pub for_id: Option<String>,
 }
 
@@ -156,10 +174,11 @@ pub fn FieldLabel(props: &FieldLabelProps) -> Html {
         let translate = translate.clone();
         let field_id = normalized_field_id.clone();
         let field_label = props.label.clone();
+        let field_hint_key = props.hint_key.clone();
         Callback::from(move |event: MouseEvent| {
             event.prevent_default();
             event.stop_propagation();
-            show_field_explanation(&field_id, &field_label, &dialog, &translate);
+            show_field_explanation(field_hint_key.as_deref(), &field_id, &field_label, &dialog, &translate);
         })
     };
     let handle_help_mousedown = Callback::from(move |event: MouseEvent| {
