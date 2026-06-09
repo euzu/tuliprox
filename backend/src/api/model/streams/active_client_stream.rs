@@ -2,10 +2,10 @@ use crate::{
     api::{
         api_utils::get_stream_options,
         model::{
-            connection_manager::{PROVIDER_END_NOT_SET, PROVIDER_END_CLOSED, PROVIDER_END_ERROR},
+            connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
             create_provider_stream, AppState, BoxedProviderStream, CleanupEvent, ConnectionManager,
-            CustomVideoStreamType, EventManager, MeteringStream, ProviderHandle, ProviderStreamFactoryOptions,
-            PendingProviderWakeSource, StreamDetails, StreamError, StreamMeterHandle, TimedClientStream,
+            CustomVideoStreamType, EventManager, MeteringStream, PendingProviderWakeSource, ProviderHandle,
+            ProviderStreamFactoryOptions, StreamDetails, StreamError, StreamMeterHandle, TimedClientStream,
             TransportStreamBuffer,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
@@ -18,6 +18,8 @@ use axum::http::{header::USER_AGENT, HeaderMap};
 use bytes::Bytes;
 use futures::{task::AtomicWaker, Future, Stream, StreamExt};
 use log::{error, info};
+use shared::model::FailureStage;
+use shared::utils::Internable;
 use shared::{
     model::{StreamChannel, UserConnectionPermission, VirtualId},
     utils::sanitize_sensitive_info,
@@ -33,8 +35,6 @@ use std::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
-use shared::utils::Internable;
-use shared::model::FailureStage;
 
 /// Discriminates which byte-stream the client is consuming at any moment.
 /// Stored as `u8` in an `AtomicU8` for lock-free access inside `poll_next`.
@@ -44,19 +44,19 @@ use shared::model::FailureStage;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamMode {
     /// Forward bytes directly from the upstream provider.
-    Inner            = 0,
+    Inner = 0,
     /// Show the "user connections exhausted" custom video.
-    UserExhausted    = 1,
+    UserExhausted = 1,
     /// Show the "provider connections exhausted" custom video.
     ProviderExhausted = 2,
     /// Show the "channel unavailable" custom video.
     ChannelUnavailable = 3,
     /// Show the provisioning/placeholder custom video while probing for capacity.
-    Provisioning     = 4,
+    Provisioning = 4,
     /// Show the "low-priority preempted" custom video.
     LowPriorityPreempted = 5,
     /// Transient: grace-period check is still in progress; `poll_next` must park.
-    GracePending     = 255,
+    GracePending = 255,
 }
 
 impl StreamMode {
@@ -76,10 +76,10 @@ impl StreamMode {
 /// Holds the optional custom video buffers for each error/placeholder scenario.
 /// Using named fields avoids the positional-indexing confusion of a 4-tuple.
 struct CustomVideoBuffers {
-    user_exhausted:    Option<TransportStreamBuffer>,
+    user_exhausted: Option<TransportStreamBuffer>,
     provider_exhausted: Option<TransportStreamBuffer>,
-    unavailable:       Option<TransportStreamBuffer>,
-    provisioning:      Option<TransportStreamBuffer>,
+    unavailable: Option<TransportStreamBuffer>,
+    provisioning: Option<TransportStreamBuffer>,
     low_priority_preempted: Option<TransportStreamBuffer>,
 }
 
@@ -151,7 +151,7 @@ enum DeferredProviderOpenOutcome {
 
 enum DeferredProviderOpenState {
     Pending(Box<DeferredProviderOpenContext>),
-    Opening(Pin<Box<dyn Future<Output = DeferredProviderOpenOutcome> + Send>>),
+    Opening(Pin<Box<dyn Future<Output=DeferredProviderOpenOutcome> + Send>>),
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -214,7 +214,7 @@ impl ActiveClientStreamState {
                 self.fingerprint.addr,
                 ctx.virtual_id,
             )
-            .boxed()
+                .boxed()
         } else {
             stream
         }
@@ -413,7 +413,6 @@ impl ActiveClientStreamState {
 
         false
     }
-
 }
 
 fn wrap_timed_client_stream_if_needed(
@@ -546,7 +545,7 @@ impl Stream for ActiveClientStream {
                                             &client,
                                             context.provider_stream_factory_options,
                                         )
-                                        .await
+                                            .await
                                         {
                                             Some((_stream, Some((_headers, _status, _response_url, Some(custom_video_type))))) => {
                                                 ActiveClientStreamState::mode_for_custom_video_type(custom_video_type)
@@ -734,7 +733,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     }
     let grant_user_grace_period = connection_permission == UserConnectionPermission::GracePeriod;
     let username = user.username.as_str();
-    let provider_name = stream_details.provider_name.clone().unwrap_or_else(||"unknown".intern());
+    let provider_name = stream_details.provider_name.clone().unwrap_or_else(|| "unknown".intern());
 
     let user_agent = req_headers.get(USER_AGENT).map(|h| String::from_utf8_lossy(h.as_bytes())).unwrap_or_default();
 
@@ -851,10 +850,10 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
             low_priority_preempted: None,
         },
         |c| CustomVideoBuffers {
-            user_exhausted:    c.user_connections_exhausted.clone(),
+            user_exhausted: c.user_connections_exhausted.clone(),
             provider_exhausted: c.provider_connections_exhausted.clone(),
-            unavailable:       c.channel_unavailable.clone(),
-            provisioning:      c.panel_api_provisioning.clone(),
+            unavailable: c.channel_unavailable.clone(),
+            provisioning: c.panel_api_provisioning.clone(),
             low_priority_preempted: c.low_priority_preempted.clone(),
         },
     );
@@ -1073,7 +1072,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                 ctx,
                                 grace_kind,
                             )
-                            .await;
+                                .await;
                             match remaining_result.admission.permission {
                                 shared::model::UserConnectionPermission::Allowed
                                 | shared::model::UserConnectionPermission::GracePeriod => {
@@ -1207,7 +1206,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                     w.wake();
                 }
             })
-            .await;
+                .await;
 
             if timed_out.is_err() {
                 // Grace task exceeded its budget without updating the flag — reset GRACE_PENDING
@@ -1253,8 +1252,8 @@ mod tests {
     use super::{
         create_active_client_stream, stream_grace_period, ActiveClientStream, ActiveClientStreamParams,
         ActiveClientStreamState,
-        CustomVideoBuffers, DeferredProviderOpenOutcome, DeferredProviderOpenState, StreamMode, TimedStreamContext,
-        GracePeriodParams,
+        CustomVideoBuffers, DeferredProviderOpenOutcome, DeferredProviderOpenState, GracePeriodParams, StreamMode,
+        TimedStreamContext,
     };
     use crate::api::api_utils::GraceResolutionContext;
     use crate::api::model::connection_manager::PROVIDER_END_NOT_SET;
@@ -1270,6 +1269,7 @@ mod tests {
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::http::HeaderMap;
+    use bytes::Bytes;
     use futures::{pin_mut, StreamExt};
     use reqwest::Client;
     use shared::{
@@ -1285,7 +1285,6 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::mpsc;
-    use bytes::Bytes;
 
     fn create_test_app_config() -> AppConfig {
         let input = Arc::new(ConfigInput {
@@ -1834,7 +1833,7 @@ mod tests {
             deferred_addr,
             Some("tok-grace-stale"),
         )
-        .await;
+            .await;
 
         let replacement_version = app_state
             .active_users
@@ -1858,9 +1857,9 @@ mod tests {
             .expect("session should still exist");
         let crate::api::model::PlaybackLifecycle::PendingProvider { data: pending } =
             &session.lifecycle
-            else {
-                panic!("stale grace task must not clear the replacement pending provider state")
-            };
+        else {
+            panic!("stale grace task must not clear the replacement pending provider state")
+        };
         assert_eq!(pending.version, replacement_version);
         assert!(pending.wake_source.is_none());
         assert_eq!(session.permission, UserConnectionPermission::GracePeriod);
@@ -1915,7 +1914,7 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-        .await;
+            .await;
         pin_mut!(stream);
 
         assert!(
@@ -1990,7 +1989,7 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-        .await;
+            .await;
         pin_mut!(stream);
 
         assert!(
@@ -2471,7 +2470,7 @@ mod tests {
             meter_uid: 55,
             meter_stream: true,
         })
-        .await;
+            .await;
         pin_mut!(stream);
 
         let first_chunk = stream.next().await;

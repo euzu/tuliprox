@@ -10,7 +10,7 @@ use crate::{
         },
         context::ConfigContext,
     },
-    config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
+    config_field, config_field_bool, config_field_child, config_field_optional, edit_field_bool, edit_field_list,
     edit_field_number_f64, edit_field_number_u64, edit_field_number_u8, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
     use_default_form_reducer,
@@ -147,14 +147,14 @@ pub fn VideoConfigView() -> Html {
                 </Card>
                 <Card class="tp__config-view__card">
                     <h1>{translate.t(LABEL_DOWNLOAD_QUEUE)}</h1>
-                    { config_field_child!(translate.t(LABEL_RESERVE_SLOTS_FOR_USERS), "VIDEO_CONFIG.RESERVE_SLOTS_FOR_USERS", { html! { download_state.form.reserve_slots_for_users } }) }
-                    { config_field_child!(translate.t(LABEL_MAX_BACKGROUND_PER_PROVIDER), "VIDEO_CONFIG.MAX_BACKGROUND_PER_PROVIDER", { html! { download_state.form.max_background_per_provider } }) }
-                    { config_field_child!(translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_INITIAL), "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_INITIAL", { html! { download_state.form.retry_backoff_initial_secs } }) }
-                    { config_field_child!(translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_MULTIPLIER), "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_MULTIPLIER", { html! { download_state.form.retry_backoff_multiplier } }) }
-                    { config_field_child!(translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_MAX), "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_MAX", { html! { download_state.form.retry_backoff_max_secs } }) }
-                    { config_field_child!(translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT), "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT", { html! { download_state.form.retry_backoff_jitter_percent } }) }
-                    { config_field_child!(translate.t(LABEL_DOWNLOAD_RETRY_MAX_ATTEMPTS), "VIDEO_CONFIG.DOWNLOAD_RETRY_MAX_ATTEMPTS", { html! { download_state.form.retry_max_attempts } }) }
-                </Card>
+                    { config_field!(download_state.form, translate.t(LABEL_RESERVE_SLOTS_FOR_USERS), reserve_slots_for_users, "VIDEO_CONFIG.RESERVE_SLOTS_FOR_USERS") }
+                    { config_field!(download_state.form, translate.t(LABEL_MAX_BACKGROUND_PER_PROVIDER), max_background_per_provider, "VIDEO_CONFIG.MAX_BACKGROUND_PER_PROVIDER") }
+                    { config_field!(download_state.form, translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_INITIAL), retry_backoff_initial_secs, "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_INITIAL") }
+                    { config_field!(download_state.form, translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_MULTIPLIER), retry_backoff_multiplier, "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_MULTIPLIER") }
+                    { config_field!(download_state.form, translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_MAX), retry_backoff_max_secs, "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_MAX") }
+                    { config_field!(download_state.form, translate.t(LABEL_DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT), retry_backoff_jitter_percent, "VIDEO_CONFIG.DOWNLOAD_RETRY_BACKOFF_JITTER_PERCENT") }
+                    { config_field!(download_state.form, translate.t(LABEL_DOWNLOAD_RETRY_MAX_ATTEMPTS), retry_max_attempts, "VIDEO_CONFIG.DOWNLOAD_RETRY_MAX_ATTEMPTS") }
+               </Card>
             </>
         }
     };

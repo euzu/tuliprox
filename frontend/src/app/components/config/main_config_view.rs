@@ -8,7 +8,7 @@ use crate::{
         context::ConfigContext,
     },
     config_field, config_field_bool, config_field_optional, edit_field_bool, edit_field_number,
-    edit_field_number_option_u32, edit_field_text_option, generate_form_reducer,
+    edit_field_number_option_u32, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
     use_default_form_reducer,
 };
@@ -32,6 +32,8 @@ const LABEL_INTERNER_GC_INTERVAL_SECS: &str = "LABEL.INTERNER_GC_INTERVAL_SECS";
 const LABEL_INTERNER_GC_MIN_POOL_SIZE: &str = "LABEL.INTERNER_GC_MIN_POOL_SIZE";
 const LABEL_CUSTOM_STREAM_RESPONSE_PATH: &str = "LABEL.CUSTOM_STREAM_RESPONSE_PATH";
 const LABEL_CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS: &str = "LABEL.CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS";
+const LABEL_CUSTOM_STREAM_RESPONSE_ENABLED: &str = "LABEL.CUSTOM_STREAM_RESPONSE_ENABLED";
+const LABEL_CUSTOM_STREAM_RESPONSE_ERROR_STATUS: &str = "LABEL.CUSTOM_STREAM_RESPONSE_ERROR_STATUS";
 const LABEL_ACCEPT_INSECURE_SSL_CERTIFICATES: &str = "LABEL.ACCEPT_INSECURE_SSL_CERTIFICATES";
 
 generate_form_reducer!(
@@ -56,6 +58,8 @@ generate_form_reducer!(
         InternerGcMinPoolSize => interner_gc_min_pool_size: u32,
         CustomStreamResponsePath => custom_stream_response_path: Option<String>,
         CustomStreamResponseTimeoutSecs => custom_stream_response_timeout_secs: u32,
+        CustomStreamResponseEnabled => custom_stream_response_enabled: bool,
+        CustomStreamResponseErrorStatus => custom_stream_response_error_status: u16,
     }
 );
 
@@ -115,6 +119,8 @@ pub fn MainConfigView() -> Html {
                 { config_field!(form_state.form, translate.t(LABEL_INTERNER_GC_MIN_POOL_SIZE), interner_gc_min_pool_size) }
                 { config_field_optional!(form_state.form, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_PATH), custom_stream_response_path) }
                 { config_field!(form_state.form, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS), custom_stream_response_timeout_secs) }
+                { config_field_bool!(form_state.form, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_ENABLED), custom_stream_response_enabled) }
+                { config_field!(form_state.form, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_ERROR_STATUS), custom_stream_response_error_status) }
             </>
         }
     };
@@ -140,6 +146,8 @@ pub fn MainConfigView() -> Html {
                 { edit_field_number!(form_state, translate.t(LABEL_INTERNER_GC_MIN_POOL_SIZE), interner_gc_min_pool_size, MainConfigFormAction::InternerGcMinPoolSize) }
                 { edit_field_text_option!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_PATH), custom_stream_response_path, MainConfigFormAction::CustomStreamResponsePath) }
                 { edit_field_number!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_TIMEOUT_SECS), custom_stream_response_timeout_secs, MainConfigFormAction::CustomStreamResponseTimeoutSecs) }
+                { edit_field_bool!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_ENABLED), custom_stream_response_enabled, MainConfigFormAction::CustomStreamResponseEnabled) }
+                { edit_field_number_u16!(form_state, translate.t(LABEL_CUSTOM_STREAM_RESPONSE_ERROR_STATUS), custom_stream_response_error_status, MainConfigFormAction::CustomStreamResponseErrorStatus) }
             </>
         }
     };
