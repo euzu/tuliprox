@@ -111,7 +111,7 @@ pub fn generate_default_encrypt_secret() -> [u8; 16] {
     out
 }
 
-pub fn default_secret() -> String { generate_default_encrypt_secret().iter().map(|b| format!("{:02X}", b)).collect() }
+pub fn default_secret() -> String { generate_default_encrypt_secret().iter().map(|b| format!("{b:02X}")).collect() }
 
 // 30 minutes by default; `0` still means “no expiration.”
 default_eq_fns!(

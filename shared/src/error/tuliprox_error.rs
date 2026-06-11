@@ -142,6 +142,9 @@ pub enum TuliproxError {
     #[error("repository M3U error: {0}")]
     RepositoryM3u(String),
 
+    #[error("repository Stalker error: {0}")]
+    RepositoryStalker(String),
+
     #[error("repository Library error: {0}")]
     RepositoryLibrary(String),
 
@@ -230,6 +233,7 @@ impl TuliproxError {
             | Self::ConfigWebUi(msg)
             | Self::RepositoryEpg(msg)
             | Self::RepositoryXtream(msg)
+            | Self::RepositoryStalker(msg)
             | Self::RepositoryM3u(msg)
             | Self::RepositoryLibrary(msg)
             | Self::RepositoryStorage(msg)
@@ -260,6 +264,7 @@ impl TuliproxError {
             Self::Repository(_)
                 | Self::RepositoryEpg(_)
                 | Self::RepositoryXtream(_)
+                | Self::RepositoryStalker(_)
                 | Self::RepositoryM3u(_)
                 | Self::RepositoryLibrary(_)
                 | Self::RepositoryStorage(_)

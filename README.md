@@ -72,6 +72,12 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Channel-Switch Friendly Reservations**: Instant takeover on channel switch — no TTL wait
 - **Custom Stream Response Timeout**: Auto-stop fallback streams after configurable duration
 - **Buffer Reuse**: Reusable serialization buffers minimize heap allocations during streaming
+- **Universal Catchup**: Serve provider catchup/archive as plain M3U with `.ts` segments proxied through Tuliprox —
+  any player, any timeline, no vendor lock-in
+- **Granular Plan Tiers**: Lock API users to Live, VOD, or Series only — sell specialized plans from the same
+  target without provisioning extra infrastructure
+- **Smart Background Work**: Skip metadata resolution and probing for entries you don't need — save CPU and
+  provider slots on huge providers that only need partial coverage
 
 ### 5. Provider Failover & DNS Rotation — Maximum Availability
 
@@ -110,6 +116,8 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Deunicoding**: On-the-fly Unicode normalization in filters and value comparisons
 - **Output Filters**: Apply filters to the final playlist state after all transformations
 - **Favorites System**: Explicit `add_favourite(group_name)` script function for bouquet management
+- **Auto-Curated Trakt Bouquets**: Drop in Trakt Charts and serve "Trending Now" and "Most Popular" as live Xtream
+  categories — your playlist refreshes itself with what people are actually watching, no manual curation
 
 ### 7. Local Media Library — Integrate Your Own Movies & Series
 
@@ -175,6 +183,31 @@ Generate all four formats simultaneously from the same source — one setup, eve
   render behind HTTPS frontends
 - **Mobile-friendly**: Responsive design for all screen sizes
 
+**UI/UX Highlights:**
+
+- **Status Health Banner**: Single green/amber/red health indicator in the header aggregates realtime connection,
+  backend, and provider capacity with hover breakdown and click-through to the Stats view
+- **Live Metric Sparklines**: Stats cards show interactive time-series sparklines for CPU, memory, network, active
+  users, and active user connections — hover shows cursor + tooltip, system metrics sampled every 2 s for responsive
+  charts
+- **Bookmarkable Views (Deep Linking)**: The active view is reflected in the URL hash (`#stats`,
+  `#source_editor`) so views can be bookmarked, shared, and navigated directly; browser back/forward works as
+  expected
+- **At a glance**: Single green/amber/red health banner in the header aggregates every signal that matters
+  (realtime connection, backend, provider capacity), with hover breakdown and click-through to detailed Stats.
+  Live metric sparklines for CPU, memory, network, active users and connections — hover for cursor + tooltip,
+  sampled every 2 s so the charts never feel stale.
+- **A UI that feels right**: Micro-interactions (cards lift, buttons ripple, chevrons rotate), animated
+  theme transitions, debounced filter input that stays responsive on huge expressions, shift+click range
+  selection in the category editor, guided empty states that tell you what to do next, paged tables with
+  localized empty messages. Every effect honors `prefers-reduced-motion: reduce`.
+- **Works the way you work**: Bookmarkable views via URL hash (`#stats`, `#source_editor`) so you can share
+  links and the browser back/forward buttons just work. Persisted sidebar state and table page size
+  survive reloads. Sessions auto-logout cleanly when the JWT expires — no mysterious 401s.
+- **For everyone**: UI languages with full RTL  support (drop a file in `assets/i18n` and a new language is live — no rebuild),
+  a recoverable error boundary that keeps one misbehaving view from taking the app down, and confirmation dialogs before any
+  destructive download/recording action.
+
 ### 11. EPG (Electronic Program Guide)
 
 - **Multi-Source EPG**: Multiple EPG sources with priorities — best coverage through combination
@@ -200,6 +233,9 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Per-Message Templates**: Individual Handlebars templates per message type (Info, Stats, Error, Watch) and channel
 - **Template Loading**: Templates from files or HTTP/HTTPS URIs with automatic discovery
 - **Typed Messaging Pipeline**: Strictly typed pipeline instead of raw JSON strings — robust and maintainable
+- **Never Fill Up Unnoticed**: Disk-usage alerts through your existing Telegram/Discord/Pushover channels
+  — opt-in, configurable thresholds, hourly re-arm so a stuck-at-95% disk keeps nagging until you actually
+  fix it
 
 ### 13. Scheduling & Automation
 
@@ -248,6 +284,8 @@ Generate all four formats simultaneously from the same source — one setup, eve
 
 - **Docker**: Alpine and Scratch images — minimal image size
 - **Docker Compose templates**: traefik, crowdsec, gluetun/socks5 templates ready to use
+- **One-Click Dev Setup**: Open in GitHub Codespaces or VS Code Dev Containers and start hacking — Rust
+  toolchain, WASM targets, and every build tool pre-configured
 - **Zero-downtime config reload**: `ArcSwap<Config>` for atomic configuration swaps without interruption
 - **Disk-based processing**: Playlist processing from disk instead of RAM — massively reduced memory consumption
 - **CLI mode**: One-shot processing without a server — ideal for scripting and CI/CD

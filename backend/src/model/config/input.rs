@@ -5,7 +5,12 @@ use log::warn;
 use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
-use shared::model::{ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputDto, XtreamCluster};
+use shared::model::{
+    ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType,
+    MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector,
+    MediaServerPlaybackConfigDto, StagedInputDto, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference,
+    StalkerInputConfigDto, StalkerMagPreset, XtreamCluster,
+};
 use shared::utils::{
     get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
     BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
@@ -20,11 +25,11 @@ use std::sync::{Arc, LazyLock};
 use url::Url;
 
 create_bitset!(
-    u16,
+    u32,
     ConfigInputFlags,
-    XtreamSkipLive,
-    XtreamSkipVod,
-    XtreamSkipSeries,
+    SkipLive,
+    SkipVod,
+    SkipSeries,
     XtreamLiveStreamUsePrefix,
     XtreamLiveStreamWithoutExtension,
     ResolveTmdb,
@@ -33,11 +38,10 @@ create_bitset!(
     ResolveVod,
     ProbeSeries,
     ProbeVod,
-    ProbeLive
+    ProbeLive,
+    StalkerPreResolvePlayback,
+    StalkerRuntimeResolvePlayback
 );
-
-
-
 
 #[derive(Debug, Clone)]
 pub struct ConfigInputOptions {
@@ -74,9 +78,9 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
         let mut flags = ConfigInputFlagsSet::new();
         apply_flags!(
             dto, flags, ConfigInputFlags;
-            (xtream_skip_live, XtreamSkipLive),
-            (xtream_skip_vod, XtreamSkipVod),
-            (xtream_skip_series, XtreamSkipSeries),
+            (skip_live, SkipLive),
+            (skip_vod, SkipVod),
+            (skip_series, SkipSeries),
             (xtream_live_stream_use_prefix, XtreamLiveStreamUsePrefix),
             (xtream_live_stream_without_extension, XtreamLiveStreamWithoutExtension),
             (resolve_tmdb, ResolveTmdb),
@@ -85,7 +89,9 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             (resolve_vod, ResolveVod),
             (probe_series, ProbeSeries),
             (probe_vod, ProbeVod),
-            (probe_live, ProbeLive)
+            (probe_live, ProbeLive),
+            (stalker_pre_resolve_playback, StalkerPreResolvePlayback),
+            (stalker_runtime_resolve_playback, StalkerRuntimeResolvePlayback),
         );
 
         Self {
@@ -186,6 +192,92 @@ impl InputUserInfo {
     }
 }
 
+/// Resolved Stalker device identity (MAG profile + derived hashes).
+///
+/// `serial_number`, `device_id`, `device_id2`, `signature` may be `None` at
+/// config time — the network layer fills them lazily during the first
+/// handshake. The runtime never reaches into the raw DTO.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StalkerDeviceProfile {
+    pub mac_address: Option<String>,
+    pub device_profile: Option<String>,
+    pub serial_number: Option<String>,
+    pub device_id: Option<String>,
+    pub device_id2: Option<String>,
+    pub signature: Option<String>,
+    pub timezone: Option<String>,
+    pub locale: Option<String>,
+    pub user_agent: Option<String>,
+    pub x_user_agent: Option<String>,
+}
+
+impl StalkerDeviceProfile {
+    pub fn mac(&self) -> Option<&str> {
+        self.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+}
+
+impl From<&StalkerDeviceProfileDto> for StalkerDeviceProfile {
+    fn from(dto: &StalkerDeviceProfileDto) -> Self {
+        Self {
+            mac_address: dto.mac_address.clone(),
+            device_profile: dto.device_profile.clone(),
+            serial_number: dto.serial_number.clone(),
+            device_id: dto.device_id.clone(),
+            device_id2: dto.device_id2.clone(),
+            signature: dto.signature.clone(),
+            timezone: dto.timezone.clone(),
+            locale: dto.locale.clone(),
+            user_agent: dto.user_agent.clone(),
+            x_user_agent: dto.x_user_agent.clone(),
+        }
+    }
+}
+
+/// Resolved Stalker input configuration. Holds the device profile, the
+/// negotiated auth mode, the preferred MAG preset and the body-size caps.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StalkerInputConfig {
+    pub device: Option<StalkerDeviceProfile>,
+    pub auth_mode: StalkerAuthMode,
+    pub mag_preset: StalkerMagPreset,
+    pub endpoint_preference: StalkerEndpointPreference,
+    pub size_caps: Option<StalkerSizeCaps>,
+    pub catalog_max_pages: Option<u32>,
+}
+
+/// Simple body-size cap struct used at runtime (DTO has the same fields but
+/// uses u32 to allow unbounded `None`; runtime uses concrete limits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StalkerSizeCaps {
+    pub create_link_kb: u32,
+    pub ordered_list_mb: u32,
+    pub get_epg_mb: u32,
+}
+
+impl Default for StalkerSizeCaps {
+    fn default() -> Self {
+        Self { create_link_kb: 64, ordered_list_mb: 8, get_epg_mb: 64 }
+    }
+}
+
+impl From<&StalkerInputConfigDto> for StalkerInputConfig {
+    fn from(dto: &StalkerInputConfigDto) -> Self {
+        Self {
+            device: dto.device.as_ref().map(StalkerDeviceProfile::from),
+            auth_mode: dto.auth_mode,
+            mag_preset: dto.mag_preset,
+            endpoint_preference: dto.endpoint_preference,
+            size_caps: dto.size_caps.as_ref().map(|caps| StalkerSizeCaps {
+                create_link_kb: caps.create_link_kb,
+                ordered_list_mb: caps.ordered_list_mb,
+                get_epg_mb: caps.get_epg_mb,
+            }),
+            catalog_max_pages: dto.catalog_max_pages.filter(|value| *value > 0),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StagedInput {
     pub enabled: bool,
@@ -276,6 +368,7 @@ pub struct ConfigInputAlias {
     pub max_connections: u16,
     pub exp_date: Option<i64>,
     pub enabled: bool,
+    pub stalker: Option<StalkerInputConfig>,
 }
 
 macros::from_impl!(ConfigInputAlias);
@@ -291,6 +384,7 @@ impl From<&ConfigInputAliasDto> for ConfigInputAlias {
             max_connections: dto.max_connections,
             exp_date: dto.exp_date,
             enabled: dto.enabled,
+            stalker: dto.stalker.as_ref().map(StalkerInputConfig::from),
         }
     }
 }
@@ -319,6 +413,8 @@ pub struct ConfigInput {
     pub panel_api: Option<PanelApiConfig>,
     pub cache_duration_seconds: u64,
     pub provider_configs: Option<Vec<Arc<ConfigProvider>>>,
+    /// Resolved Stalker device identity + portal hints.
+    pub stalker: Option<StalkerInputConfig>,
 }
 
 impl ConfigInput {
@@ -489,12 +585,7 @@ impl ConfigInput {
         self.options.as_ref().map_or(default, |o| o.has_all_flags(flags))
     }
 
-    fn prepare_media_server_input(&self) -> Result<(), TuliproxError> {
-        if !self.input_type.is_media_server() {
-            return Ok(());
-        }
-
-        let trimmed_url = self.url.trim();
+    fn validate_media_server_commons(&self, trimmed_url: &str) -> Result<(), TuliproxError> {
         if trimmed_url.starts_with(BATCH_SCHEME_PREFIX) || trimmed_url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media-server input does not support batch:// or provider:// URLs (input: {})",
@@ -525,30 +616,14 @@ impl ConfigInput {
                 self.name
             )));
         }
-        let Some(media_server) = self.media_server.as_ref() else {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media_server configuration is mandatory for input type {} (input: {})",
-                self.input_type, self.name
-            )));
-        };
-        if media_server.libraries.is_empty() {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media-server input requires at least one selected library (input: {})",
-                self.name
-            )));
-        }
-        if media_server.libraries.iter().any(MediaServerLibrarySelector::is_empty) {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media_server library selectors must not be empty (input: {})",
-                self.name
-            )));
-        }
-        if media_server.catalog.page_size == 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media server catalog page_size must be greater than zero (input: {})",
-                self.name
-            )));
-        }
+        Ok(())
+    }
+
+    fn validate_media_server_specific(
+        &self,
+        trimmed_url: &str,
+        media_server: &MediaServerInputConfig,
+    ) -> Result<(), TuliproxError> {
         match self.input_type {
             InputType::Emby | InputType::Jellyfin => {
                 if trimmed_url.is_empty() {
@@ -587,8 +662,49 @@ impl ConfigInput {
                     )));
                 }
             }
-            InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {}
+            InputType::M3u
+            | InputType::Xtream
+            | InputType::M3uBatch
+            | InputType::XtreamBatch
+            | InputType::Stalker
+            | InputType::StalkerBatch
+            | InputType::Library => {}
         }
+        Ok(())
+    }
+
+    fn prepare_media_server_input(&self) -> Result<(), TuliproxError> {
+        if !self.input_type.is_media_server() {
+            return Ok(());
+        }
+
+        let trimmed_url = self.url.trim();
+        self.validate_media_server_commons(trimmed_url)?;
+        let Some(media_server) = self.media_server.as_ref() else {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media_server configuration is mandatory for input type {} (input: {})",
+                self.input_type, self.name
+            )));
+        };
+        if media_server.libraries.is_empty() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input requires at least one selected library (input: {})",
+                self.name
+            )));
+        }
+        if media_server.libraries.iter().any(MediaServerLibrarySelector::is_empty) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media_server library selectors must not be empty (input: {})",
+                self.name
+            )));
+        }
+        if media_server.catalog.page_size == 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media server catalog page_size must be greater than zero (input: {})",
+                self.name
+            )));
+        }
+        self.validate_media_server_specific(trimmed_url, media_server)?;
 
         Ok(())
     }
@@ -623,9 +739,9 @@ impl ConfigInput {
         if self.enabled {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
-            let skip_live = self.has_flag(ConfigInputFlags::XtreamSkipLive);
-            let skip_vod = self.has_flag(ConfigInputFlags::XtreamSkipVod);
-            let skip_series = self.has_flag(ConfigInputFlags::XtreamSkipSeries);
+            let skip_live = self.has_flag(ConfigInputFlags::SkipLive);
+            let skip_vod = self.has_flag(ConfigInputFlags::SkipVod);
+            let skip_series = self.has_flag(ConfigInputFlags::SkipSeries);
             self.prepare_staged_input(provider_configs, &mut used_provider_configs, skip_live, skip_vod, skip_series)?;
             self.apply_expiration();
             self.prepare_aliases(provider_configs, &mut used_provider_configs)?;
@@ -661,11 +777,13 @@ impl ConfigInput {
     }
 
     fn prepare_batch(&mut self) -> Option<PathBuf> {
-        if matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch) {
+        if matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch) {
             let input_type = if self.input_type == InputType::M3uBatch {
                 InputType::M3u
-            } else {
+            } else if self.input_type == InputType::XtreamBatch {
                 InputType::Xtream
+            } else {
+                InputType::Stalker
             };
 
             self.t_batch_url = Some(self.url.clone());
@@ -731,6 +849,7 @@ impl ConfigInput {
             panel_api: self.panel_api.clone(),
             cache_duration_seconds: self.cache_duration_seconds,
             provider_configs: self.provider_configs.clone(),
+            stalker: alias.stalker.clone().or_else(|| self.stalker.clone()),
         }
     }
 
@@ -819,6 +938,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
             provider_configs: None,
+            stalker: dto.stalker.as_ref().map(StalkerInputConfig::from),
         }
     }
 }
@@ -1300,6 +1420,7 @@ mod tests {
                 max_connections: 0,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..Default::default()
         };
@@ -1496,7 +1617,7 @@ mod tests {
             password: Some("main_pass".to_string()),
             enabled: true,
             options: Some(ConfigInputOptions::from(&ConfigInputOptionsDto {
-                xtream_skip_vod: true,
+                skip_vod: true,
                 ..ConfigInputOptionsDto::default()
             })),
             staged: Some(StagedInput {
@@ -1531,6 +1652,7 @@ mod tests {
                 max_connections: 0,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..Default::default()
         };
@@ -1559,6 +1681,7 @@ mod tests {
                 max_connections: 0,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..Default::default()
         };
@@ -1587,5 +1710,34 @@ mod tests {
             .expect_err("prepare must reject root credentials for batch:// xtream-batch URL");
         assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_root_creds_not_allowed"), "Error: {err}");
+    }
+
+    #[test]
+    fn stalker_alias_configuration_overrides_parent() {
+        let parent = ConfigInput {
+            input_type: InputType::StalkerBatch,
+            stalker: Some(StalkerInputConfig { auth_mode: StalkerAuthMode::MacOnly, ..Default::default() }),
+            ..Default::default()
+        };
+        let alias = ConfigInputAlias {
+            id: 1,
+            name: "alias".into(),
+            url: "http://portal.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("password".to_string()),
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: Some(StalkerInputConfig {
+                auth_mode: StalkerAuthMode::CredentialsOnly,
+                ..Default::default()
+            }),
+        };
+
+        assert_eq!(
+            parent.as_input(&alias).stalker.expect("stalker config").auth_mode,
+            StalkerAuthMode::CredentialsOnly
+        );
     }
 }

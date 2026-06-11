@@ -271,6 +271,7 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputEmby => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Emby))),
         BlockType::InputJellyfin => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Jellyfin))),
         BlockType::InputPlex => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Plex))),
+        BlockType::InputStalker => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Stalker))),
         BlockType::Target => {
             let dto = ConfigTargetDto {
                 name: String::new(),
@@ -1224,8 +1225,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             let _ = path_el.set_attribute("d", &d);
                             if update_delete_circles {
                                 if let Some(doc) = &document {
-                                    if let Some(circle_el) = doc.get_element_by_id(&format!("conn-del-{}-{}", from, to))
-                                    {
+                                    if let Some(circle_el) = doc.get_element_by_id(&format!("conn-del-{from}-{to}")) {
                                         let mid_x = (fx + tx) / 2.0;
                                         let mid_y = (fy + ty) / 2.0;
                                         let _ = circle_el.set_attribute("cx", &mid_x.to_string());

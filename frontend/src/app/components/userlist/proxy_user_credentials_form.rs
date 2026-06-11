@@ -1,8 +1,9 @@
 use crate::{
     app::{
         components::{
-            config::HasFormData, select::Select, userlist::proxy_type_input::ProxyTypeInput, ClusterFlagsInput,
-            ClusterFlagsInputMode, DropDownOption, DropDownSelection, Tag, TextButton, UserStatus,
+            config::HasFormData, select::Select, selection_first_owned, selection_parse_first,
+            userlist::proxy_type_input::ProxyTypeInput, ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption,
+            DropDownSelection, Tag, TextButton, UserStatus,
         },
         TargetUser,
     },
@@ -327,14 +328,10 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                html! {
                     <div class="tp__proxy-user-credentials-form__playlist-row">
                         <div class="tp__proxy-user-credentials-form__playlist-target">
-                            <Select name="target"
+                                <Select name="target"
                                 multi_select={false}
                                 on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
-                                  let target = match selections {
-                                    DropDownSelection::Empty => None,
-                                    DropDownSelection::Single(option) => Some(option),
-                                    DropDownSelection::Multi(options) => options.first().cloned(),
-                                    };
+                                  let target = selection_first_owned(selections);
                                     set_selected_target.set(target);
                                 })}
                                 options={targets.clone()}
@@ -356,11 +353,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                html! { <Select name="status"
                     multi_select={false}
                     on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
-                        let status = match selections {
-                            DropDownSelection::Empty => None,
-                            DropDownSelection::Single(option) => option.parse::<ProxyUserStatus>().ok(),
-                            DropDownSelection::Multi(options) => options.first().as_ref().and_then(|f| f.parse::<ProxyUserStatus>().ok())
-                           };
+                        let status = selection_parse_first::<ProxyUserStatus>(&selections);
                         instance_status.dispatch(UserFormAction::Status(status));
                     })}
                     options={proxy_user_status.clone()}
@@ -387,11 +380,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 <Select name="server"
                     multi_select={false}
                     on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
-                        let server = match selections {
-                            DropDownSelection::Empty => None,
-                            DropDownSelection::Single(option) => Some(option.clone()),
-                            DropDownSelection::Multi(options) => options.first().cloned(),
-                           };
+                        let server = selection_first_owned(selections);
                         instance_server.dispatch(UserFormAction::Server(server));
                     })}
                     options={server_list.clone()}

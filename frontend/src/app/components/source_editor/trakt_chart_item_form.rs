@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{select::Select, Card, DropDownOption, DropDownSelection, TextButton},
+    app::components::{build_options, select::Select, selection_parse_first, Card, DropDownSelection, TextButton},
     config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u8, edit_field_text,
     generate_form_reducer,
     i18n::use_translation,
@@ -63,35 +63,17 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
     let kind_options = use_memo(form_state.form.kind, {
         let translate = translate.clone();
         move |kind| {
-            vec![
-                DropDownOption {
-                    id: TraktChartKind::Movies.to_string(),
-                    label: html! { translate.t(LABEL_TRAKT_CHART_KIND_MOVIES) },
-                    selected: kind == &TraktChartKind::Movies,
-                },
-                DropDownOption {
-                    id: TraktChartKind::Shows.to_string(),
-                    label: html! { translate.t(LABEL_TRAKT_CHART_KIND_SHOWS) },
-                    selected: kind == &TraktChartKind::Shows,
-                },
-            ]
+            build_options([TraktChartKind::Movies, TraktChartKind::Shows], kind, |value| {
+                html! { translate.t(trakt_chart_kind_label_key(*value)) }
+            })
         }
     });
     let chart_options = use_memo(form_state.form.chart, {
         let translate = translate.clone();
         move |chart| {
-            vec![
-                DropDownOption {
-                    id: TraktChartType::Trending.to_string(),
-                    label: html! { translate.t(LABEL_TRAKT_CHART_TYPE_TRENDING) },
-                    selected: chart == &TraktChartType::Trending,
-                },
-                DropDownOption {
-                    id: TraktChartType::Popular.to_string(),
-                    label: html! { translate.t(LABEL_TRAKT_CHART_TYPE_POPULAR) },
-                    selected: chart == &TraktChartType::Popular,
-                },
-            ]
+            build_options([TraktChartType::Trending, TraktChartType::Popular], chart, |value| {
+                html! { translate.t(trakt_chart_type_label_key(*value)) }
+            })
         }
     });
 
@@ -126,10 +108,8 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
                             name={"trakt_chart_kind"}
                             multi_select={false}
                             on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                if let DropDownSelection::Single(option) = selections {
-                                    if let Ok(kind) = option.parse::<TraktChartKind>() {
-                                        form_state_kind.dispatch(TraktChartFormAction::Kind(kind));
-                                    }
+                                if let Some(kind) = selection_parse_first::<TraktChartKind>(&selections) {
+                                    form_state_kind.dispatch(TraktChartFormAction::Kind(kind));
                                 }
                             })}
                             options={kind_options.clone()}
@@ -143,10 +123,8 @@ pub fn TraktChartItemForm(props: &TraktChartItemFormProps) -> Html {
                             name={"trakt_chart_type"}
                             multi_select={false}
                             on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                if let DropDownSelection::Single(option) = selections {
-                                    if let Ok(chart) = option.parse::<TraktChartType>() {
-                                        form_state_chart.dispatch(TraktChartFormAction::Chart(chart));
-                                    }
+                                if let Some(chart) = selection_parse_first::<TraktChartType>(&selections) {
+                                    form_state_chart.dispatch(TraktChartFormAction::Chart(chart));
                                 }
                             })}
                             options={chart_options.clone()}

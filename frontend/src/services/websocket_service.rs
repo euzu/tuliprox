@@ -212,7 +212,7 @@ impl WebSocketService {
                     //let ws_service_reconnect_clone = Rc::clone(&ws_service_reconnect);
 
                     let onerror_callback = Closure::<dyn FnMut(ErrorEvent)>::wrap(Box::new(move |e: ErrorEvent| {
-                        error!("WebSocket error: {:?}", e);
+                        error!("WebSocket error: {e:?}");
                         connected_clone.set(false);
                         event_service_clone.broadcast(EventMessage::WebSocketStatus(false));
                         // ws_service_reconnect_clone.schedule_reconnect();
@@ -235,7 +235,7 @@ impl WebSocketService {
         }
         let delay = reconnect_delay(attempt);
 
-        warn!("WebSocket reconnect attempt #{attempt} scheduled in {} ms", delay);
+        warn!("WebSocket reconnect attempt #{attempt} scheduled in {delay} ms");
 
         // clone_for_reconnect returns a Service with shared internals (Atomic, etc.)
         let ws_clone = Rc::new(self.clone_for_reconnect());

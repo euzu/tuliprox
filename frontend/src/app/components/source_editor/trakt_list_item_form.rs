@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{select::Select, Card, DropDownOption, DropDownSelection, TextButton},
+    app::components::{build_options, select::Select, selection_parse_first, Card, DropDownSelection, TextButton},
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u8,
     edit_field_text, generate_form_reducer,
     i18n::use_translation,
@@ -67,24 +67,11 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
     let content_type_options = use_memo(form_state.form.content_type, {
         let translate = translate.clone();
         move |content_type| {
-            let default_ct = content_type;
-            vec![
-                DropDownOption {
-                    id: TraktContentType::Vod.to_string(),
-                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_VOD) },
-                    selected: default_ct == &TraktContentType::Vod,
-                },
-                DropDownOption {
-                    id: TraktContentType::Series.to_string(),
-                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_SERIES) },
-                    selected: default_ct == &TraktContentType::Series,
-                },
-                DropDownOption {
-                    id: TraktContentType::Both.to_string(),
-                    label: html! { translate.t(LABEL_TRAKT_CONTENT_TYPE_BOTH) },
-                    selected: default_ct == &TraktContentType::Both,
-                },
-            ]
+            build_options(
+                [TraktContentType::Vod, TraktContentType::Series, TraktContentType::Both],
+                content_type,
+                |value| html! { translate.t(trakt_content_type_label_key(*value)) },
+            )
         }
     });
 
@@ -133,10 +120,8 @@ pub fn TraktListItemForm(props: &TraktListItemFormProps) -> Html {
                             name={"trakt_content_type"}
                             multi_select={false}
                             on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                if let DropDownSelection::Single(option) = selections {
-                                    if let Ok(ct) = option.parse::<TraktContentType>() {
-                                        form_state_ct.dispatch(TraktListFormAction::ContentType(ct));
-                                    }
+                                if let Some(ct) = selection_parse_first::<TraktContentType>(&selections) {
+                                    form_state_ct.dispatch(TraktListFormAction::ContentType(ct));
                                 }
                             })}
                             options={content_type_options.clone()}

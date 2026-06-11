@@ -4,11 +4,30 @@
 
 ## ⚠️ Breaking Changes
 
+- **Shared Input Skip Option Names**:
+  - Input options now serialize as `skip_live`, `skip_vod`, and `skip_series` instead of the old
+    type-prefixed `xtream_skip_*` / `stalker_skip_*` names.
+  - Existing config files remain read-compatible because the old names are still accepted as aliases.
+  - This is still a breaking change for generated config, API payloads, docs snippets, and any tooling that depends on
+    the old serialized field names.
+
 - Removed the `plex` STRM export style. Existing STRM outputs configured with `style: plex` must switch to `kodi`,
   `emby`, or `jellyfin`; Plex use cases should use the HDHomeRun integration instead. Existing generated TMDB marker
   paths remain read-compatible, but `style: plex` is no longer accepted in configuration.
 
 ## 🌟 New Features
+
+- **New Stalker Portal Integration**:
+  - Added first-class Stalker input support to Tuliprox.
+  - Added Stalker catalog preview support in the protected Web UI playlist endpoints.
+  - Added Stalker playback URL materialization with runtime `create_link` refresh for stale or expired temp links.
+  - Added typed handling for portal-internal auth/session body codes such as `44` and `440..449` so Stalker playback refresh can react to them.
+  - Added Stalker bulk-EPG ingestion with streaming parse and batched persistence to avoid buffering the full payload in memory first.
+  - Added explicit unresolved-item semantics for Stalker playlist entries: Tuliprox keeps Stalker playback metadata without exposing raw portal `cmd` values as playlist URLs.
+  - Added follow-up hardening for Stalker temp-link playback modes, runtime stale-URL invalidation, endpoint-preference ordering, and soft session-TTL refresh behavior.
+  - Added explicit Stalker transport-policy handling: Tuliprox only proxies `http`/`https` playback URLs and rejects unsupported `rtmp`/`rtsp` commands up front.
+  - Added the remaining Stalker config fields to the Web UI, including device identity overrides and per-action response-size caps.
+  - The remaining open edge case is portal-specific header/cookie forwarding for temp-link media requests; fresh temp-link resolution itself is already implemented.
 
 - **Trakt Charts**: Xtream Trakt integration can now build virtual categories from public Trakt charts via `trakt.charts[]`.
   - MVP supports `movies/shows` with `trending` and `popular`.

@@ -49,7 +49,7 @@ pub async fn playlist_resolve_vod(
     fpl: &mut FetchedPlaylist<'_>,
 ) {
     // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
-    if fpl.input.has_flag(ConfigInputFlags::XtreamSkipVod) {
+    if fpl.input.has_flag(ConfigInputFlags::SkipVod) {
         return;
     }
 
@@ -565,7 +565,7 @@ pub async fn update_vod_metadata(
     let storage_path = resolve_input_storage_path(storage_dir, &input.name).await;
 
     // Check if we should skip based on input options
-    if input.has_flag(ConfigInputFlags::XtreamSkipVod) {
+    if input.has_flag(ConfigInputFlags::SkipVod) {
         return Ok(None);
     }
 

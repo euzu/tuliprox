@@ -678,16 +678,23 @@ mod tests {
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::{
+        extract::Query,
         body::Body,
         http::{Request, StatusCode},
-        Router,
+        response::IntoResponse,
+        Json, Router,
     };
+    use serde_json::json;
+    use crate::model::ConfigInputOptions;
     use shared::foundation::Filter;
     use shared::{
-        model::{ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto, EpgProgramme, EpgSourceDto, PlaylistRequest, XtreamCluster},
+        model::{
+            ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto, EpgProgramme, EpgSourceDto, InputType,
+            PlaylistRequest, XtreamCluster,
+        },
         utils::Internable,
     };
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
     use chrono::Utc;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
@@ -791,6 +798,43 @@ mod tests {
             metadata_manager,
             manual_update_sender,
         })
+    }
+
+    async fn stalker_mock_handler(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
+        let action = params.get("action").map_or("", String::as_str);
+        let portal_type = params.get("type").map_or("", String::as_str);
+        let page = params.get("p").map_or("1", String::as_str);
+        let response = match (portal_type, action, page) {
+            ("stb", "handshake", _) => json!({"js": {"token": "preview-token"}}),
+            ("stb", "get_profile", _) => json!({"js": {"status": 1, "max_connections": 1}}),
+            ("stb", "get_capabilities", _) => json!({"js": {}}),
+            ("itv", "get_genres", _) => json!({"js": [{"id": "10", "title": "News"}]}),
+            ("itv", "get_ordered_list", "1") => json!({
+                "js": {
+                    "data": {
+                        "101": {
+                            "id": "101",
+                            "name": "Demo Channel",
+                            "category_id": "10",
+                            "cmd": "ffmpeg http://streams.example/live/101"
+                        }
+                    }
+                }
+            }),
+            //("itv", "get_ordered_list", _) => json!({"js": []}),
+            _ => json!({"js": []}),
+        };
+        Json(response)
+    }
+
+    async fn spawn_stalker_mock_server() -> (String, tokio::task::JoinHandle<()>) {
+        let router = Router::new().route("/server/load.php", axum::routing::get(stalker_mock_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock stalker server");
+        let base_url = format!("http://{}", listener.local_addr().expect("mock addr"));
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve mock stalker server");
+        });
+        (base_url, handle)
     }
 
     #[test]
@@ -1174,6 +1218,62 @@ mod tests {
         let response = router.into_service::<Body>().oneshot(request).await.expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn playlist_live_input_route_supports_stalker_inputs() {
+        let temp_dir = tempdir().expect("temp dir");
+        let (base_url, server_handle) = spawn_stalker_mock_server().await;
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "stalker".intern(),
+            input_type: InputType::Stalker,
+            url: base_url,
+            enabled: true,
+            options: Some(ConfigInputOptions {
+                flags: crate::model::ConfigInputFlagsSet::new(),
+                resolve_delay: shared::utils::default_resolve_delay_secs(),
+                probe_delay: shared::utils::default_probe_delay_secs(),
+                probe_live_interval_hours: 120,
+                resolve_filter: None,
+                probe_filter: None,
+            }),
+            stalker: Some(crate::model::StalkerInputConfig {
+                device: None,
+                auth_mode: shared::model::StalkerAuthMode::Auto,
+                mag_preset: shared::model::StalkerMagPreset::GenericSafe,
+                endpoint_preference: shared::model::StalkerEndpointPreference::ServerLoad,
+                size_caps: None,
+                catalog_max_pages: None,
+            }),
+            ..Default::default()
+        });
+        let source = ConfigSource {
+            inputs: vec![Arc::clone(&input.name)],
+            targets: vec![],
+        };
+        let app_config = test_app_config(input, source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+        let app_state = test_app_state(Arc::new(app_config));
+        let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/playlist/live")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"Input":"stalker"}"#))
+            .expect("request");
+
+        let response = router.into_service::<Body>().oneshot(request).await.expect("response");
+        server_handle.abort();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body_text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(body_text.contains("Demo Channel"), "{body_text}");
+        assert!(!body_text.contains("ffmpeg http://streams.example/live/101"), "{body_text}");
     }
 
     #[tokio::test]

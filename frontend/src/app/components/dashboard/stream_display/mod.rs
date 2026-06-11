@@ -406,7 +406,7 @@ impl FromStr for StreamDisplayAction {
             COPY_LINK_TULIPROX_VIRTUAL_ID => Ok(Self::CopyLinkTuliproxVirtualId),
             COPY_LINK_TULIPROX_WEBPLAYER_URL => Ok(Self::CopyLinkTuliproxWebPlayerUrl),
             COPY_LINK_PROVIDER_URL => Ok(Self::CopyLinkProviderUrl),
-            _ => Err(TuliproxError::Config(format!("Unknown Stream Action: {}", s))),
+            _ => Err(TuliproxError::Config(format!("Unknown Stream Action: {s}"))),
         }
     }
 }

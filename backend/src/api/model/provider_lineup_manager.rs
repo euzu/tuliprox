@@ -1056,6 +1056,7 @@ mod tests {
             panel_api: None,
             provider_configs: None,
             cache_duration_seconds: 0,
+            stalker: None,
         }
     }
 
@@ -1071,6 +1072,7 @@ mod tests {
             max_connections,
             exp_date: None,
             enabled: true,
+            stalker: None,
         }
     }
 

@@ -400,6 +400,7 @@ mod tests {
             panel_api: None,
             provider_configs: None,
             cache_duration_seconds: 0,
+            stalker: None,
         };
         let conn = Arc::new(RwLock::new(ProviderConfigConnection::default()));
         let counter = Arc::new(AtomicUsize::new(0));

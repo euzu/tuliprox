@@ -70,7 +70,7 @@ pub async fn playlist_resolve_series(
     processed_fpl: &mut FetchedPlaylist<'_>,
 ) {
     // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
-    if processed_fpl.input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+    if processed_fpl.input.has_flag(ConfigInputFlags::SkipSeries) {
         return;
     }
 
@@ -674,7 +674,7 @@ pub async fn update_series_metadata(
         .await
         .map_err(|e| TuliproxError::Io(format!("Storage path error: {e}")))?;
 
-    if input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+    if input.has_flag(ConfigInputFlags::SkipSeries) {
         return Ok(None);
     }
 

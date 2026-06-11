@@ -2,6 +2,7 @@ use axum::{
     extract::FromRequestParts,
     http::{request::Parts, StatusCode},
 };
+use std::future::{ready, Future};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct ExtractAcceptHeader(pub Option<String>);
@@ -12,12 +13,15 @@ where
 {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &B) -> Result<Self, Self::Rejection> {
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &B,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
         if let Some(accept_type) = parts.headers.get(axum::http::header::ACCEPT) {
             if let Ok(val) = accept_type.to_str() {
-                return Ok(ExtractAcceptHeader(Some(val.to_string())));
+                return ready(Ok(ExtractAcceptHeader(Some(val.to_string()))));
             }
         }
-        Ok(ExtractAcceptHeader(None))
+        ready(Ok(ExtractAcceptHeader(None)))
     }
 }

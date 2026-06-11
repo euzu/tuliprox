@@ -1,4 +1,5 @@
 mod playlist;
+mod stalker;
 mod xtream;
 // mod affix;
 mod xtream_vod;
@@ -11,6 +12,9 @@ mod stream_probe;
 mod probe_handle_guard;
 mod resolve_options;
 pub use self::playlist::*;
+pub(crate) use self::stalker::{
+    download_stalker_playlist, re_resolve_stalker_url, StalkerCluster,
+};
 pub use self::epg::*;
 pub use self::xtream::*;
 pub use self::xtream_vod::*;

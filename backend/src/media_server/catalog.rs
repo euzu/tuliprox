@@ -216,64 +216,66 @@ mod tests {
     }
 
     impl MediaServerCatalogClient for MockMediaServerCatalogClient {
-        async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> {
-            Ok(MediaServerStatus {
+        fn discover(&self) -> impl std::future::Future<Output = Result<MediaServerStatus, MediaServerError>> {
+            std::future::ready(Ok(MediaServerStatus {
                 kind: MediaServerKind::Emby,
                 server_id: "server-redacted".into(),
                 display_name: None,
                 version: None,
                 owned: None,
-            })
+            }))
         }
 
-        async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> { Ok(self.libraries.clone()) }
+        fn list_libraries(&self) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
+            std::future::ready(Ok(self.libraries.clone()))
+        }
 
-        async fn list_movies(
+        fn list_movies(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerMovie>, MediaServerError> {
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerMovie>, MediaServerError>> {
             self.movie_call_times.lock().expect("lock").push(Instant::now());
-            self.movie_pages.lock().expect("lock").remove(0)
+            std::future::ready(self.movie_pages.lock().expect("lock").remove(0))
         }
 
-        async fn list_series(
+        fn list_series(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerSeries>, MediaServerError> {
-            self.series_pages.lock().expect("lock").remove(0)
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerSeries>, MediaServerError>> {
+            std::future::ready(self.series_pages.lock().expect("lock").remove(0))
         }
 
-        async fn list_seasons(
+        fn list_seasons(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerSeason>, MediaServerError> {
-            self.season_pages.lock().expect("lock").remove(0)
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerSeason>, MediaServerError>> {
+            std::future::ready(self.season_pages.lock().expect("lock").remove(0))
         }
 
-        async fn list_episodes(
+        fn list_episodes(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerEpisode>, MediaServerError> {
-            self.episode_pages.lock().expect("lock").remove(0)
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerEpisode>, MediaServerError>> {
+            std::future::ready(self.episode_pages.lock().expect("lock").remove(0))
         }
 
-        async fn open_stream(
+        fn open_stream(
             &self,
             _stream_ref: &MediaServerStreamRef,
             _range: Option<&str>,
-        ) -> Result<crate::media_server::MediaServerStreamResponse, MediaServerError> {
-            Ok(empty_stream_response())
+        ) -> impl std::future::Future<Output = Result<crate::media_server::MediaServerStreamResponse, MediaServerError>> {
+            std::future::ready(Ok(empty_stream_response()))
         }
 
-        async fn open_image(
+        fn open_image(
             &self,
             _image_ref: &MediaServerImageRef,
-        ) -> Result<MediaServerResourceResponse, MediaServerError> {
-            Ok(empty_response())
+        ) -> impl std::future::Future<Output = Result<MediaServerResourceResponse, MediaServerError>> {
+            std::future::ready(Ok(empty_response()))
         }
     }
 

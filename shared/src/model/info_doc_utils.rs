@@ -20,7 +20,7 @@ impl InfoDocUtils {
         if n < 0.01 {
             "0".to_string()
         } else {
-            let s = format!("{:.2}", n);
+            let s = format!("{n:.2}");
             s.trim_end_matches('0').trim_end_matches('.').to_string()
         }
     }

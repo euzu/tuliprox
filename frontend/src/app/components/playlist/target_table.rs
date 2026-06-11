@@ -226,7 +226,7 @@ impl FromStr for TargetTableAction {
             "edit" => Ok(Self::Edit),
             "refresh" => Ok(Self::Refresh),
             "delete" => Ok(Self::Delete),
-            _ => Err(TuliproxError::Config(format!("Unknown Target Action: {}", s))),
+            _ => Err(TuliproxError::Config(format!("Unknown Target Action: {s}"))),
         }
     }
 }

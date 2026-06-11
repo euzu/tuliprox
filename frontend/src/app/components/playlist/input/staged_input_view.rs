@@ -22,6 +22,8 @@ pub fn StagedInputView(props: &StagedInputViewProps) -> Html {
                 InputType::Xtream => "LABEL.XTREAM",
                 InputType::M3uBatch => "LABEL.M3U_BATCH",
                 InputType::XtreamBatch => "LABEL.XTREAM_BATCH",
+                InputType::Stalker => "LABEL.STALKER",
+                InputType::StalkerBatch => "LABEL.STALKER_BATCH",
                 InputType::Library => "LABEL.LIBRARY",
                 InputType::Emby => "LABEL.EMBY",
                 InputType::Jellyfin => "LABEL.JELLYFIN",

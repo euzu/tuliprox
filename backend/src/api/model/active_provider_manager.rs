@@ -1571,6 +1571,7 @@ mod tests {
                 max_connections: 1,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             1,
         )

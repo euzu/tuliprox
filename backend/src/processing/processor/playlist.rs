@@ -22,7 +22,7 @@ use crate::{
         parser::xmltv::flatten_tvguide,
         playlist_watch::process_group_watch,
         processor::{
-            epg::process_playlist_epg, library, sort::sort_playlist, trakt::process_trakt_categories_for_target,
+            epg::process_playlist_epg, library, sort::sort_playlist, stalker, trakt::process_trakt_categories_for_target,
             xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod,
         },
     },
@@ -542,7 +542,12 @@ async fn playlist_download_from_input(
                 let xtream_error_count = e.len();
                 (p, e, persisted, 0, xtream_error_count)
             }
-            InputType::M3uBatch | InputType::XtreamBatch => (vec![], vec![], false, 0, 0),
+            InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch => (vec![], vec![], false, 0, 0),
+            InputType::Stalker => {
+                let (p, e, persisted) = stalker::download_stalker_playlist(app_config, client, input, None).await;
+                let stalker_error_count = e.len();
+                (p, e, persisted, 0, stalker_error_count)
+            }
             InputType::Library => {
                 let (p, e) = library::download_library_playlist(client, app_config, input).await;
                 (p, e, false, 0, 0)
@@ -1241,7 +1246,7 @@ fn get_live_probe_interval_settings(
     input_type: InputType,
     input_options: Option<&ConfigInputOptions>,
 ) -> Option<(u16, u64)> {
-    if !(input_type.is_xtream() || input_type.is_m3u()) {
+    if !(input_type.is_xtream() || input_type.is_m3u() || input_type.is_stalker()) {
         return None;
     }
     target.get_xtream_output().map(|_| {

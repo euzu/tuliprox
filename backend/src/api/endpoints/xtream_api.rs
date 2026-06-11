@@ -1381,9 +1381,9 @@ async fn xtream_player_api(fingerprint: &Fingerprint, api_req: UserApiRequest, a
             inputs.iter().fold((true, true, true), |acc, i| {
                 let (live, vod, series) = acc;
                 (
-                    live && i.has_flag(ConfigInputFlags::XtreamSkipLive),
-                    vod && i.has_flag(ConfigInputFlags::XtreamSkipVod),
-                    series && i.has_flag(ConfigInputFlags::XtreamSkipSeries),
+                    live && i.has_flag(ConfigInputFlags::SkipLive),
+                    vod && i.has_flag(ConfigInputFlags::SkipVod),
+                    series && i.has_flag(ConfigInputFlags::SkipSeries),
                 )
             })
         } else {

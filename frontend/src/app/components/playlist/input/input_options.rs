@@ -61,9 +61,9 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                 ],
             ),
             Some(options) => {
-                let has_options = options.xtream_skip_live
-                    || options.xtream_skip_vod
-                    || options.xtream_skip_series
+                let has_options = options.skip_live
+                    || options.skip_vod
+                    || options.skip_series
                     || !options.xtream_live_stream_use_prefix
                     || options.xtream_live_stream_without_extension
                     || options.resolve_tmdb
@@ -80,9 +80,9 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                 (
                     has_options,
                     vec![
-                        (options.xtream_skip_live, "LABEL.LIVE"),
-                        (options.xtream_skip_vod, "LABEL.VOD"),
-                        (options.xtream_skip_series, "LABEL.SERIES"),
+                        (options.skip_live, "LABEL.LIVE"),
+                        (options.skip_vod, "LABEL.VOD"),
+                        (options.skip_series, "LABEL.SERIES"),
                     ],
                     vec![
                         (options.xtream_live_stream_use_prefix, "LABEL.LIVE_STREAM_USE_PREFIX"),

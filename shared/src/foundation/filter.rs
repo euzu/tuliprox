@@ -448,12 +448,11 @@ pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> R
             }
 
             if !errors.is_empty() {
-                errors.push(format!("Unable to parse filter: {}", filter_text));
+                errors.push(format!("Unable to parse filter: {filter_text}"));
                 return Err(TuliproxError::FilterParse(errors.join("\n").to_string()));
             }
 
-            result
-                .map_or_else(|| Err(TuliproxError::FilterParse(format!("Unable to parse filter: {}", filter_text))), Ok)
+            result.map_or_else(|| Err(TuliproxError::FilterParse(format!("Unable to parse filter: {filter_text}"))), Ok)
         }
         Err(err) => Err(TuliproxError::FilterParse(format!("{err}"))),
     }

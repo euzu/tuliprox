@@ -1017,7 +1017,7 @@ mod tests {
         dto.url = "http://main.com".to_string();
         dto.username = Some("u".to_string());
         dto.password = Some("p".to_string());
-        dto.options = Some(ConfigInputOptionsDto { xtream_skip_live: true, ..ConfigInputOptionsDto::default() });
+        dto.options = Some(ConfigInputOptionsDto { skip_live: true, ..ConfigInputOptionsDto::default() });
         dto.staged = Some(StagedInputDto {
             enabled: true,
             name: "staged".into(),
@@ -1044,7 +1044,7 @@ mod tests {
         dto.url = "http://main.com".to_string();
         dto.username = Some("u".to_string());
         dto.password = Some("p".to_string());
-        dto.options = Some(ConfigInputOptionsDto { xtream_skip_vod: true, ..ConfigInputOptionsDto::default() });
+        dto.options = Some(ConfigInputOptionsDto { skip_vod: true, ..ConfigInputOptionsDto::default() });
         dto.staged = Some(StagedInputDto {
             name: "staged".into(),
             input_type: InputType::M3u,

@@ -2,6 +2,7 @@ use crate::api::model::AppState;
 use crate::{
     api::api_utils::{empty_json_list_response, json_or_bin_response, stream_json_or_bin_response_stream},
     model::{ConfigInput, ConfigTarget},
+    processing::processor::{download_stalker_playlist, StalkerCluster},
     repository::{
         iter_raw_m3u_input_playlist, iter_raw_m3u_target_playlist, iter_raw_xtream_input_playlist,
         iter_raw_xtream_target_playlist,
@@ -117,6 +118,24 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 }
             });
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
+        } else if matches!(input.input_type, InputType::Stalker | InputType::StalkerBatch) {
+            let stalker_cluster = match cluster {
+                XtreamCluster::Live => StalkerCluster::Live,
+                XtreamCluster::Video => StalkerCluster::Vod,
+                XtreamCluster::Series => StalkerCluster::Series,
+            };
+            let client = app_state.http_client.load();
+            let (groups, errors, _) =
+                download_stalker_playlist(&app_state.app_config, client.as_ref(), input, Some(&[stalker_cluster])).await;
+            if groups.is_empty() {
+                let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();
+                return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
+                    .into_response();
+            }
+            let channels: Vec<UiPlaylistItem> =
+                groups.iter().flat_map(|g| g.channels.iter()).map(UiPlaylistItem::from).collect();
+            interner_gc();
+            return json_or_bin_response(accept, &channels).into_response();
         }
     }
     (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"}))).into_response()
@@ -154,6 +173,25 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                         axum::Json(json!({ "error": "Media-server inputs are not supported on this endpoint yet"})),
                     )
                         .into_response();
+                }
+                InputType::Stalker | InputType::StalkerBatch => {
+                    let stalker_cluster = match cluster {
+                        XtreamCluster::Live => StalkerCluster::Live,
+                        XtreamCluster::Video => StalkerCluster::Vod,
+                        XtreamCluster::Series => StalkerCluster::Series,
+                    };
+                    // The Stalker processor mirrors the M3U/Xtream path: it returns
+                    // `PlaylistGroup`s for the requested cluster only. The third
+                    // tuple element (`use_disk_based_processing`) is irrelevant for
+                    // a live preview — we always surface the in-memory items here.
+                    let (groups, errs, _) = download_stalker_playlist(
+                        &app_state.app_config,
+                        client,
+                        input,
+                        Some(&[stalker_cluster]),
+                    )
+                    .await;
+                    (groups, errs)
                 }
             };
             if result.is_empty() {

@@ -3,7 +3,10 @@ use crate::{
     check_input_connections, check_input_credentials,
     error::TuliproxError,
     foundation::{get_filter, Filter},
-    model::{config::media_server_catalog::MediaServerInputConfigDto, EpgConfigDto, PatternTemplate},
+    model::{
+        config::media_server_catalog::MediaServerInputConfigDto, EpgConfigDto, PatternTemplate,
+        StalkerDeviceProfileDto, StalkerInputConfigDto,
+    },
     utils::{
         arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
         default_resolve_background, default_resolve_delay_secs, default_xtream_live_stream_use_prefix,
@@ -104,6 +107,8 @@ pub enum InputType {
     Xtream,
     M3uBatch,
     XtreamBatch,
+    Stalker,
+    StalkerBatch,
     Library,
     Emby,
     Jellyfin,
@@ -113,12 +118,14 @@ pub enum InputType {
 impl InputType {
     pub fn is_xtream(&self) -> bool { matches!(self, Self::Xtream | Self::XtreamBatch) }
     pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
+    pub fn is_stalker(&self) -> bool { matches!(self, Self::Stalker | Self::StalkerBatch) }
     pub fn uses_standard_input_url(&self) -> bool {
-        matches!(self, Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch)
+        matches!(self, Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch | Self::Stalker)
     }
 
     pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
     pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
+    pub fn is_batch(&self) -> bool { matches!(self, Self::M3uBatch | Self::XtreamBatch | Self::StalkerBatch) }
 }
 
 #[derive(
@@ -151,12 +158,12 @@ impl InputFetchMethod {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigInputOptionsDto {
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub xtream_skip_live: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub xtream_skip_vod: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub xtream_skip_series: bool,
+    #[serde(default, alias = "xtream_skip_live", alias = "stalker_skip_live", skip_serializing_if = "is_false")]
+    pub skip_live: bool,
+    #[serde(default, alias = "xtream_skip_vod", alias = "stalker_skip_vod", skip_serializing_if = "is_false")]
+    pub skip_vod: bool,
+    #[serde(default, alias = "xtream_skip_series", alias = "stalker_skip_series", skip_serializing_if = "is_false")]
+    pub skip_series: bool,
     #[serde(default = "default_xtream_live_stream_use_prefix", skip_serializing_if = "is_true")]
     pub xtream_live_stream_use_prefix: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -193,14 +200,19 @@ pub struct ConfigInputOptionsDto {
     pub probe_filter: Option<String>,
     #[serde(skip)]
     pub t_probe_filter: Option<Filter>,
+    // --- Stalker/Ministra options ----------------------------------------
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub stalker_pre_resolve_playback: bool,
+    #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
+    pub stalker_runtime_resolve_playback: bool,
 }
 
 impl Default for ConfigInputOptionsDto {
     fn default() -> Self {
         ConfigInputOptionsDto {
-            xtream_skip_live: false,
-            xtream_skip_vod: false,
-            xtream_skip_series: false,
+            skip_live: false,
+            skip_vod: false,
+            skip_series: false,
             xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
             resolve_tmdb: false,
@@ -217,15 +229,17 @@ impl Default for ConfigInputOptionsDto {
             t_resolve_filter: None,
             probe_filter: None,
             t_probe_filter: None,
+            stalker_pre_resolve_playback: default_as_true(),
+            stalker_runtime_resolve_playback: default_as_true(),
         }
     }
 }
 
 impl ConfigInputOptionsDto {
     pub fn is_empty(&self) -> bool {
-        !self.xtream_skip_live
-            && !self.xtream_skip_vod
-            && !self.xtream_skip_series
+        !self.skip_live
+            && !self.skip_vod
+            && !self.skip_series
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
             && !self.resolve_tmdb
@@ -240,12 +254,14 @@ impl ConfigInputOptionsDto {
             && is_default_probe_live_interval(&self.probe_live_interval_hours)
             && self.resolve_filter.as_ref().is_none_or(|s| s.trim().is_empty())
             && self.probe_filter.as_ref().is_none_or(|s| s.trim().is_empty())
+            && self.stalker_pre_resolve_playback
+            && self.stalker_runtime_resolve_playback
     }
 
     pub fn clean(&mut self) {
-        self.xtream_skip_live = false;
-        self.xtream_skip_vod = false;
-        self.xtream_skip_series = false;
+        self.skip_live = false;
+        self.skip_vod = false;
+        self.skip_series = false;
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
         self.resolve_tmdb = false;
@@ -262,6 +278,8 @@ impl ConfigInputOptionsDto {
         self.t_resolve_filter = None;
         self.probe_filter = None;
         self.t_probe_filter = None;
+        self.stalker_pre_resolve_playback = default_as_true();
+        self.stalker_runtime_resolve_playback = default_as_true();
     }
 
     pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
@@ -317,7 +335,7 @@ impl FromStr for ClusterSource {
         } else if s.eq(Self::SKIP) {
             Ok(Self::Skip)
         } else {
-            Err(TuliproxError::ConfigInput(format!("Unknown ClusterSource: {}", s)))
+            Err(TuliproxError::ConfigInput(format!("Unknown ClusterSource: {s}")))
         }
     }
 }
@@ -412,6 +430,8 @@ pub struct ConfigInputAliasDto {
     pub exp_date: Option<i64>,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalker: Option<StalkerInputConfigDto>,
 }
 
 impl ConfigInputAliasDto {
@@ -427,6 +447,7 @@ impl ConfigInputAliasDto {
         }
         check_input_credentials!(self, input_type, true, true);
         check_input_connections!(self, input_type, true);
+        prepare_stalker_config(&self.name, input_type, &mut self.stalker)?;
 
         Ok(self.id)
     }
@@ -479,6 +500,10 @@ pub struct ConfigInputDto {
     pub panel_api: Option<PanelApiConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Vec<ConfigProviderDto>>,
+    /// Stalker/Ministra portal configuration. Required when `input_type`
+    /// is `Stalker` or `StalkerBatch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalker: Option<StalkerInputConfigDto>,
 }
 
 impl Default for ConfigInputDto {
@@ -506,13 +531,93 @@ impl Default for ConfigInputDto {
             exp_date: None,
             panel_api: None,
             provider: None,
+            stalker: None,
         }
     }
 }
 
 impl ConfigInputDto {
-    pub fn new_with_type(input_type: InputType) -> Self { Self { input_type, ..Self::default() } }
+    pub fn new_with_type(input_type: InputType) -> Self {
+        let stalker = input_type.is_stalker().then(StalkerInputConfigDto::default);
+        Self { input_type, stalker, ..Self::default() }
+    }
 
+    /// Validate and normalize the `stalker` sub-struct.
+    ///
+    /// Stalker/Ministra portals require *some* identity anchor — a MAC address
+    /// or account credentials. The derived fields (`device_id`, `signature`,
+    /// `device_id2`) are filled by the network layer at runtime; we only
+    /// verify the user-supplied inputs here.
+    pub fn prepare_stalker_input(&mut self) -> Result<(), TuliproxError> {
+        prepare_stalker_config(&self.name, &self.input_type, &mut self.stalker)
+    }
+}
+
+fn prepare_stalker_config(
+    input_name: &str,
+    input_type: &InputType,
+    stalker: &mut Option<StalkerInputConfigDto>,
+) -> Result<(), TuliproxError> {
+    if !input_type.is_stalker() {
+        if stalker.is_some() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "stalker configuration is only valid for stalker inputs (input: {input_name})"
+            )));
+        }
+        return Ok(());
+    }
+
+    let config = stalker.get_or_insert_with(StalkerInputConfigDto::default);
+    let device = config.device.get_or_insert_with(StalkerDeviceProfileDto::default);
+
+    // MAC validation — accept XX:XX:XX:XX:XX:XX (case-insensitive). Empty
+    // MAC is allowed at this point (auth mode might be credentials-only);
+    // the network layer surfaces a clearer error if no identity is derivable.
+    if let Some(mac) = device.mac_address.as_ref() {
+        let normalized = mac.trim();
+        if !normalized.is_empty() {
+            let parts: Vec<&str> = normalized.split(':').collect();
+            let valid =
+                parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()));
+            if !valid {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "stalker.device.mac_address must be in XX:XX:XX:XX:XX:XX format (input: {input_name})"
+                )));
+            }
+            let first_octet = u8::from_str_radix(parts[0], 16).unwrap_or_default();
+            if first_octet & 1 != 0 {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "stalker.device.mac_address must be a unicast MAC address (input: {input_name})"
+                )));
+            }
+            device.mac_address = Some(normalized.to_ascii_lowercase());
+        }
+    }
+
+    // Trim locale/timezone if the user supplied them.
+    if let Some(timezone) = device.timezone.as_mut() {
+        *timezone = timezone.trim().to_string();
+        if timezone.is_empty() {
+            device.timezone = None;
+        }
+    }
+    if let Some(locale) = device.locale.as_mut() {
+        *locale = locale.trim().to_string();
+        if locale.is_empty() {
+            device.locale = None;
+        }
+    }
+    if let Some(profile) = device.device_profile.as_mut() {
+        *profile = profile.trim().to_string();
+        if profile.is_empty() {
+            device.device_profile = None;
+        }
+    }
+
+    Ok(())
+}
+
+impl ConfigInputDto {
     fn normalize_input_type_from_batch_url(&mut self) {
         let is_batch_url = self.url.trim().starts_with(BATCH_SCHEME_PREFIX);
         self.input_type = match self.input_type {
@@ -528,6 +633,13 @@ impl ConfigInputDto {
                     InputType::XtreamBatch
                 } else {
                     InputType::Xtream
+                }
+            }
+            InputType::Stalker | InputType::StalkerBatch => {
+                if is_batch_url {
+                    InputType::StalkerBatch
+                } else {
+                    InputType::Stalker
                 }
             }
             InputType::Library => InputType::Library,
@@ -631,7 +743,13 @@ impl ConfigInputDto {
                     )));
                 }
             }
-            InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {}
+            InputType::M3u
+            | InputType::Xtream
+            | InputType::M3uBatch
+            | InputType::XtreamBatch
+            | InputType::Stalker
+            | InputType::StalkerBatch
+            | InputType::Library => {}
         }
 
         Ok(())
@@ -675,6 +793,9 @@ impl ConfigInputDto {
 
         check_input_credentials!(self, self.input_type, true, false);
         check_input_connections!(self, self.input_type, false);
+        if self.enabled && self.input_type.is_stalker() {
+            self.prepare_stalker_input()?;
+        }
         if let Some(staged_input) = self.staged.as_mut() {
             if staged_input.enabled {
                 check_input_credentials!(staged_input, staged_input.input_type, true, true);
@@ -692,10 +813,10 @@ impl ConfigInputDto {
                         if staged_input.input_type.is_m3u() { ClusterSource::Input } else { ClusterSource::Staged };
                     let vod = staged_input.vod_source.unwrap_or(vod_default);
                     let series = staged_input.series_source.unwrap_or(series_default);
-                    let (skip_live, skip_vod, skip_series) =
-                        self.options.as_ref().map_or((false, false, false), |opts| {
-                            (opts.xtream_skip_live, opts.xtream_skip_vod, opts.xtream_skip_series)
-                        });
+                    let (skip_live, skip_vod, skip_series) = self
+                        .options
+                        .as_ref()
+                        .map_or((false, false, false), |opts| (opts.skip_live, opts.skip_vod, opts.skip_series));
 
                     let live_uses_staged = matches!(live, ClusterSource::Staged) && !skip_live;
                     let vod_uses_staged = matches!(vod, ClusterSource::Staged) && !skip_vod;
@@ -1594,7 +1715,7 @@ mod tests {
         dto.url = "http://main.com".to_string();
         dto.username = Some("u".to_string());
         dto.password = Some("p".to_string());
-        dto.options = Some(ConfigInputOptionsDto { xtream_skip_live: true, ..ConfigInputOptionsDto::default() });
+        dto.options = Some(ConfigInputOptionsDto { skip_live: true, ..ConfigInputOptionsDto::default() });
         dto.staged = Some(StagedInputDto {
             enabled: true,
             name: "staged".into(),
@@ -1621,7 +1742,7 @@ mod tests {
         dto.url = "http://main.com".to_string();
         dto.username = Some("u".to_string());
         dto.password = Some("p".to_string());
-        dto.options = Some(ConfigInputOptionsDto { xtream_skip_vod: true, ..ConfigInputOptionsDto::default() });
+        dto.options = Some(ConfigInputOptionsDto { skip_vod: true, ..ConfigInputOptionsDto::default() });
         dto.staged = Some(StagedInputDto {
             name: "staged".into(),
             input_type: InputType::M3u,
@@ -1763,5 +1884,118 @@ mod tests {
         let mut dto = ConfigInputOptionsDto { resolve_filter: None, ..ConfigInputOptionsDto::default() };
         dto.prepare(None).expect("None filter should prepare successfully");
         assert!(dto.t_resolve_filter.is_none());
+    }
+
+    #[test]
+    fn config_input_options_deserializes_legacy_prefixed_skip_aliases() {
+        let dto: ConfigInputOptionsDto = serde_json::from_str(
+            r#"{
+                "xtream_skip_live": true,
+                "stalker_skip_vod": true,
+                "skip_series": true
+            }"#,
+        )
+        .expect("legacy aliases should deserialize");
+
+        assert!(dto.skip_live);
+        assert!(dto.skip_vod);
+        assert!(dto.skip_series);
+    }
+
+    #[test]
+    fn config_input_options_serializes_shared_skip_names() {
+        let dto = ConfigInputOptionsDto {
+            skip_live: true,
+            skip_vod: true,
+            skip_series: false,
+            ..ConfigInputOptionsDto::default()
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&dto).expect("config input options should serialize"))
+                .expect("serialized json should parse");
+
+        assert_eq!(value.get("skip_live"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(value.get("skip_vod"), Some(&serde_json::Value::Bool(true)));
+        assert!(value.get("xtream_skip_live").is_none());
+        assert!(value.get("stalker_skip_vod").is_none());
+    }
+
+    #[test]
+    fn new_stalker_input_has_configuration_block() {
+        let input = ConfigInputDto::new_with_type(InputType::Stalker);
+
+        assert!(input.stalker.is_some());
+        assert!(ConfigInputDto::new_with_type(InputType::M3u).stalker.is_none());
+    }
+
+    #[test]
+    fn stalker_mac_is_normalized_and_multicast_is_rejected() {
+        let mut input = ConfigInputDto::new_with_type(InputType::Stalker);
+        input.name = "portal".into();
+        input.stalker.as_mut().expect("stalker config").device =
+            Some(StalkerDeviceProfileDto { mac_address: Some("00:1A:79:AA:BB:CC".to_string()), ..Default::default() });
+        input.prepare_stalker_input().expect("unicast MAC should be valid");
+        assert_eq!(
+            input
+                .stalker
+                .as_ref()
+                .and_then(|config| config.device.as_ref())
+                .and_then(|device| device.mac_address.as_deref()),
+            Some("00:1a:79:aa:bb:cc")
+        );
+
+        input.stalker.as_mut().expect("stalker config").device.as_mut().expect("device").mac_address =
+            Some("01:00:00:00:00:00".to_string());
+        assert!(input.prepare_stalker_input().is_err());
+    }
+
+    #[test]
+    fn non_stalker_input_rejects_stalker_configuration() {
+        let mut input = ConfigInputDto {
+            name: "m3u".into(),
+            stalker: Some(StalkerInputConfigDto::default()),
+            ..Default::default()
+        };
+        assert!(input.prepare_stalker_input().is_err());
+    }
+
+    #[test]
+    fn stalker_config_round_trips_extended_device_and_size_caps() {
+        let mut input = ConfigInputDto::new_with_type(InputType::Stalker);
+        input.name = "portal".into();
+        input.stalker = Some(StalkerInputConfigDto {
+            device: Some(StalkerDeviceProfileDto {
+                mac_address: Some("00:1a:79:aa:bb:cc".to_string()),
+                device_profile: Some("MAG254".to_string()),
+                serial_number: Some("serial-1".to_string()),
+                device_id: Some("device-1".to_string()),
+                device_id2: Some("device-2".to_string()),
+                signature: Some("sig-1".to_string()),
+                ..Default::default()
+            }),
+            size_caps: Some(crate::model::stalker::StalkerActionSizeCapDto {
+                create_link_kb: 96,
+                ordered_list_mb: 12,
+                get_epg_mb: 80,
+            }),
+            catalog_max_pages: Some(2048),
+            ..Default::default()
+        });
+
+        let value = serde_json::to_value(&input).expect("serialize stalker input");
+        let decoded: ConfigInputDto = serde_json::from_value(value).expect("deserialize stalker input");
+        let stalker = decoded.stalker.expect("stalker config");
+        let device = stalker.device.expect("device");
+        assert_eq!(device.device_profile.as_deref(), Some("MAG254"));
+        assert_eq!(device.serial_number.as_deref(), Some("serial-1"));
+        assert_eq!(device.device_id.as_deref(), Some("device-1"));
+        assert_eq!(device.device_id2.as_deref(), Some("device-2"));
+        assert_eq!(device.signature.as_deref(), Some("sig-1"));
+        let caps = stalker.size_caps.expect("size caps");
+        assert_eq!(caps.create_link_kb, 96);
+        assert_eq!(caps.ordered_list_mb, 12);
+        assert_eq!(caps.get_epg_mb, 80);
+        assert_eq!(stalker.catalog_max_pages, Some(2048));
     }
 }

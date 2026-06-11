@@ -1,7 +1,7 @@
 use crate::{
     app::components::{
-        config::HasFormData, select::Select, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode,
-        SourceEditorContext, TextButton,
+        build_options, config::HasFormData, select::Select, selection_parse_first, BlockId, BlockInstance, Card,
+        DropDownSelection, EditMode, SourceEditorContext, TextButton,
     },
     config_field, config_field_child, config_field_custom, edit_field_text, generate_form_reducer,
     i18n::use_translation,
@@ -44,10 +44,7 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
 
     let target_types = use_memo(output_form_state.form.use_output, |use_output| {
         let default_type = use_output.unwrap_or(TargetType::M3u);
-        [TargetType::M3u, TargetType::Xtream]
-            .iter()
-            .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: *t == default_type })
-            .collect::<Vec<DropDownOption>>()
+        build_options([TargetType::M3u, TargetType::Xtream], &default_type, |value| html! { value.to_string() })
     });
 
     {
@@ -92,19 +89,10 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
                                 name={"use_output"}
                                 multi_select={false}
                                 on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    match selections {
-                                        DropDownSelection::Empty => {
-                                            output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(TargetType::M3u)));
-                                        }
-                                        DropDownSelection::Single(option) => {
-                                            output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(option.parse::<TargetType>().unwrap_or(TargetType::M3u))));
-                                        }
-                                        DropDownSelection::Multi(options) => {
-                                            if let Some(first) = options.first() {
-                                                output_form_state_1.dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(first.parse::<TargetType>().unwrap_or(TargetType::M3u))));
-                                            }
-                                        }
-                                    }
+                                    let target_type =
+                                        selection_parse_first::<TargetType>(&selections).unwrap_or(TargetType::M3u);
+                                    output_form_state_1
+                                        .dispatch(HdHomeRunTargetOutputFormAction::UseOutput(Some(target_type)));
                                 })}
                                 options={target_types.clone()}
                             />

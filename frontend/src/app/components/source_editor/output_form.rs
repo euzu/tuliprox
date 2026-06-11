@@ -28,6 +28,7 @@ pub fn ConfigOutputView(props: &ConfigOutputViewProps) -> Html {
             | BlockType::InputEmby
             | BlockType::InputJellyfin
             | BlockType::InputPlex
+            | BlockType::InputStalker
             | BlockType::Target => html! {},
             BlockType::OutputM3u => {
                 let output = props.output.as_ref().and_then(|to| {

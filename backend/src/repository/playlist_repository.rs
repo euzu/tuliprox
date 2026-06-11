@@ -9,15 +9,20 @@ use crate::repository::{ensure_target_storage_path, get_input_storage_path, get_
 use crate::repository::{load_input_local_library_playlist, persist_input_library_playlist};
 use crate::repository::{load_input_m3u_playlist, m3u_get_file_path_for_db, m3u_write_playlist, persist_input_m3u_playlist};
 use crate::repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
+use crate::repository::stalker_repository::{
+    get_stalker_storage_path, iter_stalker_items, iter_stalker_series_roots,
+};
 use crate::repository::BPlusTree;
 use crate::repository::{
     LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource,
-    MediaServerDiskPlaylistSource, XtreamDiskPlaylistSource,
+    MediaServerDiskPlaylistSource, StalkerDiskPlaylistSource, XtreamDiskPlaylistSource,
 };
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::utils;
+use crate::utils::normalized_source_ordinal;
 use log::{info, warn};
 use shared::error::{ TuliproxError};
+use shared::model::stalker::StalkerStreamKind;
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
@@ -623,6 +628,16 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
             }
             (playlist, None)
         }
+        InputType::Stalker | InputType::StalkerBatch => {
+            // The Stalker processor (`processor::stalker::download_stalker_playlist`)
+            // is the single writer of the per-cluster B+Tree. Re-encoding the
+            // `PlaylistItem` runtime projection back into `StalkerPlaylistItem`
+            // would destroy the canonical `cmd`/`playback_descriptor`/capability
+            // flags the processor just persisted — including the field the
+            // runtime 4xx-re-resolve hook relies on. The disk layout is
+            // already in sync; nothing to do here.
+            (playlist, None)
+        }
     }
 }
 
@@ -680,6 +695,19 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
+        InputType::Stalker | InputType::StalkerBatch => {
+            let clusters_to_load = clusters.unwrap_or(&XTREAM_CLUSTER);
+            if disk_based_processing {
+                let stalker_path = get_stalker_storage_path(&storage_path);
+                let source = PlaylistSource::stalker_disk(
+                    StalkerDiskPlaylistSource::new(app_config, &stalker_path).await,
+                );
+                Ok(PlaylistSource::filtered(source, skipped_clusters(clusters_to_load)))
+            } else {
+                let groups = load_input_stalker_playlist(app_config, &storage_path, clusters_to_load).await?;
+                Ok(MemoryPlaylistSource::new(groups).into_source())
+            }
+        }
     }
 }
 
@@ -711,6 +739,74 @@ pub fn get_input_media_server_playlist_file_path(storage_path: &Path, input_name
         .collect();
     storage_path.join(format!("media_server_{sanitized_input_name}.{FILE_SUFFIX_DB}"))
 }
+
+/// Load a Stalker input's playlist into memory. The on-disk B+Tree is the
+/// source of truth; we stream every per-cluster tree and bucket the items
+/// by cluster to build the runtime `PlaylistGroup`s.
+pub async fn load_input_stalker_playlist(
+    app_config: &Arc<AppConfig>,
+    storage_path: &Path,
+    clusters: &[XtreamCluster],
+) -> Result<Vec<PlaylistGroup>, TuliproxError> {
+    use futures::StreamExt;
+    let stalker_path = get_stalker_storage_path(storage_path);
+    let mut groups_map: indexmap::IndexMap<(XtreamCluster, u32), PlaylistGroup> =
+        indexmap::IndexMap::new();
+    for &cluster in clusters {
+        let kind = match cluster {
+            XtreamCluster::Live => StalkerStreamKind::Live,
+            XtreamCluster::Video => StalkerStreamKind::Movie,
+            XtreamCluster::Series => StalkerStreamKind::Episode,
+        };
+        let mut streams = Vec::new();
+        if cluster == XtreamCluster::Series {
+            if let Some(stream) = iter_stalker_series_roots(app_config, &stalker_path).await? {
+                streams.push(stream);
+            }
+        }
+        if let Some(stream) = iter_stalker_items(app_config, &stalker_path, kind).await? {
+            streams.push(stream);
+        }
+        for mut stream in streams {
+            while let Some(item) = stream.next().await {
+                let category_id = item.category_id;
+                groups_map
+                    .entry((cluster, category_id))
+                    .or_insert_with(|| PlaylistGroup {
+                        id: category_id,
+                        title: Arc::clone(&item.category_name),
+                        channels: Vec::new(),
+                        xtream_cluster: cluster,
+                    })
+                    .channels
+                    .push(PlaylistItem::from(&item));
+            }
+        }
+    }
+    let mut groups: Vec<PlaylistGroup> = groups_map.into_values().collect();
+    for group in &mut groups {
+        group
+            .channels
+            .sort_by_key(|item| normalized_source_ordinal(item.header.source_ordinal));
+    }
+    groups.sort_by_key(|group| {
+        group
+            .channels
+            .first()
+            .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal))
+    });
+    Ok(groups)
+}
+
+/// Build a `StalkerPlaylistItem` from a runtime `PlaylistItem`. The fields that
+/// are not part of the runtime projection (`cmd`, `playback_descriptor`,
+/// `archive_available`, …) are left at their default values; the reverse-proxy
+/// re-resolves the playback URL on demand. Currently unused: the Stalker
+/// processor writes the canonical rows directly via `persist_stalker_items`,
+/// and the disk layout is owned by the processor. Kept as `#[allow(dead_code)]`
+/// to document the public surface for any future callers.
+#[allow(dead_code)]
+fn _stalker_playlist_item_from_doc_marker() {}
 
 pub async fn persist_input_media_server_playlist(
     app_config: &Arc<AppConfig>,

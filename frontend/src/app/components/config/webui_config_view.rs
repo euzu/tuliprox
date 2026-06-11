@@ -1,12 +1,13 @@
 use crate::{
     app::{
         components::{
+            build_options,
             config::{
                 config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
                 config_view_context::ConfigViewContext,
                 use_emit_mapped, HasFormData,
             },
-            AppIcon, Card, Chip, DropDownOption, DropDownSelection, Select,
+            selection_parse_first, AppIcon, Card, Chip, DropDownSelection, Select,
         },
         context::ConfigContext,
     },
@@ -121,15 +122,9 @@ pub fn WebUiConfigView() -> Html {
         use_default_form_reducer!(StreamInfoConfigFormState { form: StreamInfoConfigDto::default() });
 
     let view_types = use_memo(webui_state.data().landing_page, |landing_page| {
-        ViewType::iter()
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|view_type| DropDownOption {
-                id: view_type.to_string(),
-                label: html! { translate.t(&format!("LABEL.VIEW_TYPE_{}", view_type.to_string().to_uppercase()))},
-                selected: landing_page == view_type,
-            })
-            .collect::<Vec<DropDownOption>>()
+        build_options(ViewType::iter(), landing_page, |view_type| {
+            html! { translate.t(&format!("LABEL.VIEW_TYPE_{}", view_type.to_string().to_uppercase())) }
+        })
     });
 
     // Notify parent when form changes
@@ -271,12 +266,8 @@ pub fn WebUiConfigView() -> Html {
                    html! { <Select name="landing_page"
                     multi_select={false}
                     on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
-                        let view_type = match selections {
-                            DropDownSelection::Empty => None,
-                            DropDownSelection::Single(option) => option.parse::<ViewType>().ok(),
-                            DropDownSelection::Multi(options) => options.first().as_ref().and_then(|f| f.parse::<ViewType>().ok())
-                           };
-                        webui_state_clone.dispatch(WebUiConfigFormAction::LandingPage(view_type.unwrap_or_else(ViewType::default)));
+                        let view_type = selection_parse_first::<ViewType>(&selections);
+                        webui_state_clone.dispatch(WebUiConfigFormAction::LandingPage(view_type.unwrap_or_default()));
                     })}
                     options={view_types.clone()}
                     />

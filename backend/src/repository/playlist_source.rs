@@ -1,4 +1,5 @@
 use crate::model::AppConfig;
+use crate::repository::stalker_repository::{get_stalker_file_path, get_stalker_series_root_file_path};
 use crate::repository::BPlusTreeQuery;
 use crate::repository::xtream_get_file_path;
 use crate::utils::{normalized_source_ordinal, FileReadGuard};
@@ -7,6 +8,8 @@ use indexmap::IndexMap;
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use shared::error::TuliproxError;
+use shared::model::stalker::StalkerStreamKind;
+use shared::model::stalker_item::StalkerPlaylistItem;
 use shared::model::{M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
 use shared::model::UUIDType;
 use shared::utils::Internable;
@@ -47,6 +50,7 @@ pub struct PlaylistSource {
 enum PlaylistSourceKind {
     Empty(EmptyPlaylistSource),
     XtreamDisk(Box<XtreamDiskPlaylistSource>),
+    StalkerDisk(Box<StalkerDiskPlaylistSource>),
     M3uDisk(Box<M3uDiskPlaylistSource>),
     LocalLibraryDisk(Box<LocalLibraryDiskPlaylistSource>),
     MediaServerDisk(Box<MediaServerDiskPlaylistSource>),
@@ -54,6 +58,8 @@ enum PlaylistSourceKind {
 }
 
 type XtreamQueryHandle = (BPlusTreeQuery<u32, XtreamPlaylistItem>, Arc<FileReadGuard>);
+
+type StalkerQueryHandle = (BPlusTreeQuery<u32, StalkerPlaylistItem>, Arc<FileReadGuard>);
 
 impl Default for PlaylistSource {
     fn default() -> Self { Self::new(PlaylistSourceKind::Empty(EmptyPlaylistSource::default())) }
@@ -63,6 +69,8 @@ impl PlaylistSource {
     fn new(kind: PlaylistSourceKind) -> Self { Self { kind, skip_set: None } }
 
     pub fn xtream_disk(source: XtreamDiskPlaylistSource) -> Self { Self::new(PlaylistSourceKind::XtreamDisk(Box::new(source))) }
+
+    pub fn stalker_disk(source: StalkerDiskPlaylistSource) -> Self { Self::new(PlaylistSourceKind::StalkerDisk(Box::new(source))) }
 
     pub fn m3u_disk(source: M3uDiskPlaylistSource) -> Self { Self::new(PlaylistSourceKind::M3uDisk(Box::new(source))) }
 
@@ -97,6 +105,7 @@ impl PlaylistSource {
         match &self.kind {
             PlaylistSourceKind::Empty(source) => source.is_memory(),
             PlaylistSourceKind::XtreamDisk(source) => source.is_memory(),
+            PlaylistSourceKind::StalkerDisk(source) => source.is_memory(),
             PlaylistSourceKind::M3uDisk(source) => source.is_memory(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.is_memory(),
             PlaylistSourceKind::MediaServerDisk(source) => source.is_memory(),
@@ -109,6 +118,7 @@ impl PlaylistSource {
             return match &mut self.kind {
                 PlaylistSourceKind::Empty(source) => source.get_channel_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::XtreamDisk(source) => source.get_channel_count_excluding_clusters(skip_set),
+                PlaylistSourceKind::StalkerDisk(source) => source.get_channel_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::M3uDisk(source) => source.get_channel_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::LocalLibraryDisk(source) => source.get_channel_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::MediaServerDisk(source) => source.get_channel_count_excluding_clusters(skip_set),
@@ -119,6 +129,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.get_channel_count(),
             PlaylistSourceKind::XtreamDisk(source) => source.get_channel_count(),
+            PlaylistSourceKind::StalkerDisk(source) => source.get_channel_count(),
             PlaylistSourceKind::M3uDisk(source) => source.get_channel_count(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_channel_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_channel_count(),
@@ -131,6 +142,7 @@ impl PlaylistSource {
             return match &mut self.kind {
                 PlaylistSourceKind::Empty(source) => source.get_group_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::XtreamDisk(source) => source.get_group_count_excluding_clusters(skip_set),
+                PlaylistSourceKind::StalkerDisk(source) => source.get_group_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::M3uDisk(source) => source.get_group_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::LocalLibraryDisk(source) => source.get_group_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::MediaServerDisk(source) => source.get_group_count_excluding_clusters(skip_set),
@@ -141,6 +153,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.get_group_count(),
             PlaylistSourceKind::XtreamDisk(source) => source.get_group_count(),
+            PlaylistSourceKind::StalkerDisk(source) => source.get_group_count(),
             PlaylistSourceKind::M3uDisk(source) => source.get_group_count(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_group_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_group_count(),
@@ -156,6 +169,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.is_empty(),
             PlaylistSourceKind::XtreamDisk(source) => source.is_empty(),
+            PlaylistSourceKind::StalkerDisk(source) => source.is_empty(),
             PlaylistSourceKind::M3uDisk(source) => source.is_empty(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.is_empty(),
             PlaylistSourceKind::MediaServerDisk(source) => source.is_empty(),
@@ -168,6 +182,7 @@ impl PlaylistSource {
         let iter = match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.into_items(),
             PlaylistSourceKind::XtreamDisk(source) => source.into_items(),
+            PlaylistSourceKind::StalkerDisk(source) => source.into_items(),
             PlaylistSourceKind::M3uDisk(source) => source.into_items(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.into_items(),
             PlaylistSourceKind::MediaServerDisk(source) => source.into_items(),
@@ -185,6 +200,7 @@ impl PlaylistSource {
         let iter = match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.items_mut(),
             PlaylistSourceKind::XtreamDisk(source) => source.items_mut(),
+            PlaylistSourceKind::StalkerDisk(source) => source.items_mut(),
             PlaylistSourceKind::M3uDisk(source) => source.items_mut(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.items_mut(),
             PlaylistSourceKind::MediaServerDisk(source) => source.items_mut(),
@@ -208,6 +224,7 @@ impl PlaylistSource {
         let iter = match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.items(),
             PlaylistSourceKind::XtreamDisk(source) => source.items(),
+            PlaylistSourceKind::StalkerDisk(source) => source.items(),
             PlaylistSourceKind::M3uDisk(source) => source.items(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.items(),
             PlaylistSourceKind::MediaServerDisk(source) => source.items(),
@@ -233,6 +250,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.update_playlist(plg),
             PlaylistSourceKind::XtreamDisk(source) => source.update_playlist(plg),
+            PlaylistSourceKind::StalkerDisk(source) => source.update_playlist(plg),
             PlaylistSourceKind::M3uDisk(source) => source.update_playlist(plg),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.update_playlist(plg),
             PlaylistSourceKind::MediaServerDisk(source) => source.update_playlist(plg),
@@ -245,6 +263,7 @@ impl PlaylistSource {
             return match &mut self.kind {
                 PlaylistSourceKind::Empty(source) => source.get_missing_vod_info_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::XtreamDisk(source) => source.get_missing_vod_info_count_excluding_clusters(skip_set),
+                PlaylistSourceKind::StalkerDisk(source) => source.get_missing_vod_info_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::M3uDisk(source) => source.get_missing_vod_info_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::LocalLibraryDisk(source) => {
                     source.get_missing_vod_info_count_excluding_clusters(skip_set)
@@ -257,6 +276,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.get_missing_vod_info_count(),
             PlaylistSourceKind::XtreamDisk(source) => source.get_missing_vod_info_count(),
+            PlaylistSourceKind::StalkerDisk(source) => source.get_missing_vod_info_count(),
             PlaylistSourceKind::M3uDisk(source) => source.get_missing_vod_info_count(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_missing_vod_info_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_missing_vod_info_count(),
@@ -269,6 +289,9 @@ impl PlaylistSource {
             return match &mut self.kind {
                 PlaylistSourceKind::Empty(source) => source.get_missing_series_info_count_excluding_clusters(skip_set),
                 PlaylistSourceKind::XtreamDisk(source) => {
+                    source.get_missing_series_info_count_excluding_clusters(skip_set)
+                }
+                PlaylistSourceKind::StalkerDisk(source) => {
                     source.get_missing_series_info_count_excluding_clusters(skip_set)
                 }
                 PlaylistSourceKind::M3uDisk(source) => source.get_missing_series_info_count_excluding_clusters(skip_set),
@@ -285,6 +308,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.get_missing_series_info_count(),
             PlaylistSourceKind::XtreamDisk(source) => source.get_missing_series_info_count(),
+            PlaylistSourceKind::StalkerDisk(source) => source.get_missing_series_info_count(),
             PlaylistSourceKind::M3uDisk(source) => source.get_missing_series_info_count(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.get_missing_series_info_count(),
             PlaylistSourceKind::MediaServerDisk(source) => source.get_missing_series_info_count(),
@@ -303,6 +327,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.deduplicate(duplicates),
             PlaylistSourceKind::XtreamDisk(source) => source.deduplicate(duplicates),
+            PlaylistSourceKind::StalkerDisk(source) => source.deduplicate(duplicates),
             PlaylistSourceKind::M3uDisk(source) => source.deduplicate(duplicates),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.deduplicate(duplicates),
             PlaylistSourceKind::MediaServerDisk(source) => source.deduplicate(duplicates),
@@ -314,6 +339,7 @@ impl PlaylistSource {
         let groups = match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.take_groups(),
             PlaylistSourceKind::XtreamDisk(source) => source.take_groups(),
+            PlaylistSourceKind::StalkerDisk(source) => source.take_groups(),
             PlaylistSourceKind::M3uDisk(source) => source.take_groups(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.take_groups(),
             PlaylistSourceKind::MediaServerDisk(source) => source.take_groups(),
@@ -331,6 +357,7 @@ impl PlaylistSource {
         let mut cloned = match &self.kind {
             PlaylistSourceKind::Empty(source) => source.clone_source(),
             PlaylistSourceKind::XtreamDisk(source) => source.clone_source(),
+            PlaylistSourceKind::StalkerDisk(source) => source.clone_source(),
             PlaylistSourceKind::M3uDisk(source) => source.clone_source(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.clone_source(),
             PlaylistSourceKind::MediaServerDisk(source) => source.clone_source(),
@@ -344,6 +371,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.release_resources(cluster),
             PlaylistSourceKind::XtreamDisk(source) => source.release_resources(cluster),
+            PlaylistSourceKind::StalkerDisk(source) => source.release_resources(cluster),
             PlaylistSourceKind::M3uDisk(source) => source.release_resources(cluster),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.release_resources(cluster),
             PlaylistSourceKind::MediaServerDisk(source) => source.release_resources(cluster),
@@ -355,6 +383,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.obtain_resources(),
             PlaylistSourceKind::XtreamDisk(source) => source.obtain_resources(),
+            PlaylistSourceKind::StalkerDisk(source) => source.obtain_resources(),
             PlaylistSourceKind::M3uDisk(source) => source.obtain_resources(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.obtain_resources(),
             PlaylistSourceKind::MediaServerDisk(source) => source.obtain_resources(),
@@ -366,6 +395,7 @@ impl PlaylistSource {
         match &mut self.kind {
             PlaylistSourceKind::Empty(source) => source.sort_by_provider_ordinal(),
             PlaylistSourceKind::XtreamDisk(source) => source.sort_by_provider_ordinal(),
+            PlaylistSourceKind::StalkerDisk(source) => source.sort_by_provider_ordinal(),
             PlaylistSourceKind::M3uDisk(source) => source.sort_by_provider_ordinal(),
             PlaylistSourceKind::LocalLibraryDisk(source) => source.sort_by_provider_ordinal(),
             PlaylistSourceKind::MediaServerDisk(source) => source.sort_by_provider_ordinal(),
@@ -691,6 +721,276 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
     fn sort_by_provider_ordinal(&mut self) {
         warn!("Sorting by provider ordinal is not supported for disk based playlists");
     }
+}
+
+pub struct StalkerDiskPlaylistSource {
+    app_config: Arc<AppConfig>,
+    storage_path: PathBuf,
+    live: Option<StalkerQueryHandle>,
+    vod: Option<StalkerQueryHandle>,
+    series_roots: Option<StalkerQueryHandle>,
+    series: Option<StalkerQueryHandle>,
+}
+
+impl StalkerDiskPlaylistSource {
+    pub(crate) async fn new(app_config: &Arc<AppConfig>, storage_path: &Path) -> Self {
+        let mut source = StalkerDiskPlaylistSource {
+            app_config: Arc::clone(app_config),
+            storage_path: storage_path.to_path_buf(),
+            live: None,
+            vod: None,
+            series_roots: None,
+            series: None,
+        };
+        source.reload().await;
+        source
+    }
+
+    async fn reload(&mut self) {
+        if self.live.is_none() {
+            let live_path = get_stalker_file_path(&self.storage_path, StalkerStreamKind::Live);
+            self.live = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &live_path).await
+                .map(|(query, guard)| (query, Arc::new(guard)));
+        }
+        if self.vod.is_none() {
+            let vod_path = get_stalker_file_path(&self.storage_path, StalkerStreamKind::Movie);
+            self.vod = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &vod_path).await
+                .map(|(query, guard)| (query, Arc::new(guard)));
+        }
+        if self.series.is_none() {
+            let series_path = get_stalker_file_path(&self.storage_path, StalkerStreamKind::Episode);
+            self.series = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &series_path).await
+                .map(|(query, guard)| (query, Arc::new(guard)));
+        }
+        if self.series_roots.is_none() {
+            let series_root_path = get_stalker_series_root_file_path(&self.storage_path);
+            self.series_roots = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &series_root_path).await
+                .map(|(query, guard)| (query, Arc::new(guard)));
+        }
+    }
+}
+
+impl PlaylistSourceOps for StalkerDiskPlaylistSource {
+    fn is_memory(&self) -> bool { false }
+
+    fn get_channel_count(&mut self) -> usize {
+        self.live.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
+            + self.vod.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
+            + self.series_roots.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
+            + self.series.as_mut().map_or(0usize, |(t, _)| t.len().unwrap_or(0usize))
+    }
+
+    fn get_group_count(&mut self) -> usize {
+        fn collect_groups<Q>(query: &mut Option<(BPlusTreeQuery<u32, StalkerPlaylistItem>, Q)>, groups: &mut HashSet<Arc<str>>) {
+            if let Some((query, _)) = query {
+                for (_, item) in query.iter() {
+                    groups.insert(Arc::clone(&item.category_name));
+                }
+            }
+        }
+        let mut groups = HashSet::new();
+        collect_groups(&mut self.live, &mut groups);
+        collect_groups(&mut self.vod, &mut groups);
+        collect_groups(&mut self.series_roots, &mut groups);
+        collect_groups(&mut self.series, &mut groups);
+        groups.len()
+    }
+
+    fn get_channel_count_excluding_clusters(&mut self, skip_set: &HashSet<XtreamCluster>) -> usize {
+        let live_count = if skip_set.contains(&XtreamCluster::Live) {
+            0
+        } else {
+            self.live.as_mut().map_or(0usize, |(query, _)| query.len().unwrap_or(0usize))
+        };
+        let vod_count = if skip_set.contains(&XtreamCluster::Video) {
+            0
+        } else {
+            self.vod.as_mut().map_or(0usize, |(query, _)| query.len().unwrap_or(0usize))
+        };
+        let series_count = if skip_set.contains(&XtreamCluster::Series) {
+            0
+        } else {
+            self.series_roots.as_mut().map_or(0usize, |(query, _)| query.len().unwrap_or(0usize))
+                + self.series.as_mut().map_or(0usize, |(query, _)| query.len().unwrap_or(0usize))
+        };
+        live_count + vod_count + series_count
+    }
+
+    fn get_group_count_excluding_clusters(&mut self, skip_set: &HashSet<XtreamCluster>) -> usize {
+        fn collect_groups<Q>(
+            cluster: XtreamCluster,
+            query: &mut Option<(BPlusTreeQuery<u32, StalkerPlaylistItem>, Q)>,
+            groups: &mut HashSet<(XtreamCluster, Arc<str>)>,
+            skip_set: &HashSet<XtreamCluster>,
+        ) {
+            if skip_set.contains(&cluster) {
+                return;
+            }
+            if let Some((query, _)) = query {
+                for (_, item) in query.iter() {
+                    groups.insert((cluster, Arc::clone(&item.category_name)));
+                }
+            }
+        }
+
+        let mut groups = HashSet::new();
+        collect_groups(XtreamCluster::Live, &mut self.live, &mut groups, skip_set);
+        collect_groups(XtreamCluster::Video, &mut self.vod, &mut groups, skip_set);
+        collect_groups(XtreamCluster::Series, &mut self.series_roots, &mut groups, skip_set);
+        collect_groups(XtreamCluster::Series, &mut self.series, &mut groups, skip_set);
+        groups.len()
+    }
+
+    fn is_empty(&mut self) -> bool {
+        self.live.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
+            && self.vod.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
+            && self.series_roots.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
+            && self.series.as_mut().is_none_or(|(q, _)| q.is_empty().unwrap_or(true))
+    }
+
+    fn into_items(&mut self) -> Box<dyn Iterator<Item = PlaylistItem> + Send + '_> {
+        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let series_roots = self.series_roots.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        Box::new(live.chain(vod).chain(series_roots).chain(series))
+    }
+
+    fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item = Cow<'a, PlaylistItem>> + Send + 'a> {
+        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let series_roots = self.series_roots.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        Box::new(live.chain(vod).chain(series_roots).chain(series))
+    }
+
+    fn items_mut(&mut self) -> Box<dyn Iterator<Item = &mut PlaylistItem> + Send + '_> {
+        warn!("Disk-based playlist sources are read-only. Use clone_source() and convert to memory for mutable access.");
+        Box::new(std::iter::empty())
+    }
+
+    fn update_playlist<'a>(&'a mut self, _plg: &'a PlaylistGroup) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            warn!("update_playlist should not be called for Stalker Disk playlist");
+        })
+    }
+
+    fn get_missing_vod_info_count(&mut self) -> usize {
+        // Stalker items arrive fully populated from the portal: VOD rows already carry
+        // `plot`, `cast`, `director`, `genre`, `rating`, `tmdb_id` etc. There is no
+        // follow-up metadata-resolution pass like there is for Xtream, so the
+        // "missing info" count is always zero. Callers that interpret this as
+        // "needs follow-up work" should special-case the Stalker source kind.
+        0
+    }
+
+    fn get_missing_series_info_count(&mut self) -> usize {
+        // Same reasoning as `get_missing_vod_info_count`: Stalker series details
+        // are fetched inline at processor time and stored on the item.
+        0
+    }
+
+    fn get_missing_vod_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
+        0
+    }
+
+    fn get_missing_series_info_count_excluding_clusters(&mut self, _skip_set: &HashSet<XtreamCluster>) -> usize {
+        0
+    }
+
+    fn deduplicate(&mut self, _duplicates: &mut HashSet<UUIDType>) {
+        warn!("Deduplication is not supported for disk based playlist updates");
+    }
+
+    fn take_groups(&mut self) -> Vec<PlaylistGroup> {
+        let mut groups_map: IndexMap<(XtreamCluster, u32), PlaylistGroup> = IndexMap::new();
+        let mut iters: Vec<(XtreamCluster, Box<dyn Iterator<Item = StalkerPlaylistItem> + Send>)> = vec![];
+        if let Some((q, _)) = self.live.as_mut() {
+            iters.push((XtreamCluster::Live, Box::new(q.iter().map(|(_, item)| item))));
+        }
+        if let Some((q, _)) = self.vod.as_mut() {
+            iters.push((XtreamCluster::Video, Box::new(q.iter().map(|(_, item)| item))));
+        }
+        if let Some((q, _)) = self.series_roots.as_mut() {
+            iters.push((XtreamCluster::Series, Box::new(q.iter().map(|(_, item)| item))));
+        }
+        if let Some((q, _)) = self.series.as_mut() {
+            iters.push((XtreamCluster::Series, Box::new(q.iter().map(|(_, item)| item))));
+        }
+
+        for (cluster, iter) in iters {
+            for item in iter {
+                groups_map.entry((cluster, item.category_id))
+                    .or_insert_with(|| PlaylistGroup {
+                        id: item.category_id,
+                        title: Arc::clone(&item.category_name),
+                        channels: vec![],
+                        xtream_cluster: cluster,
+                    })
+                    .channels.push(PlaylistItem::from(&item));
+            }
+        }
+
+        for group in groups_map.values_mut() {
+            group
+                .channels
+                .sort_by_key(|item| normalized_source_ordinal(item.header.source_ordinal));
+        }
+
+        let mut groups: Vec<PlaylistGroup> = groups_map.into_values().collect();
+        groups.sort_by_key(|group| group.channels.first().map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal)));
+        groups
+    }
+
+    fn clone_source(&self) -> Result<PlaylistSource, TuliproxError> {
+        let live = clone_stalker_query("live", self.live.as_ref())?;
+        let vod = clone_stalker_query("vod", self.vod.as_ref())?;
+        let series_roots = clone_stalker_query("series roots", self.series_roots.as_ref())?;
+        let series = clone_stalker_query("series", self.series.as_ref())?;
+
+        Ok(PlaylistSource::stalker_disk(Self {
+            app_config: Arc::clone(&self.app_config),
+            storage_path: self.storage_path.clone(),
+            live,
+            vod,
+            series_roots,
+            series,
+        }))
+    }
+
+    fn release_resources(&mut self, cluster: XtreamCluster) {
+        match cluster {
+            XtreamCluster::Live => self.live = None,
+            XtreamCluster::Video => self.vod = None,
+            XtreamCluster::Series => {
+                self.series_roots = None;
+                self.series = None;
+            }
+        }
+    }
+
+    fn obtain_resources(&mut self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.reload().await;
+        })
+    }
+    fn sort_by_provider_ordinal(&mut self) {
+        warn!("Sorting by provider ordinal is not supported for disk based playlists");
+    }
+}
+
+fn clone_stalker_query(
+    label: &str,
+    source: Option<&StalkerQueryHandle>,
+) -> Result<Option<StalkerQueryHandle>, TuliproxError> {
+    source
+        .map(|(query, guard)| {
+            query
+                .try_clone()
+                .map(|cloned_query| (cloned_query, Arc::clone(guard)))
+                .map_err(|err| TuliproxError::RepositoryPlaylist(format!("Failed to clone {label} stalker disk playlist query: {err}")))
+        })
+        .transpose()
 }
 
 macro_rules! impl_single_file_disk_source {

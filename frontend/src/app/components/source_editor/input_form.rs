@@ -1,10 +1,10 @@
 use crate::{
     app::{
         components::{
-            config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId,
-            BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSmartMatchForm, EpgSourceItemForm,
-            FilterInput, IconButton, Panel, ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton,
-            TitledCard, ToolAction,
+            config::HasFormData, input::Input, key_value_editor::KeyValueEditor, select::Select, selection_parse_first,
+            AliasItemForm, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode,
+            EpgSmartMatchForm, EpgSourceItemForm, FilterInput, IconButton, Panel, ProviderItemForm, RadioButtonGroup,
+            SourceEditorContext, TextButton, TitledCard, ToolAction,
         },
         ConfigContext,
     },
@@ -21,7 +21,8 @@ use shared::{
     model::{
         ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto,
         EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, OnConnectErrorPolicy,
-        ProviderUrlSelectionPolicy, StagedInputDto, XtreamLoginRequest,
+        ProviderUrlSelectionPolicy, StagedInputDto, StalkerAuthMode, StalkerDeviceProfileDto,
+        StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset, XtreamLoginRequest,
     },
     utils::{Internable, BATCH_SCHEME_PREFIX},
 };
@@ -32,6 +33,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use strum::IntoEnumIterator;
 use web_sys::MouseEvent;
 use yew::{
     component, html, platform::spawn_local, use_context, use_effect_with, use_memo, use_mut_ref, use_reducer,
@@ -66,9 +68,9 @@ const LABEL_ADD_ALIAS: &str = "LABEL.ADD_ALIAS";
 const LABEL_ADD_PROVIDER: &str = "LABEL.ADD_PROVIDER";
 const LABEL_PROVIDERS: &str = "LABEL.PROVIDER";
 const LABEL_SKIP: &str = "LABEL.SKIP";
-const LABEL_XTREAM_SKIP_LIVE: &str = "LABEL.LIVE";
-const LABEL_XTREAM_SKIP_VOD: &str = "LABEL.VOD";
-const LABEL_XTREAM_SKIP_SERIES: &str = "LABEL.SERIES";
+const LABEL_SKIP_LIVE: &str = "LABEL.LIVE";
+const LABEL_SKIP_VOD: &str = "LABEL.VOD";
+const LABEL_SKIP_SERIES: &str = "LABEL.SERIES";
 const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX";
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
 const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
@@ -90,6 +92,60 @@ const LABEL_VOD_SOURCE: &str = "LABEL.VOD_SOURCE";
 const LABEL_SERIES_SOURCE: &str = "LABEL.SERIES_SOURCE";
 const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+
+fn blank_to_none(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn stalker_device_input<F>(
+    state: &yew::UseStateHandle<StalkerInputConfigDto>,
+    label: &str,
+    name: &str,
+    value: String,
+    update: F,
+) -> Html
+where
+    F: Fn(&mut StalkerDeviceProfileDto, String) + 'static,
+{
+    let state = state.clone();
+    html! {
+        <div class="tp__form-field tp__form-field__text">
+            <Input label={label.to_string()} name={name.to_string()} value={value}
+                on_change={Callback::from(move |value: String| {
+                    let mut config = (*state).clone();
+                    let device = config.device.get_or_insert_with(StalkerDeviceProfileDto::default);
+                    update(device, value);
+                    state.set(config);
+                })} />
+        </div>
+    }
+}
+
+fn stalker_size_cap_input<F>(
+    state: &yew::UseStateHandle<StalkerInputConfigDto>,
+    label: &str,
+    name: &str,
+    value: u32,
+    update: F,
+) -> Html
+where
+    F: Fn(&mut shared::model::stalker::StalkerActionSizeCapDto, u32) + 'static,
+{
+    let state = state.clone();
+    html! {
+        <div class="tp__form-field tp__form-field__text">
+            <Input label={label.to_string()} name={name.to_string()} value={value.to_string()}
+                on_change={Callback::from(move |value: String| {
+                    let parsed = value.trim().parse::<u32>().unwrap_or_default();
+                    let mut config = (*state).clone();
+                    let caps = config.size_caps.get_or_insert_with(Default::default);
+                    update(caps, parsed);
+                    state.set(config);
+                })} />
+        </div>
+    }
+}
 
 fn provider_url_selection_policy_label_key(policy: ProviderUrlSelectionPolicy) -> &'static str {
     match policy {
@@ -191,9 +247,9 @@ generate_form_reducer!(
     state: ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto },
     action_name: ConfigInputOptionsFormAction,
     fields {
-      XtreamSkipLive => xtream_skip_live: bool,
-      XtreamSkipVod => xtream_skip_vod: bool,
-      XtreamSkipSeries => xtream_skip_series: bool,
+      SkipLive => skip_live: bool,
+      SkipVod => skip_vod: bool,
+      SkipSeries => skip_series: bool,
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       ResolveTmdb => resolve_tmdb: bool,
@@ -208,6 +264,8 @@ generate_form_reducer!(
       ProbeLiveIntervalHours => probe_live_interval_hours: u32,
       ResolveFilter => resolve_filter: Option<String>,
       ProbeFilter => probe_filter: Option<String>,
+      StalkerPreResolvePlayback => stalker_pre_resolve_playback: bool,
+      StalkerRuntimeResolvePlayback => stalker_runtime_resolve_playback: bool,
     }
 );
 
@@ -328,6 +386,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let headers_state = use_state(HashMap::<String, String>::new);
     let providers_state = use_state(Vec::<ConfigProviderDto>::new);
     let providers_dirty_state = use_state(|| false);
+    let stalker_config_state = use_state(StalkerInputConfigDto::default);
 
     let epg_smart_match_state = use_state(|| None::<EpgSmartMatchConfigDto>);
     let show_smart_match_form_state = use_state(|| false);
@@ -356,6 +415,26 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         .collect::<Vec<DropDownOption>>()
     });
 
+    let stalker_auth_options = use_memo(stalker_config_state.auth_mode, |auth_mode| {
+        StalkerAuthMode::iter()
+            .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == *auth_mode })
+            .collect::<Vec<DropDownOption>>()
+    });
+    let stalker_preset_options = use_memo(stalker_config_state.mag_preset, |mag_preset| {
+        StalkerMagPreset::iter()
+            .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == *mag_preset })
+            .collect::<Vec<DropDownOption>>()
+    });
+    let stalker_endpoint_options = use_memo(stalker_config_state.endpoint_preference, |endpoint_preference| {
+        StalkerEndpointPreference::iter()
+            .map(|t| DropDownOption {
+                id: t.to_string(),
+                label: html! { t.to_string() },
+                selected: t == *endpoint_preference,
+            })
+            .collect::<Vec<DropDownOption>>()
+    });
+
     {
         let input_form_state = input_form_state.clone();
         let input_options_state = input_options_state.clone();
@@ -366,6 +445,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let headers_state = headers_state.clone();
         let providers_state = providers_state.clone();
         let providers_dirty_state = providers_dirty_state.clone();
+        let stalker_config_state = stalker_config_state.clone();
         let deps = (props.block_id, props.input.clone(), config_ctx.clone());
         let view_visible = view_visible.clone();
         use_effect_with(deps, move |(_, cfg, config_ctx)| {
@@ -422,6 +502,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 }
                 providers_state.set(display_providers);
                 providers_dirty_state.set(false);
+                stalker_config_state.set(input.stalker.clone().unwrap_or_default());
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
@@ -432,6 +513,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 aliases_state.set(Vec::new());
                 providers_state.set(Vec::new());
                 providers_dirty_state.set(false);
+                stalker_config_state.set(StalkerInputConfigDto::default());
             }
             || ()
         });
@@ -754,19 +836,31 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let library_input = input_form_state.form.input_type.is_library();
     let xtream_input = input_form_state.form.input_type.is_xtream();
+    let stalker_input = input_form_state.form.input_type.is_stalker();
 
     let render_options = || {
         let headers = headers_state.clone();
         if !props.allow_write {
             return html! {
                 <Card class="tp__config-view__card">
+                { html_if!(stalker_input, {
+                    <TitledCard title={translate.t("LABEL.STALKER")}>
+                      <div class="tp__config-view__cols-3">
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_LIVE), skip_live) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_VOD), skip_vod) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_SERIES), skip_series) }
+                      </div>
+                      { config_field_bool!(input_options_state.form, translate.t("LABEL.STALKER_PRE_RESOLVE"), stalker_pre_resolve_playback) }
+                      { config_field_bool!(input_options_state.form, translate.t("LABEL.STALKER_RUNTIME_RESOLVE"), stalker_runtime_resolve_playback) }
+                    </TitledCard>
+                })}
                 { html_if!(xtream_input, {
                     <>
                     <TitledCard title={translate.t(LABEL_SKIP)}>
                       <div class="tp__config-view__cols-3">
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_LIVE), xtream_skip_live) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), xtream_skip_vod) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_LIVE), skip_live) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_VOD), skip_vod) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_SERIES), skip_series) }
                       </div>
                     </TitledCard>
                     <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>
@@ -777,8 +871,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     </TitledCard>
                     <TitledCard title={translate.t(LABEL_RESOLVE)}>
                         <div class="tp__config-view__cols-3">
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), resolve_vod) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), resolve_series) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_VOD), resolve_vod) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_SERIES), resolve_series) }
                         </div>
                         <div class="tp__config-view__cols-2">
                         { config_field_custom!(translate.t(LABEL_RESOLVE_DELAY_SEC), input_options_state.form.resolve_delay.to_string()) }
@@ -788,9 +882,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     </TitledCard>
                     <TitledCard title={translate.t(LABEL_PROBE)}>
                         <div class="tp__config-view__cols-3">
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_LIVE), probe_live) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), probe_vod) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), probe_series) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_LIVE), probe_live) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_VOD), probe_vod) }
+                        { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_SERIES), probe_series) }
                         </div>
                         <div class="tp__config-view__cols-2">
                         { config_field_custom!(translate.t(LABEL_PROBE_DELAY_SEC), input_options_state.form.probe_delay.to_string()) }
@@ -822,13 +916,24 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
         html! {
             <Card class="tp__config-view__card">
+            { html_if!(stalker_input, {
+                <TitledCard title={translate.t("LABEL.STALKER")}>
+                  <div class="tp__config-view__cols-3">
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_LIVE), skip_live, ConfigInputOptionsFormAction::SkipLive) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
+                  </div>
+                  { edit_field_bool!(input_options_state, translate.t("LABEL.STALKER_PRE_RESOLVE"), stalker_pre_resolve_playback, ConfigInputOptionsFormAction::StalkerPreResolvePlayback) }
+                  { edit_field_bool!(input_options_state, translate.t("LABEL.STALKER_RUNTIME_RESOLVE"), stalker_runtime_resolve_playback, ConfigInputOptionsFormAction::StalkerRuntimeResolvePlayback) }
+                </TitledCard>
+            })}
             { html_if!(xtream_input, {
                 <>
                 <TitledCard title={translate.t(LABEL_SKIP)}>
                   <div class="tp__config-view__cols-3">
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_LIVE), xtream_skip_live, ConfigInputOptionsFormAction::XtreamSkipLive) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), xtream_skip_vod, ConfigInputOptionsFormAction::XtreamSkipVod) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series, ConfigInputOptionsFormAction::XtreamSkipSeries) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_LIVE), skip_live, ConfigInputOptionsFormAction::SkipLive) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
                   </div>
                 </TitledCard>
                 <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>
@@ -839,8 +944,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 </TitledCard>
                 <TitledCard title={translate.t(LABEL_RESOLVE)}>
                     <div class="tp__config-view__cols-3">
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), resolve_vod,  ConfigInputOptionsFormAction::ResolveVod) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), resolve_series,  ConfigInputOptionsFormAction::ResolveSeries) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_VOD), resolve_vod,  ConfigInputOptionsFormAction::ResolveVod) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_SERIES), resolve_series,  ConfigInputOptionsFormAction::ResolveSeries) }
                     </div>
                     <div class="tp__config-view__cols-2">
                     { edit_field_number_u16!(input_options_state, translate.t(LABEL_RESOLVE_DELAY_SEC), resolve_delay,  ConfigInputOptionsFormAction::ResolveDelay) }
@@ -857,9 +962,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 </TitledCard>
                 <TitledCard title={translate.t(LABEL_PROBE)}>
                     <div class="tp__config-view__cols-3">
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_LIVE), probe_live,  ConfigInputOptionsFormAction::ProbeLive) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), probe_vod,  ConfigInputOptionsFormAction::ProbeVod) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), probe_series,  ConfigInputOptionsFormAction::ProbeSeries) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_LIVE), probe_live,  ConfigInputOptionsFormAction::ProbeLive) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_VOD), probe_vod,  ConfigInputOptionsFormAction::ProbeVod) }
+                    { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_SERIES), probe_series,  ConfigInputOptionsFormAction::ProbeSeries) }
                     </div>
                     <div class="tp__config-view__cols-2">
                     { edit_field_number_u16!(input_options_state, translate.t(LABEL_PROBE_DELAY_SEC), probe_delay,  ConfigInputOptionsFormAction::ProbeDelay) }
@@ -1050,6 +1155,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let render_input = || {
         let providers_state = providers_state.clone();
         let input_method_selection = Rc::new(vec![input_form_state.form.method.to_string()]);
+        let stalker_device = stalker_config_state.device.clone().unwrap_or_default();
+        let stalker_size_caps = stalker_config_state.size_caps.clone().unwrap_or_default();
         let is_csv_batch = input_form_state.form.url.starts_with(BATCH_SCHEME_PREFIX);
         let input_form_state_disp = input_form_state.clone();
         let exp_date_tool_action = if input_form_state.form.input_type.is_xtream() {
@@ -1145,6 +1252,32 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                    { html_if!(!library_input, {
                     <>
                      { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
+                     { html_if!(stalker_input, {
+                       <>
+                         { config_field_custom!(translate.t("LABEL.STALKER_MAC_ADDRESS"), stalker_device.mac_address.clone().unwrap_or_default()) }
+                         { config_field_custom!(translate.t("LABEL.STALKER_AUTH_MODE"), stalker_config_state.auth_mode.to_string()) }
+                         { config_field_custom!(translate.t("LABEL.STALKER_MAG_PRESET"), stalker_config_state.mag_preset.to_string()) }
+                         { config_field_custom!(translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), stalker_config_state.endpoint_preference.to_string()) }
+                         <div class="tp__config-view__cols-2">
+                           { config_field_custom!(translate.t("LABEL.STALKER_CREATE_LINK_KB"), stalker_size_caps.create_link_kb.to_string()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_ORDERED_LIST_MB"), stalker_size_caps.ordered_list_mb.to_string()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_GET_EPG_MB"), stalker_size_caps.get_epg_mb.to_string()) }
+                         </div>
+                         <div class="tp__config-view__cols-2">
+                           { config_field_custom!(translate.t("LABEL.STALKER_TIMEZONE"), stalker_device.timezone.clone().unwrap_or_default()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_LOCALE"), stalker_device.locale.clone().unwrap_or_default()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_USER_AGENT"), stalker_device.user_agent.clone().unwrap_or_default()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_X_USER_AGENT"), stalker_device.x_user_agent.clone().unwrap_or_default()) }
+                         </div>
+                         <div class="tp__config-view__cols-2">
+                           { config_field_custom!(translate.t("LABEL.STALKER_DEVICE_PROFILE"), stalker_device.device_profile.clone().unwrap_or_default()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_SERIAL_NUMBER"), stalker_device.serial_number.clone().unwrap_or_default()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_DEVICE_ID"), stalker_device.device_id.clone().unwrap_or_default()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_DEVICE_ID2"), stalker_device.device_id2.clone().unwrap_or_default()) }
+                           { config_field_custom!(translate.t("LABEL.STALKER_SIGNATURE"), stalker_device.signature.clone().unwrap_or_default()) }
+                         </div>
+                       </>
+                     })}
                      <div class="tp__config-view__cols-2">
                      { html_if!(xtream_input && !is_csv_batch, {
                        <>
@@ -1177,34 +1310,108 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                { html_if!(!library_input, {
                 <>
                  { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
-                 <div class="tp__config-view__cols-2">
                  { html_if!(xtream_input && !is_csv_batch, {
-                   <>
+                   <div class="tp__config-view__cols-2">
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
-                   </>
+                   </div>
                  })}
-                 { html_if!(!is_csv_batch, {
+                 { html_if!(stalker_input, {
                    <>
-                   { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-                   { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                   { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
+                     <div class="tp__config-view__cols-2">
+                     { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_MAC_ADDRESS"), "stalker_mac_address", stalker_device.mac_address.clone().unwrap_or_default(), |device, value| device.mac_address = blank_to_none(value)) }
+                       { config_field_child!(translate.t("LABEL.STALKER_AUTH_MODE"), "INPUT_FORM.STALKER_AUTH_MODE", {
+                         let state = stalker_config_state.clone();
+                         html! { <Select
+                           name={"stalker_auth_mode"}
+                           multi_select={false}
+                           on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                             if let Some(parsed) = selection_parse_first(&selections) {
+                                 let mut config = (*state).clone();
+                                 config.auth_mode = parsed;
+                                 state.set(config);
+                             }
+                           })}
+                           options={stalker_auth_options.clone()}
+                         /> }
+                       })}
+                       { config_field_child!(translate.t("LABEL.STALKER_MAG_PRESET"), "INPUT_FORM.STALKER_MAG_PRESET", {
+                         let state = stalker_config_state.clone();
+                         html! { <Select
+                           name={"stalker_mag_preset"}
+                           multi_select={false}
+                           on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                             if let Some(parsed) = selection_parse_first(&selections) {
+                                 let mut config = (*state).clone();
+                                 config.mag_preset = parsed;
+                                 state.set(config);
+                             }
+                           })}
+                           options={stalker_preset_options.clone()}
+                         /> }
+                       })}
+                       { config_field_child!(translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), "INPUT_FORM.STALKER_ENDPOINT_PREFERENCE", {
+                         let state = stalker_config_state.clone();
+                         html! { <Select
+                           name={"stalker_endpoint_preference"}
+                           multi_select={false}
+                           on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
+                             if let Some(parsed) = selection_parse_first(&selections) {
+                                 let mut config = (*state).clone();
+                                 config.endpoint_preference = parsed;
+                                 state.set(config);
+                             }
+                           })}
+                           options={stalker_endpoint_options.clone()}
+                         /> }
+                       })}
+                     </div>
+
+                     <div class="tp__config-view__cols-2">
+                       { stalker_size_cap_input(&stalker_config_state, &translate.t("LABEL.STALKER_CREATE_LINK_KB"), "stalker_create_link_kb", stalker_size_caps.create_link_kb, |caps, value| caps.create_link_kb = value) }
+                       { stalker_size_cap_input(&stalker_config_state, &translate.t("LABEL.STALKER_ORDERED_LIST_MB"), "stalker_ordered_list_mb", stalker_size_caps.ordered_list_mb, |caps, value| caps.ordered_list_mb = value) }
+                       { stalker_size_cap_input(&stalker_config_state, &translate.t("LABEL.STALKER_GET_EPG_MB"), "stalker_get_epg_mb", stalker_size_caps.get_epg_mb, |caps, value| caps.get_epg_mb = value) }
+                     </div>
+
+                     <div class="tp__config-view__cols-2">
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_TIMEZONE"), "stalker_timezone", stalker_device.timezone.clone().unwrap_or_default(), |device, value| device.timezone = blank_to_none(value)) }
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_LOCALE"), "stalker_locale", stalker_device.locale.clone().unwrap_or_default(), |device, value| device.locale = blank_to_none(value)) }
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_USER_AGENT"), "stalker_user_agent", stalker_device.user_agent.clone().unwrap_or_default(), |device, value| device.user_agent = blank_to_none(value)) }
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_X_USER_AGENT"), "stalker_x_user_agent", stalker_device.x_user_agent.clone().unwrap_or_default(), |device, value| device.x_user_agent = blank_to_none(value)) }
+                     </div>
+
+                     <div class="tp__config-view__cols-2">
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_DEVICE_PROFILE"), "stalker_device_profile", stalker_device.device_profile.clone().unwrap_or_default(), |device, value| device.device_profile = blank_to_none(value)) }
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_SERIAL_NUMBER"), "stalker_serial_number", stalker_device.serial_number.clone().unwrap_or_default(), |device, value| device.serial_number = blank_to_none(value)) }
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_DEVICE_ID"), "stalker_device_id", stalker_device.device_id.clone().unwrap_or_default(), |device, value| device.device_id = blank_to_none(value)) }
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_DEVICE_ID2"), "stalker_device_id2", stalker_device.device_id2.clone().unwrap_or_default(), |device, value| device.device_id2 = blank_to_none(value)) }
+                       { stalker_device_input(&stalker_config_state, &translate.t("LABEL.STALKER_SIGNATURE"), "stalker_signature", stalker_device.signature.clone().unwrap_or_default(), |device, value| device.signature = blank_to_none(value)) }
+                     </div>
+
                    </>
                  })}
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
-                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
-                   html! {
-                       <RadioButtonGroup
-                        multi_select={false} none_allowed={false}
-                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
-                            if let Some(first) = selections.first() {
-                                input_form_state_disp.dispatch(ConfigInputFormAction::Method(first.parse::<InputFetchMethod>().unwrap_or(InputFetchMethod::GET)));
-                            }
-                        })}
-                        options={fetch_methods.clone()}
-                        selected={input_method_selection}
-                    />
-                 }})}
+                 <div class="tp__config-view__cols-2">
+                     { html_if!(!is_csv_batch, {
+                       <>
+                       { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
+                       { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
+                       { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
+                       </>
+                     })}
+                     { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
+                     { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
+                       html! {
+                           <RadioButtonGroup
+                            multi_select={false} none_allowed={false}
+                            on_select={Callback::from(move |selections: Rc<Vec<String>>| {
+                                if let Some(first) = selections.first() {
+                                    input_form_state_disp.dispatch(ConfigInputFormAction::Method(first.parse::<InputFetchMethod>().unwrap_or(InputFetchMethod::GET)));
+                                }
+                            })}
+                            options={fetch_methods.clone()}
+                            selected={input_method_selection}
+                        />
+                     }})}
                  </div>
                  { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
                 </>
@@ -1563,6 +1770,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let aliases_state = aliases_state.clone();
         let providers_state = providers_state.clone();
         let providers_dirty_state = providers_dirty_state.clone();
+        let stalker_config_state = stalker_config_state.clone();
 
         Callback::from(move |_| {
             let mut input = input_form_state.data().clone();
@@ -1599,6 +1807,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 // Keep explicit empty overrides (Some(vec![])) so deleting the last provider
                 // survives source-level fallback logic during save.
                 input.provider = Some(providers);
+            }
+
+            if input.input_type.is_stalker() {
+                input.stalker = Some((*stalker_config_state).clone());
+            } else {
+                input.stalker = None;
             }
 
             if let Some(on_apply) = &on_apply {

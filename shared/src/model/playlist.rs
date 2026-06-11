@@ -2,13 +2,13 @@ use crate::{
     create_bitset,
     error::TuliproxError,
     model::{
-        xtream_const, CatchupAttribute, CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions,
-        EpisodeStreamProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties,
-        XtreamInfoDocument,
+        stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, xtream_const, CatchupAttribute,
+        CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
+        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
     },
     utils::{
-        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_runtime_playlist_uuid,
-        get_provider_id, obfuscate_text, Internable,
+        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_provider_playlist_uuid,
+        generate_runtime_playlist_uuid, get_provider_id, obfuscate_text, Internable,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1282,6 +1282,61 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             time_shift: item.time_shift.clone(),
             additional_properties: item.additional_properties.clone(),
             source_ordinal: item.source_ordinal,
+        };
+
+        PlaylistItem { header }
+    }
+}
+
+impl From<&StalkerPlaylistItem> for PlaylistItem {
+    fn from(item: &StalkerPlaylistItem) -> Self {
+        let item_type = match item.stream_kind {
+            StalkerStreamKind::Live | StalkerStreamKind::Archive => PlaylistItemType::Live,
+            StalkerStreamKind::Movie => PlaylistItemType::Video,
+            StalkerStreamKind::Episode => {
+                if item.is_series_root() {
+                    PlaylistItemType::SeriesInfo
+                } else {
+                    PlaylistItemType::Series
+                }
+            }
+        };
+        let xtream_cluster = match item.stream_kind {
+            StalkerStreamKind::Live | StalkerStreamKind::Archive => XtreamCluster::Live,
+            StalkerStreamKind::Movie => XtreamCluster::Video,
+            StalkerStreamKind::Episode => XtreamCluster::Series,
+        };
+        let stream_id_str: Arc<str> = Internable::intern(item.stream_id.to_string());
+        let logo: Arc<str> = item.logo_url.clone().unwrap_or_else(|| Internable::intern(String::new()));
+        let url: Arc<str> = if item.stream_url.is_empty() {
+            // The runtime will re-resolve on demand; expose the raw cmd as a
+            // placeholder so the pipeline can still render group/filter.
+            Arc::clone(&item.cmd)
+        } else {
+            Arc::clone(&item.stream_url)
+        };
+        let header = PlaylistItemHeader {
+            uuid: generate_provider_playlist_uuid(&item.category_name, &stream_id_str, item_type),
+            virtual_id: item.stream_id,
+            id: Arc::clone(&stream_id_str),
+            name: Arc::clone(&item.name),
+            title: Arc::clone(&item.name),
+            logo: Arc::clone(&logo),
+            logo_small: Internable::intern(String::new()),
+            group: Arc::clone(&item.category_name),
+            parent_code: Internable::intern(String::new()),
+            audio_track: Internable::intern(String::new()),
+            time_shift: Internable::intern(String::new()),
+            rec: Internable::intern(String::new()),
+            url,
+            epg_channel_id: item.epg_channel_id.clone(),
+            item_type,
+            xtream_cluster,
+            additional_properties: None,
+            input_name: Internable::intern(String::new()),
+            chno: item.number,
+            category_id: item.category_id,
+            source_ordinal: 0,
         };
 
         PlaylistItem { header }

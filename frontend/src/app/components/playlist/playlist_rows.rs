@@ -35,7 +35,7 @@ pub fn map_sources_to_playlist_rows(sources: &SourcesConfigDto) -> Rc<PlaylistRo
                     }
                 }
             } else {
-                log::error!("Input '{}' not found in global inputs", input_name);
+                log::error!("Input '{input_name}' not found in global inputs");
             }
         }
 

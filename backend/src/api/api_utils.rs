@@ -22,6 +22,7 @@ use crate::{
         MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
     model::{AppConfig, ConfigInput, ConfigTarget, InputUserInfo, ProxyUserCredentials},
+    processing::processor::re_resolve_stalker_url,
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -45,7 +46,7 @@ use shared::{
     concat_string,
     model::{
         Claims, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
-        UserConnectionPermission, VirtualId, XtreamCluster,
+        StalkerStreamKind, UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
         bin_serialize, current_time_secs, extract_extension_from_url, get_credentials_from_url,
@@ -1925,6 +1926,7 @@ async fn create_stream_response_details(
         }
         ProviderStreamState::Available(_provider_name, request_url)
         | ProviderStreamState::GracePeriod(_provider_name, request_url) => {
+            let mut request_url = request_url;
             debug_if_enabled!(
                 "Provider stream selection: allocated_provider={} actual_request_url={}",
                 sanitize_sensitive_info(guard_provider_name.as_deref().unwrap_or("?")),
@@ -1960,7 +1962,7 @@ async fn create_stream_response_details(
                 }
             } else {
                 let parsed_url = Url::parse(&request_url);
-                let ((stream, stream_info), reconnect_flag) = if let Ok(url) = parsed_url {
+                let ((mut stream, mut stream_info), mut reconnect_flag) = if let Ok(url) = parsed_url {
                     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
                     let disabled_headers = app_state.get_disabled_headers();
                     let mut provider_stream_factory_options =
@@ -1998,6 +2000,70 @@ async fn create_stream_response_details(
                 } else {
                     ((None, None), None)
                 };
+                let should_refresh_stalker = input.input_type.is_stalker()
+                    && stream_info
+                        .as_ref()
+                        .is_some_and(|(_, status, _, _)| status.is_client_error());
+                if should_refresh_stalker {
+                    let kind = match stream_channel.cluster {
+                        XtreamCluster::Live => StalkerStreamKind::Live,
+                        XtreamCluster::Video => StalkerStreamKind::Movie,
+                        XtreamCluster::Series => StalkerStreamKind::Episode,
+                    };
+                    let stalker_http_client = app_state.http_client.load().as_ref().clone();
+                    match re_resolve_stalker_url(
+                        &app_state.app_config,
+                        &stalker_http_client,
+                        input,
+                        stream_channel.provider_id,
+                        kind,
+                    )
+                    .await
+                    {
+                        Ok(Some(refreshed_url)) => {
+                            if let Ok(url) = Url::parse(&refreshed_url) {
+                                let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
+                                let disabled_headers = app_state.get_disabled_headers();
+                                let mut options = ProviderStreamFactoryOptions::new(
+                                    &crate::api::model::ProviderStreamFactoryParams {
+                                        addr: fingerprint.addr,
+                                        item_type,
+                                        share_stream,
+                                        stream_options,
+                                        stream_url: &url,
+                                        req_headers,
+                                        input_headers: streaming_strategy.input_headers.as_ref(),
+                                        disabled_headers: disabled_headers.as_ref(),
+                                        default_user_agent: default_user_agent.as_deref(),
+                                        username: Some(username),
+                                        client_ip: Some(&fingerprint.client_ip),
+                                        stream_channel: Some(stream_channel),
+                                        connect_failure_stage: Some(FailureStage::ProviderOpen),
+                                    },
+                                );
+                                options.set_provider(input.get_resolve_provider(url.as_ref()));
+                                let retry_reconnect_flag = options.get_reconnect_flag_clone();
+                                let retried = create_provider_stream(
+                                    app_state,
+                                    &app_state.http_client.load(),
+                                    options,
+                                )
+                                .await;
+                                if let Some((retry_stream, retry_info)) = retried {
+                                    stream = Some(retry_stream);
+                                    stream_info = retry_info;
+                                    reconnect_flag = Some(retry_reconnect_flag);
+                                    request_url = refreshed_url;
+                                } else {
+                                    stream = None;
+                                    stream_info = None;
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => warn!("Failed to refresh Stalker playback URL: {err}"),
+                    }
+                }
                 (stream, stream_info, reconnect_flag)
             };
 
@@ -2228,7 +2294,13 @@ async fn open_media_server_stream_for_input(
                 .provider("media-server")
                 .detail("media-server playback proxy is not implemented for this input type"));
         }
-        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+        InputType::M3u
+        | InputType::Xtream
+        | InputType::M3uBatch
+        | InputType::XtreamBatch
+        | InputType::Stalker
+        | InputType::StalkerBatch
+        | InputType::Library => {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
                 .provider("media-server")
                 .detail("playlist item is not backed by a media-server input"));
@@ -3536,7 +3608,13 @@ async fn open_media_server_image_resource(
                 .provider("media-server")
                 .detail("media-server image proxy is not implemented for this input type"));
         }
-        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+        InputType::M3u
+        | InputType::Xtream
+        | InputType::M3uBatch
+        | InputType::XtreamBatch
+        | InputType::Stalker
+        | InputType::StalkerBatch
+        | InputType::Library => {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
                 .provider("media-server")
                 .detail("media-server image input is not backed by a media-server input"));
@@ -4191,6 +4269,7 @@ mod tests {
                 priority: 0,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..ConfigInput::default()
         };
@@ -4725,6 +4804,7 @@ mod tests {
                 max_connections: 1,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..ConfigInput::default()
         });

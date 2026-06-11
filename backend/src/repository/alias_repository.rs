@@ -59,6 +59,9 @@ fn build_m3u_url(
 }
 
 fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: InputType) {
+    if input_type == InputType::StalkerBatch {
+        alias.stalker.get_or_insert_with(Default::default);
+    }
     if !alias.url.is_empty() {
         let mut provider_scheme = false;
         if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
@@ -70,7 +73,7 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                 let (username, password) = get_credentials_from_url(&url);
                 if username.is_none() || password.is_none() {
                     // xtream url
-                    if input_type == InputType::XtreamBatch {
+                    if matches!(input_type, InputType::XtreamBatch | InputType::StalkerBatch) {
                         alias.url = url.origin().ascii_serialization();
                     } else if input_type == InputType::M3uBatch
                         && alias.username.is_some()
@@ -89,7 +92,7 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                         }
                     }
                 } else {
-                    if input_type == InputType::XtreamBatch {
+                    if matches!(input_type, InputType::XtreamBatch | InputType::StalkerBatch) {
                         alias.url = url.origin().ascii_serialization();
                     }
                     // m3u url
@@ -178,6 +181,7 @@ pub fn csv_read_inputs_from_reader(
     let input_type = match batch_input_type {
         InputType::M3uBatch | InputType::M3u => InputType::M3uBatch,
         InputType::XtreamBatch | InputType::Xtream => InputType::XtreamBatch,
+        InputType::Stalker | InputType::StalkerBatch => InputType::StalkerBatch,
         InputType::Library => InputType::Library,
         InputType::Emby | InputType::Jellyfin | InputType::Plex => batch_input_type,
     };
@@ -224,6 +228,7 @@ pub fn csv_read_inputs_from_reader(
             max_connections: 1,
             exp_date: None,
             enabled: true,
+            stalker: None,
         };
 
         let columns: Vec<&str> = line.split(CSV_SEPARATOR).collect();
@@ -384,6 +389,7 @@ pub async fn csv_patch_batch_append(
         max_connections: 1,
         exp_date,
         enabled: true,
+        stalker: None,
     };
     aliases.push(alias);
 
@@ -637,5 +643,14 @@ input_2;de566567;de2345f43g5;http://provider_2.tv:8080;1;2028-12-23 13:12:34
         for config in aliases {
             assert!(!config.url.contains("username"));
         }
+    }
+
+    #[test]
+    fn test_read_inputs_xtream_as_stalker_batch() {
+        let reader = file_reader(Cursor::new(XTREAM_BATCH));
+        let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, reader).expect("stalker batch aliases");
+        assert_eq!(aliases.len(), 2);
+        assert!(aliases.iter().all(|alias| alias.stalker.is_some()));
+        assert!(aliases.iter().all(|alias| !alias.url.contains("username")));
     }
 }

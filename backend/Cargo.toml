@@ -16,7 +16,7 @@ serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
 quick-xml = { version = "0.39.4", features = ["async-tokio", "serialize"] }
 regex.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
-reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form"] }
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
 url.workspace = true
 chrono.workspace = true
 iana-time-zone = "0.1.65"
@@ -58,6 +58,7 @@ rphonetic = "3.0.6"
 rayon = "1.12.0"
 base64.workspace = true
 paste.workspace = true
+thiserror.workspace = true
 indexmap.workspace = true
 parking_lot = "0.12.5"
 lz4_flex.workspace = true

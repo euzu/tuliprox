@@ -1,7 +1,8 @@
 use crate::{
     app::components::{
-        config::HasFormData, select::Select, BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode,
-        DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
+        build_options, config::HasFormData, select::Select, selection_parse_first, BlockId, BlockInstance, Card,
+        ClusterFlagsInput, ClusterFlagsInputMode, DropDownSelection, EditMode, FilterInput, IconButton, Panel,
+        SourceEditorContext, TextButton,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_list_option,
     edit_field_text, generate_form_reducer,
@@ -136,17 +137,18 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
 
     let processing_orders = use_memo((*target_form_state).clone(), |target_state: &ConfigTargetFormState| {
         let default_po = target_state.form.processing_order;
-        [
-            ProcessingOrder::Frm,
-            ProcessingOrder::Fmr,
-            ProcessingOrder::Rfm,
-            ProcessingOrder::Rmf,
-            ProcessingOrder::Mfr,
-            ProcessingOrder::Mrf,
-        ]
-        .iter()
-        .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: *t == default_po })
-        .collect::<Vec<DropDownOption>>()
+        build_options(
+            [
+                ProcessingOrder::Frm,
+                ProcessingOrder::Fmr,
+                ProcessingOrder::Rfm,
+                ProcessingOrder::Rmf,
+                ProcessingOrder::Mfr,
+                ProcessingOrder::Mrf,
+            ],
+            &default_po,
+            |value| html! { value.to_string() },
+        )
     });
 
     {
@@ -257,19 +259,10 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                             name={"processing_order"}
                             multi_select={false}
                             on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                               match selections {
-                                DropDownSelection::Empty => {
-                                       target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(ProcessingOrder::Frm));
-                                }
-                                DropDownSelection::Single(option) => {
-                                    target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(option.parse::<ProcessingOrder>().unwrap_or(ProcessingOrder::Frm)));
-                                }
-                                DropDownSelection::Multi(options) => {
-                                  if let Some(first) = options.first() {
-                                    target_form_state_1.dispatch(ConfigTargetFormAction::ProcessingOrder(first.parse::<ProcessingOrder>().unwrap_or(ProcessingOrder::Frm)));
-                                   }
-                                 }
-                               }
+                                let processing_order =
+                                    selection_parse_first::<ProcessingOrder>(&selections).unwrap_or(ProcessingOrder::Frm);
+                                target_form_state_1
+                                    .dispatch(ConfigTargetFormAction::ProcessingOrder(processing_order));
                             })}
                             options={processing_orders.clone()}
                         />

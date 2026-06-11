@@ -130,7 +130,7 @@ inputs:
 | Parameter               | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                            |
 |:------------------------|:-------|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`                  | String |   Yes    |         | Internal reference ID for Tuliprox. Must be strictly unique. Critical for persistent UUID generation!                                                                                                                                                                                                                                                                                                                                    |
-| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `library` (Local files) and `m3u_batch`, `xtream_batch` (CSV offloading).                                                                                                                                                                                                                                                                                                                                      |
+| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `stalker`, `library` (Local files) and `m3u_batch`, `xtream_batch` (CSV offloading). Stalker inputs use the portal handshake/catalog flow instead of a plain playlist download.                                                                                                                                                                                                                                   |
 | `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                               |
 | `username` / `password` | String |  Often   |         | Mandatory if `type` = `xtream`.                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                          |
@@ -143,6 +143,21 @@ inputs:
 | `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                         |
 | `staged`                | Object |    No    |         | Hybrid architecture feature (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                               |
 | `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                     |
+
+#### Minimal Stalker Input Example
+
+```yaml
+inputs:
+  - name: stalker_main
+    type: stalker
+    url: http://portal.example.com/c/
+    enabled: true
+    options:
+      stalker_pre_resolve_playback: false
+      stalker_runtime_resolve_playback: true
+```
+
+Use `stalker_pre_resolve_playback: true` if you want Tuliprox to materialize playback URLs during refresh whenever the portal already grants them. Keep `stalker_runtime_resolve_playback: true` when the portal uses expiring or session-bound temp links that may need a fresh `create_link` call later during playback.
 
 #### Input URL Schemes (`inputs[].url`)
 
@@ -204,25 +219,42 @@ headers:
 Controls the behavior during download and asynchronous metadata resolution (see the *Metadata Update* chapter) for this
 specific provider.
 
-| Parameter                              | Type     | Default | Technical Impact & Background                                                                                                                                                   |
-|:---------------------------------------|:---------|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `xtream_skip_live` / `vod` / `series`  | Bool     | `false` | Immediately ignores entire categories during the Xtream API download. Saves massive amounts of RAM and runtime if you only want Live-TV from a specific provider, for instance. |
-| `xtream_live_stream_without_extension` | Bool     | `false` | Strips `.ts` from generated stream URLs.                                                                                                                                        |
-| `xtream_live_stream_use_prefix`        | Bool     | `true`  | Injects the `/live/` prefix into URLs.                                                                                                                                          |
-| `disable_hls_streaming`                | Bool     | `false` | Forces Tuliprox to play Live-TV as a raw MPEG-TS (`.ts`) stream, skipping HLS (`.m3u8`) reverse-proxy handling, and forcing direct TS endpoints.                                |
-| `resolve_tmdb`                         | Bool     | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years.                                                                  |
-| `probe_stream`                         | Bool     | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`.                                                                                                         |
-| `resolve_background`                   | Bool     | `true`  | Metadata scans run asynchronously in the background so the general playlist update (which blocks clients) finishes instantly.                                                   |
-| `resolve_series` / `resolve_vod`       | Bool     | `false` | Fetches missing details like Plot or Cast via the Provider's API (`get_vod_info` / `get_series_info`).                                                                          |
-| `probe_series` / `probe_vod`           | Bool     | `false` | Allows explicit FFprobe analysis of movies or entire TV show seasons.                                                                                                           |
-| `probe_live`                           | Bool     | `false` | Allows FFprobe to periodically tap into Live-TV streams in the background.                                                                                                      |
-| `probe_live_interval_hours`            | Int      | `120`   | Interval after which a Live stream is re-analyzed (Important as backup streams often change resolutions).                                                                       |
-| `resolve_delay` / `probe_delay`        | Int      | `2`     | **Ban Protection:** Hard wait time (in seconds) between API or Probe requests to the *same* provider! Prevents API spamming.                                                    |
-| `resolve_filter`                       | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                      |
-| `probe_filter`                         | String   | -       | Filter expression to selectively probe only entries matching the condition. Uses the same Filter syntax.                                                                        |
+| Parameter                                  | Type     | Default | Technical Impact & Background                                                                                                                                                   |
+|:-------------------------------------------|:---------|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `skip_live` / `skip_vod` / `skip_series`   | Bool     | `false` | Immediately ignores entire categories during Xtream or Stalker ingestion. Saves massive amounts of RAM and runtime if you only want specific clusters from a provider.          |
+| `xtream_live_stream_without_extension`     | Bool     | `false` | Strips `.ts` from generated stream URLs.                                                                                                                                        |
+| `xtream_live_stream_use_prefix`            | Bool     | `true`  | Injects the `/live/` prefix into URLs.                                                                                                                                          |
+| `disable_hls_streaming`                    | Bool     | `false` | Forces Tuliprox to play Live-TV as a raw MPEG-TS (`.ts`) stream, skipping HLS (`.m3u8`) reverse-proxy handling, and forcing direct TS endpoints.                                |
+| `resolve_tmdb`                             | Bool     | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years.                                                                  |
+| `probe_stream`                             | Bool     | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`.                                                                                                         |
+| `resolve_background`                       | Bool     | `true`  | Metadata scans run asynchronously in the background so the general playlist update (which blocks clients) finishes instantly.                                                   |
+| `resolve_series` / `resolve_vod`           | Bool     | `false` | Fetches missing details like Plot or Cast via the Provider's API (`get_vod_info` / `get_series_info`).                                                                          |
+| `probe_series` / `probe_vod`               | Bool     | `false` | Allows explicit FFprobe analysis of movies or entire TV show seasons.                                                                                                           |
+| `probe_live`                               | Bool     | `false` | Allows FFprobe to periodically tap into Live-TV streams in the background.                                                                                                      |
+| `probe_live_interval_hours`                | Int      | `120`   | Interval after which a Live stream is re-analyzed (Important as backup streams often change resolutions).                                                                       |
+| `resolve_delay` / `probe_delay`            | Int      | `2`     | **Ban Protection:** Hard wait time (in seconds) between API or Probe requests to the *same* provider! Prevents API spamming.                                                    |
+| `resolve_filter`                           | String   | -       | Filter expression to selectively resolve only entries matching the condition. Uses the same Filter syntax.                                                                      |
+| `probe_filter`                             | String   | -       | Filter expression to selectively probe only entries matching the condition. Uses the same Filter syntax.                                                                        |
+| `stalker_pre_resolve_playback`             | Bool     | `false` | Stalker-only: resolves `create_link` during playlist processing and persists the returned playback URL when the portal already grants one. Useful when you want the playlist/export step to materialize playable stream URLs up front. |
+| `stalker_runtime_resolve_playback`         | Bool     | `false` | Stalker-only: lets the reverse-proxy retry `create_link` during playback when a persisted Stalker URL has gone stale or is rejected by the portal. This is the recovery path for temp links and expired session-bound stream URLs. |
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.
+
+#### Stalker playback notes
+
+- Stalker playlist preview in the Web UI now works through the same protected playlist endpoints used for other input types.
+- `stalker_pre_resolve_playback` and `stalker_runtime_resolve_playback` are complementary:
+  - `stalker_pre_resolve_playback: true` tries to turn portal `cmd` values into concrete playback URLs during refresh.
+  - `stalker_runtime_resolve_playback: true` retries `create_link` later if the stored playback URL is stale, temp-link based, or rejected after processing.
+- Temp-link variants (`nginx_secure_link`, `flussonic_tmp_link`, `wowza_tmp_link`) are persisted as explicit playback modes and reused during runtime refresh, instead of being flattened into a generic direct-URL path.
+- When pre-resolve does not materialize a URL, Tuliprox keeps the Stalker item metadata and playback descriptor but does not leak the raw `cmd` into the exported playlist URL field.
+- If pre-resolve is disabled or the portal refuses to resolve a specific item during refresh, the item can still remain playable later through runtime resolution, assuming the reverse-proxy path is used and runtime resolve is enabled.
+- Runtime refresh reuses a cached Stalker client per input configuration and treats the session TTL as a soft re-handshake boundary. If refresh still cannot resolve a playable URL, Tuliprox invalidates the stale persisted URL instead of continuing to serve it indefinitely.
+- Stalker EPG import now also consumes the portal bulk-EPG endpoint during processing when Stalker playback pre-resolve is enabled.
+- The bulk-EPG path is streamed and batch-persisted to reduce peak memory pressure on large portals, but portal-specific tuning for pathological datasets is still a separate follow-up topic.
+- Supported Stalker playback transports are currently `http` and `https` only. `rtmp://` / `rtsp://` commands are rejected explicitly because Tuliprox's reverse-proxy path does not relay those schemes.
+- Fresh temp-link resolution is implemented. The still-open edge case is whether a specific portal also requires extra forwarded cookies or headers on the final media request after temp-link resolution.
 
 ---
 
@@ -460,9 +492,9 @@ inputs:
     username: main_user
     password: main_pass
     options:
-      xtream_skip_live: false
-      xtream_skip_vod: false
-      xtream_skip_series: false
+      skip_live: false
+      skip_vod: false
+      skip_series: false
     staged:
       enabled: true
       type: xtream
@@ -492,7 +524,7 @@ inputs:
 
 The selection of data sources for different clusters (Live, VOD, Series) follows specific validation and priority rules:
 
-1. **Global Skip Priority:** If `input.options.xtream_skip_live|vod|series` is set to `true`, that section is skipped
+1. **Global Skip Priority:** If `input.options.skip_live|skip_vod|skip_series` is set to `true`, that section is skipped
    entirely,
    regardless of the `staged` settings.
 2. **Xtream Main Inputs:**

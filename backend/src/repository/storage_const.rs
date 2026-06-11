@@ -19,4 +19,14 @@ pub(in crate::repository) const USER_VOD_BOUQUET: &str = "vod_bouquet.json";
 pub(in crate::repository) const USER_SERIES_BOUQUET: &str = "series_bouquet.json";
 pub(in crate::repository) const API_USER_DB_FILE: &str = "api_user.db";
 pub(in crate::repository) const PATH_XTREAM: &str = "xtream";
+#[allow(dead_code)]
+pub(in crate::repository) const PATH_STALKER: &str = "stalker";
+#[allow(dead_code)]
+pub(in crate::repository) const STALKER_LIVE_FILE: &str = "stalker_live.db";
+#[allow(dead_code)]
+pub(in crate::repository) const STALKER_VOD_FILE: &str = "stalker_vod.db";
+#[allow(dead_code)]
+pub(in crate::repository) const STALKER_SERIES_FILE: &str = "stalker_series.db";
+#[allow(dead_code)]
+pub(in crate::repository) const STALKER_EPISODE_FILE: &str = "stalker_episode.db";
 

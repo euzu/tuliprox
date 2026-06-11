@@ -190,7 +190,8 @@ async fn prepare_generic_stream_metadata(
                 ProbeStorageKind::Xtream,
             )
         }
-        InputType::Emby | InputType::Jellyfin | InputType::Plex => return Ok(PreparedGenericProbeOutcome::Noop),
+        InputType::Emby | InputType::Jellyfin | InputType::Plex
+        | InputType::Stalker | InputType::StalkerBatch => return Ok(PreparedGenericProbeOutcome::Noop),
     };
 
     if !db_path.exists() {

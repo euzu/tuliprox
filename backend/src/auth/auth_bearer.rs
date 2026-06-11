@@ -2,6 +2,7 @@ use axum::extract::FromRequestParts;
 use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
+use std::future::{ready, Future};
 use crate::auth::Rejection;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -13,8 +14,8 @@ where
 {
     type Rejection = Rejection;
 
-    async fn from_request_parts(req: &mut Parts, _: &B) -> Result<Self, Self::Rejection> {
-        Self::decode_request_parts(req)
+    fn from_request_parts(req: &mut Parts, _: &B) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(Self::decode_request_parts(req))
     }
 }
 

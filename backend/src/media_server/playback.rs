@@ -259,47 +259,51 @@ mod tests {
     }
 
     impl MediaServerCatalogClient for MockPlaybackClient {
-        async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> { unreachable!() }
-        async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> { unreachable!() }
-        async fn list_movies(
-            &self,
-            _library: &MediaServerLibraryRef,
-            _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerMovie>, MediaServerError> {
-            unreachable!()
+        fn discover(&self) -> impl std::future::Future<Output = Result<MediaServerStatus, MediaServerError>> {
+            std::future::pending::<Result<MediaServerStatus, MediaServerError>>()
         }
-        async fn list_series(
-            &self,
-            _library: &MediaServerLibraryRef,
-            _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerSeries>, MediaServerError> {
-            unreachable!()
+        fn list_libraries(&self) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
+            std::future::pending::<Result<Vec<MediaServerLibrary>, MediaServerError>>()
         }
-
-        async fn list_seasons(
+        fn list_movies(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerSeason>, MediaServerError> {
-            unreachable!()
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerMovie>, MediaServerError>> {
+            std::future::pending::<Result<MediaServerPage<MediaServerMovie>, MediaServerError>>()
+        }
+        fn list_series(
+            &self,
+            _library: &MediaServerLibraryRef,
+            _page: MediaServerPageRequest,
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerSeries>, MediaServerError>> {
+            std::future::pending::<Result<MediaServerPage<MediaServerSeries>, MediaServerError>>()
         }
 
-        async fn list_episodes(
+        fn list_seasons(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
-        ) -> Result<MediaServerPage<MediaServerEpisode>, MediaServerError> {
-            unreachable!()
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerSeason>, MediaServerError>> {
+            std::future::pending::<Result<MediaServerPage<MediaServerSeason>, MediaServerError>>()
         }
 
-        async fn open_stream(
+        fn list_episodes(
+            &self,
+            _library: &MediaServerLibraryRef,
+            _page: MediaServerPageRequest,
+        ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerEpisode>, MediaServerError>> {
+            std::future::pending::<Result<MediaServerPage<MediaServerEpisode>, MediaServerError>>()
+        }
+
+        fn open_stream(
             &self,
             _stream_ref: &MediaServerStreamRef,
             range: Option<&str>,
-        ) -> Result<crate::media_server::MediaServerStreamResponse, MediaServerError> {
+        ) -> impl std::future::Future<Output = Result<crate::media_server::MediaServerStreamResponse, MediaServerError>> {
             *self.seen_range.lock().expect("lock") = range.map(ToOwned::to_owned);
             if let Some(error) = self.stream_error.clone() {
-                return Err(error);
+                return std::future::ready(Err(error));
             }
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("video/mp4"));
@@ -307,15 +311,22 @@ mod tests {
             headers.insert(CONTENT_LENGTH, HeaderValue::from_static("1024"));
             headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
             headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer should-not-leak"));
-            Ok(MediaServerStreamResponse {
+            std::future::ready(Ok(MediaServerStreamResponse {
                 status: StatusCode::PARTIAL_CONTENT,
                 headers,
                 body: stream::once(async { Ok::<Bytes, MediaServerError>(Bytes::from_static(b"data")) }).boxed(),
-            })
+            }))
         }
 
-        async fn open_image(&self, _image_ref: &MediaServerImageRef) -> Result<MediaServerResourceResponse, MediaServerError> {
-            Ok(MediaServerResourceResponse { status: StatusCode::OK, headers: HeaderMap::new(), body: Bytes::new() })
+        fn open_image(
+            &self,
+            _image_ref: &MediaServerImageRef,
+        ) -> impl std::future::Future<Output = Result<MediaServerResourceResponse, MediaServerError>> {
+            std::future::ready(Ok(MediaServerResourceResponse {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Bytes::new(),
+            }))
         }
     }
 

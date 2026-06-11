@@ -35,7 +35,7 @@ impl ConfigRenameDto {
         }
         let resolved_pattern = apply_templates_to_pattern_single(&self.pattern, templates)?;
         if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(&resolved_pattern) {
-            return Err(TuliproxError::RegexCompile(format!("{} {err}", resolved_pattern)));
+            return Err(TuliproxError::RegexCompile(format!("{resolved_pattern} {err}")));
         }
         self.t_pattern = Some(resolved_pattern);
         Ok(())

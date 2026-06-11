@@ -1,5 +1,8 @@
 use crate::{
-    app::components::{select::Select, Card, DropDownOption, DropDownSelection, Tag, TagList, TextButton},
+    app::components::{
+        select::Select, selection_first, selection_vec, Card, DropDownOption, DropDownSelection, Tag, TagList,
+        TextButton,
+    },
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_number_u64,
     edit_field_text, generate_form_reducer,
     i18n::use_translation,
@@ -292,11 +295,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     ]);
     let dns_prefer_state = dns_state.clone();
     let handle_dns_prefer_select = Callback::from(move |(_, selection): (String, DropDownSelection)| {
-        let prefer = match selection {
-            DropDownSelection::Single(id) => dns_prefer_from_id(&id),
-            DropDownSelection::Multi(ids) => ids.first().map_or(DnsPrefer::default(), |id| dns_prefer_from_id(id)),
-            DropDownSelection::Empty => DnsPrefer::default(),
-        };
+        let prefer = selection_first(&selection).map_or(DnsPrefer::default(), dns_prefer_from_id);
         dns_prefer_state.dispatch(ProviderDnsFormAction::Prefer(prefer));
     });
 
@@ -319,11 +318,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     ]);
     let dns_schemes_state = dns_state.clone();
     let handle_dns_schemes_select = Callback::from(move |(_, selection): (String, DropDownSelection)| {
-        let schemes = match selection {
-            DropDownSelection::Single(id) => schemes_from_ids(vec![id]),
-            DropDownSelection::Multi(ids) => schemes_from_ids(ids),
-            DropDownSelection::Empty => None,
-        };
+        let schemes = schemes_from_ids(selection_vec(selection));
         dns_schemes_state.dispatch(ProviderDnsFormAction::Schemes(schemes));
     });
 
@@ -341,13 +336,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     ]);
     let dns_on_resolve_error_state = dns_state.clone();
     let handle_dns_on_resolve_error_select = Callback::from(move |(_, selection): (String, DropDownSelection)| {
-        let policy = match selection {
-            DropDownSelection::Single(id) => on_resolve_error_from_id(&id),
-            DropDownSelection::Multi(ids) => {
-                ids.first().map_or(OnResolveErrorPolicy::default(), |id| on_resolve_error_from_id(id))
-            }
-            DropDownSelection::Empty => OnResolveErrorPolicy::default(),
-        };
+        let policy = selection_first(&selection).map_or(OnResolveErrorPolicy::default(), on_resolve_error_from_id);
         dns_on_resolve_error_state.dispatch(ProviderDnsFormAction::OnResolveError(policy));
     });
 
@@ -365,13 +354,7 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     ]);
     let dns_on_connect_error_state = dns_state.clone();
     let handle_dns_on_connect_error_select = Callback::from(move |(_, selection): (String, DropDownSelection)| {
-        let policy = match selection {
-            DropDownSelection::Single(id) => on_connect_error_from_id(&id),
-            DropDownSelection::Multi(ids) => {
-                ids.first().map_or(OnConnectErrorPolicy::default(), |id| on_connect_error_from_id(id))
-            }
-            DropDownSelection::Empty => OnConnectErrorPolicy::default(),
-        };
+        let policy = selection_first(&selection).map_or(OnConnectErrorPolicy::default(), on_connect_error_from_id);
         dns_on_connect_error_state.dispatch(ProviderDnsFormAction::OnConnectError(policy));
     });
 
@@ -391,13 +374,8 @@ pub fn ProviderItemForm(props: &ProviderItemFormProps) -> Html {
     ]);
     let provider_policy_state = form_state.clone();
     let handle_provider_policy_select = Callback::from(move |(_, selection): (String, DropDownSelection)| {
-        let policy = match selection {
-            DropDownSelection::Single(id) => provider_url_selection_policy_from_id(&id),
-            DropDownSelection::Multi(ids) => ids
-                .first()
-                .map_or(ProviderUrlSelectionPolicy::default(), |id| provider_url_selection_policy_from_id(id)),
-            DropDownSelection::Empty => ProviderUrlSelectionPolicy::default(),
-        };
+        let policy = selection_first(&selection)
+            .map_or(ProviderUrlSelectionPolicy::default(), provider_url_selection_policy_from_id);
         provider_policy_state.dispatch(ProviderFormAction::ProviderUrlSelectionPolicy(policy));
     });
 

@@ -133,12 +133,10 @@ pub fn BlockView(props: &BlockProps) -> Html {
                 }
             }),
             BlockInstance::Target(dto) => (dto.name.to_string(), true, false),
-            BlockInstance::Output(_output) => {
-                (translate.t(&format!("SOURCE_EDITOR.BRICK_{}", block_type)), false, false)
-            }
+            BlockInstance::Output(_output) => (translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}")), false, false),
         };
         if dto_title.is_empty() {
-            (translate.t(&format!("SOURCE_EDITOR.BRICK_{}", block_type)), false, is_batch)
+            (translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}")), false, is_batch)
         } else {
             (dto_title, show_type, is_batch)
         }
@@ -168,7 +166,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                     </div>
                     {
                         html_if!(show_type, {
-                          <span class="tp__source-editor__block-sub-label">{translate.t(&format!("SOURCE_EDITOR.BRICK_{}", block_type))}</span>
+                          <span class="tp__source-editor__block-sub-label">{translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}"))}</span>
                         })
                     }
                 </div>

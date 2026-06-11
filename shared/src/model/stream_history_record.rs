@@ -67,7 +67,7 @@ impl Display for DisconnectReason {
             DisconnectReason::SessionExpired => write!(f, "session_expired"),
             DisconnectReason::UserConnectionsExhausted => write!(f, "user_connections_exhausted"),
             DisconnectReason::ProviderConnectionsExhausted => write!(f, "provider_connections_exhausted"),
-            DisconnectReason::IntermediateFailures(count) => write!(f, "intermediate_failures({count})", count = count),
+            DisconnectReason::IntermediateFailures(count) => write!(f, "intermediate_failures({count})"),
         }
     }
 }

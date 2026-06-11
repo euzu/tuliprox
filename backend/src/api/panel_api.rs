@@ -1152,6 +1152,7 @@ async fn patch_source_yml_add_alias(
         max_connections: 1,
         exp_date,
         enabled: true,
+        stalker: None,
     };
 
     input.upsert_alias(alias)?;
@@ -1414,6 +1415,7 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                     max_connections: 1,
                     exp_date: *exp_date,
                     enabled: true,
+                    stalker: None,
                 };
                 alias.prepare(next_index, &input_type)?;
                 aliases.push(alias);
