@@ -51,6 +51,15 @@ fn versioned_static_asset_url(path: &str) -> String {
 
 fn versioned_config_url() -> String { versioned_static_asset_url("config.json") }
 
+fn router_basename(config: &WebConfig) -> Option<String> {
+    config
+        .web_path
+        .as_ref()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty() && *path != "/")
+        .map(ToOwned::to_owned)
+}
+
 fn resolve_effective_language(languages: &[LanguageInfo], active_language: &str) -> String {
     if languages.iter().any(|language| language.code == active_language) {
         active_language.to_string()
@@ -210,9 +219,10 @@ pub fn App() -> Html {
         active: effective_language.clone(),
         on_change: on_language_change,
     };
+    let basename = router_basename(config);
 
     html! {
-        <BrowserRouter>
+        <BrowserRouter basename={basename}>
             <ServiceContextProvider config={config.clone()}>
                 <IconContextProvider icons={icons.clone()}>
                     <ContextProvider<LanguageState> context={language_state}>
@@ -255,6 +265,18 @@ mod tests {
             versioned_static_asset_url("assets/i18n/en.json?lang=en"),
             format!("assets/i18n/en.json?lang=en&v={}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn router_basename_uses_non_root_web_path() {
+        let config = WebConfig { web_path: Some("/tuli".to_string()), ..WebConfig::default() };
+        assert_eq!(router_basename(&config), Some("/tuli".to_string()));
+    }
+
+    #[test]
+    fn router_basename_ignores_root_path() {
+        let config = WebConfig { web_path: Some("/".to_string()), ..WebConfig::default() };
+        assert_eq!(router_basename(&config), None);
     }
 
     #[test]

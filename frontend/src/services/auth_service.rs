@@ -1,5 +1,8 @@
 use super::{check_dummy_token, get_base_href, request_post, set_token};
-use crate::error::{Error, Error::Unauthorized};
+use crate::{
+    error::{Error, Error::Unauthorized},
+    model::WebConfig,
+};
 use base64::{engine::general_purpose, Engine as _};
 use futures_signals::signal::{Mutable, SignalExt};
 use log::warn;
@@ -18,6 +21,16 @@ fn decode_jwt_payload(token: &str) -> Option<Claims> {
     serde_json::from_slice::<Claims>(&payload_bytes).ok()
 }
 
+fn resolve_auth_path(config: &WebConfig) -> String {
+    let auth_url = config.api.auth_url.trim();
+    if !auth_url.is_empty() {
+        return auth_url.to_string();
+    }
+
+    let base_href = get_base_href();
+    concat_path_leading_slash(&base_href, "auth")
+}
+
 pub struct AuthService {
     auth_path: String,
     username: RefCell<String>,
@@ -28,10 +41,9 @@ pub struct AuthService {
 }
 
 impl AuthService {
-    pub fn new() -> Self {
-        let base_href = get_base_href();
+    pub fn new(config: &WebConfig) -> Self {
         Self {
-            auth_path: concat_path_leading_slash(&base_href, "auth"),
+            auth_path: resolve_auth_path(config),
             username: RefCell::new(String::new()),
             auth_channel: Mutable::new(false),
             roles: RefCell::new(vec![]),
@@ -150,5 +162,21 @@ impl AuthService {
 }
 
 impl Default for AuthService {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self { Self::new(&WebConfig::default()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_auth_path;
+    use crate::model::{ApiConfig, WebConfig};
+
+    #[test]
+    fn resolve_auth_path_prefers_configured_auth_url() {
+        let config = WebConfig {
+            api: ApiConfig { api_url: "/tuli/api/v1/".to_string(), auth_url: "/tuli/auth".to_string() },
+            ..WebConfig::default()
+        };
+
+        assert_eq!(resolve_auth_path(&config), "/tuli/auth");
+    }
 }
