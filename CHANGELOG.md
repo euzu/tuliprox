@@ -443,6 +443,9 @@
 - **EPG Programme Lookup**: `EpgChannel::get_programme_with_limit` now binary-searches the sorted programme list
   for the current window boundary instead of scanning linearly, reducing per-channel EPG lookup from `O(p)` to
   `O(log p)` on large guides. The selected programmes are unchanged.
+- **Item Type Field Access**: Reading the `Type` field during sorting and filtering no longer re-interns the
+  type label on every access. The five fixed type labels are now interned once and cached, so `Type`-keyed
+  rules return a cheap `Arc` clone instead of performing an interner hash-map lookup per item.
 
 ## 3.3.0 (2026-04-02)
 

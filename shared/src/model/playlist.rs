@@ -185,6 +185,24 @@ impl PlaylistItemType {
         }
     }
 
+    /// Returns a cached interned `Arc<str>` of this type's label.
+    ///
+    /// `intern()` performs an interner hash-map lookup on every call. Because the
+    /// label is one of only five fixed values, this caches the interned `Arc` per
+    /// label in a `OnceLock` and returns a cheap `Arc::clone`, avoiding repeated
+    /// interner lookups on hot sort/filter paths.
+    pub fn interned_label(&self) -> Arc<str> {
+        static CACHE: [std::sync::OnceLock<Arc<str>>; 5] = [const { std::sync::OnceLock::new() }; 5];
+        let idx = match self {
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => 0,
+            Self::Video | Self::LocalVideo => 1,
+            Self::Series | Self::LocalSeries => 2,
+            Self::SeriesInfo | Self::LocalSeriesInfo => 3,
+            Self::Catchup => 4,
+        };
+        Arc::clone(CACHE[idx].get_or_init(|| self.as_str().intern()))
+    }
+
     pub fn is_cluster(&self, cluster: XtreamCluster) -> bool {
         match self {
             Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => cluster == XtreamCluster::Live,

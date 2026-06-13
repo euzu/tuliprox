@@ -111,7 +111,7 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
         ItemField::Genre => get_genre!(header).unwrap_or_else(|| "".intern()),
         ItemField::Url => Arc::clone(&header.url),
         ItemField::Input => Arc::clone(&header.input_name),
-        ItemField::Type => header.item_type.intern(),
+        ItemField::Type => header.item_type.interned_label(),
         ItemField::Caption => {
             if header.title.is_empty() {
                 Arc::clone(&header.name)
