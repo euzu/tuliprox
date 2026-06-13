@@ -78,7 +78,7 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
 
             let uuid = header.get_uuid();
             let item_type = header.item_type;
-            let parent_virtual_id = if matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
+            let parent_virtual_id = if item_type.is_series() {
                 target_id_mapping.get_parent_virtual_id_by_uuid(uuid).unwrap_or_default()
             } else {
                 0
@@ -450,7 +450,7 @@ fn rewrite_series_episode_parent_virtual_ids(playlist: &mut [PlaylistGroup], tar
     for group in playlist.iter_mut() {
         for channel in &mut group.channels {
             let header = &mut channel.header;
-            if matches!(header.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
+            if header.item_type.is_series() {
                 if let Some(parent_virtual_id) = series_parent_virtual_ids.get(&header.parent_code) {
                     let provider_id = header.get_provider_id().unwrap_or_default();
                     let item_type = header.item_type;

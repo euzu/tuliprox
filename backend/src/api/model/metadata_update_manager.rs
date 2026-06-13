@@ -3209,7 +3209,7 @@ impl InputWorker {
     fn batchable_generic_probe_xtream_cluster(item_type: PlaylistItemType) -> Option<XtreamCluster> {
         if item_type.is_live() {
             Some(XtreamCluster::Live)
-        } else if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
+        } else if item_type.is_video() {
             Some(XtreamCluster::Video)
         } else {
             None

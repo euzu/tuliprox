@@ -177,9 +177,9 @@ async fn prepare_generic_stream_metadata(
         InputType::Xtream | InputType::XtreamBatch => {
             let cluster = if item_type.is_live() {
                 XtreamCluster::Live
-            } else if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
+            } else if item_type.is_video() {
                 XtreamCluster::Video
-            } else if matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
+            } else if item_type.is_series() {
                 XtreamCluster::Series
             } else {
                 // Generic probing currently supports live/video/series payload shapes.
@@ -422,7 +422,7 @@ pub fn update_properties(
     raw_audio: Option<Arc<str>>,
     stats: ProbeStreamStats,
 ) {
-    if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
+    if item_type.is_video() {
        let mut props = if let Some(StreamProperties::Video(p)) = props_opt {
            *p.clone()
        } else {
@@ -453,9 +453,8 @@ pub fn update_properties(
        }
        *props_opt = Some(StreamProperties::Video(Box::new(props)));
     }
-    else if matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
-       let mut props = if let Some(StreamProperties::Episode(p)) = props_opt {
-           *p.clone()
+    else if item_type.is_series() {
+       let mut props = if let Some(StreamProperties::Episode(p)) = props_opt {           *p.clone()
        } else {
            EpisodeStreamProperties {
                episode_id: virtual_id,

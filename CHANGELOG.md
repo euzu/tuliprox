@@ -490,6 +490,10 @@
   `matches!(input_type, M3uBatch | XtreamBatch)` / `Xtream | XtreamBatch` / `M3u | M3uBatch` checks across the backend
   and frontend through the centralized `is_batch()` / `is_xtream()` / `is_m3u()` methods, so the batch/family rules
   live on the enum instead of being re-encoded (and risking silent drift) at every call site.
+- **PlaylistItemType Classification Helpers**: Added `PlaylistItemType::is_video()` / `is_series()` and routed the
+  repeated `matches!(item_type, Video | LocalVideo)` and `matches!(item_type, Series | LocalSeries)` boolean checks
+  (filter evaluation, stream probing, trakt matching, playlist persistence, custom-provider filtering, metadata probe
+  routing) through them, so the family classification is defined once on the enum instead of re-encoded per call site.
 - **XtreamCluster Behavior Centralization**: Added `XtreamCluster::info_action_and_id_field()` (and a backend
   `xtream_cluster_category_collection()` helper) so the per-cluster `player_api` action / id-field and the
   `cat_live`/`cat_vod`/`cat_series` collection names are derived once instead of being re-matched at each storage and

@@ -13,7 +13,7 @@ use log::warn;
 use serde_json::json;
 use shared::utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable};
 use shared::model::{
-    InputType, M3uPlaylistItem, PlaylistItemType, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
+    InputType, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
 };
 use std::sync::Arc;
 use tokio_stream::StreamExt;
@@ -39,7 +39,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             };
             let item_filter = if cluster == XtreamCluster::Series {
                 |pli: &XtreamPlaylistItem| {
-                    !matches!(pli.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
+                    !pli.item_type.is_series()
                 }
             } else {
                 |_pli: &XtreamPlaylistItem| true
@@ -52,7 +52,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             };
             let item_filter = if cluster == XtreamCluster::Series {
                 |pli: &M3uPlaylistItem| {
-                    !matches!(pli.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
+                    !pli.item_type.is_series()
                 }
             } else {
                 |_pli: &M3uPlaylistItem| true

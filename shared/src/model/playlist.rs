@@ -160,6 +160,12 @@ impl PlaylistItemType {
 
     pub fn is_live_adaptive(&self) -> bool { matches!(self, PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) }
 
+    /// True for VOD item types (`Video` or `LocalVideo`).
+    pub fn is_video(&self) -> bool { matches!(self, PlaylistItemType::Video | PlaylistItemType::LocalVideo) }
+
+    /// True for concrete series item types (`Series` or `LocalSeries`); excludes the `SeriesInfo` containers.
+    pub fn is_series(&self) -> bool { matches!(self, PlaylistItemType::Series | PlaylistItemType::LocalSeries) }
+
     /// Controls address tracking only.
     /// Do not use this to decide whether a playback request should use session-based admission
     /// or whether a logical playback must stay on the same provider account.
