@@ -59,12 +59,12 @@ impl EpgChannel {
     pub fn get_programme_with_limit(&self, limit: u32) -> Vec<&EpgProgramme> {
         let now = Utc::now().timestamp();
 
-        // find index for first relevant entry
-        let start_idx = self
-            .programmes
-            .iter()
-            .position(|p| (p.start <= now && now <= p.stop) || (p.start >= now))
-            .unwrap_or(self.programmes.len()); // nothing found, empty response
+        // Programmes are stored sorted by start timestamp. The first relevant
+        // entry is the first programme that is currently airing or starts in the
+        // future, which is equivalent to the first programme whose stop is not in
+        // the past (`p.stop >= now`). Because the past programmes form a prefix,
+        // we can binary-search for the boundary in O(log p) instead of scanning.
+        let start_idx = self.programmes.partition_point(|p| p.stop < now);
 
         // slice from start_idx, max. limit
         self.programmes.iter().skip(start_idx).take(limit as usize).collect()

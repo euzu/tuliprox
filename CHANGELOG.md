@@ -438,6 +438,12 @@
     - `allowed_countries`: ISO-style country codes resolved through GeoIP.
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
+## 🚀 Performance
+
+- **EPG Programme Lookup**: `EpgChannel::get_programme_with_limit` now binary-searches the sorted programme list
+  for the current window boundary instead of scanning linearly, reducing per-channel EPG lookup from `O(p)` to
+  `O(log p)` on large guides. The selected programmes are unchanged.
+
 ## 3.3.0 (2026-04-02)
 
 ## ⚠️ Breaking Changes 3.3.0
