@@ -113,6 +113,7 @@ pub enum InputType {
 impl InputType {
     pub fn is_xtream(&self) -> bool { matches!(self, Self::Xtream | Self::XtreamBatch) }
     pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
+    pub fn is_batch(&self) -> bool { matches!(self, Self::M3uBatch | Self::XtreamBatch) }
     pub fn uses_standard_input_url(&self) -> bool {
         matches!(self, Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch)
     }
@@ -664,9 +665,7 @@ impl ConfigInputDto {
         if self.enabled {
             self.prepare_media_server_input()?;
         }
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
-            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
-        {
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) && self.input_type.is_batch() {
             return Err(TuliproxError::ConfigInput(format!(
                 "input type {} does not support provider:// URLs for batch definitions; use batch:// URL (input: {})",
                 self.input_type, self.name
@@ -855,9 +854,7 @@ impl ConfigInputDto {
     pub fn prepare_type(&mut self) -> Result<(), TuliproxError> {
         self.url = self.url.trim().to_string();
         self.normalize_input_type_from_batch_url();
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
-            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
-        {
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) && self.input_type.is_batch() {
             return Err(TuliproxError::ConfigInput(format!(
                 "input type {} does not support provider:// URLs for batch definitions; use batch:// URL",
                 self.input_type

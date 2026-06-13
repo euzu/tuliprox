@@ -96,13 +96,13 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
     accept: Option<&str>,
 ) -> impl IntoResponse + Send {
     if let Some(input) = cfg_input {
-        if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
+        if input.input_type.is_xtream() {
             let Some(channel_iterator) = iter_raw_xtream_input_playlist(&app_state.app_config, input, cluster).await else {
                 return empty_json_list_response();
             };
             let converted_stream = channel_iterator.map(UiPlaylistItem::from);
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
-        } else if matches!(input.input_type, InputType::M3u | InputType::M3uBatch) {
+        } else if input.input_type.is_m3u() {
             let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
                 return empty_json_list_response();
             };

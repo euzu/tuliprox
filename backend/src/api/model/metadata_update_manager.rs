@@ -3402,7 +3402,7 @@ impl InputWorker {
                 let task_key = TaskKey::from_task(task);
                 let probe_identifier = if unique_id.trim().is_empty() { url.as_str() } else { unique_id.as_str() };
 
-                if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
+                if input.input_type.is_xtream() {
                     if let Some(cluster) = Self::batchable_generic_probe_xtream_cluster(*item_type) {
                         let Ok(provider_id) = unique_id.parse::<u32>() else {
                             warn!("Skipping xtream generic probe update with non-numeric id: {unique_id}");

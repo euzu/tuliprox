@@ -341,7 +341,7 @@ async fn playlist_series_info(
 
         PlaylistRequest::Input(input_name) => {
             if let Some(input) = app_state.app_config.get_input_by_name(&input_name.intern()) {
-                if matches!(input.input_type, InputType::Xtream | InputType::XtreamBatch) {
+                if input.input_type.is_xtream() {
                     // We cannot call `xtream_get_stream_info_response` directly here because that path
                     // depends on target-local virtual-id mapping (`xtream_get_item_for_stream_id`).
                     // Input/custom requests only provide provider_id, so we resolve series info from

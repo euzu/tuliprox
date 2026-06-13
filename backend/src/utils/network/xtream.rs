@@ -425,8 +425,7 @@ async fn download_xtream_from_source(
 
     let cfg = app_config.config.load();
     let storage_dir = &cfg.storage_dir;
-    let use_disk_based_processing =
-        cfg.disk_based_processing && matches!(source_input_type, InputType::Xtream | InputType::XtreamBatch);
+    let use_disk_based_processing = cfg.disk_based_processing && source_input_type.is_xtream();
 
     let mut errors = vec![];
     for (xtream_cluster, category, stream) in &ACTIONS {

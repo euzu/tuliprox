@@ -1,5 +1,5 @@
 use crate::app::components::InputRow;
-use shared::model::{ConfigInputDto, ConfigTargetDto, InputType, SourcesConfigDto};
+use shared::model::{ConfigInputDto, ConfigTargetDto, SourcesConfigDto};
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 pub type PlaylistRows = Vec<(Vec<Rc<InputRow>>, Vec<Rc<ConfigTargetDto>>)>;
@@ -55,7 +55,7 @@ pub fn collect_provider_buttons(rows: &PlaylistRows) -> Vec<ProviderButton> {
             let InputRow::Input(input) = &**row else {
                 continue;
             };
-            if matches!(input.input_type, InputType::M3uBatch | InputType::XtreamBatch) {
+            if input.input_type.is_batch() {
                 continue;
             }
             if seen.insert(input.id) {

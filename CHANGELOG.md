@@ -484,6 +484,13 @@
   a second `Vec<UiPlaylistItem>` and serializing the whole body at once, lowering peak memory and latency for large
   provider imports.
 
+## 🧹 Maintainability
+
+- **InputType Family Helpers**: Added `InputType::is_batch()` and routed the scattered
+  `matches!(input_type, M3uBatch | XtreamBatch)` / `Xtream | XtreamBatch` / `M3u | M3uBatch` checks across the backend
+  and frontend through the centralized `is_batch()` / `is_xtream()` / `is_m3u()` methods, so the batch/family rules
+  live on the enum instead of being re-encoded (and risking silent drift) at every call site.
+
 ## 3.3.0 (2026-04-02)
 
 ## ⚠️ Breaking Changes 3.3.0
