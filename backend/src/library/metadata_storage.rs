@@ -1,7 +1,7 @@
 use crate::library::metadata::{MediaMetadata, MetadataCacheEntry};
 use log::{debug, error, info};
 use path_clean::PathClean;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -165,17 +165,60 @@ impl MetadataStorage {
 
     // Cleans up metadata for files that no longer exist
     pub async fn cleanup_orphaned(&self) -> std::io::Result<usize> {
+        let _guard = self.mutation_guard.lock().await;
         let entries = self.load_all().await;
-        let mut deleted_count = 0;
 
+        // Partition into orphaned (source file missing) and surviving entries in a
+        // single pass so we read the library exactly once for the whole cleanup.
+        let mut orphaned = Vec::new();
+        let mut surviving = Vec::new();
         for entry in entries {
-            if !fs::try_exists(&entry.file_path).await.unwrap_or(false) {
-                info!("Removing orphaned metadata for missing file: {}", entry.file_path);
-                if let Err(e) = self.delete_by_uuid(&entry.uuid).await {
+            if fs::try_exists(&entry.file_path).await.unwrap_or(false) {
+                surviving.push(entry);
+            } else {
+                orphaned.push(entry);
+            }
+        }
+
+        if orphaned.is_empty() {
+            return Ok(0);
+        }
+
+        // Thumbnails referenced by any surviving entry must be kept. Compute the
+        // set once instead of reloading the library for every orphaned entry.
+        let surviving_thumbnails: HashSet<String> = surviving
+            .iter()
+            .flat_map(referenced_thumbnail_ids_for_entry)
+            .collect();
+
+        let mut deleted_count = 0;
+        let mut candidate_thumbnails: HashSet<String> = HashSet::new();
+        for entry in &orphaned {
+            info!("Removing orphaned metadata for missing file: {}", entry.file_path);
+            let file_path = self.get_library_metadata_file_path(&entry.uuid);
+            match fs::remove_file(&file_path).await {
+                Ok(()) => deleted_count += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
                     error!("Failed to delete orphaned metadata: {e}");
-                } else {
-                    deleted_count += 1;
+                    continue;
                 }
+            }
+            for thumbnail_id in referenced_thumbnail_ids_for_entry(entry) {
+                candidate_thumbnails.insert(thumbnail_id);
+            }
+        }
+
+        // Delete thumbnails that the removed entries referenced and that no
+        // surviving entry still references.
+        for thumbnail_id in candidate_thumbnails {
+            if surviving_thumbnails.contains(&thumbnail_id) {
+                continue;
+            }
+            let path = self.get_thumbnail_path(&thumbnail_id);
+            if fs::try_exists(&path).await.unwrap_or(false) {
+                debug!("Deleting thumbnail file: {}", path.display());
+                let _ = fs::remove_file(path).await;
             }
         }
 

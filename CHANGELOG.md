@@ -467,6 +467,10 @@
 - **Client Stream Keep-Alive Handling**: After a run of empty keep-alive chunks, `ClientStream` now backs off with a
   short timer instead of immediately re-waking the task. A provider that streams an endless sequence of empty chunks
   can no longer keep the task hot with back-to-back `Poll::Pending` re-wakes.
+- **Library Orphan Cleanup**: `cleanup_orphaned` no longer reloads the entire metadata library for every orphaned
+  entry (and again for each thumbnail reference check). It now reads the library once, partitions entries into
+  orphaned and surviving, and deletes unreferenced thumbnails against a precomputed surviving-thumbnail set, turning
+  an O(orphans × library) scan into a single linear pass.
 
 ## 3.3.0 (2026-04-02)
 
