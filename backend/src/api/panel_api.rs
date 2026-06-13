@@ -7,14 +7,14 @@ use crate::{
         },
     },
     model::{
-        is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, PanelApiConfig, PanelApiQueryParam,
+        is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, InputSource, PanelApiConfig, PanelApiQueryParam,
         ProxyUserCredentials,
     },
     repository::{
         csv_patch_batch_append, csv_patch_batch_remove_expired, csv_patch_batch_sort_by_exp_date,
         csv_patch_batch_update_credentials, csv_patch_batch_update_exp_date, get_csv_file_path,
     },
-    utils::{debug_if_enabled, format_http_status, persist_source_config, read_sources_file_from_path},
+    utils::{debug_if_enabled, format_http_status, persist_source_config, read_sources_file_from_path, request},
 };
 use smallvec::SmallVec;
 use axum::http::{Method, StatusCode};
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shared::{
     concat_string, create_bitset,
-    error::{TuliproxError},
+    error::{string_to_io_error, TuliproxError},
     model::{
         ConfigInputAliasDto, InputType, PanelApiAliasPoolSizeValue, PanelApiProvisioningMethod, ProxyUserStatus,
         SourcesConfigDto, VirtualId,
@@ -40,6 +40,7 @@ use shared::{
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    io,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -523,15 +524,58 @@ async fn panel_get_json(app_state: &AppState, url: Url) -> Result<Value, Tulipro
     Ok(json)
 }
 
-async fn user_api_get_json(app_state: &AppState, url: Url) -> Result<Value, TuliproxError> {
+fn build_user_api_account_info_input_source(
+    input: &ConfigInput,
+    username: &str,
+    password: &str,
+) -> Result<InputSource, TuliproxError> {
+    let url = build_player_api_action_url(input.url.as_str(), username, password, "account_info").ok_or_else(|| {
+        TuliproxError::ConfigPanelApi(format!(
+            "panel_api: invalid user_api base_url: {}",
+            sanitize_sensitive_info(input.url.as_str())
+        ))
+    })?;
+
+    Ok(InputSource::from(input).with_url(url.to_string()))
+}
+
+async fn user_api_get_json(app_state: &AppState, input_source: &InputSource) -> Result<Value, TuliproxError> {
     let client = app_state.http_client.load();
-    let sanitized = sanitize_sensitive_info(url.as_str());
-    debug_if_enabled!("panel_api user_api request {}", sanitized);
-    let resp = client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
+    let url = Url::parse(input_source.url.as_str()).map_err(|e| {
+        TuliproxError::ConfigPanelApi(format!(
+            "panel_api user_api invalid url {}: {e}",
+            sanitize_sensitive_info(input_source.url.as_str())
+        ))
+    })?;
+    debug_if_enabled!(
+        "panel_api user_api request {}",
+        sanitize_sensitive_info(&request::preview_request_diagnostics_for_logging(&url, input_source.get_provider()))
+    );
+
+    let config = app_state.app_config.config.load();
+    let default_user_agent = config.default_user_agent.clone();
+    let disabled_headers = config.get_disabled_headers();
+    drop(config);
+
+    let headers = request::get_request_headers(
+        Some(&input_source.headers),
+        None::<&HashMap<String, Vec<u8>>>,
+        disabled_headers.as_ref(),
+        default_user_agent.as_deref(),
+    );
+    let resp = request::send_with_retry_and_provider(
+        &app_state.app_config,
+        &url,
+        input_source.get_provider(),
+        false,
+        |resolved_url| {
+            client
+                .get(resolved_url.clone())
+                .headers(headers.clone())
+                .timeout(std::time::Duration::from_secs(30))
+        },
+    )
+    .await
         .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api request failed: {e}")))?;
     let status = resp.status();
     let body = resp.text().await.map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api read response failed: {e}")))?;
@@ -642,21 +686,9 @@ async fn fetch_root_user_api_info(
         return Ok(None);
     };
 
-    let resolved_url = input.resolve()?;
-    let base_url = get_base_url_from_str(&resolved_url).unwrap_or_else(|| resolved_url.to_string());
+    let input_source = build_user_api_account_info_input_source(input, username.as_ref(), password.as_ref())?;
 
-    let Ok(mut url) = Url::parse(base_url.as_str()) else {
-        return Err(TuliproxError::ConfigPanelApi(format!("panel_api: invalid base_url: {}", sanitize_sensitive_info(&base_url))));
-    };
-    url.set_path("/player_api.php");
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("username", username.as_ref());
-        pairs.append_pair("password", password.as_ref());
-        pairs.append_pair("action", "account_info");
-    }
-
-    let json = match user_api_get_json(app_state, url).await {
+    let json = match user_api_get_json(app_state, &input_source).await {
         Ok(json) => json,
         Err(err) => {
             debug_if_enabled!(
@@ -1537,23 +1569,15 @@ fn derive_unique_alias_name_set(existing: &HashSet<Arc<str>>, input_name: &Arc<s
 
 #[derive(Debug, Clone)]
 pub(crate) enum PanelApiProvisionOutcome {
-    Renewed { username: String, password: String },
-    Created { username: String, password: String },
+    Renewed,
+    Created,
 }
 
 impl PanelApiProvisionOutcome {
-    pub(crate) fn credentials(&self) -> (&str, &str) {
-        match self {
-            Self::Renewed { username, password } | Self::Created { username, password } => {
-                (username.as_str(), password.as_str())
-            }
-        }
-    }
-
     pub(crate) fn kind_label(&self) -> &'static str {
         match self {
-            Self::Renewed { .. } => "client_renew",
-            Self::Created { .. } => "client_new",
+            Self::Renewed => "client_renew",
+            Self::Created => "client_new",
         }
     }
 }
@@ -1648,10 +1672,7 @@ async fn try_renew_expired_account(
                         debug_if_enabled!("panel_api reload sources failed: {}", err);
                     }
                 }
-                return Some(PanelApiProvisionOutcome::Renewed {
-                    username: acct.username.clone(),
-                    password: acct.password.clone(),
-                });
+                return Some(PanelApiProvisionOutcome::Renewed);
             }
             Err(err) => {
                 debug_if_enabled!(
@@ -1704,6 +1725,23 @@ async fn try_create_new_account(
             }
 
             let exp_date = panel_client_info(app_state, panel_cfg, &username, &password, None).await.ok().flatten();
+
+            if !wait_for_panel_api_account_ready(
+                app_state,
+                input,
+                panel_cfg,
+                alias_name.as_ref(),
+                username.as_str(),
+                password.as_str(),
+            )
+            .await
+            {
+                debug_if_enabled!(
+                    "panel_api client_new account not ready after probe/cooldown for {}",
+                    sanitize_sensitive_info(alias_name.as_ref())
+                );
+                return None;
+            }
 
             if is_batch {
                 let batch_url = input.t_batch_url.as_deref().unwrap_or_default();
@@ -1764,7 +1802,7 @@ async fn try_create_new_account(
                     return None;
                 }
             }
-            Some(PanelApiProvisionOutcome::Created { username, password })
+            Some(PanelApiProvisionOutcome::Created)
         }
         Err(err) => {
             debug_if_enabled!("panel_api client_new failed: {}", sanitize_sensitive_info(&err.to_string()));
@@ -3325,12 +3363,8 @@ fn build_player_api_action_url(base_url: &str, username: &str, password: &str, a
     Some(test_url)
 }
 
-fn build_panel_api_test_url(base_url: &str, username: &str, password: &str) -> Option<Url> {
-    build_player_api_action_url(base_url, username, password, "account_info")
-}
-
 enum PanelApiProbeTarget {
-    PlayerApi { action: &'static str, url: Url },
+    PlayerApi { action: &'static str, input_source: InputSource },
 }
 
 impl PanelApiProbeTarget {
@@ -3356,7 +3390,10 @@ fn build_panel_api_probe_targets(input: &ConfigInput, username: &str, password: 
     let mut targets = Vec::new();
     for action in ["client_info", "get_live_categories", "get_series_categories", "get_vod_categories"] {
         if let Some(url) = build_player_api_action_url(input.url.as_str(), username, password, action) {
-            targets.push(PanelApiProbeTarget::PlayerApi { action, url });
+            targets.push(PanelApiProbeTarget::PlayerApi {
+                action,
+                input_source: InputSource::from(input).with_url(url.to_string()),
+            });
         }
     }
     targets
@@ -3374,31 +3411,31 @@ async fn probe_panel_api_targets(
             continue;
         }
         match target {
-            PanelApiProbeTarget::PlayerApi { action, url } => {
-                match probe_panel_api_test_url(app_state, url, probe_method).await {
+            PanelApiProbeTarget::PlayerApi { action, input_source } => {
+                match probe_panel_api_test_url(app_state, input_source, probe_method).await {
                     Ok(status) => {
                         debug_if_enabled!(
                             "panel_api probe status: '{}' action={} url: {}",
                             format_http_status(status),
                             action,
-                            sanitize_sensitive_info(url.as_str())
+                            sanitize_sensitive_info(input_source.url.as_str())
                         );
                         if status.is_success() {
                             done.insert(action);
                         }
                     }
                     Err(err) => {
-                        if err.is_timeout() {
+                        if err.kind() == io::ErrorKind::TimedOut {
                             debug_if_enabled!(
                                 "panel_api probe timeout action={} url: {}",
                                 action,
-                                sanitize_sensitive_info(url.as_str())
+                                sanitize_sensitive_info(input_source.url.as_str())
                             );
                         } else {
                             debug_if_enabled!(
                                 "panel_api probe failed action={} url: {}: {err}",
                                 action,
-                                sanitize_sensitive_info(url.as_str())
+                                sanitize_sensitive_info(input_source.url.as_str())
                             );
                         }
                     }
@@ -3411,12 +3448,38 @@ async fn probe_panel_api_targets(
 
 async fn probe_panel_api_test_url(
     app_state: &Arc<AppState>,
-    test_url: &Url,
+    input_source: &InputSource,
     method: PanelApiProvisioningMethod,
-) -> Result<StatusCode, reqwest::Error> {
+) -> Result<StatusCode, io::Error> {
     let client = app_state.http_client.load();
     let request_method = provisioning_method_to_reqwest(method);
-    let response = client.request(request_method, test_url.clone()).send().await?;
+    let test_url = Url::parse(input_source.url.as_str()).map_err(|err| {
+        string_to_io_error(format!(
+            "Malformed URL {}: {}",
+            sanitize_sensitive_info(input_source.url.as_str()),
+            sanitize_sensitive_info(err.to_string().as_str())
+        ))
+    })?;
+
+    let config = app_state.app_config.config.load();
+    let default_user_agent = config.default_user_agent.clone();
+    let disabled_headers = config.get_disabled_headers();
+    drop(config);
+
+    let headers = request::get_request_headers(
+        Some(&input_source.headers),
+        None::<&HashMap<String, Vec<u8>>>,
+        disabled_headers.as_ref(),
+        default_user_agent.as_deref(),
+    );
+    let response = request::send_with_retry_and_provider(
+        &app_state.app_config,
+        &test_url,
+        input_source.get_provider(),
+        false,
+        |resolved_url| client.request(request_method.clone(), resolved_url.clone()).headers(headers.clone()),
+    )
+    .await?;
     Ok(response.status())
 }
 
@@ -3434,7 +3497,7 @@ async fn apply_provisioning_cooldown(panel_cfg: &PanelApiConfig, account_name: &
     tokio::time::sleep(Duration::from_secs(cooldown_secs)).await;
 }
 
-async fn wait_for_panel_api_account_ready(
+pub(crate) async fn wait_for_panel_api_account_ready(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
     panel_cfg: &PanelApiConfig,
@@ -3558,23 +3621,17 @@ pub(crate) async fn run_panel_api_provisioning_probe(
     }
 
     let max_wait_secs = panel_cfg.provisioning.timeout_sec;
-    let probe_interval_secs = panel_cfg.provisioning.probe_interval_sec.max(1);
-    let probe_method = panel_cfg.provisioning.method;
 
     debug_if_enabled!(
-        "panel_api provisioning probe start for input {} (timeout={}s interval={}s method={})",
+        "panel_api provisioning probe start for input {} (timeout={}s)",
         sanitize_sensitive_info(&input.name),
-        max_wait_secs,
-        probe_interval_secs,
-        probe_method
+        max_wait_secs
     );
 
-    let deadline = Instant::now() + Duration::from_secs(max_wait_secs);
     let outcome = tokio::select! {
         () = stop_signal.cancelled() => return Ok(()),
         outcome = try_provision_account_on_exhausted(&app_state, &input) => outcome,
     };
-    let credentials = outcome.as_ref().map(PanelApiProvisionOutcome::credentials);
 
     if let Some(outcome) = outcome.as_ref() {
         debug_if_enabled!(
@@ -3589,7 +3646,7 @@ pub(crate) async fn run_panel_api_provisioning_probe(
         );
     }
 
-    let Some((username, password)) = credentials else {
+    if outcome.is_none() {
         if max_wait_secs > 0 {
             tokio::select! {
                 () = stop_signal.cancelled() => return Ok(()),
@@ -3612,100 +3669,12 @@ pub(crate) async fn run_panel_api_provisioning_probe(
                 &addr,
                 virtual_id,
                 provisioning_kick_secs,
-                DisconnectReason::Provisioning,
-            )
-            .await;
+            DisconnectReason::Provisioning,
+        )
+        .await;
         return Ok(());
-    };
-
-    let resolved_url = input.resolve()?;
-
-    let Some(test_url) = build_panel_api_test_url(&resolved_url, username, password) else {
-        if max_wait_secs > 0 {
-            tokio::select! {
-                () = stop_signal.cancelled() => return Ok(()),
-                () = tokio::time::sleep(Duration::from_secs(max_wait_secs)) => {}
-            }
-        }
-        debug_if_enabled!(
-            "panel_api provisioning probe failed to build test url for input {}",
-            sanitize_sensitive_info(&input.name)
-        );
-        stop_signal.cancel();
-        let _ = app_state
-            .connection_manager
-            .close_connection_with_reason_and_block(
-                &addr,
-                virtual_id,
-                provisioning_kick_secs,
-                DisconnectReason::Provisioning,
-            )
-            .await;
-        return Ok(());
-    };
-
-    let probe_delay = Duration::from_secs(probe_interval_secs);
-    let mut attempt = 0u64;
-    let mut ready = false;
-    while Instant::now() < deadline {
-        attempt += 1;
-        debug_if_enabled!("panel_api provisioning probe attempt {}", attempt);
-        let probe_result = tokio::select! {
-            () = stop_signal.cancelled() => return Ok(()),
-            probe_result = probe_panel_api_test_url(&app_state, &test_url, probe_method) => probe_result,
-        };
-        match probe_result {
-            Ok(status) => {
-                debug_if_enabled!(
-                    "panel_api provisioning probe status: '{}' url: {}",
-                    format_http_status(status),
-                    sanitize_sensitive_info(test_url.as_str())
-                );
-                if status.is_success() {
-                    ready = true;
-                    break;
-                }
-            }
-            Err(err) => {
-                if err.is_timeout() {
-                    debug_if_enabled!(
-                        "panel_api provisioning probe timeout for {}",
-                        sanitize_sensitive_info(test_url.as_str())
-                    );
-                } else {
-                    debug_if_enabled!(
-                        "panel_api provisioning probe failed for {}: {err}",
-                        sanitize_sensitive_info(test_url.as_str())
-                    );
-                }
-            }
-        }
-
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let remaining = deadline.checked_duration_since(now).unwrap_or_default();
-        let sleep_for = if remaining < probe_delay { remaining } else { probe_delay };
-        tokio::select! {
-            () = stop_signal.cancelled() => return Ok(()),
-            () = tokio::time::sleep(sleep_for) => {}
-        }
     }
 
-    if ready {
-        debug_if_enabled!(
-            "panel_api provisioning ready for input {} (attempts={})",
-            sanitize_sensitive_info(&input.name),
-            attempt
-        );
-    } else {
-        debug_if_enabled!(
-            "panel_api provisioning probe timeout reached for input {} (attempts={})",
-            sanitize_sensitive_info(&input.name),
-            attempt
-        );
-    }
     if stop_signal.is_cancelled() {
         return Ok(());
     }
@@ -3792,7 +3761,13 @@ pub fn create_panel_api_provisioning_stream_details(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_provisioned_account_base_url;
+    use super::{
+        build_panel_api_probe_targets, build_user_api_account_info_input_source, resolve_provisioned_account_base_url,
+        PanelApiProbeTarget,
+    };
+    use crate::model::{ConfigInput, ConfigProvider};
+    use shared::model::{ConfigProviderDto, ProviderUrlSelectionPolicy};
+    use std::sync::Arc;
     use url::Url;
 
     #[test]
@@ -3858,5 +3833,101 @@ mod tests {
         );
 
         assert_eq!(result, "custom-scheme://panel.example.com/path?username=new&password=new");
+    }
+
+    #[test]
+    fn panel_api_probe_targets_preserve_provider_failover_context() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "tivione".into(),
+            urls: vec!["http://line-a.example.test".into(), "http://line-b.example.test".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        }));
+        let input = ConfigInput {
+            name: Arc::from("cdn-dev"),
+            url: "provider://tivione".to_string(),
+            provider_configs: Some(vec![Arc::clone(&provider)]),
+            ..ConfigInput::default()
+        };
+
+        let targets = build_panel_api_probe_targets(&input, "probe-user", "probe-pass");
+
+        assert_eq!(targets.len(), 4);
+        let PanelApiProbeTarget::PlayerApi { action, input_source } = &targets[0];
+        assert_eq!(*action, "client_info");
+        assert_eq!(
+            input_source.provider.as_ref().expect("provider context should be preserved").name.as_ref(),
+            "tivione"
+        );
+        assert!(input_source.url.starts_with("provider://tivione/player_api.php?"));
+        assert!(input_source.url.contains("username=probe-user"));
+        assert!(input_source.url.contains("password=probe-pass"));
+        assert!(input_source.url.contains("action=client_info"));
+    }
+
+    #[test]
+    fn panel_api_probe_targets_keep_plain_http_without_provider_context() {
+        let input = ConfigInput {
+            name: Arc::from("plain"),
+            url: "http://origin.example.test/some/path?ignored=1".to_string(),
+            ..ConfigInput::default()
+        };
+
+        let targets = build_panel_api_probe_targets(&input, "probe-user", "probe-pass");
+
+        assert_eq!(targets.len(), 4);
+        let PanelApiProbeTarget::PlayerApi { action, input_source } = &targets[0];
+        assert_eq!(*action, "client_info");
+        assert!(input_source.provider.is_none());
+        assert!(input_source.url.starts_with("http://origin.example.test/player_api.php?"));
+        assert!(input_source.url.contains("username=probe-user"));
+        assert!(input_source.url.contains("password=probe-pass"));
+        assert!(input_source.url.contains("action=client_info"));
+    }
+
+    #[test]
+    fn user_api_account_info_preserves_provider_failover_context() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "tivione".into(),
+            urls: vec!["http://line-a.example.test".into(), "http://line-b.example.test".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        }));
+        let input = ConfigInput {
+            name: Arc::from("cdn-dev"),
+            url: "provider://tivione".to_string(),
+            provider_configs: Some(vec![Arc::clone(&provider)]),
+            ..ConfigInput::default()
+        };
+
+        let input_source = build_user_api_account_info_input_source(&input, "root-user", "root-pass")
+            .expect("expected provider account_info input source");
+
+        assert_eq!(
+            input_source.provider.as_ref().expect("provider context should be preserved").name.as_ref(),
+            "tivione"
+        );
+        assert!(input_source.url.starts_with("provider://tivione/player_api.php?"));
+        assert!(input_source.url.contains("username=root-user"));
+        assert!(input_source.url.contains("password=root-pass"));
+        assert!(input_source.url.contains("action=account_info"));
+    }
+
+    #[test]
+    fn user_api_account_info_keeps_plain_http_without_provider_context() {
+        let input = ConfigInput {
+            name: Arc::from("plain"),
+            url: "http://origin.example.test/some/path?ignored=1".to_string(),
+            ..ConfigInput::default()
+        };
+
+        let input_source = build_user_api_account_info_input_source(&input, "root-user", "root-pass")
+            .expect("expected plain account_info input source");
+
+        assert!(input_source.provider.is_none());
+        assert!(input_source.url.starts_with("http://origin.example.test/player_api.php?"));
+        assert!(input_source.url.contains("username=root-user"));
+        assert!(input_source.url.contains("password=root-pass"));
+        assert!(input_source.url.contains("action=account_info"));
     }
 }

@@ -45,7 +45,7 @@ use shared::{
     concat_string,
     model::{
         Claims, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
-        UserConnectionPermission, VirtualId, XtreamCluster,
+        UserConnectionPermission, VirtualId, XtreamCluster, ConfigTargetOptions,
     },
     utils::{
         bin_serialize, current_time_secs, extract_extension_from_url, get_credentials_from_url,
@@ -3397,7 +3397,7 @@ fn is_path_within_allowed_directories(sub_path: &Path, root_paths: &[String]) ->
 
 pub fn is_stream_share_enabled(item_type: PlaylistItemType, target: &ConfigTarget) -> bool {
     (item_type == PlaylistItemType::Live/* || item_type == PlaylistItemType::LiveHls */)
-        && target.options.as_ref().is_some_and(|opt| opt.share_live_streams)
+        && target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_mpeg_ts_enabled)
 }
 
 pub type HeaderFilter = Option<Box<dyn Fn(&str) -> bool + Send>>;
@@ -5092,6 +5092,8 @@ mod tests {
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
+            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
+            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
             active_users,
             active_provider,
             connection_manager,
@@ -5126,6 +5128,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             user_access_control: true,
             ..Config::default()
@@ -5882,6 +5885,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             ..Config::default()
         }));
@@ -5985,6 +5989,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             ..Config::default()
         }));
@@ -6040,7 +6045,13 @@ mod tests {
             id: 1,
             enabled: true,
             name: "shared".to_string(),
-            options: Some(ConfigTargetOptions { share_live_streams: true, ..ConfigTargetOptions::default() }),
+            options: Some(ConfigTargetOptions {
+                share_live_streams: shared::model::ConfigTargetShareLiveStreams {
+                    mpeg_ts: true,
+                    ..Default::default()
+                },
+                ..ConfigTargetOptions::default()
+            }),
             sort: None,
             filter: Filter::default(),
             output: Vec::new(),
@@ -8160,7 +8171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_bound_playback_tokens_enforce_hard_limits_per_socket() {
+    async fn socket_bound_playback_sessions_enforce_hard_limits_per_socket() {
         let app_state = create_test_app_state();
         let mut user = ProxyUserCredentials::default();
         user.username = "user1".to_string();
@@ -8336,7 +8347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_bound_playback_tokens_still_allow_soft_slots() {
+    async fn socket_bound_playback_sessions_still_allow_soft_slots() {
         let app_state = create_test_app_state();
         let mut user = ProxyUserCredentials::default();
         user.username = "soft-user".to_string();
@@ -8535,6 +8546,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             ..Config::default()
         };

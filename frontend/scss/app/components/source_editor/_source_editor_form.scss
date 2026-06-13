@@ -130,6 +130,40 @@ $form-width: 520px;
     margin-top: var(--margin-default);
   }
 
+  .tp__target-options {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-default);
+
+    &__group {
+      display: flex;
+      flex-flow: column;
+      gap: var(--gap-small);
+    }
+
+    &__children {
+      display: flex;
+      flex-flow: column;
+      gap: var(--gap-default);
+      padding-left: var(--padding-default);
+
+      .tp__form-field {
+        min-width: 0;
+      }
+    }
+
+    &__heading {
+      display: flex;
+      align-items: center;
+      min-height: 2.5rem;
+    }
+
+    &__child-content {
+      display: flex;
+      min-width: 0;
+    }
+  }
+
   &__sidebar {
     .tp__icon-button.active {
       background-color: var(--menu-item-hover-background-color);

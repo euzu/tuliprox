@@ -12,7 +12,9 @@ use crate::{
                 parse_admission_strategy_tags, remove_admission_strategy_tag, use_emit_mapped_option,
                 AdmissionStrategiesDto,
             },
-            Card, Chip, IconButton, RadioButtonGroup, TextButton,
+            dto_field_id,
+            number_input::NumberInput,
+            Card, Chip, DropDownOption, DropDownSelection, IconButton, RadioButtonGroup, Select, TextButton,
         },
         context::ConfigContext,
     },
@@ -23,17 +25,20 @@ use crate::{
 };
 use shared::{
     model::{
-        CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, QosAggregationConfigDto, RateLimitConfigDto,
-        ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto,
-        StreamConfigDto, StreamHistoryConfigDto,
+        ByteSizeDto, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
+        HlsCorruptSegmentWatchdogModeDto, HlsSegmentRepairConfigDto, HlsSegmentRepairModeDto, QosAggregationConfigDto,
+        RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
+        StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto, StripConfigDto, StripModeDto,
     },
     utils::{default_secret, format_float_localized},
 };
 use std::{rc::Rc, str::FromStr};
 use strum::IntoEnumIterator;
+use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 const LABEL_CACHE: &str = "LABEL.CACHE";
+const LABEL_RESOURCE_IMAGE_CACHE: &str = "LABEL.RESOURCE_IMAGE_CACHE";
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SIZE: &str = "LABEL.SIZE";
 const LABEL_DIRECTORY: &str = "LABEL.DIRECTORY";
@@ -52,6 +57,28 @@ const LABEL_THROTTLE_KBPS: &str = "LABEL.THROTTLE_KBPS";
 const LABEL_STREAM_BUFFER: &str = "LABEL.STREAM_BUFFER";
 const LABEL_BUFFER_ENABLED: &str = "LABEL.BUFFER_ENABLED";
 const LABEL_BUFFER_SIZE: &str = "LABEL.BUFFER_SIZE";
+const LABEL_HLS_CACHE_PROXY: &str = "LABEL.HLS_CACHE_PROXY";
+const LABEL_HLS_CACHE_SEGMENT_REPAIR: &str = "LABEL.HLS_CACHE_SEGMENT_REPAIR";
+const LABEL_CACHE_PATH: &str = "LABEL.CACHE_PATH";
+const LABEL_STRIP_MODE: &str = "LABEL.STRIP_MODE";
+const LABEL_STRIP_VALUE: &str = "LABEL.STRIP_VALUE";
+const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
+const LABEL_CACHE_BYTES: &str = "LABEL.CACHE_BYTES";
+const LABEL_CACHE_BYTES_PER_SESSION: &str = "LABEL.CACHE_BYTES_PER_SESSION";
+const LABEL_MAX_SEGMENTS_PREFETCH: &str = "LABEL.MAX_SEGMENTS_PREFETCH";
+const LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION: &str = "LABEL.MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION";
+const LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL: &str = "LABEL.MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL";
+const LABEL_ORIGIN_MANIFEST_TIMEOUT_MS: &str = "LABEL.ORIGIN_MANIFEST_TIMEOUT_MS";
+const LABEL_ORIGIN_SEGMENT_TIMEOUT_MS: &str = "LABEL.ORIGIN_SEGMENT_TIMEOUT_MS";
+const LABEL_SESSION_IDLE_TIMEOUT: &str = "LABEL.SESSION_IDLE_TIMEOUT";
+const LABEL_SEGMENT_REPAIR: &str = "LABEL.SEGMENT_REPAIR";
+const LABEL_SEGMENT_SIZE_INCREASE: &str = "LABEL.SEGMENT_SIZE_INCREASE";
+const LABEL_REPAIR_TRIGGER: &str = "LABEL.REPAIR_TRIGGER";
+const LABEL_APPLY_TO_FIRST_SEGMENTS: &str = "LABEL.APPLY_TO_FIRST_SEGMENTS";
+const LABEL_MAX_PARALLEL_REPAIRS: &str = "LABEL.MAX_PARALLEL_REPAIRS";
+const LABEL_POSTPROCESS_TIMEOUT_MS: &str = "LABEL.POSTPROCESS_TIMEOUT_MS";
+const LABEL_CORRUPT_SEGMENT_WATCHDOG: &str = "LABEL.CORRUPT_SEGMENT_WATCHDOG";
+const LABEL_MAX_WATCHDOG_JOBS: &str = "LABEL.MAX_WATCHDOG_JOBS";
 
 const LABEL_RATE_LIMIT: &str = "LABEL.RATE_LIMIT";
 const LABEL_PERIOD_MILLIS: &str = "LABEL.PERIOD_MILLIS";
@@ -180,6 +207,33 @@ generate_form_reducer!(
 );
 
 generate_form_reducer!(
+    state: StripConfigFormState { form: StripConfigDto },
+    action_name: StripConfigFormAction,
+    fields {
+        Mode => mode: StripModeDto,
+        Value => value: u64,
+    }
+);
+
+generate_form_reducer!(
+    state: HlsCacheConfigFormState { form: HlsCacheConfigDto },
+    action_name: HlsCacheConfigFormAction,
+    fields {
+        CachePath => cache_path: String,
+        CacheDuration => cache_duration: u64,
+        CacheBytes => cache_bytes: ByteSizeDto,
+        CacheBytesPerSession => cache_bytes_per_session: ByteSizeDto,
+        MaxSegmentsPrefetch => max_segments_prefetch: usize,
+        MaxConcurrentSegmentFetchesPerSession => max_concurrent_segment_fetches_per_session: usize,
+        MaxConcurrentSegmentFetchesGlobal => max_concurrent_segment_fetches_global: usize,
+        OriginManifestTimeoutMs => origin_manifest_timeout_ms: u64,
+        OriginSegmentTimeoutMs => origin_segment_timeout_ms: u64,
+        SessionIdleTimeout => session_idle_timeout: u64,
+        SegmentRepair => segment_repair: HlsSegmentRepairConfigDto,
+    }
+);
+
+generate_form_reducer!(
     state: StreamHistoryConfigFormState { form: StreamHistoryConfigDto },
     action_name: StreamHistoryConfigFormAction,
     fields {
@@ -237,6 +291,94 @@ fn geoip_unavailable_policy_labels(translate: &YewI18n) -> Rc<Vec<String>> {
     ])
 }
 
+fn hls_strip_mode_options(selected: StripModeDto) -> Rc<Vec<DropDownOption>> {
+    Rc::new(vec![
+        DropDownOption::new("segments", html! { "segments" }, selected == StripModeDto::Segments),
+        DropDownOption::new("seconds", html! { "seconds" }, selected == StripModeDto::Seconds),
+    ])
+}
+
+fn hls_segment_repair_max_level_options(selected: HlsSegmentRepairModeDto) -> Rc<Vec<DropDownOption>> {
+    Rc::new(vec![
+        DropDownOption::new("off", html! { "OFF" }, selected == HlsSegmentRepairModeDto::Off),
+        DropDownOption::new("low", html! { "LOW" }, selected == HlsSegmentRepairModeDto::Low),
+        DropDownOption::new("medium", html! { "MEDIUM" }, selected == HlsSegmentRepairModeDto::Medium),
+        DropDownOption::new("high", html! { "HIGH" }, selected == HlsSegmentRepairModeDto::High),
+    ])
+}
+
+fn hls_segment_repair_max_level_label(mode: HlsSegmentRepairModeDto) -> &'static str {
+    match mode {
+        HlsSegmentRepairModeDto::Off => "OFF",
+        HlsSegmentRepairModeDto::Low => "LOW",
+        HlsSegmentRepairModeDto::Medium => "MEDIUM",
+        HlsSegmentRepairModeDto::High => "HIGH",
+    }
+}
+
+fn hls_corrupt_segment_watchdog_options(selected: HlsCorruptSegmentWatchdogModeDto) -> Rc<Vec<DropDownOption>> {
+    Rc::new(vec![
+        DropDownOption::new("off", html! { "OFF" }, selected == HlsCorruptSegmentWatchdogModeDto::Off),
+        DropDownOption::new(
+            "detect_only",
+            html! { "DETECT ONLY" },
+            selected == HlsCorruptSegmentWatchdogModeDto::DetectOnly,
+        ),
+        DropDownOption::new("sanitize", html! { "SANITIZE" }, selected == HlsCorruptSegmentWatchdogModeDto::Sanitize),
+        DropDownOption::new(
+            "diagnostic",
+            html! { "DIAGNOSTIC" },
+            selected == HlsCorruptSegmentWatchdogModeDto::Diagnostic,
+        ),
+    ])
+}
+
+fn hls_corrupt_segment_watchdog_label(mode: HlsCorruptSegmentWatchdogModeDto) -> &'static str {
+    match mode {
+        HlsCorruptSegmentWatchdogModeDto::Off => "OFF",
+        HlsCorruptSegmentWatchdogModeDto::DetectOnly => "DETECT ONLY",
+        HlsCorruptSegmentWatchdogModeDto::Sanitize => "SANITIZE",
+        HlsCorruptSegmentWatchdogModeDto::Diagnostic => "DIAGNOSTIC",
+    }
+}
+
+fn hls_segment_repair_size_increase_percent(segment_repair: &HlsSegmentRepairConfigDto) -> Option<u8> {
+    match segment_repair.max_level {
+        HlsSegmentRepairModeDto::Off => None,
+        HlsSegmentRepairModeDto::Low => Some(segment_repair.size_increase.low_percent),
+        HlsSegmentRepairModeDto::Medium => Some(segment_repair.size_increase.medium_percent),
+        HlsSegmentRepairModeDto::High => Some(segment_repair.size_increase.high_percent),
+    }
+}
+
+fn set_hls_segment_repair_size_increase_percent(segment_repair: &mut HlsSegmentRepairConfigDto, value: u8) {
+    match segment_repair.max_level {
+        HlsSegmentRepairModeDto::Off => {}
+        HlsSegmentRepairModeDto::Low => segment_repair.size_increase.low_percent = value,
+        HlsSegmentRepairModeDto::Medium => segment_repair.size_increase.medium_percent = value,
+        HlsSegmentRepairModeDto::High => segment_repair.size_increase.high_percent = value,
+    }
+}
+
+fn hls_segment_repair_size_increase_label(translate: &YewI18n, mode: HlsSegmentRepairModeDto) -> String {
+    match mode {
+        HlsSegmentRepairModeDto::Off => translate.t(LABEL_SEGMENT_SIZE_INCREASE),
+        _ => format!("{} ({})", translate.t(LABEL_SEGMENT_SIZE_INCREASE), hls_segment_repair_max_level_label(mode)),
+    }
+}
+
+fn clamp_u64_min(value: Option<i64>, min_value: u64) -> u64 {
+    value.and_then(|value| u64::try_from(value).ok()).filter(|value| *value >= min_value).unwrap_or(min_value)
+}
+
+fn clamp_usize_min(value: Option<i64>, min_value: usize) -> usize {
+    value.and_then(|value| usize::try_from(value).ok()).filter(|value| *value >= min_value).unwrap_or(min_value)
+}
+
+fn clamp_u8_range(value: Option<i64>, min_value: u8, max_value: u8) -> u8 {
+    value.and_then(|value| u8::try_from(value).ok()).map(|value| value.clamp(min_value, max_value)).unwrap_or(min_value)
+}
+
 #[component]
 pub fn ReverseProxyConfigView() -> Html {
     let translate = use_translation();
@@ -264,6 +406,10 @@ pub fn ReverseProxyConfigView() -> Html {
 
     let geoip_state: UseReducerHandle<GeoIpConfigFormState> =
         use_reducer(|| GeoIpConfigFormState { form: GeoIpConfigDto::default(), modified: false });
+    let hls_cache_state: UseReducerHandle<HlsCacheConfigFormState> =
+        use_reducer(|| HlsCacheConfigFormState { form: HlsCacheConfigDto::default(), modified: false });
+    let hls_strip_state: UseReducerHandle<StripConfigFormState> =
+        use_reducer(|| StripConfigFormState { form: StripConfigDto::default(), modified: false });
 
     let stream_buffer_state: UseReducerHandle<StreamBufferConfigFormState> =
         use_reducer(|| StreamBufferConfigFormState { form: StreamBufferConfigDto::default(), modified: false });
@@ -286,6 +432,8 @@ pub fn ReverseProxyConfigView() -> Html {
         let resource_retry_state = resource_retry_state.clone();
         let stream_state = stream_state.clone();
         let geoip_state = geoip_state.clone();
+        let hls_cache_state = hls_cache_state.clone();
+        let hls_strip_state = hls_strip_state.clone();
         let stream_buffer_state = stream_buffer_state.clone();
         let failover_patterns_state = failover_patterns_state.clone();
         let admission_strategies_state = admission_strategies_state.clone();
@@ -296,63 +444,79 @@ pub fn ReverseProxyConfigView() -> Html {
         use_emit_mapped_option(
             (
                 (
-                    reverse_proxy_state.form.clone(),
-                    disabled_header_state.form.clone(),
-                    cache_state.form.clone(),
-                    rate_limit_state.form.clone(),
-                    resource_retry_state.form.clone(),
-                    stream_state.form.clone(),
-                    geoip_state.form.clone(),
-                    stream_buffer_state.form.clone(),
-                    failover_patterns_state.form.clone(),
-                    admission_strategies_state.form.clone(),
-                    stream_history_state.form.clone(),
-                    qos_aggregation_state.form.clone(),
+                    (
+                        reverse_proxy_state.form.clone(),
+                        disabled_header_state.form.clone(),
+                        cache_state.form.clone(),
+                        rate_limit_state.form.clone(),
+                        resource_retry_state.form.clone(),
+                        stream_state.form.clone(),
+                        geoip_state.form.clone(),
+                    ),
+                    (
+                        hls_cache_state.form.clone(),
+                        hls_strip_state.form.clone(),
+                        stream_buffer_state.form.clone(),
+                        failover_patterns_state.form.clone(),
+                        admission_strategies_state.form.clone(),
+                        stream_history_state.form.clone(),
+                        qos_aggregation_state.form.clone(),
+                    ),
                 ),
                 (
-                    reverse_proxy_state.modified,
-                    disabled_header_state.modified,
-                    cache_state.modified,
-                    rate_limit_state.modified,
-                    resource_retry_state.modified,
-                    stream_state.modified,
-                    geoip_state.modified,
-                    stream_buffer_state.modified,
-                    failover_patterns_state.modified,
-                    admission_strategies_state.modified,
-                    stream_history_state.modified,
-                    qos_aggregation_state.modified,
+                    (
+                        reverse_proxy_state.modified,
+                        disabled_header_state.modified,
+                        cache_state.modified,
+                        rate_limit_state.modified,
+                        resource_retry_state.modified,
+                        stream_state.modified,
+                        geoip_state.modified,
+                    ),
+                    (
+                        hls_cache_state.modified,
+                        hls_strip_state.modified,
+                        stream_buffer_state.modified,
+                        failover_patterns_state.modified,
+                        admission_strategies_state.modified,
+                        stream_history_state.modified,
+                        qos_aggregation_state.modified,
+                    ),
                 ),
             ),
             config_view_ctx.on_form_change.clone(),
             move |(
                 (
-                    rp,
-                    disabled_header,
-                    cache,
-                    rl,
-                    resource_retry,
-                    stream,
-                    geoip,
-                    stream_buffer,
-                    failover_patterns,
-                    admission_strategies,
-                    stream_history,
-                    qos_aggregation,
+                    (rp, disabled_header, cache, rl, resource_retry, stream, geoip),
+                    (
+                        hls_cache,
+                        hls_strip,
+                        stream_buffer,
+                        failover_patterns,
+                        admission_strategies,
+                        stream_history,
+                        qos_aggregation,
+                    ),
                 ),
                 (
-                    rp_modified,
-                    disabled_header_modified,
-                    cache_modified,
-                    rl_modified,
-                    resource_retry_modified,
-                    stream_modified,
-                    geoip_modified,
-                    stream_buffer_modified,
-                    failover_patterns_modified,
-                    admission_strategies_modified,
-                    stream_history_modified,
-                    qos_aggregation_modified,
+                    (
+                        rp_modified,
+                        disabled_header_modified,
+                        cache_modified,
+                        rl_modified,
+                        resource_retry_modified,
+                        stream_modified,
+                        geoip_modified,
+                    ),
+                    (
+                        hls_cache_modified,
+                        hls_strip_modified,
+                        stream_buffer_modified,
+                        failover_patterns_modified,
+                        admission_strategies_modified,
+                        stream_history_modified,
+                        qos_aggregation_modified,
+                    ),
                 ),
             )| {
                 let mut form = rp.clone();
@@ -371,6 +535,9 @@ pub fn ReverseProxyConfigView() -> Html {
                 form.resource_retry = Some(resource_retry_form);
                 form.stream = Some(stream_form);
                 form.geoip = Some(geoip.clone());
+                let mut hls_cache_form = hls_cache.clone();
+                hls_cache_form.strip = hls_strip.clone();
+                form.hls_cache = Some(hls_cache_form);
                 form.disabled_header = if disabled_header.is_empty() { None } else { Some(disabled_header.clone()) };
                 form.stream_history = if stream_history.is_empty() { None } else { Some(stream_history.clone()) };
                 form.qos_aggregation = if qos_aggregation.is_empty() { None } else { Some(qos_aggregation.clone()) };
@@ -382,6 +549,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     || resource_retry_modified
                     || stream_modified
                     || geoip_modified
+                    || (hls_cache_modified || hls_strip_modified)
                     || stream_buffer_modified
                     || failover_patterns_modified
                     || admission_strategies_modified
@@ -407,6 +575,8 @@ pub fn ReverseProxyConfigView() -> Html {
         let resource_retry_state = resource_retry_state.clone();
         let stream_state = stream_state.clone();
         let geoip_state = geoip_state.clone();
+        let hls_cache_state = hls_cache_state.clone();
+        let hls_strip_state = hls_strip_state.clone();
         let stream_buffer_state = stream_buffer_state.clone();
         let failover_patterns_state = failover_patterns_state.clone();
         let admission_strategies_state = admission_strategies_state.clone();
@@ -454,6 +624,14 @@ pub fn ReverseProxyConfigView() -> Html {
                 let target_geoip = rp.geoip.as_ref().map_or_else(GeoIpConfigDto::default, |s| s.clone());
                 if geoip_state.form != target_geoip {
                     geoip_state.dispatch(GeoIpConfigFormAction::SetAll(target_geoip));
+                }
+
+                let target_hls_cache = rp.hls_cache.as_ref().map_or_else(HlsCacheConfigDto::default, |h| h.clone());
+                if hls_cache_state.form != target_hls_cache {
+                    hls_cache_state.dispatch(HlsCacheConfigFormAction::SetAll(target_hls_cache.clone()));
+                }
+                if hls_strip_state.form != target_hls_cache.strip {
+                    hls_strip_state.dispatch(StripConfigFormAction::SetAll(target_hls_cache.strip));
                 }
 
                 let target_stream_buffer = rp.stream.as_ref().and_then(|s| s.buffer.clone()).unwrap_or_default();
@@ -530,6 +708,16 @@ pub fn ReverseProxyConfigView() -> Html {
                     geoip_state.dispatch(GeoIpConfigFormAction::SetAll(target_geoip));
                 }
 
+                let target_hls_cache = HlsCacheConfigDto::default();
+                if hls_cache_state.form != target_hls_cache {
+                    hls_cache_state.dispatch(HlsCacheConfigFormAction::SetAll(target_hls_cache));
+                }
+
+                let target_hls_strip = StripConfigDto::default();
+                if hls_strip_state.form != target_hls_strip {
+                    hls_strip_state.dispatch(StripConfigFormAction::SetAll(target_hls_strip));
+                }
+
                 let target_stream_buffer = StreamBufferConfigDto::default();
                 if stream_buffer_state.form != target_stream_buffer {
                     stream_buffer_state.dispatch(StreamBufferConfigFormAction::SetAll(target_stream_buffer));
@@ -563,13 +751,373 @@ pub fn ReverseProxyConfigView() -> Html {
     let render_cache = || {
         html! {
             <Card class="tp__config-view__card">
-                <h1>{translate.t(LABEL_CACHE)}</h1>
+                <h1>{translate.t(LABEL_RESOURCE_IMAGE_CACHE)}</h1>
                 { config_field_bool!(cache_state.form, translate.t(LABEL_ENABLED), enabled) }
                 { config_field_optional!(cache_state.form, translate.t(LABEL_SIZE), size) }
                 { config_field_optional!(cache_state.form, translate.t(LABEL_DIRECTORY), directory) }
             </Card>
         }
     };
+
+    let render_hls_cache = || {
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
+                { config_field!(hls_cache_state.form, translate.t(LABEL_CACHE_PATH), cache_path) }
+                { config_field_child!(translate.t(LABEL_STRIP_MODE), "HLS_CACHE_CONFIG.STRIP_MODE", {
+                    html! { <span class="tp__form-field__value">{hls_strip_state.form.mode.to_string()}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_STRIP_VALUE), "HLS_CACHE_CONFIG.STRIP_VALUE", {
+                    html! { <span class="tp__form-field__value">{hls_strip_state.form.value.to_string()}</span> }
+                }) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                { config_field_child!(translate.t(LABEL_CACHE_BYTES), "HLS_CACHE_CONFIG.CACHE_BYTES", {
+                    html! { <span class="tp__form-field__value">{hls_cache_state.form.cache_bytes.as_str().to_string()}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_CACHE_BYTES_PER_SESSION), "HLS_CACHE_CONFIG.CACHE_BYTES_PER_SESSION", {
+                    html! { <span class="tp__form-field__value">{hls_cache_state.form.cache_bytes_per_session.as_str().to_string()}</span> }
+                }) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_MAX_SEGMENTS_PREFETCH), max_segments_prefetch) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), max_concurrent_segment_fetches_per_session) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), max_concurrent_segment_fetches_global) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), origin_manifest_timeout_ms) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), origin_segment_timeout_ms) }
+                { config_field!(hls_cache_state.form, translate.t(LABEL_SESSION_IDLE_TIMEOUT), session_idle_timeout) }
+            </Card>
+        }
+    };
+
+    let render_hls_segment_repair = || {
+        let segment_repair = &hls_cache_state.form.segment_repair;
+        let watchdog = &segment_repair.corrupt_segment_watchdog;
+        let size_increase = hls_segment_repair_size_increase_percent(segment_repair)
+            .map_or_else(|| "-".to_string(), |value| format!("{value}%"));
+        html! {
+            <Card class="tp__config-view__card tp__hls-cache-segment-repair">
+                <h1>{translate.t(LABEL_HLS_CACHE_SEGMENT_REPAIR)}</h1>
+                { config_field_child!(translate.t(LABEL_SEGMENT_REPAIR), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_MAX_LEVEL", {
+                    html! { <span class="tp__form-field__value">{hls_segment_repair_max_level_label(segment_repair.max_level)}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_APPLY_TO_FIRST_SEGMENTS), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_APPLY_TO_FIRST_SEGMENTS", {
+                    html! { <span class="tp__form-field__value">{segment_repair.apply_to_first_segments.to_string()}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_MAX_PARALLEL_REPAIRS), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_MAX_PARALLEL_REPAIRS", {
+                    html! { <span class="tp__form-field__value">{segment_repair.max_parallel_repairs.to_string()}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_POSTPROCESS_TIMEOUT_MS), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_POSTPROCESS_TIMEOUT_MS", {
+                    html! { <span class="tp__form-field__value">{segment_repair.postprocess_timeout_ms.to_string()}</span> }
+                }) }
+                { config_field_child!(hls_segment_repair_size_increase_label(&translate, segment_repair.max_level), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_SIZE_INCREASE", {
+                    html! { <span class="tp__form-field__value">{size_increase}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_REPAIR_TRIGGER), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_TRIGGER", {
+                    html! { <span class="tp__form-field__value">{"automatic codec trigger policy"}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_CORRUPT_SEGMENT_WATCHDOG), "HLS_CACHE_CONFIG.CORRUPT_SEGMENT_WATCHDOG", {
+                    html! { <span class="tp__form-field__value">{hls_corrupt_segment_watchdog_label(watchdog.mode)}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_MAX_WATCHDOG_JOBS), "HLS_CACHE_CONFIG.CORRUPT_SEGMENT_WATCHDOG_MAX_PARALLEL_JOBS", {
+                    html! { <span class="tp__form-field__value">{watchdog.max_parallel_jobs.to_string()}</span> }
+                }) }
+            </Card>
+        }
+    };
+
+    let render_hls_cache_edit = || {
+        let selected_strip_mode = hls_strip_state.form.mode;
+        let strip_state = hls_strip_state.clone();
+        let set_max_segments_prefetch = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |value: Option<i64>| {
+                let max_segments_prefetch = value.and_then(|value| usize::try_from(value).ok()).unwrap_or(0);
+                let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                segment_repair.max_parallel_repairs = segment_repair.max_parallel_repairs.min(max_segments_prefetch);
+                segment_repair.corrupt_segment_watchdog.max_parallel_jobs =
+                    segment_repair.corrupt_segment_watchdog.max_parallel_jobs.min(max_segments_prefetch.max(1));
+                hls_cache_state.dispatch(HlsCacheConfigFormAction::MaxSegmentsPrefetch(max_segments_prefetch));
+                hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+            })
+        };
+        let edit_hls_cache_u64_min =
+            |label: String, field: &'static str, value: u64, action: fn(u64) -> HlsCacheConfigFormAction| {
+                let hls_cache_state = hls_cache_state.clone();
+                html! {
+                    <div class="tp__form-field tp__form-field__number">
+                        <NumberInput
+                            label={label}
+                            name={field}
+                            field_id={Some(dto_field_id(&hls_cache_state.form, field))}
+                            value={value.min(i64::MAX as u64) as i64}
+                            on_change={Callback::from(move |value: Option<i64>| {
+                                hls_cache_state.dispatch(action(clamp_u64_min(value, 1)));
+                            })}
+                        />
+                    </div>
+                }
+            };
+        let edit_hls_cache_usize_min =
+            |label: String, field: &'static str, value: usize, action: fn(usize) -> HlsCacheConfigFormAction| {
+                let hls_cache_state = hls_cache_state.clone();
+                html! {
+                    <div class="tp__form-field tp__form-field__number">
+                        <NumberInput
+                            label={label}
+                            name={field}
+                            field_id={Some(dto_field_id(&hls_cache_state.form, field))}
+                            value={value.min(i64::MAX as usize) as i64}
+                            on_change={Callback::from(move |value: Option<i64>| {
+                                hls_cache_state.dispatch(action(clamp_usize_min(value, 1)));
+                            })}
+                        />
+                    </div>
+                }
+            };
+        html! {
+            <Card class="tp__config-view__card">
+                <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
+                { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_PATH), cache_path, HlsCacheConfigFormAction::CachePath) }
+                { config_field_child!(translate.t(LABEL_STRIP_MODE), "HLS_CACHE_CONFIG.STRIP_MODE", {
+                    html! {
+                        <Select
+                            name="hls_strip_mode"
+                            multi_select={false}
+                            options={hls_strip_mode_options(selected_strip_mode)}
+                            on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
+                                if let DropDownSelection::Single(selection) = selections {
+                                    if let Ok(mode) = StripModeDto::from_str(selection.as_str()) {
+                                        strip_state.dispatch(StripConfigFormAction::Mode(mode));
+                                    }
+                                }
+                            })}
+                        />
+                    }
+                }) }
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput
+                        label={translate.t(LABEL_STRIP_VALUE)}
+                        name="hls_strip_value"
+                        field_id={Some("HLS_CACHE_CONFIG.STRIP_VALUE".to_string())}
+                        value={hls_strip_state.form.value.min(i64::MAX as u64) as i64}
+                        on_change={Callback::from({
+                            let hls_strip_state = hls_strip_state.clone();
+                            move |value: Option<i64>| {
+                                hls_strip_state.dispatch(StripConfigFormAction::Value(clamp_u64_min(value, 0)));
+                            }
+                        })}
+                    />
+                </div>
+                { edit_hls_cache_u64_min(translate.t(LABEL_CACHE_DURATION), "cache_duration", hls_cache_state.form.cache_duration, HlsCacheConfigFormAction::CacheDuration) }
+                { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES), cache_bytes, HlsCacheConfigFormAction::CacheBytes) }
+                { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES_PER_SESSION), cache_bytes_per_session, HlsCacheConfigFormAction::CacheBytesPerSession) }
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput
+                        label={translate.t(LABEL_MAX_SEGMENTS_PREFETCH)}
+                        name="max_segments_prefetch"
+                        field_id={Some(dto_field_id(&hls_cache_state.form, "max_segments_prefetch"))}
+                        value={hls_cache_state.form.max_segments_prefetch.min(i64::MAX as usize) as i64}
+                        on_change={set_max_segments_prefetch}
+                    />
+                </div>
+                { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), "max_concurrent_segment_fetches_per_session", hls_cache_state.form.max_concurrent_segment_fetches_per_session, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesPerSession) }
+                { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), "max_concurrent_segment_fetches_global", hls_cache_state.form.max_concurrent_segment_fetches_global, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesGlobal) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms, HlsCacheConfigFormAction::OriginManifestTimeoutMs) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", hls_cache_state.form.origin_segment_timeout_ms, HlsCacheConfigFormAction::OriginSegmentTimeoutMs) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout, HlsCacheConfigFormAction::SessionIdleTimeout) }
+            </Card>
+        }
+    };
+
+    let render_hls_segment_repair_edit = || {
+        let segment_repair = hls_cache_state.form.segment_repair.clone();
+        let watchdog = segment_repair.corrupt_segment_watchdog.clone();
+        let selected_segment_repair_max_level = segment_repair.max_level;
+        let set_segment_repair_max_level = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |(_, selections): (String, DropDownSelection)| {
+                if let DropDownSelection::Single(selection) = selections {
+                    if let Ok(mode) = HlsSegmentRepairModeDto::from_str(selection.as_str()) {
+                        let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                        segment_repair.max_level = mode;
+                        hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+                    }
+                }
+            })
+        };
+        let set_segment_repair_apply_to_first_segments = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |value: Option<i64>| {
+                let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                segment_repair.apply_to_first_segments = clamp_u8_range(value, 0, 6);
+                hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+            })
+        };
+        let set_segment_repair_max_parallel_repairs = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |value: Option<i64>| {
+                let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                segment_repair.max_parallel_repairs =
+                    clamp_usize_min(value, 1).min(hls_cache_state.form.max_segments_prefetch);
+                hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+            })
+        };
+        let set_segment_repair_postprocess_timeout_ms = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |value: Option<i64>| {
+                let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                segment_repair.postprocess_timeout_ms = clamp_u64_min(value, 100);
+                hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+            })
+        };
+        let selected_watchdog_mode = watchdog.mode;
+        let set_watchdog_mode = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |(_, selections): (String, DropDownSelection)| {
+                if let DropDownSelection::Single(selection) = selections {
+                    if let Ok(mode) = HlsCorruptSegmentWatchdogModeDto::from_str(selection.as_str()) {
+                        let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                        segment_repair.corrupt_segment_watchdog.mode = mode;
+                        hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+                    }
+                }
+            })
+        };
+        let set_watchdog_max_parallel_jobs = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |value: Option<i64>| {
+                let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                segment_repair.corrupt_segment_watchdog.max_parallel_jobs =
+                    clamp_usize_min(value, 1).min(hls_cache_state.form.max_segments_prefetch.max(1));
+                hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+            })
+        };
+        let render_slider_control = |name: String, value: u8, max_value: u8, on_change: Callback<u8>| -> Html {
+            let value_string = value.to_string();
+            let max_string = max_value.to_string();
+            let fill = if max_value == 0 { 0 } else { (u16::from(value) * 100) / u16::from(max_value) };
+            let slider_style = format!("--tp-hls-repair-slider-fill: {fill}%;");
+            let oninput = Callback::from(move |event: InputEvent| {
+                let input: HtmlInputElement = event.target_unchecked_into();
+                if let Ok(value) = input.value().parse::<u8>() {
+                    on_change.emit(value.min(max_value));
+                }
+            });
+            html! {
+                <div class="tp__hls-repair-slider">
+                    <input
+                        class="tp__hls-repair-slider__range"
+                        type="range"
+                        name={name}
+                        min="0"
+                        max={max_string}
+                        value={value_string.clone()}
+                        style={slider_style}
+                        oninput={oninput}
+                    />
+                    <span class="tp__form-field__value tp__hls-repair-slider__value">{value_string}</span>
+                </div>
+            }
+        };
+        let render_slider =
+            |label: String, info_key: &'static str, name: String, value: u8, max_value: u8, on_change: Callback<u8>| {
+                let control = render_slider_control(name, value, max_value, on_change);
+                config_field_child!(label, info_key, {
+                    html! {
+                        { control }
+                    }
+                })
+            };
+        let size_increase_editor =
+            if let Some(size_increase_percent) = hls_segment_repair_size_increase_percent(&segment_repair) {
+                let hls_cache_state = hls_cache_state.clone();
+                render_slider(
+                    hls_segment_repair_size_increase_label(&translate, segment_repair.max_level),
+                    "HLS_CACHE_CONFIG.SEGMENT_REPAIR_SIZE_INCREASE",
+                    "hls_segment_repair_size_increase".to_string(),
+                    size_increase_percent,
+                    100,
+                    Callback::from(move |value| {
+                        let mut segment_repair = hls_cache_state.form.segment_repair.clone();
+                        set_hls_segment_repair_size_increase_percent(&mut segment_repair, value);
+                        hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
+                    }),
+                )
+            } else {
+                config_field_child!(
+                    translate.t(LABEL_SEGMENT_SIZE_INCREASE),
+                    "HLS_CACHE_CONFIG.SEGMENT_REPAIR_SIZE_INCREASE",
+                    {
+                        html! { <span class="tp__form-field__value">{"-"}</span> }
+                    }
+                )
+            };
+
+        html! {
+            <Card class="tp__config-view__card tp__hls-cache-segment-repair">
+                <h1>{translate.t(LABEL_HLS_CACHE_SEGMENT_REPAIR)}</h1>
+                { config_field_child!(translate.t(LABEL_SEGMENT_REPAIR), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_MAX_LEVEL", {
+                    html! {
+                        <Select
+                            name="hls_segment_repair_max_level"
+                            multi_select={false}
+                            options={hls_segment_repair_max_level_options(selected_segment_repair_max_level)}
+                            on_select={set_segment_repair_max_level}
+                        />
+                    }
+                }) }
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput
+                        label={translate.t(LABEL_APPLY_TO_FIRST_SEGMENTS)}
+                        name="hls_segment_repair_apply_to_first_segments"
+                        field_id={Some("HLS_CACHE_CONFIG.SEGMENT_REPAIR_APPLY_TO_FIRST_SEGMENTS".to_string())}
+                        value={i64::from(segment_repair.apply_to_first_segments)}
+                        on_change={set_segment_repair_apply_to_first_segments}
+                    />
+                </div>
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput
+                        label={translate.t(LABEL_MAX_PARALLEL_REPAIRS)}
+                        name="hls_segment_repair_max_parallel_repairs"
+                        field_id={Some("HLS_CACHE_CONFIG.SEGMENT_REPAIR_MAX_PARALLEL_REPAIRS".to_string())}
+                        value={segment_repair.max_parallel_repairs.min(i64::MAX as usize) as i64}
+                        on_change={set_segment_repair_max_parallel_repairs}
+                    />
+                </div>
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput
+                        label={translate.t(LABEL_POSTPROCESS_TIMEOUT_MS)}
+                        name="hls_segment_repair_postprocess_timeout_ms"
+                        field_id={Some("HLS_CACHE_CONFIG.SEGMENT_REPAIR_POSTPROCESS_TIMEOUT_MS".to_string())}
+                        value={segment_repair.postprocess_timeout_ms.min(i64::MAX as u64) as i64}
+                        on_change={set_segment_repair_postprocess_timeout_ms}
+                    />
+                </div>
+                { size_increase_editor }
+                { config_field_child!(translate.t(LABEL_REPAIR_TRIGGER), "HLS_CACHE_CONFIG.SEGMENT_REPAIR_TRIGGER", {
+                    html! { <span class="tp__form-field__value">{"automatic codec trigger policy"}</span> }
+                }) }
+                { config_field_child!(translate.t(LABEL_CORRUPT_SEGMENT_WATCHDOG), "HLS_CACHE_CONFIG.CORRUPT_SEGMENT_WATCHDOG", {
+                    html! {
+                        <Select
+                            name="hls_corrupt_segment_watchdog"
+                            multi_select={false}
+                            options={hls_corrupt_segment_watchdog_options(selected_watchdog_mode)}
+                            on_select={set_watchdog_mode}
+                        />
+                    }
+                }) }
+                <div class="tp__form-field tp__form-field__number">
+                    <NumberInput
+                        label={translate.t(LABEL_MAX_WATCHDOG_JOBS)}
+                        name="hls_corrupt_segment_watchdog_max_parallel_jobs"
+                        field_id={Some("HLS_CACHE_CONFIG.CORRUPT_SEGMENT_WATCHDOG_MAX_PARALLEL_JOBS".to_string())}
+                        value={watchdog.max_parallel_jobs.min(i64::MAX as usize) as i64}
+                        on_change={set_watchdog_max_parallel_jobs}
+                    />
+                </div>
+            </Card>
+        }
+    };
+
     let render_stream = || {
         let strategy_tags = displayed_admission_strategy_tags(&admission_strategies_state.form, &stream_state.form);
         html! {
@@ -960,6 +1508,8 @@ pub fn ReverseProxyConfigView() -> Html {
                 { render_geoip() }
                 { render_disabled_header_view() }
                 { render_cache() }
+                { render_hls_cache() }
+                { render_hls_segment_repair() }
                 { render_resource_retry_view() }
                 { render_rate_limit() }
                 { render_stream() }
@@ -977,6 +1527,8 @@ pub fn ReverseProxyConfigView() -> Html {
                 { render_geoip_edit() }
                 { render_disabled_header_edit() }
                 { render_cache_edit() }
+                { render_hls_cache_edit() }
+                { render_hls_segment_repair_edit() }
                 { render_resource_retry_edit() }
                 { render_rate_limit_edit() }
                 { render_stream_edit() }

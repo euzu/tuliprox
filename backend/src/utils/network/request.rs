@@ -451,6 +451,158 @@ async fn execute_attempt_request(
     base_client.execute(request).await
 }
 
+/// Response returned after applying provider URL failover without applying the generic resource retry policy.
+pub struct ProviderFailoverResponse {
+    pub response: reqwest::Response,
+    pub provider_url_index: Option<usize>,
+}
+
+/// Sends one logical request while allowing one bounded provider URL failover cycle.
+///
+/// This reuses provider URL resolution, provider DNS handling, global client/proxy configuration and failover status
+/// classification, but deliberately does not apply `reverse_proxy.resource_retry` attempts or backoff.
+#[allow(clippy::too_many_lines)]
+pub async fn send_with_provider_failover_only(
+    app_config: &Arc<AppConfig>,
+    url: &Url,
+    provider: Option<&Arc<ConfigProvider>>,
+    allow_redirects: bool,
+    mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
+) -> Result<ProviderFailoverResponse, std::io::Error> {
+    let failover_patterns = app_config
+        .config
+        .load()
+        .reverse_proxy
+        .as_ref()
+        .map_or_else(|| ResourceRetryConfig::default().failover_redirect_patterns, |rp| {
+            rp.resource_retry.failover_redirect_patterns.clone()
+        });
+
+    let start_provider_index = provider_start_index(provider);
+    let mut provider_url_index = start_provider_index;
+
+    'provider_loop: loop {
+        let mut attempted_dns_ips = HashSet::new();
+
+        'ip_loop: loop {
+            let attempt_target = resolve_attempt_target_at_provider_index(url, provider, provider_url_index);
+            if log_enabled!(Level::Debug) {
+                if let Some(current_provider) = provider {
+                    let attempt_target_log = format_request_target_for_logging(&attempt_target);
+                    debug!(
+                        "Provider '{}' acquiring URL index {} of {}: {}",
+                        current_provider.name,
+                        provider_url_index,
+                        current_provider.urls.len(),
+                        sanitize_sensitive_info(attempt_target_log.as_str())
+                    );
+                }
+            }
+
+            let request_builder = send(&attempt_target.request_url);
+            let (base_client, request_result) = request_builder.build_split();
+            let mut request = request_result.map_err(|err| {
+                string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(err.to_string().as_str())))
+            })?;
+            apply_attempt_to_request(&mut request, &attempt_target)?;
+
+            match execute_attempt_request(app_config, base_client, request, &attempt_target).await {
+                Ok(response) => {
+                    let status = response.status();
+                    if allow_redirects && status.is_redirection() {
+                        if let Some(current_provider) = provider {
+                            current_provider.set_current_index(provider_url_index);
+                        }
+                        return Ok(ProviderFailoverResponse {
+                            response,
+                            provider_url_index: provider.map(|_| provider_url_index),
+                        });
+                    }
+
+                    let is_failover = is_failover_redirect(response.url(), &failover_patterns);
+                    if !is_failover && !should_trigger_failover(status) {
+                        if status.is_success() {
+                            if let Some(current_provider) = provider {
+                                current_provider.set_current_index(provider_url_index);
+                            }
+                        }
+                        return Ok(ProviderFailoverResponse {
+                            response,
+                            provider_url_index: provider.map(|_| provider_url_index),
+                        });
+                    }
+
+                    let last_provider_failure = format!(
+                        "status {} while trying {}",
+                        format_http_status(status),
+                        sanitize_sensitive_info(attempt_target.request_url.as_str())
+                    );
+
+                    if let Some(current_provider) = provider {
+                        let reason = format!("status {}", format_http_status(status));
+                        if rotate_to_next_provider_url(
+                            current_provider.as_ref(),
+                            &mut provider_url_index,
+                            start_provider_index,
+                            reason.as_str(),
+                        ) {
+                            continue 'provider_loop;
+                        }
+                        log_provider_cycle_exhausted(
+                            current_provider.as_ref(),
+                            start_provider_index,
+                            provider_url_index,
+                            &last_provider_failure,
+                        );
+                    }
+
+                    return Ok(ProviderFailoverResponse {
+                        response,
+                        provider_url_index: provider.map(|_| provider_url_index),
+                    });
+                }
+                Err(err) => {
+                    if (err.is_timeout() || err.is_connect())
+                        && should_try_next_ip_on_connect_error(provider, &attempt_target, &mut attempted_dns_ips)
+                    {
+                        continue 'ip_loop;
+                    }
+
+                    let last_provider_failure = format!(
+                        "connection error while trying {}: {}",
+                        sanitize_sensitive_info(attempt_target.request_url.as_str()),
+                        sanitize_sensitive_info(err.to_string().as_str())
+                    );
+
+                    if err.is_timeout() || err.is_connect() {
+                        if let Some(current_provider) = provider {
+                            if rotate_to_next_provider_url(
+                                current_provider.as_ref(),
+                                &mut provider_url_index,
+                                start_provider_index,
+                                "connection error",
+                            ) {
+                                continue 'provider_loop;
+                            }
+                            log_provider_cycle_exhausted(
+                                current_provider.as_ref(),
+                                start_provider_index,
+                                provider_url_index,
+                                &last_provider_failure,
+                            );
+                        }
+                    }
+
+                    return Err(string_to_io_error(format!(
+                        "Request error: {}",
+                        sanitize_sensitive_info(err.to_string().as_str())
+                    )));
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
 pub fn calculate_retry_backoff(base_delay_ms: u64, multiplier: f64, attempt: u32) -> u64 {
     let base = base_delay_ms.max(1);
@@ -2369,6 +2521,7 @@ mod tests {
             geoip: None,
             stream_history: None,
             qos_aggregation: None,
+            hls_cache: None,
         });
         let app_config = make_test_app_config(cfg);
         let client = reqwest::Client::builder()
@@ -2443,6 +2596,7 @@ mod tests {
             geoip: None,
             stream_history: None,
             qos_aggregation: None,
+            hls_cache: None,
         });
         let app_config = make_test_app_config(cfg);
         let client = reqwest::Client::builder()
@@ -2503,6 +2657,7 @@ mod tests {
             geoip: None,
             stream_history: None,
             qos_aggregation: None,
+            hls_cache: None,
         });
         let app_config = make_test_app_config(cfg);
         let client = reqwest::Client::builder()
@@ -2586,6 +2741,7 @@ mod tests {
             geoip: None,
             stream_history: None,
             qos_aggregation: None,
+            hls_cache: None,
         });
         let app_config = make_test_app_config(cfg);
         let client = reqwest::Client::builder()

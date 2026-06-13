@@ -46,6 +46,8 @@ pub const PROVIDER_CONNECTIONS_EXHAUSTED: &str = "provider_connections_exhausted
 pub const LOW_PRIORITY_PREEMPTED: &str = "low_priority_preempted.ts";
 pub const USER_ACCOUNT_EXPIRED: &str = "user_account_expired.ts";
 pub const PANEL_API_PROVISIONING: &str = "panel_api_provisioning.ts";
+pub const PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT: usize = 6;
+pub const PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX: &str = "panel_api_provisioning_hls_";
 
 pub const DEFAULT_EPISODE_PATTERN: &str = r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*";
 pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9\-]";

@@ -5,6 +5,9 @@ use std::borrow::Cow;
 use std::str;
 use url::Url;
 
+pub mod origin_manifest;
+pub mod transient_manifest;
+
 const TOKEN_SEPARATOR: char = '\x1F';
 const TOKEN_SEPARATOR_STR: &str = "\x1F";
 

@@ -991,6 +991,22 @@ impl ActiveProviderManager {
         self.providers.get_next_provider(provider_name).await
     }
 
+    pub fn find_provider_config(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
+        self.providers.find_provider_config(provider_name)
+    }
+
+    pub fn is_provider_for_input(&self, provider_name: &Arc<str>, input_name: &Arc<str>) -> bool {
+        self.providers.is_provider_for_input(provider_name.as_ref(), input_name.as_ref())
+    }
+
+    pub async fn is_provider_reserved_for_other_session(
+        &self,
+        provider_name: &Arc<str>,
+        session_owner: Option<&str>,
+    ) -> bool {
+        self.is_reserved_for_other(provider_name, session_owner).await
+    }
+
     pub async fn active_connections(&self) -> Option<HashMap<Arc<str>, usize>> {
         self.providers.active_connections().await
     }

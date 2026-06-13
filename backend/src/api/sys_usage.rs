@@ -1,6 +1,7 @@
 use crate::api::model::AppState;
 use crate::messaging::send_message as send_messaging;
 use crate::model::{DiskAlertConfig, MessageContent};
+#[cfg(target_os = "linux")]
 use crate::utils::parse_ascii_u64_bytes;
 use shared::model::{DiskAlert, DiskAlertLevel, MsgKind, SystemInfo};
 use std::{
@@ -109,9 +110,9 @@ impl DiskProbe {
             if rc != 0 {
                 return (0, 0);
             }
-            let bsize = stat.f_frsize;
-            let total = stat.f_blocks.saturating_mul(bsize);
-            let free = stat.f_bavail.saturating_mul(bsize);
+            let bsize = stat.f_frsize as u64;
+            let total = (stat.f_blocks as u64).saturating_mul(bsize);
+            let free = (stat.f_bavail as u64).saturating_mul(bsize);
             (total, free)
         }
         #[cfg(windows)]
@@ -273,6 +274,7 @@ impl NetTracker {
 
 enum SystemUsageSampler {
     Platform(Box<platform::Sampler>),
+    #[cfg(target_os = "linux")]
     Unavailable,
     #[cfg(not(target_os = "linux"))]
     Fallback(Box<FallbackSampler>),
@@ -297,6 +299,7 @@ impl SystemUsageSampler {
     fn sample(&mut self) -> Option<SystemInfo> {
         match self {
             Self::Platform(sampler) => sampler.sample(),
+            #[cfg(target_os = "linux")]
             Self::Unavailable => None,
             #[cfg(not(target_os = "linux"))]
             Self::Fallback(sampler) => sampler.sample(),
@@ -335,14 +338,14 @@ impl FallbackSampler {
         self.networks.refresh(true);
 
         let (rx_bytes, tx_bytes) = sum_sysinfo_network_bytes(&self.networks);
-        let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+        let (rx_bytes_per_sec, tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
 
         self.inner.processes().get(&self.pid).map(|proc| SystemInfo {
             cpu_usage: proc.cpu_usage(),
             memory_usage: proc.memory(),
             memory_total: self.inner.total_memory(),
-            net_rx_bytes_per_sec,
-            net_tx_bytes_per_sec,
+            net_rx_bytes_per_sec: rx_bytes_per_sec,
+            net_tx_bytes_per_sec: tx_bytes_per_sec,
             disk_total_bytes: 0,
             disk_free_bytes: 0,
         })
@@ -626,7 +629,7 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{CpuTracker, DiskProbe, SystemInfo};
-    use libc::{c_char, c_int, c_void, getrusage, gettimeofday, rusage, sysctlbyname, timeval, RUSAGE_SELF};
+    use libc::{c_int, c_void, getrusage, rusage, sysctlbyname, timeval, RUSAGE_SELF};
     use std::{
         ffi::CString,
         mem::{size_of, zeroed},
@@ -715,9 +718,9 @@ mod platform {
         let mut size = size_of::<u64>();
         let rc = unsafe {
             sysctlbyname(
-                name.as_ptr() as *const c_char,
-                (&mut value as *mut u64).cast::<c_void>(),
-                &mut size,
+                name.as_ptr().cast(),
+                (&raw mut value).cast::<c_void>(),
+                &raw mut size,
                 std::ptr::null_mut(),
                 0,
             )
@@ -732,8 +735,8 @@ mod platform {
             task_info(
                 mach_task_self(),
                 MACH_TASK_BASIC_INFO,
-                (&mut info as *mut MachTaskBasicInfo).cast::<libc::c_int>(),
-                &mut count,
+                (&raw mut info).cast::<libc::c_int>(),
+                &raw mut count,
             )
         };
         (rc == KERN_SUCCESS).then_some(info.resident_size)
@@ -741,7 +744,7 @@ mod platform {
 
     fn query_process_cpu_time_secs() -> Option<f64> {
         let mut usage = unsafe { zeroed::<rusage>() };
-        let rc = unsafe { getrusage(RUSAGE_SELF, &mut usage) };
+        let rc = unsafe { getrusage(RUSAGE_SELF, &raw mut usage) };
         if rc != 0 {
             return None;
         }
@@ -751,7 +754,8 @@ mod platform {
         Some(user_secs + system_secs)
     }
 
-    fn timeval_to_secs(tv: timeval) -> f64 { tv.tv_sec as f64 + (tv.tv_usec as f64 / 1_000_000.0) }
+    #[allow(clippy::cast_precision_loss)]
+    fn timeval_to_secs(tv: timeval) -> f64 { tv.tv_sec as f64 + (f64::from(tv.tv_usec) / 1_000_000.0) }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]

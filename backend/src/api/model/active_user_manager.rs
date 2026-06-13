@@ -1238,6 +1238,56 @@ impl ActiveUserManager {
             .permission
     }
 
+    pub(crate) async fn refresh_session_connection_kind_for_origin_policy(
+        &self,
+        username: &str,
+        max_connections: u32,
+        soft_connections: u16,
+        session_token: &str,
+    ) -> Option<ConnectionKind> {
+        if max_connections == 0 && soft_connections == 0 {
+            return Some(ConnectionKind::Normal);
+        }
+
+        let (connection_kind, promotions, divergence_snapshot) = {
+            let mut connections = self.connections.write().await;
+            let connection_data = connections.by_key.get_mut(username)?;
+            connection_data.max_connections = max_connections;
+            connection_data.soft_connections = soft_connections;
+
+            let session_index = connection_data.sessions.iter().position(|session| session.token == session_token)?;
+
+            let promotions = Self::promote_counted_soft_session_to_normal_if_available(connection_data, session_token);
+            let connection_kind = if connection_data.sessions[session_index].lifecycle.is_counted()
+                || Self::session_has_stream(connection_data, session_token)
+            {
+                connection_data.sessions[session_index]
+                    .connection_kind
+                    .unwrap_or(ConnectionKind::Normal)
+            } else {
+                let admission = self.check_connection_admission_with_counts(
+                    username,
+                    connection_data,
+                    connection_data.effective_counts_for_admission(Some(session_token)),
+                );
+                admission
+                    .kind
+                    .or(connection_data.sessions[session_index].connection_kind)
+                    .unwrap_or(ConnectionKind::Normal)
+            };
+            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+
+            (connection_kind, promotions, divergence_snapshot)
+        };
+
+        self.log_divergence_snapshot(divergence_snapshot).await;
+        for action in promotions {
+            self.emit_promotion_update(username, action).await;
+        }
+
+        Some(connection_kind)
+    }
+
     pub(crate) async fn get_eviction_candidates(
         &self,
         username: &str,
@@ -1642,6 +1692,51 @@ impl ActiveUserManager {
         promotions
     }
 
+    fn promote_counted_soft_session_to_normal_if_available(
+        connection_data: &mut UserConnectionData,
+        session_token: &str,
+    ) -> Vec<PromotionAction> {
+        if connection_data.max_connections > 0 && connection_data.counts.normal >= connection_data.max_connections {
+            return Vec::new();
+        }
+
+        let Some(session_index) = connection_data.sessions.iter().position(|session| {
+            session.token == session_token
+                && session.lifecycle.is_counted()
+                && session.connection_kind == Some(ConnectionKind::Soft)
+        }) else {
+            return Vec::new();
+        };
+
+        if connection_data.counts.soft == 0 {
+            return Vec::new();
+        }
+
+        connection_data.counts.normal = connection_data.counts.normal.saturating_add(1);
+        connection_data.counts.soft = connection_data.counts.soft.saturating_sub(1);
+        connection_data.sessions[session_index].connection_kind = Some(ConnectionKind::Normal);
+        Self::bump_session_transition_version(&mut connection_data.sessions[session_index]);
+
+        let mut promotions = Vec::new();
+        for stream in connection_data
+            .streams
+            .iter()
+            .filter(|stream| stream.session_token.as_deref() == Some(session_token))
+        {
+            if connection_data.stream_kinds.get(&stream.uid) != Some(&ConnectionKind::Soft) {
+                continue;
+            }
+            let new_priority = connection_data.stream_normal_priorities.get(&stream.uid).copied().unwrap_or_default();
+            connection_data.stream_kinds.insert(stream.uid, ConnectionKind::Normal);
+            promotions.push(PromotionAction {
+                addr: stream.addr,
+                uid: stream.uid,
+                new_priority,
+            });
+        }
+        promotions
+    }
+
     fn bump_session_transition_version(session: &mut UserSession) -> u64 {
         session.transition_version = session.transition_version.saturating_add(1);
         session.transition_version
@@ -1942,6 +2037,56 @@ impl ActiveUserManager {
         for action in promotions {
             self.emit_promotion_update(username, action).await;
         }
+    }
+
+    pub async fn release_session_streams_and_counted_reservation(
+        &self,
+        username: &str,
+        session_token: &str,
+    ) -> bool {
+        let (connection_changed, user_removed, promotions, divergence_snapshot) = {
+            let mut user_connections = self.connections.write().await;
+            let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+                return false;
+            };
+
+            let counted_kind = connection_data
+                .sessions
+                .iter()
+                .find(|session| session.token == session_token && session.lifecycle.is_counted())
+                .and_then(|session| session.connection_kind);
+            let (_removed_streams, mut connection_changed) =
+                connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
+            Self::clear_session_counted_without_stream(connection_data, session_token);
+
+            if connection_data.connections < connection_data.max_connections {
+                connection_data.granted_grace = false;
+                connection_data.grace_ts = 0;
+            }
+
+            let promotions = Self::collect_promotions_after_capacity_release(connection_data);
+            let user_removed = connection_data.connections == 0
+                && connection_data.streams.is_empty()
+                && connection_data.sessions.is_empty();
+            let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
+            connection_changed |= !promotions.is_empty();
+
+            (connection_changed, user_removed, promotions, divergence_snapshot)
+        };
+
+        self.log_divergence_snapshot(divergence_snapshot).await;
+
+        if user_removed {
+            let mut user_connections = self.connections.write().await;
+            user_connections.by_key.remove(username);
+        }
+        if connection_changed || user_removed {
+            self.log_active_user().await;
+        }
+        for action in promotions {
+            self.emit_promotion_update(username, action).await;
+        }
+        connection_changed || user_removed
     }
 
     pub async fn create_user_session(&self, request: CreateUserSessionParams<'_>) -> String {
@@ -7472,6 +7617,146 @@ mod tests {
             Some(&ConnectionKind::Soft),
             "binding a reserved soft session must keep the soft classification"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn origin_policy_refresh_promotes_counted_soft_session_when_hard_slot_is_available() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user-hls-policy-refresh");
+        user.max_connections = 1;
+        user.soft_connections = 1;
+
+        let normal_addr: SocketAddr = "127.0.0.1:55185".parse().unwrap();
+        let soft_addr: SocketAddr = "127.0.0.1:55186".parse().unwrap();
+        let normal_fingerprint = Fingerprint::new("fp-hls-policy-1".to_string(), "127.0.0.1".to_string(), normal_addr);
+        let soft_fingerprint = Fingerprint::new("fp-hls-policy-2".to_string(), "127.0.0.1".to_string(), soft_addr);
+
+        manager.add_connection(&normal_addr).await;
+        manager.add_connection(&soft_addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-normal",
+                virtual_id: 9210,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-normal.m3u8",
+                addr: &normal_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-soft",
+                virtual_id: 9211,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-soft.m3u8",
+                addr: &soft_addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        let normal_admission = manager
+            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-normal")
+            .await;
+        assert_eq!(normal_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(normal_admission.kind, Some(ConnectionKind::Normal));
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 411,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &normal_fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(9210),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-normal"),
+            })
+            .await
+            .expect("normal stream should bind");
+
+        let soft_admission = manager
+            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-soft")
+            .await;
+        assert_eq!(soft_admission.permission, UserConnectionPermission::Allowed);
+        assert_eq!(soft_admission.kind, Some(ConnectionKind::Soft));
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 412,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Soft,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &soft_fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(9211),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-soft"),
+            })
+            .await
+            .expect("soft stream should bind");
+
+        assert!(manager
+            .release_session_streams_and_counted_reservation(&user.username, "tok-normal")
+            .await);
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert_eq!(connection_data.connections, 1);
+            assert_eq!(connection_data.counts.normal, 0);
+            assert_eq!(connection_data.counts.soft, 1);
+            assert_eq!(
+                connection_data
+                    .sessions
+                    .iter()
+                    .find(|session| session.token == "tok-soft")
+                    .and_then(|session| session.connection_kind),
+                Some(ConnectionKind::Soft)
+            );
+        }
+
+        let refreshed_kind = manager
+            .refresh_session_connection_kind_for_origin_policy(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                "tok-soft",
+            )
+            .await;
+        assert_eq!(refreshed_kind, Some(ConnectionKind::Normal));
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert_eq!(connection_data.connections, 1);
+        assert_eq!(connection_data.counts.normal, 1);
+        assert_eq!(connection_data.counts.soft, 0);
+        assert_eq!(
+            connection_data
+                .sessions
+                .iter()
+                .find(|session| session.token == "tok-soft")
+                .and_then(|session| session.connection_kind),
+            Some(ConnectionKind::Normal)
+        );
+        assert_eq!(connection_data.stream_kinds.get(&412), Some(&ConnectionKind::Normal));
     }
 
     #[tokio::test]

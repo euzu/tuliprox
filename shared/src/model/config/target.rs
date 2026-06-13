@@ -14,11 +14,24 @@ use crate::{
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct ConfigTargetShareLiveStreams {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hls: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mpeg_ts: bool,
+}
+
+impl ConfigTargetShareLiveStreams {
+    pub fn is_empty(&self) -> bool { !self.hls && !self.mpeg_ts }
+}
+
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ignore_logo: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub share_live_streams: bool,
+    #[serde(default, skip_serializing_if = "ConfigTargetShareLiveStreams::is_empty")]
+    pub share_live_streams: ConfigTargetShareLiveStreams,
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove_duplicates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -28,11 +41,17 @@ pub struct ConfigTargetOptions {
 impl ConfigTargetOptions {
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
-            && !self.share_live_streams
+            && self.share_live_streams.is_empty()
             && !self.remove_duplicates
             && (self.force_redirect.is_none()
                 || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
     }
+
+    pub fn share_live_hls_enabled(&self) -> bool { self.share_live_streams.hls }
+
+    pub fn share_live_mpeg_ts_enabled(&self) -> bool { self.share_live_streams.mpeg_ts }
+
+    pub fn share_live_any_enabled(&self) -> bool { self.share_live_hls_enabled() || self.share_live_mpeg_ts_enabled() }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -431,7 +450,10 @@ impl ConfigTargetDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigTargetDto, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto};
+    use super::{
+        ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, M3uTargetOutputDto, StrmTargetOutputDto,
+        TargetOutputDto, XtreamTargetOutputDto,
+    };
 
     fn target_with_outputs(output: Vec<TargetOutputDto>) -> ConfigTargetDto {
         ConfigTargetDto {
@@ -498,5 +520,62 @@ mod tests {
         let err = target.prepare(1, None, None).expect_err("STRM without stream output should fail");
 
         assert!(err.to_string().contains("xtream or m3u output"));
+    }
+
+    #[test]
+    fn target_options_deserialize_structured_share_live_streams() {
+        let yaml = r#"
+share_live_streams:
+  hls: true
+  mpeg_ts: true
+"#;
+
+        let options: ConfigTargetOptions =
+            serde_saphyr::from_str(yaml).expect("structured share_live_streams should deserialize");
+
+        assert!(options.share_live_hls_enabled());
+        assert!(options.share_live_mpeg_ts_enabled());
+        assert!(options.share_live_any_enabled());
+    }
+
+    #[test]
+    fn target_options_reject_legacy_bool_share_live_streams() {
+        let yaml = r#"
+share_live_streams: true
+"#;
+
+        let err = serde_saphyr::from_str::<ConfigTargetOptions>(yaml)
+            .expect_err("legacy bool share_live_streams must be rejected");
+
+        assert!(err.to_string().contains("share_live_streams"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn target_options_omit_default_share_live_streams() {
+        let options = ConfigTargetOptions::default();
+
+        assert!(options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("default options should serialize");
+        assert!(
+            !serialized.contains("share_live_streams"),
+            "default share_live_streams should be omitted, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn target_options_mpeg_ts_helper_keeps_existing_stream_share_semantics() {
+        let hls_only = ConfigTargetOptions {
+            share_live_streams: ConfigTargetShareLiveStreams { hls: true, mpeg_ts: false },
+            ..Default::default()
+        };
+        let mpeg_ts = ConfigTargetOptions {
+            share_live_streams: ConfigTargetShareLiveStreams { hls: false, mpeg_ts: true },
+            ..Default::default()
+        };
+
+        assert!(hls_only.share_live_hls_enabled());
+        assert!(!hls_only.share_live_mpeg_ts_enabled());
+        assert!(mpeg_ts.share_live_mpeg_ts_enabled());
     }
 }

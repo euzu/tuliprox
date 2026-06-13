@@ -373,6 +373,7 @@ mod tests {
             low_priority_preempted: None,
             user_account_expired: None,
             panel_api_provisioning: None,
+            panel_api_provisioning_hls_segments: Vec::new(),
         })));
         app_cfg
     }

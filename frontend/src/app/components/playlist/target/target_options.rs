@@ -22,6 +22,8 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
                 vec![
                     (false, "LABEL.IGNORE_LOGO"),
                     (false, "LABEL.SHARE_LIVE_STREAMS"),
+                    (false, "LABEL.HLS"),
+                    (false, "LABEL.MPEG_TS"),
                     (false, "LABEL.REMOVE_DUPLICATES"),
                 ],
                 redirect_default.clone(),
@@ -38,7 +40,9 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
                 (
                     vec![
                         options.ignore_logo,
-                        options.share_live_streams,
+                        options.share_live_any_enabled(),
+                        options.share_live_hls_enabled(),
+                        options.share_live_mpeg_ts_enabled(),
                         options.remove_duplicates,
                         force_redirect[0].0,
                         force_redirect[1].0,
@@ -46,7 +50,9 @@ pub fn TargetOptions(props: &TargetOptionsProps) -> Html {
                     ],
                     vec![
                         (options.ignore_logo, "LABEL.IGNORE_LOGO"),
-                        (options.share_live_streams, "LABEL.SHARE_LIVE_STREAMS"),
+                        (options.share_live_any_enabled(), "LABEL.SHARE_LIVE_STREAMS"),
+                        (options.share_live_hls_enabled(), "LABEL.HLS"),
+                        (options.share_live_mpeg_ts_enabled(), "LABEL.MPEG_TS"),
                         (options.remove_duplicates, "LABEL.REMOVE_DUPLICATES"),
                     ],
                     force_redirect,
