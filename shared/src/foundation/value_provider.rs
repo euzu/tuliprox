@@ -102,43 +102,68 @@ macro_rules! get_genre {
 pub use get_genre;
 pub use set_genre;
 
+/// Canonical list of `ItemField` variants that map 1:1 to a simple `Arc<str>` slot on
+/// `PlaylistItemHeader`.
+///
+/// Both `get_field_value` and `set_field_value` are generated from this single list (via a
+/// callback macro), so a directly-bound field cannot be added to the read half but forgotten in
+/// the write half (or vice versa). The asymmetric fields (`Genre`, `Type`, `Caption`) stay
+/// explicit because their read/write behavior differs.
+macro_rules! for_each_direct_field {
+    ($cb:ident) => {
+        $cb! {
+            Group => group,
+            Name => name,
+            Title => title,
+            Url => url,
+            Input => input_name,
+        }
+    };
+}
+
 pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
     let header = &pli.header;
-    match field {
-        ItemField::Group => Arc::clone(&header.group),
-        ItemField::Name => Arc::clone(&header.name),
-        ItemField::Title => Arc::clone(&header.title),
-        ItemField::Genre => get_genre!(header).unwrap_or_else(|| "".intern()),
-        ItemField::Url => Arc::clone(&header.url),
-        ItemField::Input => Arc::clone(&header.input_name),
-        ItemField::Type => header.item_type.interned_label(),
-        ItemField::Caption => {
-            if header.title.is_empty() {
-                Arc::clone(&header.name)
-            } else {
-                Arc::clone(&header.title)
+
+    macro_rules! get_arms {
+        ($($variant:ident => $prop:ident),+ $(,)?) => {
+            match field {
+                $(ItemField::$variant => Arc::clone(&header.$prop),)+
+                ItemField::Genre => get_genre!(header).unwrap_or_else(|| "".intern()),
+                ItemField::Type => header.item_type.interned_label(),
+                ItemField::Caption => {
+                    if header.title.is_empty() {
+                        Arc::clone(&header.name)
+                    } else {
+                        Arc::clone(&header.title)
+                    }
+                }
             }
-        }
+        };
     }
+
+    for_each_direct_field!(get_arms)
 }
 
 pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: &str) -> bool {
     let header = &mut pli.header;
-    match field {
-        ItemField::Group => header.group = value.intern(),
-        ItemField::Name => header.name = value.intern(),
-        ItemField::Title => header.title = value.intern(),
-        ItemField::Genre => {
-            return set_genre!(header, value);
-        }
-        ItemField::Url => header.url = value.intern(),
-        ItemField::Input => header.input_name = value.intern(),
-        ItemField::Caption => {
-            header.title = value.intern();
-            header.name = header.title.clone();
-        }
-        ItemField::Type => {}
+
+    macro_rules! set_arms {
+        ($($variant:ident => $prop:ident),+ $(,)?) => {
+            match field {
+                $(ItemField::$variant => header.$prop = value.intern(),)+
+                ItemField::Genre => {
+                    return set_genre!(header, value);
+                }
+                ItemField::Caption => {
+                    header.title = value.intern();
+                    header.name = header.title.clone();
+                }
+                ItemField::Type => {}
+            }
+        };
     }
+
+    for_each_direct_field!(set_arms);
     true
 }
 

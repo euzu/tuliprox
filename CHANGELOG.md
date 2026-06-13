@@ -486,6 +486,10 @@
 
 ## 🧹 Maintainability
 
+- **ItemField Single-Source Binding**: The directly-bound `ItemField` variants (`Group`/`Name`/`Title`/`Url`/`Input`)
+  are now listed once and both `get_field_value` and `set_field_value` are generated from that single list via a
+  callback macro, so a new simple field can no longer be wired into the read half but forgotten in the write half (or
+  vice versa). The asymmetric `Genre`/`Type`/`Caption` cases stay explicit because their read/write behavior differs.
 - **Resolver Stage Summaries**: The background VOD and series resolve-queueing loops now emit a single concise
   debug summary (total / queued / expanded / skipped-by-filter / skipped-by-resolve-filter / elapsed) per stage in
   addition to the existing detailed per-item logs, making operational analysis of the hot resolver paths easier
