@@ -479,6 +479,10 @@
 - **Group Flatten Pre-Sizing**: `flatten_groups` now pre-allocates its merge buffer and category index to the
   incoming group count instead of growing them from empty, reducing reallocation churn when assembling large target
   playlists.
+- **Custom Provider Playlist Streaming**: The custom provider playlist endpoint now streams its UI items lazily via
+  `stream_json_or_bin_response_stream` (like the target and input endpoints) instead of collecting every channel into
+  a second `Vec<UiPlaylistItem>` and serializing the whole body at once, lowering peak memory and latency for large
+  provider imports.
 
 ## 3.3.0 (2026-04-02)
 

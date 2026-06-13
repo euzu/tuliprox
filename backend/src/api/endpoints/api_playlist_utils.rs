@@ -1,6 +1,6 @@
 use crate::api::model::AppState;
 use crate::{
-    api::api_utils::{empty_json_list_response, json_or_bin_response, stream_json_or_bin_response_stream},
+    api::api_utils::{empty_json_list_response, stream_json_or_bin_response_stream},
     model::{ConfigInput, ConfigTarget},
     repository::{
         iter_raw_m3u_input_playlist, iter_raw_m3u_target_playlist, iter_raw_xtream_input_playlist,
@@ -12,11 +12,8 @@ use axum::response::IntoResponse;
 use log::warn;
 use serde_json::json;
 use shared::utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable};
-use shared::{
-    model::{
-        InputType, M3uPlaylistItem, PlaylistItemType, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
-    },
-    utils::interner_gc,
+use shared::model::{
+    InputType, M3uPlaylistItem, PlaylistItemType, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
 };
 use std::sync::Arc;
 use tokio_stream::StreamExt;
@@ -161,10 +158,12 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                 (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
                     .into_response()
             } else {
-                let channels: Vec<UiPlaylistItem> =
-                    result.iter().flat_map(|g| g.channels.iter()).map(UiPlaylistItem::from).collect();
-                interner_gc();
-                json_or_bin_response(accept, &channels).into_response()
+                // Stream the UI conversion lazily (like the target/input endpoints) instead of
+                // collecting the whole playlist into a second Vec and serializing it all at once.
+                let converted_stream = tokio_stream::iter(
+                    result.into_iter().flat_map(|g| g.channels).map(|pli| UiPlaylistItem::from(&pli)),
+                );
+                stream_json_or_bin_response_stream(accept, converted_stream).into_response()
             }
         }
         None => {
