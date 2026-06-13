@@ -464,6 +464,9 @@
   consumed the whole body in an initial loop with no idle protection and then re-entered an idle-timeout `select!`
   loop on an already-exhausted stream (dead code). The redundant first loop is removed, so the download runs through
   a single loop and the idle timeout now actually guards the transfer.
+- **Client Stream Keep-Alive Handling**: After a run of empty keep-alive chunks, `ClientStream` now backs off with a
+  short timer instead of immediately re-waking the task. A provider that streams an endless sequence of empty chunks
+  can no longer keep the task hot with back-to-back `Poll::Pending` re-wakes.
 
 ## 3.3.0 (2026-04-02)
 
