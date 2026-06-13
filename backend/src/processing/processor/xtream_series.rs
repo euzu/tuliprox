@@ -196,8 +196,16 @@ fn queue_background_series_info(
     // Extract filter before iterating to avoid borrow conflict
     let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
 
+    let stage_started = Instant::now();
+    let mut total = 0usize;
+    let mut skipped_filter = 0usize;
+    let mut skipped_resolve_filter = 0usize;
+    let mut queued = 0usize;
+    let mut expanded = 0usize;
     for pli in fpl.items_mut() {
+        total += 1;
         if !filter(pli) {
+            skipped_filter += 1;
             continue;
         }
 
@@ -205,6 +213,7 @@ fn queue_background_series_info(
         if let Some(r_filter) = resolve_filter {
             let provider = ValueProvider { pli, match_as_ascii: false };
             if !r_filter.filter(&provider) {
+                skipped_resolve_filter += 1;
                 continue;
             }
         }
@@ -243,12 +252,21 @@ fn queue_background_series_info(
                     );
                 }
                 mgr.queue_task_background(input_name_arc.clone(), task);
+                queued += 1;
             }
         }
 
         if let Some(group_obj) = expand_series_item(pli, input) {
             groups_to_add.push(group_obj);
+            expanded += 1;
         }
+    }
+
+    if log_enabled!(Level::Debug) {
+        debug!(
+            "[Task] Series resolve queueing summary for input {input_name_arc}: total={total}, queued={queued}, expanded={expanded}, skipped_filter={skipped_filter}, skipped_resolve_filter={skipped_resolve_filter}, elapsed_ms={}",
+            stage_started.elapsed().as_millis()
+        );
     }
     groups_to_add
 }

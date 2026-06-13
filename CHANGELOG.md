@@ -486,6 +486,10 @@
 
 ## 🧹 Maintainability
 
+- **Resolver Stage Summaries**: The background VOD and series resolve-queueing loops now emit a single concise
+  debug summary (total / queued / expanded / skipped-by-filter / skipped-by-resolve-filter / elapsed) per stage in
+  addition to the existing detailed per-item logs, making operational analysis of the hot resolver paths easier
+  without raising the default log level.
 - **InputType Family Helpers**: Added `InputType::is_batch()` and routed the scattered
   `matches!(input_type, M3uBatch | XtreamBatch)` / `Xtream | XtreamBatch` / `M3u | M3uBatch` checks across the backend
   and frontend through the centralized `is_batch()` / `is_xtream()` / `is_m3u()` methods, so the batch/family rules
