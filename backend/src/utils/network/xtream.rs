@@ -52,11 +52,7 @@ pub fn get_xtream_player_api_action_url(input: &ConfigInput, action: &str) -> Op
 }
 
 pub fn get_xtream_player_api_info_url(input: &ConfigInput, cluster: XtreamCluster, stream_id: u32) -> Option<String> {
-    let (action, stream_id_field) = match cluster {
-        XtreamCluster::Live => (crate::model::XC_ACTION_GET_LIVE_INFO, crate::model::XC_LIVE_ID),
-        XtreamCluster::Video => (crate::model::XC_ACTION_GET_VOD_INFO, crate::model::XC_VOO_ID),
-        XtreamCluster::Series => (crate::model::XC_ACTION_GET_SERIES_INFO, crate::model::XC_SERIES_ID),
-    };
+    let (action, stream_id_field) = cluster.info_action_and_id_field();
     get_xtream_player_api_action_url(input, action).map(|action_url| format!("{action_url}&{stream_id_field}={stream_id}"))
 }
 

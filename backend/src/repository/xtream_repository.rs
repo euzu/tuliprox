@@ -51,6 +51,19 @@ pub fn get_collection_path(path: &Path, collection: &str) -> PathBuf {
     path.join(format!("{collection}.json"))
 }
 
+/// Returns the category-collection base name for an [`XtreamCluster`].
+///
+/// Centralizes the per-cluster `cat_live` / `cat_vod` / `cat_series` mapping so the
+/// path-deriving call sites read a single property instead of re-matching the cluster.
+#[inline]
+pub(crate) const fn xtream_cluster_category_collection(cluster: XtreamCluster) -> &'static str {
+    match cluster {
+        XtreamCluster::Live => storage_const::COL_CAT_LIVE,
+        XtreamCluster::Video => storage_const::COL_CAT_VOD,
+        XtreamCluster::Series => storage_const::COL_CAT_SERIES,
+    }
+}
+
 #[inline]
 pub fn get_live_cat_collection_path(path: &Path) -> PathBuf {
     get_collection_path(path, storage_const::COL_CAT_LIVE)
@@ -748,11 +761,7 @@ where
 }
 
 pub(crate) async fn xtream_get_playlist_categories(config: &Config, target_name: &str, cluster: XtreamCluster) -> Option<Vec<PlaylistXtreamCategory>> {
-    let path = xtream_get_collection_path(config, target_name, match cluster {
-        XtreamCluster::Live => storage_const::COL_CAT_LIVE,
-        XtreamCluster::Video => storage_const::COL_CAT_VOD,
-        XtreamCluster::Series => storage_const::COL_CAT_SERIES,
-    });
+    let path = xtream_get_collection_path(config, target_name, xtream_cluster_category_collection(cluster));
     if let Ok(file_path) = path {
         if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
             return serde_json::from_str::<Vec<PlaylistXtreamCategory>>(&content).ok();
@@ -1134,13 +1143,8 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
     let root_path = storage_path.to_path_buf();
     let app_cfg = app_config.clone();
     for cluster in XTREAM_CLUSTER {
-        let col_path = match cluster {
-            XtreamCluster::Live => get_collection_path(&root_path, storage_const::COL_CAT_LIVE),
-            XtreamCluster::Video => get_collection_path(&root_path, storage_const::COL_CAT_VOD),
-            XtreamCluster::Series => get_collection_path(&root_path, storage_const::COL_CAT_SERIES),
-        };
-        let data = fetched_categories.get_mut(cluster);
-        // if there is no data save only if no file exists! Prevent data loss from failed download attempt
+        let col_path = get_collection_path(&root_path, xtream_cluster_category_collection(cluster));
+        let data = fetched_categories.get_mut(cluster);        // if there is no data save only if no file exists! Prevent data loss from failed download attempt
         if !data.is_empty() || !file_exists_async(&col_path).await {
             let lock = app_cfg.file_locks.write_lock(&col_path).await;
             if let Err(err) = json_write_documents_to_file(&col_path, data).await {
@@ -1446,11 +1450,7 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
     for &cluster in clusters {
         let xtream_path = xtream_get_file_path(storage_path, cluster);
         if xtream_path.exists() {
-            let cat_col_name = match cluster {
-                XtreamCluster::Live => storage_const::COL_CAT_LIVE,
-                XtreamCluster::Video => storage_const::COL_CAT_VOD,
-                XtreamCluster::Series => storage_const::COL_CAT_SERIES,
-            };
+            let cat_col_name = xtream_cluster_category_collection(cluster);
             let cat_path = get_collection_path(storage_path, cat_col_name);
 
             if cat_path.exists() {

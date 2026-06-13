@@ -490,6 +490,10 @@
   `matches!(input_type, M3uBatch | XtreamBatch)` / `Xtream | XtreamBatch` / `M3u | M3uBatch` checks across the backend
   and frontend through the centralized `is_batch()` / `is_xtream()` / `is_m3u()` methods, so the batch/family rules
   live on the enum instead of being re-encoded (and risking silent drift) at every call site.
+- **XtreamCluster Behavior Centralization**: Added `XtreamCluster::info_action_and_id_field()` (and a backend
+  `xtream_cluster_category_collection()` helper) so the per-cluster `player_api` action / id-field and the
+  `cat_live`/`cat_vod`/`cat_series` collection names are derived once instead of being re-matched at each storage and
+  network call site, reducing the chance of a forgotten or inconsistent cluster arm.
 - **Derived GeoIP Error Display**: `GeoIpUpdateError` now derives its `Display`/`Error` implementation via `thiserror`
   instead of a hand-written `match self` formatter, so adding a variant only requires an `#[error(...)]` attribute next
   to it rather than remembering to extend a separate formatting block (a classic source of stale or missing messages).

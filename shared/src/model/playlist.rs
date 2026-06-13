@@ -47,6 +47,18 @@ impl XtreamCluster {
             Self::Series => "series",
         }
     }
+
+    /// Returns the xtream `player_api` info action and the stream-id query field for this cluster.
+    ///
+    /// Keeps the per-cluster `(action, id_field)` mapping attached to the enum so call sites read a
+    /// single property instead of re-deriving it with a local `match`.
+    pub fn info_action_and_id_field(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Live => (xtream_const::XC_ACTION_GET_LIVE_INFO, xtream_const::XC_LIVE_ID),
+            Self::Video => (xtream_const::XC_ACTION_GET_VOD_INFO, xtream_const::XC_VOO_ID),
+            Self::Series => (xtream_const::XC_ACTION_GET_SERIES_INFO, xtream_const::XC_SERIES_ID),
+        }
+    }
 }
 
 impl TryFrom<PlaylistItemType> for XtreamCluster {
