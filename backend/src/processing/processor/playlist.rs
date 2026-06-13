@@ -115,10 +115,15 @@ fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option
 }
 
 pub fn apply_filter_to_playlist(playlist: &mut [PlaylistGroup], filter: &Filter) -> Option<Vec<PlaylistGroup>> {
-    let mut new_playlist = Vec::with_capacity(128);
-    for pg in playlist.iter_mut() {
-        let channels =
-            pg.channels.iter().filter(|&pli| is_valid(pli, filter, false)).cloned().collect::<Vec<PlaylistItem>>();
+    // NOTE: the source `playlist` is intentionally cloned (not drained) here because
+    // the caller reuses the same slice for every target output and for the no-filter
+    // fallback path, so the survivors cannot be moved out of it. We pre-size each
+    // survivor buffer to the source group length (most channels survive a permissive
+    // filter) to avoid repeated reallocations while collecting.
+    let mut new_playlist = Vec::with_capacity(playlist.len());
+    for pg in playlist.iter() {
+        let mut channels = Vec::with_capacity(pg.channels.len());
+        channels.extend(pg.channels.iter().filter(|&pli| is_valid(pli, filter, false)).cloned());
         if !channels.is_empty() {
             new_playlist.push(PlaylistGroup {
                 id: pg.id,

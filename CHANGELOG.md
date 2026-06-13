@@ -453,6 +453,9 @@
   instead of running on every chunk. Pause/cancel/restart still take effect immediately via the existing
   `control_notify` wakeups in the `select!` loop; the throttled poll only covers the rare race where a control
   change fires mid-write, removing an unthrottled per-chunk lock read from multi-GB downloads.
+- **Playlist Filtering**: `apply_filter_to_playlist` now pre-sizes each surviving-channel buffer to the source
+  group length instead of growing from a fixed small capacity, removing repeated reallocations while collecting
+  survivors for permissive filters (the common case where most channels pass).
 
 ## 3.3.0 (2026-04-02)
 
