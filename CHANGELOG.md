@@ -320,6 +320,10 @@
 
 ## 🐛 Fixes
 
+- **Playlist Cache Load Failures No Longer Silent**: Xtream and M3U storage loads that fail due to corruption,
+  version mismatch, or task panics now log an error before falling back to an empty playlist, instead of silently
+  serving empty data. A genuinely missing storage file (first run) is logged at debug only, so normal startup stays
+  quiet.
 - **EPG Output Selection In Mixed Targets**: Fixed ambiguous EPG file selection when a target exposes both Xtream and M3U outputs.
   - Web UI playlist EPG and stream EPG APIs now explicitly prefer M3U EPG data and fall back to Xtream when M3U EPG is unavailable.
   - Xtream short-EPG now explicitly resolves Xtream EPG data.

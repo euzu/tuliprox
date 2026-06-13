@@ -16,7 +16,7 @@ use crate::repository::{
 };
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::utils;
-use log::{info, warn};
+use log::{debug, error, info, warn};
 use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
@@ -502,7 +502,18 @@ async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Pat
         BPlusTree::<u32, XtreamPlaylistItem>::load(&path_clone)
     }).await {
         Ok(Ok(tree)) => tree,
-        _ => BPlusTree::new(),
+        Ok(Err(err)) => {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                debug!("No xtream {cluster} storage at {}, serving empty playlist", xtream_path.display());
+            } else {
+                error!("Failed to load xtream {cluster} storage at {}: {err}. Serving empty playlist", xtream_path.display());
+            }
+            BPlusTree::new()
+        }
+        Err(join_err) => {
+            error!("Xtream {cluster} storage load task panicked for {}: {join_err}. Serving empty playlist", xtream_path.display());
+            BPlusTree::new()
+        }
     }
 }
 
@@ -545,7 +556,18 @@ async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) 
         BPlusTree::<u32, M3uPlaylistItem>::load(&path_clone)
     }).await {
         Ok(Ok(tree)) => Ok(tree),
-        _ => Ok(BPlusTree::new()),
+        Ok(Err(err)) => {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                debug!("No m3u storage at {}, serving empty playlist", m3u_path.display());
+            } else {
+                error!("Failed to load m3u storage at {}: {err}. Serving empty playlist", m3u_path.display());
+            }
+            Ok(BPlusTree::new())
+        }
+        Err(join_err) => {
+            error!("M3u storage load task panicked for {}: {join_err}. Serving empty playlist", m3u_path.display());
+            Ok(BPlusTree::new())
+        }
     }
 }
 
