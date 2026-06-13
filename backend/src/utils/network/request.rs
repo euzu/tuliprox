@@ -1160,10 +1160,6 @@ pub async fn get_remote_content_as_file(
     let mut writer = async_file_writer(File::create(file_path).await?);
 
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| string_to_io_error(format!("Failed to read chunk: {e}")))?;
-        writer.write_all(&bytes).await?;
-    }
 
     let idle_timeout = tokio::time::Duration::from_secs(STREAM_IDLE_TIMEOUT);
     let idle = sleep(idle_timeout);

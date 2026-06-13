@@ -460,6 +460,10 @@
 - **Playlist Filtering**: `apply_filter_to_playlist` now pre-sizes each surviving-channel buffer to the source
   group length instead of growing from a fixed small capacity, removing repeated reallocations while collecting
   survivors for permissive filters (the common case where most channels pass).
+- **Remote File Download**: `get_remote_content_as_file` no longer drains the response stream twice. It previously
+  consumed the whole body in an initial loop with no idle protection and then re-entered an idle-timeout `select!`
+  loop on an already-exhausted stream (dead code). The redundant first loop is removed, so the download runs through
+  a single loop and the idle timeout now actually guards the transfer.
 
 ## 3.3.0 (2026-04-02)
 
