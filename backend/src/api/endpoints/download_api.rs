@@ -27,6 +27,11 @@ const DOWNLOAD_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const DOWNLOAD_PROGRESS_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const DOWNLOAD_SNAPSHOT_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 const DOWNLOAD_SNAPSHOT_UPDATE_BYTES: u64 = 4 * 1024 * 1024;
+// Pause/cancel/restart are delivered immediately via `control_notify` while the
+// worker is parked in the `select!`. This poll is only a fallback for the rare
+// race where a control change fires while a chunk is being written (notify is not
+// persisted), so it does not need to run on every chunk.
+const DOWNLOAD_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const RECORDING_PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_secs(5);
 type ProviderCapacities = Vec<(Arc<str>, usize, usize)>;
 
@@ -386,16 +391,24 @@ async fn download_file(
                                     let mut last_progress_logged_bytes = downloaded;
                                     let mut last_snapshot_update_at = Instant::now();
                                     let mut last_snapshot_update_bytes = downloaded;
+                                    let mut last_control_poll_at = Instant::now();
                                     let deadline_at = recording_deadline_instant(&file_download);
                                     let mut deadline_sleep = deadline_at.map(|deadline| {
                                         Box::pin(time::sleep_until(deadline)) as Pin<Box<Sleep>>
                                     });
 
                                     loop {
-                                        if let Some(result) =
-                                            handle_download_control(&active, current_download_control(&control_signal), &mut buf_writer).await
-                                        {
-                                            return result;
+                                        // The `select!` arms below react to control changes immediately
+                                        // while the worker is parked. This throttled poll only covers the
+                                        // race where a change fired during a chunk write, so it runs at
+                                        // most every `DOWNLOAD_CONTROL_POLL_INTERVAL` instead of per chunk.
+                                        if last_control_poll_at.elapsed() >= DOWNLOAD_CONTROL_POLL_INTERVAL {
+                                            last_control_poll_at = Instant::now();
+                                            if let Some(result) =
+                                                handle_download_control(&active, current_download_control(&control_signal), &mut buf_writer).await
+                                            {
+                                                return result;
+                                            }
                                         }
 
                                         if deadline_at.is_some_and(|deadline| Instant::now() >= deadline) {

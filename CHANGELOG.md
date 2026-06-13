@@ -449,6 +449,10 @@
 - **EPG XML Parsing**: The Web UI XMLTV parser no longer allocates an owned `String` for every XML element. It now
   borrows the element name (via `from_utf8_lossy` without `to_string`) and tracks the active text element with a
   small enum, removing one to two heap allocations per element on large EPG guides.
+- **VOD/Recording Download Loop**: The per-chunk download-control check is now throttled to at most every 200ms
+  instead of running on every chunk. Pause/cancel/restart still take effect immediately via the existing
+  `control_notify` wakeups in the `select!` loop; the throttled poll only covers the rare race where a control
+  change fires mid-write, removing an unthrottled per-chunk lock read from multi-GB downloads.
 
 ## 3.3.0 (2026-04-02)
 
