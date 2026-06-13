@@ -131,9 +131,7 @@ async fn playlist_resolve_series_info(
     }
 
     // Apply resolved episodes to playlist
-    for group in new_playlist {
-        fpl.update_playlist(&group).await;
-    }
+    fpl.extend_playlist(new_playlist);
 }
 
 fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {

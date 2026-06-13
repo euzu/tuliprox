@@ -471,6 +471,11 @@
   entry (and again for each thumbnail reference check). It now reads the library once, partitions entries into
   orphaned and surviving, and deletes unreferenced thumbnails against a precomputed surviving-thumbnail set, turning
   an O(orphans × library) scan into a single linear pass.
+- **Series Expansion Merge**: Applying resolved series groups back into the in-memory playlist no longer re-scans
+  (and re-normalizes the title of) every existing group for each incoming group. A new batched `merge_groups`/
+  `extend_playlist` path builds `(cluster, normalized_title)` and `(cluster, id)` indexes once and merges the whole
+  batch in a single linear pass, replacing the previous O(groups²) behavior on series-heavy inputs while moving
+  channels instead of cloning them.
 
 ## 3.3.0 (2026-04-02)
 
