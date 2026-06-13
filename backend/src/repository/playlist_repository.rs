@@ -19,7 +19,7 @@ use crate::utils;
 use log::{debug, error, info, warn};
 use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{InputType, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{InputPersistence, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -615,12 +615,12 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
         }
     };
 
-    match input.get_download_input_type() {
-        InputType::Xtream | InputType::XtreamBatch => {
+    match input.get_download_input_type().persistence() {
+        InputPersistence::Xtream => {
             persist_input_xtream_playlist(app_config, &storage_path, playlist).await
         }
 
-        InputType::M3u | InputType::M3uBatch => {
+        InputPersistence::M3u => {
             // Persist M3U
             let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if let Err(err) = persist_input_m3u_playlist(app_config, &file_path, &playlist).await {
@@ -628,7 +628,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
             }
             (playlist, None)
         }
-        InputType::Library => {
+        InputPersistence::Library => {
             // Persist local library playlist
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             let (playlist, result) = persist_input_library_playlist(app_config, &file_path, playlist).await;
@@ -637,7 +637,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
             }
             (playlist, None)
         }
-        InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+        InputPersistence::MediaServer => {
             let file_path = get_input_media_server_playlist_file_path(&storage_path, &input.name);
             let (playlist, result) = persist_input_media_server_playlist(app_config, &file_path, playlist).await;
             if let Err(err) = result {
@@ -655,8 +655,8 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
         .map_err(|e| TuliproxError::Config(format!("Error getting input path: {e}")))?;
     let disk_based_processing = cfg.disk_based_processing;
 
-    match input.get_download_input_type() {
-        InputType::Xtream | InputType::XtreamBatch => {
+    match input.get_download_input_type().persistence() {
+        InputPersistence::Xtream => {
             let clusters_to_load = clusters.unwrap_or(&XTREAM_CLUSTER);
             if disk_based_processing {
                 let source = PlaylistSource::xtream_disk(
@@ -668,7 +668,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
-        InputType::M3u | InputType::M3uBatch => {
+        InputPersistence::M3u => {
             // Load M3U
             let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
@@ -680,7 +680,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
-        InputType::Library => {
+        InputPersistence::Library => {
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
                 Ok(PlaylistSource::local_library_disk(
@@ -691,7 +691,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
-        InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+        InputPersistence::MediaServer => {
             let file_path = get_input_media_server_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
                 Ok(PlaylistSource::media_server_disk(

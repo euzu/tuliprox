@@ -13,7 +13,7 @@ use log::warn;
 use serde_json::json;
 use shared::utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable};
 use shared::model::{
-    InputType, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
+    InputPersistence, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
 };
 use std::sync::Arc;
 use tokio_stream::StreamExt;
@@ -129,23 +129,23 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
     let cfg = app_state.app_config.config.load();
     match cfg_input {
         Some(input) => {
-            let (result, errors) = match input.get_download_input_type() {
-                InputType::M3u | InputType::M3uBatch => {
+            let (result, errors) = match input.get_download_input_type().persistence() {
+                InputPersistence::M3u => {
                     m3u::download_m3u_playlist(&app_state.app_config, client, &cfg, input).await
                 }
-                InputType::Xtream | InputType::XtreamBatch => {
+                InputPersistence::Xtream => {
                     let (pl, err, _) =
                         xtream::download_xtream_playlist(&app_state.app_config, client, input, Some(&[cluster])).await;
                     (pl, err)
                 }
-                InputType::Library => {
+                InputPersistence::Library => {
                     return (
                         axum::http::StatusCode::BAD_REQUEST,
                         axum::Json(json!({ "error": "Library inputs are not supported on this endpoint"})),
                     )
                         .into_response();
                 }
-                InputType::Emby | InputType::Jellyfin | InputType::Plex => {
+                InputPersistence::MediaServer => {
                     return (
                         axum::http::StatusCode::BAD_REQUEST,
                         axum::Json(json!({ "error": "Media-server inputs are not supported on this endpoint yet"})),

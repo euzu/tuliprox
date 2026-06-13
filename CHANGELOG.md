@@ -486,6 +486,11 @@
 
 ## 🧹 Maintainability
 
+- **Input Capability Descriptor**: Introduced `InputType::capabilities()` — a single exhaustive table describing each
+  input type's persistence family (`InputPersistence`), whether generic probing needs a provider connection, and
+  whether the custom-provider endpoint can serve it. Backend persist/load routing, the stream-probe requirement check,
+  and the custom-provider endpoint now derive from this table instead of re-listing `InputType` variants in parallel
+  `match` arms, so most new input variants only need a single descriptor entry and the dependent sites stay in sync.
 - **ItemField Single-Source Binding**: The directly-bound `ItemField` variants (`Group`/`Name`/`Title`/`Url`/`Input`)
   are now listed once and both `get_field_value` and `set_field_value` are generated from that single list via a
   callback macro, so a new simple field can no longer be wired into the read half but forgotten in the write half (or

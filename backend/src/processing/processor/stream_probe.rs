@@ -58,7 +58,7 @@ pub enum GenericProbeMetadataOutcome {
 }
 
 fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool {
-    !(matches!(input_type, InputType::Library) || input_type.is_media_server())
+    input_type.capabilities().requires_provider_connection_for_probe
 }
 
 fn uses_seekable_remote_probe(item_type: PlaylistItemType, is_remote_probe: bool) -> bool {
