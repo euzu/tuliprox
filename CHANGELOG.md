@@ -486,6 +486,11 @@
 
 ## 🧹 Maintainability
 
+- **Output Capability Descriptor**: Introduced `TargetType::capabilities()` — a single exhaustive table describing
+  whether each output format supports playlist filtering, EPG, and the in-memory cache. The EPG write/path sites now
+  derive "this format has no EPG" from the table instead of silent empty match arms, and a new `TargetOutput::filter()`
+  accessor co-locates the per-format filter lookup so the playlist writer no longer re-matches every variant. Adding an
+  output format now centers on one descriptor entry plus the format-specific writer.
 - **Input Capability Descriptor**: Introduced `InputType::capabilities()` — a single exhaustive table describing each
   input type's persistence family (`InputPersistence`), whether generic probing needs a provider connection, and
   whether the custom-provider endpoint can serve it. Backend persist/load routing, the stream-probe requirement check,

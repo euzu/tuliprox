@@ -192,6 +192,25 @@ impl From<&TargetOutput> for TargetType {
     }
 }
 
+impl TargetOutput {
+    /// Output format of this configured target output.
+    #[must_use]
+    pub fn target_type(&self) -> TargetType { TargetType::from(self) }
+
+    /// The optional playlist filter configured for this output, co-located so
+    /// the per-format filter access lives in one place rather than being
+    /// re-matched at every call site.
+    #[must_use]
+    pub fn filter(&self) -> Option<&Filter> {
+        match self {
+            TargetOutput::Xtream(out) => out.filter.as_ref(),
+            TargetOutput::M3u(out) => out.filter.as_ref(),
+            TargetOutput::Strm(out) => out.filter.as_ref(),
+            TargetOutput::HdHomeRun(_) => None,
+        }
+    }
+}
+
 macros::from_impl!(TargetOutput);
 impl From<&TargetOutputDto> for TargetOutput {
     fn from(dto: &TargetOutputDto) -> Self {

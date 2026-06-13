@@ -110,12 +110,8 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     drop(media_server_series);
 
     for output in &target.output {
-        let mut filtered: Option<Vec<PlaylistGroup>> = match output {
-            TargetOutput::Xtream(out) => out.filter.as_ref().and_then(|flt| apply_filter_to_playlist(playlist, flt)),
-            TargetOutput::M3u(out) => out.filter.as_ref().and_then(|flt| apply_filter_to_playlist(playlist, flt)),
-            TargetOutput::Strm(out) => out.filter.as_ref().and_then(|flt| apply_filter_to_playlist(playlist, flt)),
-            TargetOutput::HdHomeRun(_) => None,
-        };
+        let mut filtered: Option<Vec<PlaylistGroup>> =
+            output.filter().and_then(|flt| apply_filter_to_playlist(playlist, flt));
 
         let pl: &mut [PlaylistGroup] = if let Some(filtered_playlist) = filtered.as_mut() {
             filtered_playlist.as_mut_slice()
