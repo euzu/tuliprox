@@ -23,6 +23,12 @@ pub const EPG_ATTRIB_ID: &str = "id";
 pub const EPG_ATTRIB_CHANNEL: &str = "channel";
 pub const EPG_TAG_DISPLAY_NAME: &str = "display-name";
 pub const EPG_TAG_ICON: &str = "icon";
+pub const EPG_TAG_TITLE: &str = "title";
+pub const EPG_TAG_DESC: &str = "desc";
+pub const EPG_ATTRIB_START: &str = "start";
+pub const EPG_ATTRIB_STOP: &str = "stop";
+pub const EPG_ATTRIB_CATCHUP_ID: &str = "catchup-id";
+pub const EPG_ATTRIB_SRC: &str = "src";
 
 // https://github.com/XMLTV/xmltv/blob/master/xmltv.dtd
 
@@ -207,8 +213,8 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                 let tag = String::from_utf8_lossy(name.as_ref());
                 current_tag = match tag.as_ref() {
                     EPG_TAG_DISPLAY_NAME => TextTag::DisplayName,
-                    "title" => TextTag::Title,
-                    "desc" => TextTag::Desc,
+                    EPG_TAG_TITLE => TextTag::Title,
+                    EPG_TAG_DESC => TextTag::Desc,
                     _ => TextTag::Other,
                 };
 
@@ -216,7 +222,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     EPG_TAG_CHANNEL => {
                         let mut id = None;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"id" {
+                            if attr.key.as_ref() == EPG_ATTRIB_ID.as_bytes() {
                                 if let Some(value) = get_attr_value(&attr) {
                                     id = Some(value);
                                     break;
@@ -236,12 +242,15 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                         let mut catchup_id = None;
                         current_programme = None;
                         for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"start" => start = get_attr_value(&attr),
-                                b"stop" => stop = get_attr_value(&attr),
-                                b"channel" => channel = get_attr_value(&attr),
-                                b"catchup-id" => catchup_id = get_attr_value(&attr),
-                                _ => {}
+                            let key = attr.key.as_ref();
+                            if key == EPG_ATTRIB_START.as_bytes() {
+                                start = get_attr_value(&attr);
+                            } else if key == EPG_ATTRIB_STOP.as_bytes() {
+                                stop = get_attr_value(&attr);
+                            } else if key == EPG_ATTRIB_CHANNEL.as_bytes() {
+                                channel = get_attr_value(&attr);
+                            } else if key == EPG_ATTRIB_CATCHUP_ID.as_bytes() {
+                                catchup_id = get_attr_value(&attr);
                             }
                         }
                         if let (Some(pstart), Some(pstop), Some(pchannel)) = (start, stop, channel) {
@@ -257,7 +266,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     EPG_TAG_ICON => {
                         if let Some(channel) = &mut current_channel {
                             for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"src" {
+                                if attr.key.as_ref() == EPG_ATTRIB_SRC.as_bytes() {
                                     if let Some(icon) = get_attr_value(&attr) {
                                         if !icon.is_empty() {
                                             channel.icon = Some(icon);
