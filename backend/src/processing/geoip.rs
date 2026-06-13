@@ -11,26 +11,17 @@ use shared::{
 };
 use std::{collections::HashMap, io::Cursor, sync::Arc};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum GeoIpUpdateError {
+    #[error("GeoIp update is disabled")]
     Disabled,
+    #[error("Failed to download geoip db: {0}")]
     DownloadFailed(String),
+    #[error("Failed to process geoip db: {0}")]
     ProcessFailed(String),
+    #[error("Unknown GeoIp processing error")]
     UnknownProcessing,
 }
-
-impl std::fmt::Display for GeoIpUpdateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Disabled => write!(f, "GeoIp update is disabled"),
-            Self::DownloadFailed(err) => write!(f, "Failed to download geoip db: {err}"),
-            Self::ProcessFailed(err) => write!(f, "Failed to process geoip db: {err}"),
-            Self::UnknownProcessing => write!(f, "Unknown GeoIp processing error"),
-        }
-    }
-}
-
-impl std::error::Error for GeoIpUpdateError {}
 
 pub(crate) async fn update_geoip_db(app_state: &Arc<AppState>) -> Result<(), GeoIpUpdateError> {
     let config = app_state.app_config.config.load();

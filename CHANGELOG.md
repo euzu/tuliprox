@@ -490,10 +490,9 @@
   `matches!(input_type, M3uBatch | XtreamBatch)` / `Xtream | XtreamBatch` / `M3u | M3uBatch` checks across the backend
   and frontend through the centralized `is_batch()` / `is_xtream()` / `is_m3u()` methods, so the batch/family rules
   live on the enum instead of being re-encoded (and risking silent drift) at every call site.
-- **XMLTV Vocabulary Constants**: The web-UI XMLTV parser no longer compares child tags (`title`, `desc`) and
-  attribute keys (`start`, `stop`, `catchup-id`, `src`, ...) as inline string/byte literals. They now reference named
-  `EPG_TAG_*` / `EPG_ATTRIB_*` constants alongside the existing set, so the recognized XMLTV vocabulary lives in one
-  auditable place and a typo becomes a localized edit instead of a silent no-match.
+- **Derived GeoIP Error Display**: `GeoIpUpdateError` now derives its `Display`/`Error` implementation via `thiserror`
+  instead of a hand-written `match self` formatter, so adding a variant only requires an `#[error(...)]` attribute next
+  to it rather than remembering to extend a separate formatting block (a classic source of stale or missing messages).
 
 ## 3.3.0 (2026-04-02)
 
