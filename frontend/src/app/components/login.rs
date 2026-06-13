@@ -98,7 +98,7 @@ pub fn Login() -> Html {
            </div>
            <div class={"tp__login-view__header"}>
                 <div class={"tp__login-view__header-logo"}>{app_logo.as_ref().clone()}</div>
-                <div class={"tp__login-view__header-title"}>{ format!("{app_title}") }</div>
+                <div class={"tp__login-view__header-title"}>{ app_title.to_string() }</div>
             </div>
             <div class="tp__login-view__message">{translation.t("MESSAGES.LOGIN.MESSAGE")}</div>
             <form>

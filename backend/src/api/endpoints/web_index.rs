@@ -405,6 +405,9 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
 #[cfg(test)]
 mod tests {
     use super::api_user_can_access_web_ui;
+    use axum::{body::Body, http::{Method, Request, StatusCode}, routing::{get, post}, Router};
+    use shared::utils::concat_path_leading_slash;
+    use tower::ServiceExt;
 
     #[test]
     fn rejects_api_user_when_ui_is_disabled() {
@@ -414,5 +417,28 @@ mod tests {
     #[test]
     fn allows_api_user_when_ui_is_enabled() {
         assert!(api_user_can_access_web_ui(true));
+    }
+
+    #[tokio::test]
+    async fn auth_route_remains_reachable_when_web_ui_uses_sub_path() {
+        let web_ui_path = "tuli";
+        let auth_router = Router::new().route("/token", post(|| async { StatusCode::OK }));
+        let web_ui_router = Router::new().fallback(get(|| async { StatusCode::NOT_FOUND }));
+        let router = Router::new()
+            .nest(&concat_path_leading_slash(web_ui_path, "auth"), auth_router)
+            .nest(&format!("/{web_ui_path}/"), web_ui_router);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/tuli/auth/token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
