@@ -1079,9 +1079,10 @@ fn execute_pipe<'a>(
 // This method is needed, because of duplicate group names in different inputs.
 // We merge the same group names considering cluster together.
 fn flatten_groups(playlistgroups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
-    let mut sort_order: Vec<PlaylistGroup> = vec![];
+    let upper_bound = playlistgroups.len();
+    let mut sort_order: Vec<PlaylistGroup> = Vec::with_capacity(upper_bound);
     let mut idx: usize = 0;
-    let mut group_map: HashMap<CategoryKey, usize> = HashMap::new();
+    let mut group_map: HashMap<CategoryKey, usize> = HashMap::with_capacity(upper_bound);
     for group in playlistgroups {
         let normalized_title: Arc<str> = shared::utils::deunicode_string(&group.title).to_lowercase().intern();
         let key = (group.xtream_cluster, normalized_title);

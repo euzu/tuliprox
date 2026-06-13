@@ -476,6 +476,9 @@
   `extend_playlist` path builds `(cluster, normalized_title)` and `(cluster, id)` indexes once and merges the whole
   batch in a single linear pass, replacing the previous O(groups²) behavior on series-heavy inputs while moving
   channels instead of cloning them.
+- **Group Flatten Pre-Sizing**: `flatten_groups` now pre-allocates its merge buffer and category index to the
+  incoming group count instead of growing them from empty, reducing reallocation churn when assembling large target
+  playlists.
 
 ## 3.3.0 (2026-04-02)
 
