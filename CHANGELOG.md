@@ -446,6 +446,9 @@
 - **Item Type Field Access**: Reading the `Type` field during sorting and filtering no longer re-interns the
   type label on every access. The five fixed type labels are now interned once and cached, so `Type`-keyed
   rules return a cheap `Arc` clone instead of performing an interner hash-map lookup per item.
+- **EPG XML Parsing**: The Web UI XMLTV parser no longer allocates an owned `String` for every XML element. It now
+  borrows the element name (via `from_utf8_lossy` without `to_string`) and tracks the active text element with a
+  small enum, removing one to two heap allocations per element on large EPG guides.
 
 ## 3.3.0 (2026-04-02)
 
