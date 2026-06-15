@@ -110,7 +110,10 @@ fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
                 return false;
             }
         }
-        SegmentCacheStatus::Discovered | SegmentCacheStatus::Failed { .. } | SegmentCacheStatus::Expired => {
+        SegmentCacheStatus::Discovered
+        | SegmentCacheStatus::FailedRetryable { .. }
+        | SegmentCacheStatus::FailedPermanent { .. }
+        | SegmentCacheStatus::Expired => {
             return false;
         }
     }

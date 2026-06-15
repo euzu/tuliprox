@@ -1,4 +1,5 @@
 use super::{cache::MapCacheKey, ids::ProxySessionId, session::HlsSession, timeline::CacheAccessState};
+use axum::http::StatusCode;
 use crate::processing::parser::hls::origin_manifest::ParsedByteRange;
 use std::{
     fmt,
@@ -75,7 +76,8 @@ pub enum MapCacheStatus {
     Queued { queued_at_ms: u64 },
     Fetching { started_at_ms: u64 },
     Ready { content_length: u64, ready_at_ms: u64 },
-    Failed { failed_at_ms: u64 },
+    FailedRetryable { failed_at_ms: u64, retry_after_ms: u64 },
+    FailedPermanent { failed_at_ms: u64, status: Option<StatusCode> },
     Expired,
 }
 

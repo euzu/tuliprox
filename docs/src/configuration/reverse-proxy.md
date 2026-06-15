@@ -230,6 +230,8 @@ reverse_proxy:
 ## 2.1 HLS Cache (`hls_cache`)
 
 This block configures the Live HLS cache proxy. It only defines operating parameters.
+For the shared session, access lease, and transient delivery state machines, see
+[HLS Cache State Machines](./hls-cache-state-machine.md).
 
 ```yaml
 reverse_proxy:

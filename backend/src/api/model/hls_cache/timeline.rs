@@ -5,6 +5,7 @@ use super::{
 use crate::processing::parser::hls::origin_manifest::{
     ParsedByteRange, ParsedOriginManifest, ParsedOriginMap, ParsedOriginSegment,
 };
+use axum::http::StatusCode;
 use log::info;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -54,7 +55,8 @@ pub enum SegmentCacheStatus {
     Queued { priority: SegmentFetchPriority, queued_at_ms: u64 },
     Fetching { priority: SegmentFetchPriority, started_at_ms: u64 },
     Ready { content_length: u64, ready_at_ms: u64 },
-    Failed { failed_at_ms: u64 },
+    FailedRetryable { failed_at_ms: u64, retry_after_ms: u64 },
+    FailedPermanent { failed_at_ms: u64, status: Option<StatusCode> },
     Expired,
 }
 
@@ -403,9 +405,8 @@ mod tests {
     #[test]
     fn parsed_target_duration_is_stored_for_account_overlap_timing() {
         let mut session = session();
-        let manifest = normal_manifest(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:12.0,\n10.ts\n",
-        );
+        let manifest =
+            normal_manifest("#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:12.0,\n10.ts\n");
 
         session.apply_origin_manifest(&manifest).expect("manifest should map");
 

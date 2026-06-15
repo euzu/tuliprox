@@ -11,11 +11,12 @@ use crate::{
             get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request,
             is_session_based_playback, is_stream_share_enabled, local_stream_response, redirect, redirect_response,
             resource_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
-            try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
+            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
+                hls_custom_video_manifest_response,
             },
             xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
         },
@@ -249,10 +250,28 @@ async fn xtream_player_api_stream(
     }
 
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
+    let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
+    let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
+    if is_hls_manifest_request && user.permission_denied(app_state) {
+        return hls_custom_video_manifest_response(
+            app_state,
+            &user,
+            CustomVideoStreamType::UserAccountExpired,
+            axum::http::StatusCode::FORBIDDEN,
+        );
+    }
 
     let target_name = &target.name;
     if !target.has_output(TargetType::Xtream) {
         debug!("Target has no xtream codes playlist {target_name}");
+        if is_hls_manifest_request {
+            return hls_custom_video_manifest_response(
+                app_state,
+                &user,
+                CustomVideoStreamType::ChannelUnavailable,
+                axum::http::StatusCode::NOT_FOUND,
+            );
+        }
         return create_custom_video_stream_response(
             app_state,
             &fingerprint.addr,
@@ -261,13 +280,22 @@ async fn xtream_player_api_stream(
         .into_response();
     }
 
-    let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let pli = try_result_not_found!(
-        xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await,
-        true,
-        format!("Failed to read xtream item for stream id {req_virtual_id}")
-    );
+    let pli = match xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await {
+        Ok(pli) => pli,
+        Err(_) => {
+            error!("Failed to read xtream item for stream id {req_virtual_id}");
+            if is_hls_manifest_request {
+                return hls_custom_video_manifest_response(
+                    app_state,
+                    &user,
+                    CustomVideoStreamType::ChannelUnavailable,
+                    axum::http::StatusCode::NOT_FOUND,
+                );
+            }
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
+    };
 
     let output_allowed = if stream_req.context == ApiStreamContext::Timeshift {
         user.allows_cluster(XtreamCluster::Live)
@@ -275,6 +303,14 @@ async fn xtream_player_api_stream(
         user.allows_item_type(pli.item_type)
     };
     if !output_allowed {
+        if is_hls_manifest_request {
+            return hls_custom_video_manifest_response(
+                app_state,
+                &user,
+                CustomVideoStreamType::ChannelUnavailable,
+                axum::http::StatusCode::NOT_FOUND,
+            );
+        }
         return create_custom_video_stream_response(
             app_state,
             &fingerprint.addr,

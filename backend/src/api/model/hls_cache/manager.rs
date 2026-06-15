@@ -3,9 +3,10 @@ use super::{
     GarbageCollectionPolicy, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId,
     HlsAccessLeaseLifecycleSnapshot, HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState, HlsAccessLeaseStore,
     HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsCacheMetrics, HlsGarbageCollector, HlsLifecycleEvent,
-    HlsLifecycleEventKey, HlsLifecycleManager, HlsMapWorkerPool, HlsOriginSource, HlsPlaybackFamilyKey,
-    HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionHandle, HlsSessionKey, HlsSessionStore,
-    HlsSessionStoreOutcome, ProxySessionId, SegmentFetchPolicy, TransientResourceStore,
+    HlsLifecycleEventKey, HlsLifecycleManager, HlsMapWorkerPool, HlsExpiredSessionMarker,
+    HlsExpiredSessionReason, HlsOriginSource, HlsPlaybackFamilyKey, HlsSegmentCache, HlsSegmentRepairManager,
+    HlsSegmentWorkerPool, HlsSessionHandle, HlsSessionKey, HlsSessionStore, HlsSessionStoreOutcome,
+    ProxySessionId, SegmentFetchPolicy, TransientResourceStore,
 };
 use crate::{
     api::model::{ActiveProviderManager, ActiveUserManager, AppState},
@@ -50,7 +51,7 @@ impl HlsProxyRuntimeConfig {
             cache_duration_seconds: config.cache_duration,
             strip: config.strip.clone(),
             origin_manifest_timeout_ms: config.origin_manifest_timeout_ms,
-            transient_resource_ttl_ms: config.session_idle_timeout.saturating_mul(1_000),
+            transient_resource_ttl_ms: config.cache_duration.saturating_mul(1_000),
             gc_policy: GarbageCollectionPolicy::from_config(config),
             rewrite_secret_fingerprint: build_rewrite_secret_fingerprint(rewrite_secret),
         }
@@ -258,13 +259,12 @@ impl HlsProxyManager {
                 .configure_segment_prefetch_queue(runtime_config.segment_fetch_policy.max_prefetch_queue_depth);
         }
         self.segment_repair.update_config(hls_config.segment_repair.clone());
-        let global_fetch_semaphore = Arc::new(Semaphore::new(runtime_config.segment_fetch_policy.max_global_segment_fetches));
+        let global_fetch_semaphore =
+            Arc::new(Semaphore::new(runtime_config.segment_fetch_policy.max_global_segment_fetches));
         self.segment_worker_pool
             .update_config(runtime_config.segment_fetch_policy.clone(), Arc::clone(&global_fetch_semaphore));
-        self.map_worker_pool
-            .update_config(runtime_config.segment_fetch_policy.clone(), global_fetch_semaphore);
-        self.gc
-            .update_config(runtime_config.gc_policy.clone(), runtime_config.rewrite_secret_fingerprint.clone());
+        self.map_worker_pool.update_config(runtime_config.segment_fetch_policy.clone(), global_fetch_semaphore);
+        self.gc.update_config(runtime_config.gc_policy.clone(), runtime_config.rewrite_secret_fingerprint.clone());
         self.runtime_config.store(Arc::new(runtime_config));
     }
 
@@ -305,6 +305,15 @@ impl HlsProxyManager {
             self.segment_repair.remove_access_lease_window(lease_id).await;
         }
         lease
+    }
+
+    pub async fn access_lease_response_snapshot(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Option<HlsAccessLease> {
+        self.access_leases.write().await.response_snapshot(lease_id, proxy_session_id, now_ms)
     }
 
     pub async fn update_access_lease_origin_acquire_policy(
@@ -410,7 +419,10 @@ impl HlsProxyManager {
         reason: &'static str,
     ) -> HlsProxySessionCleanupStats {
         let before = self.segment_repair.stats().await;
-        let removed_lease_ids = self.access_leases.write().await.remove_access_leases_for_session(proxy_session_id);
+        let removed_leases = self.access_leases.write().await.remove_access_leases_for_session(proxy_session_id);
+        let username = removed_leases.first().map(|lease| lease.username.clone());
+        self.sessions.update_expired_session_marker_username(proxy_session_id, username).await;
+        let removed_lease_ids = removed_leases.iter().map(|lease| lease.lease_id.clone()).collect::<Vec<_>>();
         self.segment_repair.remove_proxy_session_state(proxy_session_id, &removed_lease_ids).await;
         let after = self.segment_repair.stats().await;
         let stats = HlsProxySessionCleanupStats {
@@ -437,6 +449,20 @@ impl HlsProxyManager {
             );
         }
         stats
+    }
+
+    pub async fn expired_session_marker(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Option<HlsExpiredSessionMarker> {
+        self.sessions
+            .expired_session_marker(
+                proxy_session_id,
+                now_ms,
+                self.session_idle_timeout_ms().saturating_mul(2).max(1),
+            )
+            .await
     }
 
     async fn cleanup_all_runtime_state(&self, reason: &'static str) {
@@ -584,7 +610,10 @@ impl HlsProxyManager {
                             safe_proxy_session_id(&snapshot.proxy_session_id),
                             snapshot.state.as_log_value()
                         );
-                        debug!("HLS lifecycle state snapshot: trigger=access-lease-removed {}", self.debug_state_summary().await);
+                        debug!(
+                            "HLS lifecycle state snapshot: trigger=access-lease-removed {}",
+                            self.debug_state_summary().await
+                        );
                     } else {
                         self.schedule_access_lease_lifecycle_snapshot(&snapshot).await;
                     }
@@ -627,7 +656,19 @@ impl HlsProxyManager {
                 .await;
             return;
         }
-        if self.sessions.remove_session(&key, proxy_session_id).await.is_some() {
+        let username = self.access_leases.read().await.first_username_for_session(proxy_session_id);
+        if self
+            .sessions
+            .remove_session_marking_expired(
+                &key,
+                proxy_session_id,
+                now_ms,
+                HlsExpiredSessionReason::SessionIdleTimeout,
+                username,
+            )
+            .await
+            .is_some()
+        {
             self.cleanup_proxy_session_state(proxy_session_id, "lifecycle-session-expired").await;
             if let Err(err) = self.segment_cache.delete_session_dir(proxy_session_id).await {
                 error!(
@@ -786,10 +827,7 @@ impl HlsProxyManager {
             }
         }
         self.schedule_session_idle_for_handle(&session).await;
-        session
-            .write()
-            .await
-            .configure_segment_prefetch_queue(self.segment_fetch_policy().max_prefetch_queue_depth);
+        session.write().await.configure_segment_prefetch_queue(self.segment_fetch_policy().max_prefetch_queue_depth);
         (session, outcome)
     }
 }
@@ -818,9 +856,7 @@ mod tests {
     use super::HlsProxyManager;
     use crate::{
         api::model::HlsSessionKey,
-        model::{
-            AppConfig, Config, HlsCacheConfig, MediaToolCapabilities, ReverseProxyConfig, SourcesConfig,
-        },
+        model::{AppConfig, Config, HlsCacheConfig, MediaToolCapabilities, ReverseProxyConfig, SourcesConfig},
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -877,9 +913,8 @@ mod tests {
         };
         let initial_config = HlsCacheConfig::from(&initial_dto);
         let manager = HlsProxyManager::with_hls_cache_config(&initial_config);
-        let (session, _) = manager
-            .get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 100)
-            .await;
+        let (session, _) =
+            manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 100).await;
 
         let mut updated_dto = initial_dto.clone();
         updated_dto.max_segments_prefetch = 4;
@@ -889,10 +924,7 @@ mod tests {
         updated_dto.origin_segment_timeout_ms = 5_678;
         updated_dto.cache_duration = 99;
         updated_dto.session_idle_timeout = 55;
-        updated_dto.strip = StripConfigDto {
-            mode: StripModeDto::Seconds,
-            value: 7,
-        };
+        updated_dto.strip = StripConfigDto { mode: StripModeDto::Seconds, value: 7 };
         let app_config = test_app_config(config_with_hls_cache(updated_dto));
 
         manager.update_config(&app_config).await;
@@ -903,6 +935,7 @@ mod tests {
         assert_eq!(manager.segment_fetch_policy().origin_segment_timeout_ms, 5_678);
         assert_eq!(manager.origin_manifest_timeout_ms(), 1_234);
         assert_eq!(manager.cache_duration_seconds(), 99);
+        assert_eq!(manager.transient_resource_ttl_ms(), 99_000);
         assert_eq!(manager.session_idle_timeout_ms(), 55_000);
         assert_eq!(manager.strip().mode, crate::model::StripMode::Seconds);
         assert_eq!(manager.strip().value, 7);
@@ -914,15 +947,11 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let old_cache = temp_dir.path().join("old");
         let new_cache = temp_dir.path().join("new");
-        let initial_dto = HlsCacheConfigDto {
-            cache_path: old_cache.to_string_lossy().to_string(),
-            ..Default::default()
-        };
+        let initial_dto =
+            HlsCacheConfigDto { cache_path: old_cache.to_string_lossy().to_string(), ..Default::default() };
         let initial_config = HlsCacheConfig::from(&initial_dto);
         let manager = HlsProxyManager::with_hls_cache_config(&initial_config);
-        let _ = manager
-            .get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 100)
-            .await;
+        let _ = manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 100).await;
         assert_eq!(manager.sessions().len().await, 1);
 
         let mut updated_dto = initial_dto;

@@ -13,10 +13,10 @@ use axum::response::IntoResponse;
 use log::trace;
 use reqwest::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use shared::error::TuliproxError;
 use shared::model::PlaylistItemType;
 use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use shared::error::TuliproxError;
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum CustomVideoStreamType {
@@ -26,6 +26,7 @@ pub enum CustomVideoStreamType {
     LowPriorityPreempted,
     UserAccountExpired,
     Provisioning,
+    HlsSessionOrLeaseExpired,
 }
 
 impl fmt::Display for CustomVideoStreamType {
@@ -37,6 +38,7 @@ impl fmt::Display for CustomVideoStreamType {
             CustomVideoStreamType::LowPriorityPreempted => "low_priority_preempted",
             CustomVideoStreamType::UserAccountExpired => "user_account_expired",
             CustomVideoStreamType::Provisioning => "provisioning",
+            CustomVideoStreamType::HlsSessionOrLeaseExpired => "hls_session_or_lease_expired",
         };
         write!(f, "{s}")
     }
@@ -53,6 +55,7 @@ impl FromStr for CustomVideoStreamType {
             "low_priority_preempted" => Ok(Self::LowPriorityPreempted),
             "user_account_expired" => Ok(Self::UserAccountExpired),
             "provisioning" => Ok(Self::Provisioning),
+            "hls_session_or_lease_expired" => Ok(Self::HlsSessionOrLeaseExpired),
             _ => Err(TuliproxError::Config(format!("Unknown stream type: {s}"))),
         }
     }
@@ -106,10 +109,10 @@ fn apply_custom_stream_timeout(cfg: &AppConfig, stream: BoxedProviderStream) -> 
 }
 
 /// Returns the value of `custom_stream_response_enabled` from the main config.
-/// When `false`, the 6 custom-video factories (`channel_unavailable`,
+/// When `false`, the custom-video factories (`channel_unavailable`,
 /// `user_connections_exhausted`, `provider_connections_exhausted`,
-/// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`) skip
-/// the configured MPEG-TS video and the call sites return
+/// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`,
+/// `hls_session_or_lease_expired`) skip the configured MPEG-TS video and the call sites return
 /// `custom_stream_response_error_status` instead. This allows a downstream Nginx
 /// with `proxy_intercept_errors on;` to sever the socket instead of seeing an
 /// infinite 200 OK loop.
@@ -233,6 +236,13 @@ ok_custom_stream_factory!(
     "Streaming response panel api provisioning"
 );
 
+ok_custom_stream_factory!(
+    create_hls_session_or_lease_expired_stream,
+    hls_session_or_lease_expired,
+    CustomVideoStreamType::HlsSessionOrLeaseExpired,
+    "Streaming response hls session or lease expired"
+);
+
 pub fn create_panel_api_provisioning_stream_with_stop(
     cfg: &AppConfig,
     headers: &[(String, String)],
@@ -273,6 +283,7 @@ pub fn create_custom_video_stream_response(
         CustomVideoStreamType::LowPriorityPreempted => create_low_priority_preempted_stream(config, &[]),
         CustomVideoStreamType::UserAccountExpired => create_user_account_expired_stream(config, &[]),
         CustomVideoStreamType::Provisioning => create_panel_api_provisioning_stream(config, &[]),
+        CustomVideoStreamType::HlsSessionOrLeaseExpired => create_hls_session_or_lease_expired_stream(config, &[]),
     } {
         app_state.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProviderConnection {
             addr: *addr,
@@ -373,6 +384,7 @@ mod tests {
             low_priority_preempted: None,
             user_account_expired: None,
             panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
             panel_api_provisioning_hls_segments: Vec::new(),
         })));
         app_cfg
@@ -383,6 +395,13 @@ mod tests {
         let parsed = CustomVideoStreamType::from_str("low_priority_preempted")
             .expect("low_priority_preempted should parse as custom video type");
         assert_eq!(parsed.to_string(), "low_priority_preempted");
+    }
+
+    #[test]
+    fn test_hls_session_or_lease_expired_custom_video_type_roundtrip() {
+        let parsed = CustomVideoStreamType::from_str("hls_session_or_lease_expired")
+            .expect("hls_session_or_lease_expired should parse as custom video type");
+        assert_eq!(parsed.to_string(), "hls_session_or_lease_expired");
     }
 
     #[test]
@@ -477,7 +496,8 @@ mod tests {
 
     /// The centralisation in `create_video_stream` must apply to the macro-generated
     /// factories as well (`user_connections_exhausted`, `provider_connections_exhausted`,
-    /// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`).
+    /// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`,
+    /// `hls_session_or_lease_expired`).
     #[test]
     fn test_hiding_custom_video_streams_applies_to_macro_factory() {
         use super::create_user_connections_exhausted_stream;

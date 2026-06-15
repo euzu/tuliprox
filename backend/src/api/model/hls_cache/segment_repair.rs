@@ -1,8 +1,8 @@
 #![allow(clippy::large_futures)]
 
 use super::{
-    safe_hls_access_lease_id, safe_proxy_session_id, CachedSegmentMetadata, HlsAccessLeaseId,
-    HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, StagedCacheObject,
+    safe_hls_access_lease_id, safe_proxy_session_id, segment_watchdog::HlsCorruptSegmentWatchdogManager,
+    CachedSegmentMetadata, HlsAccessLeaseId, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, StagedCacheObject,
 };
 use crate::model::{HlsCorruptSegmentWatchdogConfig, HlsSegmentRepairConfig, HlsSegmentRepairMode};
 use arc_swap::ArcSwap;
@@ -23,8 +23,6 @@ use tokio::{
     sync::{Mutex, RwLock, Semaphore},
     time::timeout,
 };
-
-use super::segment_watchdog::HlsCorruptSegmentWatchdogManager;
 
 const COMMAND_VERSION: u32 = 1;
 const REPAIR_METADATA_MAX_ENTRIES: usize = 4_096;
@@ -70,10 +68,7 @@ pub struct HlsSegmentRepairObjectContext {
 
 impl HlsSegmentRepairObjectContext {
     pub(super) fn is_repairable_ts(&self) -> bool {
-        self.file_ext.eq_ignore_ascii_case("ts")
-            && self.complete_object
-            && !self.encrypted
-            && !self.custom_response
+        self.file_ext.eq_ignore_ascii_case("ts") && self.complete_object && !self.encrypted && !self.custom_response
     }
 
     fn repair_skip_reason(&self) -> Option<&'static str> {
@@ -271,15 +266,10 @@ pub(super) struct HlsPostProcessingDeadline {
 
 impl HlsPostProcessingDeadline {
     fn new(timeout_ms: u64) -> Self {
-        Self {
-            started: Instant::now(),
-            timeout: Duration::from_millis(timeout_ms.max(100)),
-        }
+        Self { started: Instant::now(), timeout: Duration::from_millis(timeout_ms.max(100)) }
     }
 
-    pub(super) fn remaining(&self) -> Option<Duration> {
-        self.timeout.checked_sub(self.started.elapsed())
-    }
+    pub(super) fn remaining(&self) -> Option<Duration> { self.timeout.checked_sub(self.started.elapsed()) }
 }
 
 #[derive(Debug, Default)]
@@ -354,10 +344,8 @@ impl HlsRepairWindowRegistry {
     fn remove_access_lease(&mut self, lease_id: &HlsAccessLeaseId) {
         self.windows.remove(lease_id);
         self.generations.remove(lease_id);
-        self.checked_candidates
-            .retain(|key| key.hls_access_lease_id != *lease_id);
-        self.checked_candidate_order
-            .retain(|key| key.hls_access_lease_id != *lease_id);
+        self.checked_candidates.retain(|key| key.hls_access_lease_id != *lease_id);
+        self.checked_candidate_order.retain(|key| key.hls_access_lease_id != *lease_id);
     }
 
     fn remove_proxy_session(&mut self, proxy_session_id: &ProxySessionId, lease_ids: &[HlsAccessLeaseId]) {
@@ -444,11 +432,7 @@ impl HlsSegmentRepairRuntime {
         };
         let watchdog_config = &config.corrupt_segment_watchdog;
         let watchdog_semaphore = Arc::new(Semaphore::new(watchdog_config.max_parallel_jobs.max(1)));
-        Self {
-            config,
-            semaphore,
-            watchdog_semaphore,
-        }
+        Self { config, semaphore, watchdog_semaphore }
     }
 
     fn repair_enabled(&self) -> bool {
@@ -526,20 +510,10 @@ impl HlsSegmentRepairManager {
         self.windows.write().await.remove_access_lease(lease_id);
     }
 
-    pub async fn remove_proxy_session_state(
-        &self,
-        proxy_session_id: &ProxySessionId,
-        lease_ids: &[HlsAccessLeaseId],
-    ) {
+    pub async fn remove_proxy_session_state(&self, proxy_session_id: &ProxySessionId, lease_ids: &[HlsAccessLeaseId]) {
         self.windows.write().await.remove_proxy_session(proxy_session_id, lease_ids);
-        self.object_metadata
-            .write()
-            .await
-            .retain(|key, _| key.proxy_session_id != *proxy_session_id);
-        self.object_metadata_order
-            .lock()
-            .await
-            .retain(|key| key.proxy_session_id != *proxy_session_id);
+        self.object_metadata.write().await.retain(|key, _| key.proxy_session_id != *proxy_session_id);
+        self.object_metadata_order.lock().await.retain(|key| key.proxy_session_id != *proxy_session_id);
     }
 
     pub async fn clear_runtime_state(&self) {
@@ -581,8 +555,7 @@ impl HlsSegmentRepairManager {
             return segment_cache.commit_staged(key, raw).await;
         }
         let postprocessing_deadline = HlsPostProcessingDeadline::new(runtime.postprocess_timeout_ms());
-        self.process_staged_and_commit(segment_cache, key, raw, context, runtime, postprocessing_deadline)
-            .await
+        self.process_staged_and_commit(segment_cache, key, raw, context, runtime, postprocessing_deadline).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -616,13 +589,8 @@ impl HlsSegmentRepairManager {
             ffmpeg_version: ffmpeg_identity_version(),
         };
         if self.repair_metadata(&identity).await.is_some() {
-            self.record_object_metadata_from_repair_identity(
-                object_key,
-                raw_hash.clone(),
-                Some(raw_hash),
-                &identity,
-            )
-            .await;
+            self.record_object_metadata_from_repair_identity(object_key, raw_hash.clone(), Some(raw_hash), &identity)
+                .await;
             return Ok(None);
         }
         let lock = self.lock_for_identity(identity.clone()).await;
@@ -645,13 +613,13 @@ impl HlsSegmentRepairManager {
                     let deadline = HlsPostProcessingDeadline::new(runtime.postprocess_timeout_ms());
                     if let Some(fixed_path) = self
                         .repair_file(
-                        &current_metadata.path,
-                        current_metadata.size,
-                        &identity,
-                        &context,
-                        runtime.clone(),
+                            &current_metadata.path,
+                            current_metadata.size,
+                            &identity,
+                            &context,
+                            runtime.clone(),
                             &deadline,
-                    )
+                        )
                         .await?
                     {
                         let fixed_size = fs::metadata(&fixed_path).await?.len();
@@ -765,17 +733,15 @@ impl HlsSegmentRepairManager {
                 Ok(committed)
             } else {
                 let raw_size = raw.size;
-                if let Some(fixed_path) = self
-                    .repair_file(&raw.path, raw.size, &identity, &context, runtime.clone(), &deadline)
-                    .await?
+                if let Some(fixed_path) =
+                    self.repair_file(&raw.path, raw.size, &identity, &context, runtime.clone(), &deadline).await?
                 {
                     let fixed_size = fs::metadata(&fixed_path).await?.len();
                     let _ = segment_cache.remove_staged(raw.clone()).await;
                     let committed = segment_cache
                         .commit_staged(key, StagedCacheObject { path: fixed_path, size: fixed_size })
                         .await?;
-                    self.record_metadata(identity.clone(), RepairStatus::Fixed, raw.size, committed.size, None)
-                        .await;
+                    self.record_metadata(identity.clone(), RepairStatus::Fixed, raw.size, committed.size, None).await;
                     let committed_hash = sha256_file(&committed.path).await?;
                     self.record_object_metadata(
                         object_key.clone(),
@@ -812,9 +778,7 @@ impl HlsSegmentRepairManager {
         context: &HlsSegmentRepairObjectContext,
     ) -> Option<(HlsSegmentRepairMode, Arc<HlsSegmentRepairRuntime>)> {
         let runtime = self.runtime.load_full();
-        self.try_select_candidate_with_runtime(context, &runtime)
-            .await
-            .map(|mode| (mode, runtime))
+        self.try_select_candidate_with_runtime(context, &runtime).await.map(|mode| (mode, runtime))
     }
 
     async fn try_select_candidate_with_runtime(
@@ -830,10 +794,7 @@ impl HlsSegmentRepairManager {
                 debug!(
                     "HLS segment repair candidate selected: session={} lease={} source={} resource={} mode={}",
                     safe_proxy_session_id(&context.proxy_session_id),
-                    context
-                        .hls_access_lease_id
-                        .as_ref()
-                        .map_or_else(|| "<none>".to_string(), safe_hls_access_lease_id),
+                    context.hls_access_lease_id.as_ref().map_or_else(|| "<none>".to_string(), safe_hls_access_lease_id),
                     context.source.as_log_value(),
                     context.resource_id,
                     mode.as_log_value()
@@ -844,10 +805,7 @@ impl HlsSegmentRepairManager {
                 debug!(
                     "HLS segment repair candidate skipped: session={} lease={} source={} resource={} reason={}",
                     safe_proxy_session_id(&context.proxy_session_id),
-                    context
-                        .hls_access_lease_id
-                        .as_ref()
-                        .map_or_else(|| "<none>".to_string(), safe_hls_access_lease_id),
+                    context.hls_access_lease_id.as_ref().map_or_else(|| "<none>".to_string(), safe_hls_access_lease_id),
                     context.source.as_log_value(),
                     context.resource_id,
                     reason
@@ -905,20 +863,14 @@ impl HlsSegmentRepairManager {
         let execution_plan = identity.repair_mode.execution_plan(decision.required_level);
         let executed_level = match execution_plan {
             HlsSegmentRepairExecutionPlan::Repair(level) => Some(level),
-            HlsSegmentRepairExecutionPlan::SkipNoTrigger | HlsSegmentRepairExecutionPlan::SkipConfiguredMaxBelowRequired => None,
+            HlsSegmentRepairExecutionPlan::SkipNoTrigger
+            | HlsSegmentRepairExecutionPlan::SkipConfiguredMaxBelowRequired => None,
         };
-        debug_repair_analysis(
-            context,
-            identity.repair_mode,
-            decision,
-            executed_level,
-            &raw_scan.warnings,
-        );
+        debug_repair_analysis(context, identity.repair_mode, decision, executed_level, &raw_scan.warnings);
         let executed_level = match execution_plan {
             HlsSegmentRepairExecutionPlan::Repair(level) => level,
             HlsSegmentRepairExecutionPlan::SkipNoTrigger => {
-                self.record_metadata(identity.clone(), RepairStatus::Clean, raw_size, raw_size, None)
-                    .await;
+                self.record_metadata(identity.clone(), RepairStatus::Clean, raw_size, raw_size, None).await;
                 return Ok(None);
             }
             HlsSegmentRepairExecutionPlan::SkipConfiguredMaxBelowRequired => {
@@ -956,8 +908,7 @@ impl HlsSegmentRepairManager {
             debug_repair_event(context, executed_level, "remux failed", Some(&reason));
             let status = if reason == "timeout" { RepairStatus::Timeout } else { RepairStatus::RemuxFailed };
             let _ = fs::remove_file(&fixed_path).await;
-            self.record_metadata(identity.clone(), status, raw_size, raw_size, Some(reason))
-                .await;
+            self.record_metadata(identity.clone(), status, raw_size, raw_size, Some(reason)).await;
             return Ok(None);
         }
         let fixed_scan = match analyze_segment(&fixed_path, deadline).await {
@@ -980,14 +931,8 @@ impl HlsSegmentRepairManager {
         if let Err(reason) = validation {
             debug_repair_event(context, executed_level, "validation failed", Some(&reason));
             let _ = fs::remove_file(&fixed_path).await;
-            self.record_metadata(
-                identity.clone(),
-                RepairStatus::ValidationFailed,
-                raw_size,
-                raw_size,
-                Some(reason),
-            )
-            .await;
+            self.record_metadata(identity.clone(), RepairStatus::ValidationFailed, raw_size, raw_size, Some(reason))
+                .await;
             return Ok(None);
         }
         debug!(
@@ -1013,15 +958,8 @@ impl HlsSegmentRepairManager {
         let inserted_new = {
             let mut metadata = self.metadata.write().await;
             let inserted_new = !metadata.contains_key(&identity);
-            metadata.insert(
-                identity.clone(),
-                SegmentRepairMetadata {
-                    status,
-                    raw_size,
-                    final_size,
-                    validation_reason,
-                },
-            );
+            metadata
+                .insert(identity.clone(), SegmentRepairMetadata { status, raw_size, final_size, validation_reason });
             inserted_new
         };
         if inserted_new {
@@ -1101,11 +1039,7 @@ impl HlsSegmentRepairManager {
 
     async fn remove_lock_if_unused(&self, identity: &RepairIdentity, lock: &Arc<Mutex<()>>) {
         let mut locks = self.locks.lock().await;
-        if Arc::strong_count(lock) <= 2
-            && locks
-                .get(identity)
-                .is_some_and(|current| Arc::ptr_eq(current, lock))
-        {
+        if Arc::strong_count(lock) <= 2 && locks.get(identity).is_some_and(|current| Arc::ptr_eq(current, lock)) {
             locks.remove(identity);
         }
     }
@@ -1396,12 +1330,7 @@ fn warning_increment(line: &str) -> Option<fn(&mut WarningCounters, u32)> {
 
 fn parse_invalid_undecodable_nalu_type(line: &str) -> Option<u8> {
     let (_, rest) = line.split_once("Skipping invalid undecodable NALU:")?;
-    rest.trim()
-        .split(|ch: char| !ch.is_ascii_digit())
-        .next()
-        .filter(|value| !value.is_empty())?
-        .parse()
-        .ok()
+    rest.trim().split(|ch: char| !ch.is_ascii_digit()).next().filter(|value| !value.is_empty())?.parse().ok()
 }
 
 fn warning_count(warnings: &WarningCounters, kind: HlsSegmentRepairWarningKind) -> u32 {
@@ -1433,9 +1362,9 @@ fn warning_count(warnings: &WarningCounters, kind: HlsSegmentRepairWarningKind) 
         HlsSegmentRepairWarningKind::NoStartCode => warnings.no_start_code,
         HlsSegmentRepairWarningKind::NalSplitError => warnings.nal_split_error,
         HlsSegmentRepairWarningKind::NalParseError => warnings.nal_parse_error,
-        HlsSegmentRepairWarningKind::InvalidVclNalu => warnings
-            .invalid_undecodable_nalu_non_metadata
-            .saturating_add(warnings.invalid_undecodable_nalu_keyframe),
+        HlsSegmentRepairWarningKind::InvalidVclNalu => {
+            warnings.invalid_undecodable_nalu_non_metadata.saturating_add(warnings.invalid_undecodable_nalu_keyframe)
+        }
         HlsSegmentRepairWarningKind::InvalidMetadataNalu => warnings.invalid_undecodable_nalu_metadata,
         HlsSegmentRepairWarningKind::MultipleDolbyVisionRpus => warnings.dolby_vision_rpu,
         HlsSegmentRepairWarningKind::AvDesync => warnings.av_desync,
@@ -1521,8 +1450,7 @@ fn decide_repair(codec: RepairVideoCodec, warnings: &WarningCounters) -> HlsSegm
         RepairVideoCodec::Unsupported => false,
     };
     match codec {
-        RepairVideoCodec::H264 if codec_medium_trigger && (common_low_trigger || codec_parameters_missing) =>
-        {
+        RepairVideoCodec::H264 if codec_medium_trigger && (common_low_trigger || codec_parameters_missing) => {
             HlsSegmentRepairDecision {
                 codec,
                 required_level: HlsSegmentRepairMode::High,
@@ -1733,28 +1661,13 @@ async fn run_remux(
 ) -> Result<(), String> {
     let input = input_path.to_str().ok_or_else(|| "invalid_input_path".to_string())?;
     let output = output_path.to_str().ok_or_else(|| "invalid_output_path".to_string())?;
-    let mut args = vec![
-        "-hide_banner",
-        "-nostdin",
-        "-y",
-        "-copyts",
-        "-i",
-        input,
-        "-map",
-        "0",
-        "-c",
-        "copy",
-    ];
+    let mut args = vec!["-hide_banner", "-nostdin", "-y", "-copyts", "-i", input, "-map", "0", "-c", "copy"];
     if matches!(mode, HlsSegmentRepairMode::Medium | HlsSegmentRepairMode::High) {
         args.push("-bsf:v");
         args.push("dump_extra=freq=keyframe");
     }
     args.push("-mpegts_flags");
-    args.push(if mode == HlsSegmentRepairMode::High {
-        "+resend_headers+pat_pmt_at_frames"
-    } else {
-        "+resend_headers"
-    });
+    args.push(if mode == HlsSegmentRepairMode::High { "+resend_headers+pat_pmt_at_frames" } else { "+resend_headers" });
     args.extend(["-mpegts_copyts", "1", "-muxpreload", "0", "-muxdelay", "0", "-f", "mpegts", output]);
     run_command_with_deadline("ffmpeg", &args, deadline).await.map(|_| ())
 }
@@ -1774,13 +1687,15 @@ pub(super) async fn run_command_with_deadline(
     })
     .await
     .map_err(|_| "timeout".to_string())?
-    .map_err(|err| {
-        if err.kind() == io::ErrorKind::NotFound {
-            "unsupported".to_string()
-        } else {
-            err.to_string()
-        }
-    })?;
+    .map_err(
+        |err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                "unsupported".to_string()
+            } else {
+                err.to_string()
+            }
+        },
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if output.status.success() {
@@ -1793,29 +1708,16 @@ pub(super) async fn run_command_with_deadline(
 fn parse_probe(json: &str, warnings: WarningCounters) -> Result<SegmentProbe, String> {
     let value = serde_json::from_str::<Value>(json).map_err(|_| "invalid_probe_json".to_string())?;
     let streams = value.get("streams").and_then(Value::as_array).ok_or_else(|| "missing_streams".to_string())?;
-    let mut probe = SegmentProbe {
-        stream_count: streams.len(),
-        warnings,
-        ..SegmentProbe::default()
-    };
+    let mut probe = SegmentProbe { stream_count: streams.len(), warnings, ..SegmentProbe::default() };
     if let Some(format) = value.get("format") {
-        probe.duration_ms = format
-            .get("duration")
-            .and_then(Value::as_str)
-            .and_then(parse_seconds_ms_u64);
-        probe.size = format
-            .get("size")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or_default();
+        probe.duration_ms = format.get("duration").and_then(Value::as_str).and_then(parse_seconds_ms_u64);
+        probe.size =
+            format.get("size").and_then(Value::as_str).and_then(|value| value.parse().ok()).unwrap_or_default();
     }
     for stream in streams {
         let codec_type = stream.get("codec_type").and_then(Value::as_str);
         let codec_name = stream.get("codec_name").and_then(Value::as_str).map(ToOwned::to_owned);
-        let start_time_ms = stream
-            .get("start_time")
-            .and_then(Value::as_str)
-            .and_then(parse_seconds_ms_i64);
+        let start_time_ms = stream.get("start_time").and_then(Value::as_str).and_then(parse_seconds_ms_i64);
         let extradata_size = stream
             .get("extradata_size")
             .and_then(Value::as_u64)
@@ -1880,9 +1782,8 @@ fn validate_repair(
         return Err("repair_triggers_remaining".to_string());
     }
     if raw.size > 0 {
-        let allowed = raw
-            .size
-            .saturating_add(raw.size.saturating_mul(size_increase_percent(config, executed_level)) / 100);
+        let allowed =
+            raw.size.saturating_add(raw.size.saturating_mul(size_increase_percent(config, executed_level)) / 100);
         if fixed.size > allowed {
             return Err("size_increase_too_large".to_string());
         }
@@ -1948,10 +1849,7 @@ pub(super) fn ffmpeg_identity_version() -> String { "system".to_string() }
 
 fn repair_output_path(raw_path: &Path) -> PathBuf {
     let suffix = fastrand::u64(..);
-    let file_name = raw_path
-        .file_name()
-        .and_then(|file_name| file_name.to_str())
-        .unwrap_or("segment");
+    let file_name = raw_path.file_name().and_then(|file_name| file_name.to_str()).unwrap_or("segment");
     raw_path.with_file_name(format!("{file_name}.repair.tmp.{suffix:016x}"))
 }
 
@@ -1978,7 +1876,10 @@ mod tests {
         WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
     };
     use crate::{
-        api::model::{HlsAccessLeaseId, HlsSegmentCache, ProxySessionId, SegmentCacheKey, TransientObjectCacheKey, TransientResourceId},
+        api::model::{
+            HlsAccessLeaseId, HlsSegmentCache, ProxySessionId, SegmentCacheKey, TransientObjectCacheKey,
+            TransientResourceId,
+        },
         model::{HlsSegmentRepairConfig, HlsSegmentRepairMode},
     };
     use std::sync::Arc;
@@ -2001,9 +1902,7 @@ mod tests {
             source: HlsSegmentRepairSource::Normal,
             proxy_session_id: ProxySessionId("proxy-session".to_string()),
             hls_access_lease_id: Some(HlsAccessLeaseId(lease_id.to_string())),
-            rendered_object_id: HlsRepairRenderedObjectId::Normal {
-                proxy_seq: resource_id.parse().unwrap_or(1),
-            },
+            rendered_object_id: HlsRepairRenderedObjectId::Normal { proxy_seq: resource_id.parse().unwrap_or(1) },
             resource_id: resource_id.to_string(),
             file_ext: "ts".to_string(),
             normalized_origin_uri: format!("http://origin.example/{resource_id}.ts"),
@@ -2055,20 +1954,14 @@ mod tests {
 
     #[test]
     fn mmco_warning_alone_does_not_trigger_repair() {
-        let warnings = WarningCounters {
-            mmco_unref_short_failure: 20,
-            ..WarningCounters::default()
-        };
+        let warnings = WarningCounters { mmco_unref_short_failure: 20, ..WarningCounters::default() };
 
         assert!(!should_repair(RepairVideoCodec::H264, &warnings));
     }
 
     #[test]
     fn critical_warning_triggers_repair() {
-        let warnings = WarningCounters {
-            missing_sps: 1,
-            ..WarningCounters::default()
-        };
+        let warnings = WarningCounters { missing_sps: 1, ..WarningCounters::default() };
 
         assert!(should_repair(RepairVideoCodec::H264, &warnings));
     }
@@ -2116,9 +2009,8 @@ mod tests {
 
     #[test]
     fn hevc_repeated_messages_expand_counters_without_triggering_alone() {
-        let warnings = parse_ffmpeg_warnings(
-            "[hevc @ 0x1] Skipping invalid undecodable NALU: 0\nLast message repeated 2 times\n",
-        );
+        let warnings =
+            parse_ffmpeg_warnings("[hevc @ 0x1] Skipping invalid undecodable NALU: 0\nLast message repeated 2 times\n");
 
         assert_eq!(warnings.invalid_undecodable_nalu_total, 3);
         assert_eq!(warnings.invalid_undecodable_nalu_non_metadata, 3);
@@ -2127,9 +2019,8 @@ mod tests {
 
     #[test]
     fn hevc_invalid_undecodable_nalu_0_to_31_counts_as_vcl_trigger_input() {
-        let warnings = parse_ffmpeg_warnings(
-            "[hevc @ 0x1] missing SPS\n[hevc @ 0x1] Skipping invalid undecodable NALU: 30\n",
-        );
+        let warnings =
+            parse_ffmpeg_warnings("[hevc @ 0x1] missing SPS\n[hevc @ 0x1] Skipping invalid undecodable NALU: 30\n");
 
         assert_eq!(warnings.invalid_undecodable_nalu_total, 1);
         assert_eq!(warnings.invalid_undecodable_nalu_non_metadata, 1);
@@ -2150,11 +2041,7 @@ mod tests {
 
     #[test]
     fn unsupported_codec_never_triggers_repair() {
-        let warnings = WarningCounters {
-            missing_sps: 1,
-            pps_id_out_of_range: 1,
-            ..WarningCounters::default()
-        };
+        let warnings = WarningCounters { missing_sps: 1, pps_id_out_of_range: 1, ..WarningCounters::default() };
 
         assert!(!should_repair(RepairVideoCodec::Unsupported, &warnings));
     }
@@ -2209,11 +2096,7 @@ mod tests {
                 ],
                 "format": { "duration": "2.000000", "size": "1010" }
             }"#,
-            WarningCounters {
-                invalid_undecodable_nalu_metadata: 1,
-                dolby_vision_rpu: 1,
-                ..WarningCounters::default()
-            },
+            WarningCounters { invalid_undecodable_nalu_metadata: 1, dolby_vision_rpu: 1, ..WarningCounters::default() },
         )
         .expect("fixed probe should parse");
 
@@ -2237,11 +2120,7 @@ mod tests {
                 ],
                 "format": { "duration": "2.000000", "size": "1000" }
             }"#,
-            WarningCounters {
-                codec_parameters_missing: 1,
-                missing_sps: 1,
-                ..WarningCounters::default()
-            },
+            WarningCounters { codec_parameters_missing: 1, missing_sps: 1, ..WarningCounters::default() },
         )
         .expect("raw probe should parse");
         let fixed = parse_probe(
@@ -2252,10 +2131,7 @@ mod tests {
                 ],
                 "format": { "duration": "2.000000", "size": "1000" }
             }"#,
-            WarningCounters {
-                missing_sps: 1,
-                ..WarningCounters::default()
-            },
+            WarningCounters { missing_sps: 1, ..WarningCounters::default() },
         )
         .expect("fixed probe should parse");
 
@@ -2339,13 +2215,11 @@ mod tests {
 
         manager.start_access_lease_window(HlsAccessLeaseId("lease-b".to_string())).await;
 
-        assert!(
-            manager
-                .repair_ready_cache_hit(&cache, &cache_key, repair_context("lease-b", "1"))
-                .await
-                .expect("repair cache hit")
-                .is_none()
-        );
+        assert!(manager
+            .repair_ready_cache_hit(&cache, &cache_key, repair_context("lease-b", "1"))
+            .await
+            .expect("repair cache hit")
+            .is_none());
         assert_eq!(manager.stats().await.metadata, 0);
         assert_eq!(selected_repair_mode(&manager, &repair_context("lease-b", "2")).await, None);
     }
@@ -2364,7 +2238,8 @@ mod tests {
         let committed_sha256 = sha256_file(&metadata.path).await.expect("hash");
         let mut previous_context = repair_context("lease-a", "1");
         previous_context.source = HlsSegmentRepairSource::Transient;
-        previous_context.rendered_object_id = HlsRepairRenderedObjectId::Transient { resource_id: "resource-a".to_string() };
+        previous_context.rendered_object_id =
+            HlsRepairRenderedObjectId::Transient { resource_id: "resource-a".to_string() };
         previous_context.resource_id = "resource-a".to_string();
         manager
             .record_object_metadata(
@@ -2384,17 +2259,16 @@ mod tests {
         let mut current_context = previous_context.clone();
         current_context.hls_access_lease_id = Some(HlsAccessLeaseId("lease-b".to_string()));
 
-        assert!(
-            manager
-                .repair_ready_cache_hit(&cache, &cache_key, current_context)
-                .await
-                .expect("repair cache hit")
-                .is_none()
-        );
+        assert!(manager
+            .repair_ready_cache_hit(&cache, &cache_key, current_context)
+            .await
+            .expect("repair cache hit")
+            .is_none());
         assert_eq!(manager.stats().await.metadata, 0);
         let mut second_context = repair_context("lease-b", "2");
         second_context.source = HlsSegmentRepairSource::Transient;
-        second_context.rendered_object_id = HlsRepairRenderedObjectId::Transient { resource_id: "resource-b".to_string() };
+        second_context.rendered_object_id =
+            HlsRepairRenderedObjectId::Transient { resource_id: "resource-b".to_string() };
         second_context.resource_id = "resource-b".to_string();
         assert_eq!(selected_repair_mode(&manager, &second_context).await, None);
     }
@@ -2438,7 +2312,8 @@ mod tests {
         manager.start_access_lease_window(HlsAccessLeaseId("lease-a".to_string())).await;
         let mut commit_context = repair_context("lease-a", "1");
         commit_context.source = HlsSegmentRepairSource::Transient;
-        commit_context.rendered_object_id = HlsRepairRenderedObjectId::Transient { resource_id: "resource-a".to_string() };
+        commit_context.rendered_object_id =
+            HlsRepairRenderedObjectId::Transient { resource_id: "resource-a".to_string() };
         commit_context.resource_id = "resource-a".to_string();
         commit_context.normalized_origin_uri = "http://origin.example/live/resource-a.ts".to_string();
         commit_context.media_sequence = None;
@@ -2448,7 +2323,8 @@ mod tests {
         cache_hit_context.normalized_origin_uri = "resource-a".to_string();
 
         let mut second_context = commit_context.clone();
-        second_context.rendered_object_id = HlsRepairRenderedObjectId::Transient { resource_id: "resource-b".to_string() };
+        second_context.rendered_object_id =
+            HlsRepairRenderedObjectId::Transient { resource_id: "resource-b".to_string() };
         second_context.resource_id = "resource-b".to_string();
         second_context.normalized_origin_uri = "resource-b".to_string();
 
@@ -2524,7 +2400,10 @@ mod tests {
         let lease_id = HlsAccessLeaseId("lease-a".to_string());
 
         manager.start_access_lease_window(lease_id.clone()).await;
-        assert_eq!(selected_repair_mode(&manager, &repair_context("lease-a", "000001")).await, Some(HlsSegmentRepairMode::Low));
+        assert_eq!(
+            selected_repair_mode(&manager, &repair_context("lease-a", "000001")).await,
+            Some(HlsSegmentRepairMode::Low)
+        );
         assert_eq!(manager.windows.read().await.checked_candidates.len(), 1);
 
         manager.remove_access_lease_window(&lease_id).await;

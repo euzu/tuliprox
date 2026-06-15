@@ -10,6 +10,20 @@ pub enum HlsSessionStoreOutcome {
     Reused,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HlsExpiredSessionReason {
+    SessionIdleTimeout,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct HlsExpiredSessionMarker {
+    pub proxy_session_id: ProxySessionId,
+    pub session_key: HlsSessionKey,
+    pub username: Option<String>,
+    pub expired_at_ms: u64,
+    pub reason: HlsExpiredSessionReason,
+}
+
 /// In-memory lookup store for HLS sessions by stable key and public proxy ID.
 #[derive(Default)]
 pub struct HlsSessionStore {
@@ -20,6 +34,7 @@ pub struct HlsSessionStore {
 struct SessionIndexes {
     by_key: HashMap<HlsSessionKey, HlsSessionHandle>,
     by_proxy_session_id: HashMap<ProxySessionId, HlsSessionHandle>,
+    expired_by_proxy_session_id: HashMap<ProxySessionId, HlsExpiredSessionMarker>,
 }
 
 impl HlsSessionStore {
@@ -74,6 +89,7 @@ impl HlsSessionStore {
         let proxy_session_id = session.proxy_session_id.clone();
         let session = Arc::new(RwLock::new(session));
         indexes.by_key.insert(key, Arc::clone(&session));
+        indexes.expired_by_proxy_session_id.remove(&proxy_session_id);
         indexes.by_proxy_session_id.insert(proxy_session_id, Arc::clone(&session));
         (session, HlsSessionStoreOutcome::Created)
     }
@@ -88,10 +104,65 @@ impl HlsSessionStore {
         indexes.by_key.remove(key)
     }
 
+    pub async fn remove_session_marking_expired(
+        &self,
+        key: &HlsSessionKey,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+        reason: HlsExpiredSessionReason,
+        username: Option<String>,
+    ) -> Option<HlsSessionHandle> {
+        let mut indexes = self.indexes.write().await;
+        indexes.by_proxy_session_id.remove(proxy_session_id);
+        let removed = indexes.by_key.remove(key);
+        if removed.is_some() {
+            indexes.expired_by_proxy_session_id.insert(
+                proxy_session_id.clone(),
+                HlsExpiredSessionMarker {
+                    proxy_session_id: proxy_session_id.clone(),
+                    session_key: key.clone(),
+                    username,
+                    expired_at_ms: now_ms,
+                    reason,
+                },
+            );
+        }
+        removed
+    }
+
+    pub async fn expired_session_marker(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+        retention_ms: u64,
+    ) -> Option<HlsExpiredSessionMarker> {
+        let mut indexes = self.indexes.write().await;
+        let marker = indexes.expired_by_proxy_session_id.get(proxy_session_id)?;
+        if marker.expired_at_ms.saturating_add(retention_ms) <= now_ms {
+            indexes.expired_by_proxy_session_id.remove(proxy_session_id);
+            return None;
+        }
+        Some(marker.clone())
+    }
+
+    pub async fn update_expired_session_marker_username(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        username: Option<String>,
+    ) {
+        let Some(username) = username else {
+            return;
+        };
+        if let Some(marker) = self.indexes.write().await.expired_by_proxy_session_id.get_mut(proxy_session_id) {
+            marker.username.get_or_insert(username);
+        }
+    }
+
     pub async fn clear(&self) {
         let mut indexes = self.indexes.write().await;
         indexes.by_key.clear();
         indexes.by_proxy_session_id.clear();
+        indexes.expired_by_proxy_session_id.clear();
     }
 
     #[cfg(test)]
@@ -106,7 +177,7 @@ impl HlsSessionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::HlsSessionStore;
+    use super::{HlsExpiredSessionReason, HlsSessionStore};
     use crate::api::model::HlsSessionKey;
     use std::sync::Arc;
 
@@ -135,6 +206,39 @@ mod tests {
             .expect("session should be indexed by proxy_session_id");
 
         assert!(Arc::ptr_eq(&created, &found));
+    }
+
+    #[tokio::test]
+    async fn remove_session_marking_expired_retains_marker_until_recreated_or_expired() {
+        let store = HlsSessionStore::new();
+        let key = HlsSessionKey::new(1, "12345");
+        let created = store.get_or_create_session(key.clone(), b"0011223344556677", 100).await;
+        let proxy_session_id = created.read().await.proxy_session_id.clone();
+
+        let removed = store
+            .remove_session_marking_expired(
+                &key,
+                &proxy_session_id,
+                1_000,
+                HlsExpiredSessionReason::SessionIdleTimeout,
+                Some("viewer".to_string()),
+            )
+            .await;
+        assert!(removed.is_some());
+
+        let marker = store
+            .expired_session_marker(&proxy_session_id, 1_500, 10_000)
+            .await
+            .expect("expired marker should remain within retention");
+        assert_eq!(marker.username.as_deref(), Some("viewer"));
+        assert_eq!(marker.reason, HlsExpiredSessionReason::SessionIdleTimeout);
+
+        let expired = store.expired_session_marker(&proxy_session_id, 11_000, 10_000).await;
+        assert!(expired.is_none(), "expired marker should be pruned after retention");
+
+        let recreated = store.get_or_create_session(key, b"0011223344556677", 12_000).await;
+        assert_eq!(recreated.read().await.proxy_session_id, proxy_session_id);
+        assert!(store.expired_session_marker(&proxy_session_id, 12_100, 10_000).await.is_none());
     }
 
     #[tokio::test]

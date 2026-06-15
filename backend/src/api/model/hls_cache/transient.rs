@@ -1,4 +1,5 @@
 use super::{CacheAccessState, ProxySessionId, TransientObjectCacheKey};
+use axum::http::StatusCode;
 use base64::{engine::general_purpose, Engine as _};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -60,7 +61,16 @@ pub struct TransientResourceRef {
 pub enum TransientObjectCacheStatus {
     Fetching { started_at_ms: u64 },
     Ready { content_length: u64, ready_at_ms: u64 },
-    Failed { failed_at_ms: u64 },
+    FailedRetryable { failed_at_ms: u64, retry_after_ms: u64 },
+    FailedPermanent { failed_at_ms: u64, status: Option<StatusCode> },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TransientObjectUnavailableState {
+    Missing,
+    Fetching,
+    FailedRetryable { retry_after_ms: u64 },
+    FailedPermanent,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -101,7 +111,9 @@ impl TransientObjectCacheEntry {
     pub fn ready_content_length(&self) -> Option<u64> {
         match self.status {
             TransientObjectCacheStatus::Ready { content_length, .. } => Some(content_length),
-            TransientObjectCacheStatus::Fetching { .. } | TransientObjectCacheStatus::Failed { .. } => None,
+            TransientObjectCacheStatus::Fetching { .. }
+            | TransientObjectCacheStatus::FailedRetryable { .. }
+            | TransientObjectCacheStatus::FailedPermanent { .. } => None,
         }
     }
 }
@@ -215,11 +227,22 @@ impl TransientPassthroughState {
         I: IntoIterator<Item = TransientResourceRef>,
     {
         for resource in resources {
+            let resource_id = resource.id.clone();
+            let expires_at_ms = resource.expires_at_ms;
             match self.resources.get_mut(&resource.id) {
                 Some(existing) => existing.refresh_from(resource),
                 None => {
                     self.resources.insert(resource.id.clone(), resource);
                 }
+            }
+            self.extend_object_ttl_for_resource(&resource_id, expires_at_ms);
+        }
+    }
+
+    fn extend_object_ttl_for_resource(&mut self, resource_id: &TransientResourceId, expires_at_ms: u64) {
+        for (key, entry) in &mut self.object_cache {
+            if key.transient_resource_id() == resource_id {
+                entry.expires_at_ms = entry.expires_at_ms.max(expires_at_ms);
             }
         }
     }
@@ -239,8 +262,9 @@ impl TransientPassthroughState {
     }
 
     pub fn prune_expired_except(&mut self, now_ms: u64, protected: &HashSet<TransientResourceId>) {
-        self.resources
-            .retain(|id, resource| protected.contains(id) || resource.is_valid_at(now_ms) || resource.active_readers() > 0);
+        self.resources.retain(|id, resource| {
+            protected.contains(id) || resource.is_valid_at(now_ms) || resource.active_readers() > 0
+        });
     }
 
     pub fn protected_manifest_resource_ids(&self) -> HashSet<TransientResourceId> {
@@ -261,11 +285,7 @@ impl TransientPassthroughState {
         TransientObjectCacheKey::new(proxy_session_id.clone(), resource_id.clone(), file_ext)
     }
 
-    pub fn ready_object(
-        &mut self,
-        key: &TransientObjectCacheKey,
-        now_ms: u64,
-    ) -> Option<TransientObjectCacheEntry> {
+    pub fn ready_object(&mut self, key: &TransientObjectCacheKey, now_ms: u64) -> Option<TransientObjectCacheEntry> {
         let entry = self.object_cache.get_mut(key)?;
         if !entry.is_ready_at(now_ms) {
             return None;
@@ -288,15 +308,18 @@ impl TransientPassthroughState {
         match self.object_cache.get(&key) {
             Some(entry) if entry.is_ready_at(now_ms) => return TransientObjectFetchDecision::Ready,
             Some(entry) if matches!(entry.status, TransientObjectCacheStatus::Fetching { .. }) => {
-                let notifier = self.object_fetch_notifiers.entry(key).or_insert_with(|| Arc::new(Notify::new())).clone();
+                let notifier =
+                    self.object_fetch_notifiers.entry(key).or_insert_with(|| Arc::new(Notify::new())).clone();
                 return TransientObjectFetchDecision::Wait(notifier);
             }
             Some(_) | None => {}
         }
-        let expires_at_ms = now_ms.saturating_add(cache_duration_ms).min(resource.expires_at_ms);
+        let expires_at_ms = now_ms.saturating_add(cache_duration_ms).max(resource.expires_at_ms);
         let content_type = resource.content_type_hint.clone().unwrap_or_else(|| "application/octet-stream".to_string());
-        self.object_cache
-            .insert(key.clone(), TransientObjectCacheEntry::new_fetching(key.clone(), now_ms, expires_at_ms, content_type));
+        self.object_cache.insert(
+            key.clone(),
+            TransientObjectCacheEntry::new_fetching(key.clone(), now_ms, expires_at_ms, content_type),
+        );
         self.object_fetch_notifiers.entry(key.clone()).or_insert_with(|| Arc::new(Notify::new()));
         TransientObjectFetchDecision::Fetch(key)
     }
@@ -337,14 +360,55 @@ impl TransientPassthroughState {
         }
     }
 
-    pub fn mark_object_failed(&mut self, key: &TransientObjectCacheKey, now_ms: u64) {
+    pub fn mark_object_failed_retryable(&mut self, key: &TransientObjectCacheKey, now_ms: u64, retry_after_ms: u64) {
         let notify_waiters = self.object_fetch_notifiers.remove(key);
         if let Some(entry) = self.object_cache.get_mut(key) {
-            entry.status = TransientObjectCacheStatus::Failed { failed_at_ms: now_ms };
+            entry.status = TransientObjectCacheStatus::FailedRetryable { failed_at_ms: now_ms, retry_after_ms };
             entry.last_accessed_at_ms = now_ms;
         }
         if let Some(notifier) = notify_waiters {
             notifier.notify_waiters();
+        }
+    }
+
+    pub fn mark_object_failed_permanent(
+        &mut self,
+        key: &TransientObjectCacheKey,
+        now_ms: u64,
+        status: Option<StatusCode>,
+    ) {
+        let notify_waiters = self.object_fetch_notifiers.remove(key);
+        if let Some(entry) = self.object_cache.get_mut(key) {
+            entry.status = TransientObjectCacheStatus::FailedPermanent { failed_at_ms: now_ms, status };
+            entry.last_accessed_at_ms = now_ms;
+        }
+        if let Some(notifier) = notify_waiters {
+            notifier.notify_waiters();
+        }
+    }
+
+    pub fn object_status(&self, key: &TransientObjectCacheKey) -> Option<TransientObjectCacheStatus> {
+        self.object_cache.get(key).map(|entry| entry.status.clone())
+    }
+
+    pub fn object_unavailable_state(
+        &self,
+        key: &TransientObjectCacheKey,
+        now_ms: u64,
+    ) -> TransientObjectUnavailableState {
+        let Some(entry) = self.object_cache.get(key) else {
+            return TransientObjectUnavailableState::Missing;
+        };
+        if entry.expires_at_ms < now_ms {
+            return TransientObjectUnavailableState::Missing;
+        }
+        match entry.status {
+            TransientObjectCacheStatus::Fetching { .. } => TransientObjectUnavailableState::Fetching,
+            TransientObjectCacheStatus::FailedRetryable { retry_after_ms, .. } => {
+                TransientObjectUnavailableState::FailedRetryable { retry_after_ms }
+            }
+            TransientObjectCacheStatus::FailedPermanent { .. } => TransientObjectUnavailableState::FailedPermanent,
+            TransientObjectCacheStatus::Ready { .. } => TransientObjectUnavailableState::Missing,
         }
     }
 
@@ -413,10 +477,8 @@ fn extract_transient_resource_ids(body: &str) -> HashSet<TransientResourceId> {
     body.split("/r/")
         .skip(1)
         .filter_map(|tail| {
-            let file_name: String = tail
-                .chars()
-                .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-                .collect();
+            let file_name: String =
+                tail.chars().take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')).collect();
             let (resource_id, extension) = file_name.rsplit_once('.')?;
             if resource_id.is_empty() || extension.is_empty() {
                 return None;
@@ -446,7 +508,11 @@ fn default_content_type_for_transient_ext(extension: &str) -> Option<&'static st
 
 #[cfg(test)]
 mod tests {
-    use super::{build_transient_resource_id, TransientPassthroughState, TransientResourceKind, TransientResourceRef};
+    use super::{
+        build_transient_resource_id, TransientObjectCacheStatus, TransientPassthroughState, TransientResourceKind,
+        TransientResourceRef,
+    };
+    use crate::api::model::ProxySessionId;
 
     #[test]
     fn transient_resource_id_is_stable_and_opaque() {
@@ -486,6 +552,45 @@ mod tests {
         assert_eq!(state.resources.len(), 1);
         assert_eq!(state.get_valid_resource(&resource_id, 150).expect("resource remains valid").expires_at_ms, 220);
         assert!(state.get_valid_resource(&resource_id, 221).is_none());
+    }
+
+    #[test]
+    fn transient_resource_render_extends_existing_object_ttl() {
+        let mut state = TransientPassthroughState::default();
+        let resource = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "http://origin.example.com/live/seg.ts",
+            b"secret",
+            10,
+            100,
+            Some("ts".to_string()),
+        );
+        let resource_id = resource.id.clone();
+        let key = TransientPassthroughState::transient_object_key(
+            &ProxySessionId("proxy-session".to_string()),
+            &resource_id,
+            "ts",
+        );
+        state.upsert_resources([resource.clone()]);
+        assert!(matches!(
+            state.begin_object_fetch(&ProxySessionId("proxy-session".to_string()), &resource, "ts", 20, 50),
+            super::TransientObjectFetchDecision::Fetch(_)
+        ));
+        assert_eq!(state.object_cache.get(&key).expect("object").expires_at_ms, 110);
+
+        let updated = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "http://origin.example.com/live/seg.ts",
+            b"secret",
+            100,
+            300,
+            Some("ts".to_string()),
+        );
+        state.upsert_resources([updated]);
+
+        let object = state.object_cache.get(&key).expect("object remains");
+        assert!(matches!(object.status, TransientObjectCacheStatus::Fetching { .. }));
+        assert_eq!(object.expires_at_ms, 400);
     }
 
     #[test]

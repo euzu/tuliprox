@@ -185,7 +185,8 @@ impl HlsSession {
             }
             SegmentCacheStatus::Fetching { .. }
             | SegmentCacheStatus::Ready { .. }
-            | SegmentCacheStatus::Failed { .. }
+            | SegmentCacheStatus::FailedRetryable { .. }
+            | SegmentCacheStatus::FailedPermanent { .. }
             | SegmentCacheStatus::Expired => false,
         }
     }

@@ -46,6 +46,21 @@ use url::Url;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RequestFetchOptions {
+    pub attempt_idle_timeout: Option<Duration>,
+}
+
+impl RequestFetchOptions {
+    pub fn with_attempt_idle_timeout(timeout: Duration) -> Self {
+        Self { attempt_idle_timeout: Some(timeout.max(Duration::from_millis(1))) }
+    }
+
+    fn attempt_idle_timeout_or_default(self) -> Duration {
+        self.attempt_idle_timeout.unwrap_or_else(|| Duration::from_secs(STREAM_IDLE_TIMEOUT))
+    }
+}
+
 fn log_proxy_diagnostics(config: &Config) {
     PROXY_DIAGNOSTICS_ONCE.call_once(|| {
         if let Some(proxy_cfg) = config.proxy.as_ref() {
@@ -627,7 +642,16 @@ pub async fn send_with_retry_and_provider(
     allow_redirects: bool,
     send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
-    send_with_retry_and_provider_policy(app_config, url, provider, allow_redirects, true, send).await
+    send_with_retry_and_provider_policy_with_options(
+        app_config,
+        url,
+        provider,
+        allow_redirects,
+        true,
+        RequestFetchOptions::default(),
+        send,
+    )
+    .await
 }
 
 /// Canonical retry and provider-failover entry point for outbound resource requests.
@@ -647,6 +671,28 @@ pub async fn send_with_retry_and_provider_policy(
     provider: Option<&Arc<ConfigProvider>>,
     allow_redirects: bool,
     retry_enabled: bool,
+    send: impl FnMut(&Url) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, std::io::Error> {
+    send_with_retry_and_provider_policy_with_options(
+        app_config,
+        url,
+        provider,
+        allow_redirects,
+        retry_enabled,
+        RequestFetchOptions::default(),
+        send,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn send_with_retry_and_provider_policy_with_options(
+    app_config: &Arc<AppConfig>,
+    url: &Url, // Used primarily for logging/context
+    provider: Option<&Arc<ConfigProvider>>,
+    allow_redirects: bool,
+    retry_enabled: bool,
+    options: RequestFetchOptions,
     mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
     let config = app_config.config.load();
@@ -663,7 +709,7 @@ pub async fn send_with_retry_and_provider_policy(
     let max_attempts = if retry_enabled { max_attempts } else { 1 };
     drop(config);
 
-    let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
+    let idle_timeout = options.attempt_idle_timeout_or_default();
     let idle = sleep(idle_timeout);
     tokio::pin!(idle);
 
@@ -700,6 +746,9 @@ pub async fn send_with_retry_and_provider_policy(
                     string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(&err.to_string())))
                 })?;
                 apply_attempt_to_request(&mut request, &attempt_target)?;
+                if let Some(timeout) = options.attempt_idle_timeout {
+                    *request.timeout_mut() = Some(timeout);
+                }
 
                 tokio::select! {
                     () = &mut idle => {
@@ -1393,6 +1442,19 @@ pub async fn get_remote_content_as_stream(
     headers: Option<&HeaderMap>,
     url: &Url,
 ) -> Result<(DynReader, String), Error> {
+    get_remote_content_as_stream_with_options(app_config, client, input, headers, url, RequestFetchOptions::default())
+        .await
+}
+
+#[allow(clippy::implicit_hasher)]
+async fn get_remote_content_as_stream_with_options(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    url: &Url,
+    options: RequestFetchOptions,
+) -> Result<(DynReader, String), Error> {
     let custom_headers = headers
         .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
 
@@ -1413,18 +1475,26 @@ pub async fn get_remote_content_as_stream(
         .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
         .collect();
 
-    let response = send_with_retry_and_provider(app_config, url, input.get_provider(), false, |resolved_url| {
-        get_client_request(
-            client,
-            input.method,
-            Some(&headers),
-            resolved_url,
-            None,
-            None,
-            default_user_agent.as_deref(),
-        )
-    })
-        .await?;
+    let response = send_with_retry_and_provider_policy_with_options(
+        app_config,
+        url,
+        input.get_provider(),
+        false,
+        true,
+        options,
+        |resolved_url| {
+            get_client_request(
+                client,
+                input.method,
+                Some(&headers),
+                resolved_url,
+                None,
+                None,
+                default_user_agent.as_deref(),
+            )
+        },
+    )
+    .await?;
 
     let response_url = response.url().to_string();
 
@@ -1432,22 +1502,81 @@ pub async fn get_remote_content_as_stream(
     Ok((reader, response_url))
 }
 
-async fn get_remote_content(
+async fn read_stream_to_string_with_options(
+    stream: &mut DynReader,
+    response_url: &str,
+    options: RequestFetchOptions,
+) -> Result<String, Error> {
+    let mut content = String::new();
+    if let Some(timeout) = options.attempt_idle_timeout {
+        tokio::time::timeout(timeout, stream.read_to_string(&mut content))
+            .await
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                    "Timed out reading content body: {}",
+                    sanitize_sensitive_info(response_url)
+                    ),
+                )
+            })?
+            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
+    } else {
+        stream
+            .read_to_string(&mut content)
+            .await
+            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
+    }
+    Ok(content)
+}
+
+fn text_body_retry_values(app_config: &Arc<AppConfig>, options: RequestFetchOptions) -> (u32, u64, f64) {
+    if options.attempt_idle_timeout.is_none() {
+        return (1, 0, 1.0);
+    }
+    let config = app_config.config.load();
+    let values = config.reverse_proxy.as_ref().map_or_else(
+        ResourceRetryConfig::get_default_retry_values,
+        |rp| rp.resource_retry.get_retry_values(),
+    );
+    drop(config);
+    values
+}
+
+async fn sleep_before_text_body_retry(attempt: u32, backoff_ms: u64, backoff_multiplier: f64, err: &Error) {
+    let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
+    warn!(
+        "Text response body timed out, retrying in {}ms (attempt {}): {}",
+        delay,
+        attempt + 1,
+        sanitize_sensitive_info(err.to_string().as_str())
+    );
+    tokio::time::sleep(Duration::from_millis(delay)).await;
+}
+
+async fn get_remote_content_with_options(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &InputSource,
     headers: Option<&HeaderMap>,
     url: &Url,
+    options: RequestFetchOptions,
 ) -> Result<(String, String), Error> {
-    let (mut stream, response_url) = get_remote_content_as_stream(app_config, client, input, headers, url)
-        .await
-        .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-    let mut content = String::new();
-    stream
-        .read_to_string(&mut content)
-        .await
-        .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-    Ok((content, response_url))
+    let (max_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options);
+    for attempt in 0..max_attempts {
+        let (mut stream, response_url) =
+            get_remote_content_as_stream_with_options(app_config, client, input, headers, url, options)
+                .await
+                .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
+        match read_stream_to_string_with_options(&mut stream, response_url.as_str(), options).await {
+            Ok(content) => return Ok((content, response_url)),
+            Err(err) if err.kind() == ErrorKind::TimedOut && attempt + 1 < max_attempts => {
+                sleep_before_text_body_retry(attempt, backoff_ms, backoff_multiplier, &err).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(string_to_io_error("Text response body retry attempts exhausted"))
 }
 
 async fn get_remote_content_with_headers(
@@ -1501,14 +1630,16 @@ async fn get_remote_content_with_headers(
     Ok((content, response_url, response_headers))
 }
 
-async fn get_remote_content_with_manual_redirects(
+async fn get_remote_content_with_manual_redirects_and_options(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &InputSource,
     headers: Option<&HeaderMap>,
     url: &Url,
     max_redirects: usize,
+    options: RequestFetchOptions,
 ) -> Result<(String, String), Error> {
+    let (max_body_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options);
     let custom_headers = headers
         .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
 
@@ -1529,70 +1660,82 @@ async fn get_remote_content_with_manual_redirects(
         .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
         .collect();
 
-    let mut current_url = url.clone();
-    let mut current_headers = headers;
-    let mut remaining_redirects = max_redirects;
-    loop {
-        let response =
-            send_with_retry_and_provider(app_config, &current_url, input.get_provider(), true, |resolved_url| {
-                get_client_request(
-                    client,
-                    input.method,
-                    Some(&current_headers),
-                    resolved_url,
-                    None,
-                    None,
-                    default_user_agent.as_deref(),
-                )
-            })
-                .await?;
-        let response_base_url = response.url().clone();
+    for body_attempt in 0..max_body_attempts {
+        let mut current_url = url.clone();
+        let mut current_headers = headers.clone();
+        let mut remaining_redirects = max_redirects;
+        loop {
+            let response = send_with_retry_and_provider_policy_with_options(
+                app_config,
+                &current_url,
+                input.get_provider(),
+                true,
+                true,
+                options,
+                |resolved_url| {
+                    get_client_request(
+                        client,
+                        input.method,
+                        Some(&current_headers),
+                        resolved_url,
+                        None,
+                        None,
+                        default_user_agent.as_deref(),
+                    )
+                },
+            )
+            .await?;
+            let response_base_url = response.url().clone();
 
-        if response.status().is_redirection() {
-            if remaining_redirects == 0 {
-                return Err(string_to_io_error(format!(
-                    "Too many redirects while requesting {}",
-                    sanitize_sensitive_info(url.as_str())
-                )));
-            }
+            if response.status().is_redirection() {
+                if remaining_redirects == 0 {
+                    return Err(string_to_io_error(format!(
+                        "Too many redirects while requesting {}",
+                        sanitize_sensitive_info(url.as_str())
+                    )));
+                }
 
-            let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-                return Err(string_to_io_error(format!(
-                    "Redirect response missing location header for {}",
-                    sanitize_sensitive_info(current_url.as_str())
-                )));
-            };
-            let Ok(location_str) = location.to_str() else {
-                return Err(string_to_io_error(format!(
-                    "Redirect response contains invalid location header for {}",
-                    sanitize_sensitive_info(current_url.as_str())
-                )));
-            };
-            let next_url =
-                response_base_url.join(location_str).or_else(|_| Url::parse(location_str)).map_err(|_| {
-                    string_to_io_error(format!(
-                        "Redirect response contains invalid location URL for {}",
+                let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+                    return Err(string_to_io_error(format!(
+                        "Redirect response missing location header for {}",
                         sanitize_sensitive_info(current_url.as_str())
-                    ))
-                })?;
+                    )));
+                };
+                let Ok(location_str) = location.to_str() else {
+                    return Err(string_to_io_error(format!(
+                        "Redirect response contains invalid location header for {}",
+                        sanitize_sensitive_info(current_url.as_str())
+                    )));
+                };
+                let next_url =
+                    response_base_url.join(location_str).or_else(|_| Url::parse(location_str)).map_err(|_| {
+                        string_to_io_error(format!(
+                            "Redirect response contains invalid location URL for {}",
+                            sanitize_sensitive_info(current_url.as_str())
+                        ))
+                    })?;
 
-            if !same_origin(&response_base_url, &next_url) {
-                strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
+                if !same_origin(&response_base_url, &next_url) {
+                    strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
+                }
+                current_url = next_url;
+                remaining_redirects = remaining_redirects.saturating_sub(1);
+                continue;
             }
-            current_url = next_url;
-            remaining_redirects = remaining_redirects.saturating_sub(1);
-            continue;
-        }
 
-        let response_url = response.url().to_string();
-        let mut stream = build_decoded_stream_reader(response).await?;
-        let mut content = String::new();
-        stream
-            .read_to_string(&mut content)
-            .await
-            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-        return Ok((content, response_url));
+            let response_url = response.url().to_string();
+            let mut stream = build_decoded_stream_reader(response).await?;
+            match read_stream_to_string_with_options(&mut stream, response_url.as_str(), options).await {
+                Ok(content) => return Ok((content, response_url)),
+                Err(err) if err.kind() == ErrorKind::TimedOut && body_attempt + 1 < max_body_attempts => {
+                    sleep_before_text_body_retry(body_attempt, backoff_ms, backoff_multiplier, &err).await;
+                    break;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
+    Err(string_to_io_error("Text response body retry attempts exhausted"))
 }
 
 async fn get_remote_content_with_manual_redirects_and_headers(
@@ -1751,6 +1894,27 @@ pub async fn download_text_content(
     persist_filepath: Option<PathBuf>,
     trace_log: bool,
 ) -> Result<(String, String), Error> {
+    download_text_content_with_options(
+        app_config,
+        client,
+        input,
+        headers,
+        persist_filepath,
+        trace_log,
+        RequestFetchOptions::default(),
+    )
+    .await
+}
+
+pub async fn download_text_content_with_options(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    persist_filepath: Option<PathBuf>,
+    trace_log: bool,
+    options: RequestFetchOptions,
+) -> Result<(String, String), Error> {
     let start_time = tokio::time::Instant::now();
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
@@ -1759,7 +1923,7 @@ pub async fn download_text_content(
                 Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
-            get_remote_content(app_config, client, input, headers, &url).await
+            get_remote_content_with_options(app_config, client, input, headers, &url, options).await
         };
         match result {
             Ok((content, response_url)) => {
@@ -1835,6 +1999,30 @@ pub async fn download_text_content_with_manual_redirects(
     trace_log: bool,
     max_redirects: usize,
 ) -> Result<(String, String), Error> {
+    download_text_content_with_manual_redirects_and_options(
+        app_config,
+        client,
+        input,
+        headers,
+        persist_filepath,
+        trace_log,
+        max_redirects,
+        RequestFetchOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn download_text_content_with_manual_redirects_and_options(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    persist_filepath: Option<PathBuf>,
+    trace_log: bool,
+    max_redirects: usize,
+    options: RequestFetchOptions,
+) -> Result<(String, String), Error> {
     let start_time = tokio::time::Instant::now();
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
@@ -1843,7 +2031,16 @@ pub async fn download_text_content_with_manual_redirects(
                 Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
-            get_remote_content_with_manual_redirects(app_config, client, input, headers, &url, max_redirects).await
+            get_remote_content_with_manual_redirects_and_options(
+                app_config,
+                client,
+                input,
+                headers,
+                &url,
+                max_redirects,
+                options,
+            )
+            .await
         };
         match result {
             Ok((content, response_url)) => {

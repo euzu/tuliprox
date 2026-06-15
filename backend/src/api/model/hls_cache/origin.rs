@@ -114,10 +114,8 @@ pub struct HlsAccountOverlapTiming {
 
 impl HlsAccountOverlapTiming {
     pub fn from_target_duration_secs(target_duration_secs: Option<u64>) -> Self {
-        let target_duration_ms =
-            target_duration_secs.map_or(HLS_ACCOUNT_OVERLAP_FALLBACK_TARGET_DURATION_MS, |duration| {
-                duration.saturating_mul(1_000)
-            });
+        let target_duration_ms = target_duration_secs
+            .map_or(HLS_ACCOUNT_OVERLAP_FALLBACK_TARGET_DURATION_MS, |duration| duration.saturating_mul(1_000));
         Self {
             target_duration_ms,
             hard_active_window_ms: target_duration_ms,
@@ -170,14 +168,8 @@ pub fn classify_account_binding_protection(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HlsOriginAccountBindingMode {
     Active,
-    Speculative {
-        displaced_proxy_session_id: ProxySessionId,
-        reclaim_until_ms: u64,
-    },
-    Detached {
-        reason: HlsOriginAccountDetachedReason,
-        detached_at_ms: u64,
-    },
+    Speculative { displaced_proxy_session_id: ProxySessionId, reclaim_until_ms: u64 },
+    Detached { reason: HlsOriginAccountDetachedReason, detached_at_ms: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,20 +235,15 @@ impl HlsOriginAccountBinding {
         now_ms: u64,
     ) -> Self {
         let mut binding = Self::new(input_name, account_name, proxy_session_id, now_ms);
-        binding.binding_mode = HlsOriginAccountBindingMode::Speculative {
-            displaced_proxy_session_id,
-            reclaim_until_ms,
-        };
+        binding.binding_mode =
+            HlsOriginAccountBindingMode::Speculative { displaced_proxy_session_id, reclaim_until_ms };
         binding
     }
 
     pub fn promote_to_active(&mut self) { self.binding_mode = HlsOriginAccountBindingMode::Active; }
 
     pub fn detach(&mut self, reason: HlsOriginAccountDetachedReason, now_ms: u64) {
-        self.binding_mode = HlsOriginAccountBindingMode::Detached {
-            reason,
-            detached_at_ms: now_ms,
-        };
+        self.binding_mode = HlsOriginAccountBindingMode::Detached { reason, detached_at_ms: now_ms };
         self.last_reservation_refresh_at_ms = None;
     }
 
@@ -267,7 +254,9 @@ impl HlsOriginAccountBinding {
         )
     }
 
-    pub const fn is_detached(&self) -> bool { matches!(self.binding_mode, HlsOriginAccountBindingMode::Detached { .. }) }
+    pub const fn is_detached(&self) -> bool {
+        matches!(self.binding_mode, HlsOriginAccountBindingMode::Detached { .. })
+    }
 }
 
 impl fmt::Debug for HlsOriginAccountBinding {
@@ -344,11 +333,7 @@ pub struct HlsEffectiveOriginAcquirePolicy {
 
 impl HlsEffectiveOriginAcquirePolicy {
     pub const fn new(connection_kind: ConnectionKind, priority: i8, updated_at_ms: u64) -> Self {
-        Self {
-            connection_kind,
-            priority,
-            updated_at_ms,
-        }
+        Self { connection_kind, priority, updated_at_ms }
     }
 
     pub const fn fallback() -> Self { Self::new(ConnectionKind::Normal, 0, 0) }
@@ -378,10 +363,7 @@ pub struct HlsEffectiveOriginAcquirePolicyState {
 
 impl HlsEffectiveOriginAcquirePolicyState {
     pub const fn new(current_policy: HlsEffectiveOriginAcquirePolicy, now_ms: u64) -> Self {
-        Self {
-            current_policy,
-            last_supported_at_ms: now_ms,
-        }
+        Self { current_policy, last_supported_at_ms: now_ms }
     }
 }
 
@@ -403,9 +385,7 @@ impl HlsOriginWorkClass {
 
     pub const fn allows_grace(self) -> bool { matches!(self, Self::ManifestInteractive | Self::Demand) }
 
-    pub const fn allows_speculative_overlap(self) -> bool {
-        matches!(self, Self::ManifestInteractive | Self::Demand)
-    }
+    pub const fn allows_speculative_overlap(self) -> bool { matches!(self, Self::ManifestInteractive | Self::Demand) }
 }
 
 #[derive(Clone)]
@@ -516,16 +496,11 @@ pub async fn begin_hls_origin_account_io(
         return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
     }
 
-    if matches!(
-        reserve_hls_origin_account_io_slot(session, binding).await?,
-        HlsOriginAccountIoSlot::Joined
-    ) {
+    if matches!(reserve_hls_origin_account_io_slot(session, binding).await?, HlsOriginAccountIoSlot::Joined) {
         if let Some(unused_handle) = origin_io.take_preacquired_provider_handle().await {
             origin_io.app_state.connection_manager.release_provider_handle(Some(unused_handle)).await;
         }
-        return Ok(HlsOriginAccountIoLeaseGuard {
-            binding: binding.clone(),
-        });
+        return Ok(HlsOriginAccountIoLeaseGuard { binding: binding.clone() });
     }
 
     let acquired_handle = if let Some(handle) = origin_io.take_preacquired_provider_handle().await {
@@ -652,9 +627,7 @@ async fn store_acquired_hls_origin_account_io_handle(
         origin_io.app_state.active_provider.clear_provider_reservation(&binding.session_owner).await;
         return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
     }
-    Ok(HlsOriginAccountIoLeaseGuard {
-        binding: binding.clone(),
-    })
+    Ok(HlsOriginAccountIoLeaseGuard { binding: binding.clone() })
 }
 
 async fn clear_pending_hls_origin_account_io_lease(session: &HlsSessionHandle, binding: &HlsOriginAccountBinding) {
@@ -718,7 +691,9 @@ pub async fn finish_hls_origin_account_io(
         }
 
         if let Some(current) = session.origin_account_binding.as_mut().filter(|current| {
-            current.is_active() && current.account_name == binding.account_name && current.session_owner == binding.session_owner
+            current.is_active()
+                && current.account_name == binding.account_name
+                && current.session_owner == binding.session_owner
         }) {
             let now_ms = chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default();
             current.last_origin_io_at_ms = Some(now_ms);
@@ -730,13 +705,8 @@ pub async fn finish_hls_origin_account_io(
 
     if let Some(provider_handle) = provider_handle_to_release {
         if should_refresh_reservation {
-            finish_hls_origin_io(
-                &origin_io.app_state,
-                &binding,
-                Some(provider_handle),
-                origin_io.reservation_ttl_secs,
-            )
-            .await;
+            finish_hls_origin_io(&origin_io.app_state, &binding, Some(provider_handle), origin_io.reservation_ttl_secs)
+                .await;
         } else {
             origin_io.app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
             if should_clear_reservation {
@@ -810,11 +780,11 @@ mod tests {
             classify_account_binding_protection(Some(1_000), 20_000, timing),
             HlsAccountBindingProtection::SoftActive { reclaim_until_ms: 31_000 }
         );
-        assert_eq!(classify_account_binding_protection(Some(1_000), 32_000, timing), HlsAccountBindingProtection::Expired);
         assert_eq!(
-            classify_account_binding_protection(None, 1_000, timing),
-            HlsAccountBindingProtection::NoMediaYet
+            classify_account_binding_protection(Some(1_000), 32_000, timing),
+            HlsAccountBindingProtection::Expired
         );
+        assert_eq!(classify_account_binding_protection(None, 1_000, timing), HlsAccountBindingProtection::NoMediaYet);
     }
 
     #[test]

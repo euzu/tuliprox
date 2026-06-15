@@ -361,6 +361,10 @@ fn hls_custom_video_type_configured(app_state: &Arc<AppState>, video_type: Custo
         CustomVideoStreamType::Provisioning => {
             custom_stream_response.as_ref().and_then(|response| response.panel_api_provisioning.as_ref()).is_some()
         }
+        CustomVideoStreamType::HlsSessionOrLeaseExpired => custom_stream_response
+            .as_ref()
+            .and_then(|response| response.hls_session_or_lease_expired.as_ref())
+            .is_some(),
     }
 }
 

@@ -1,10 +1,9 @@
 use super::{
-    build_proxy_session_id, classify_account_binding_protection, HlsAccountBindingProtection,
-    HlsAccountOverlapTiming, HlsEffectiveOriginAcquirePolicy, HlsEffectiveOriginAcquirePolicyState,
-    HlsOriginAccountBinding, HlsOriginAccountIoLease, HlsOriginAccountRebindState, HlsOriginSource,
-    HlsSessionKey, MapCacheStatus, MapEntry, OriginMapKey, OriginRefreshState, OriginSegmentKey, ProxyMapId,
-    ProxySessionId, RenderPolicy, RenderedManifest, SegmentCacheStatus, SegmentEntry, SegmentPrefetchQueue,
-    TransientPassthroughState,
+    build_proxy_session_id, classify_account_binding_protection, HlsAccountBindingProtection, HlsAccountOverlapTiming,
+    HlsEffectiveOriginAcquirePolicy, HlsEffectiveOriginAcquirePolicyState, HlsOriginAccountBinding,
+    HlsOriginAccountIoLease, HlsOriginAccountRebindState, HlsOriginSource, HlsSessionKey, MapCacheStatus, MapEntry,
+    OriginMapKey, OriginRefreshState, OriginSegmentKey, ProxyMapId, ProxySessionId, RenderPolicy, RenderedManifest,
+    SegmentCacheStatus, SegmentEntry, SegmentPrefetchQueue, TransientPassthroughState,
 };
 use axum::http::HeaderMap;
 use std::{
@@ -312,10 +311,7 @@ impl fmt::Debug for HlsSession {
             .field("proxy_next_seq", &self.proxy_next_seq)
             .field("origin_to_proxy_len", &self.origin_to_proxy.len())
             .field("discontinuity_sequence", &self.discontinuity_sequence)
-            .field(
-                "pending_handoff_discontinuity_sequence",
-                &self.pending_handoff_discontinuity_sequence,
-            )
+            .field("pending_handoff_discontinuity_sequence", &self.pending_handoff_discontinuity_sequence)
             .field("active_map_fetches", &self.active_map_fetches)
             .field("segments_len", &self.segments.len())
             .field("maps_len", &self.maps.len())
@@ -333,7 +329,9 @@ impl fmt::Debug for HlsSession {
 #[cfg(test)]
 mod tests {
     use super::HlsSession;
-    use crate::api::model::{ConnectionKind, HlsAccountBindingProtection, HlsEffectiveOriginAcquirePolicy, HlsSessionKey};
+    use crate::api::model::{
+        ConnectionKind, HlsAccountBindingProtection, HlsEffectiveOriginAcquirePolicy, HlsSessionKey,
+    };
 
     fn origin_policy(connection_kind: ConnectionKind, priority: i8) -> HlsEffectiveOriginAcquirePolicy {
         HlsEffectiveOriginAcquirePolicy::new(connection_kind, priority, 0)
@@ -415,22 +413,13 @@ mod tests {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
         session.target_duration = Some(12);
 
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Soft, -20)),
-            1_000,
-        );
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Normal, 50)),
-            1_001,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Soft, -20)), 1_000);
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Normal, 50)), 1_001);
         let normal_policy = session.effective_origin_acquire_policy_or_default();
         assert_eq!(normal_policy.connection_kind, ConnectionKind::Normal);
         assert_eq!(normal_policy.priority, 50);
 
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Normal, -5)),
-            1_002,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Normal, -5)), 1_002);
         let upgraded_priority = session.effective_origin_acquire_policy_or_default();
         assert_eq!(upgraded_priority.connection_kind, ConnectionKind::Normal);
         assert_eq!(upgraded_priority.priority, -5);
@@ -440,23 +429,14 @@ mod tests {
     fn effective_origin_policy_downgrade_waits_for_session_target_duration() {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
         session.target_duration = Some(12);
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Normal, -5)),
-            1_000,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Normal, -5)), 1_000);
 
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Soft, -20)),
-            5_000,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Soft, -20)), 5_000);
         let protected_policy = session.effective_origin_acquire_policy_or_default();
         assert_eq!(protected_policy.connection_kind, ConnectionKind::Normal);
         assert_eq!(protected_policy.priority, -5);
 
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Soft, -20)),
-            13_000,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Soft, -20)), 13_000);
         let downgraded_policy = session.effective_origin_acquire_policy_or_default();
         assert_eq!(downgraded_policy.connection_kind, ConnectionKind::Soft);
         assert_eq!(downgraded_policy.priority, -20);
@@ -465,15 +445,9 @@ mod tests {
     #[test]
     fn effective_origin_policy_downgrades_without_delay_when_target_duration_is_unknown() {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Normal, -5)),
-            1_000,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Normal, -5)), 1_000);
 
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Soft, -20)),
-            1_001,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Soft, -20)), 1_001);
 
         let policy = session.effective_origin_acquire_policy_or_default();
         assert_eq!(policy.connection_kind, ConnectionKind::Soft);
@@ -484,10 +458,7 @@ mod tests {
     fn effective_origin_policy_clear_waits_for_session_target_duration() {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
         session.target_duration = Some(10);
-        session.reconcile_effective_origin_acquire_policy(
-            Some(origin_policy(ConnectionKind::Normal, -5)),
-            1_000,
-        );
+        session.reconcile_effective_origin_acquire_policy(Some(origin_policy(ConnectionKind::Normal, -5)), 1_000);
 
         session.reconcile_effective_origin_acquire_policy(None, 5_000);
         assert!(session.effective_origin_acquire_policy.is_some());

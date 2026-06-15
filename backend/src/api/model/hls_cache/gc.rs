@@ -1,7 +1,7 @@
 use super::{
     renderer_candidate_window_proxy_seqs, CacheInvalidationOutcome, HlsCacheMetrics, HlsSegmentCache, HlsSession,
-    HlsSessionHandle, HlsSessionStore, MapCacheKey, MapCacheStatus, ProxyMapId, ProxySessionId, SegmentCacheKey,
-    SegmentCacheStatus, TransientObjectCacheKey,
+    HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, MapCacheKey, MapCacheStatus, ProxyMapId,
+    ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey,
 };
 use crate::{api::model::AppState, model::HlsCacheConfig};
 use arc_swap::ArcSwap;
@@ -401,7 +401,18 @@ impl HlsGarbageCollector {
             return Ok(());
         }
 
-        if self.sessions.remove_session(&key, &proxy_session_id).await.is_some() {
+        if self
+            .sessions
+            .remove_session_marking_expired(
+                &key,
+                &proxy_session_id,
+                now_ms,
+                HlsExpiredSessionReason::SessionIdleTimeout,
+                None,
+            )
+            .await
+            .is_some()
+        {
             self.cache.delete_session_dir(&proxy_session_id).await?;
             report.sessions_deleted = report.sessions_deleted.saturating_add(1);
             report.removed_session_ids.push(proxy_session_id);
@@ -435,11 +446,7 @@ impl HlsGarbageCollector {
         self.metrics.record_maps_removed(report.maps_deleted);
     }
 
-    fn should_remove_idle_session(
-        session: &HlsSession,
-        now_ms: u64,
-        policy: &GarbageCollectionPolicy,
-    ) -> bool {
+    fn should_remove_idle_session(session: &HlsSession, now_ms: u64, policy: &GarbageCollectionPolicy) -> bool {
         session.can_expire_idle_session(now_ms, policy.session_idle_timeout_ms)
     }
 }
@@ -465,7 +472,10 @@ pub fn exec_hls_cache_gc(app_state: &Arc<AppState>, cancel_token: &CancellationT
                 .await;
             match hls_proxy.run_garbage_collection_once(now_ms).await {
                 Ok(report) if report.did_cleanup_or_invalidate() => {
-                    debug!("HLS cache state snapshot after garbage collection: {}", hls_proxy.debug_state_summary().await);
+                    debug!(
+                        "HLS cache state snapshot after garbage collection: {}",
+                        hls_proxy.debug_state_summary().await
+                    );
                 }
                 Ok(_) => {}
                 Err(err) => {
@@ -533,7 +543,9 @@ async fn oldest_global_fifo_head_candidate(sessions: &[HlsSessionHandle]) -> Opt
     candidates.into_iter().min_by_key(|candidate| (candidate.last_relevant_at_ms, candidate.proxy_seq))
 }
 
-async fn oldest_global_transient_object_candidate(sessions: &[HlsSessionHandle]) -> Option<GlobalTransientObjectCandidate> {
+async fn oldest_global_transient_object_candidate(
+    sessions: &[HlsSessionHandle],
+) -> Option<GlobalTransientObjectCandidate> {
     let mut candidates = Vec::new();
     for session in sessions {
         let session_guard = session.read().await;
@@ -576,7 +588,9 @@ fn duration_expired_head_segment(
     }
     let last_relevant_at_ms = segment_last_relevant_at_ms(segment)?;
     let retention_ms = match segment.status {
-        SegmentCacheStatus::Failed { .. } | SegmentCacheStatus::Expired => policy.failed_segment_retention_ms,
+        SegmentCacheStatus::FailedRetryable { .. }
+        | SegmentCacheStatus::FailedPermanent { .. }
+        | SegmentCacheStatus::Expired => policy.failed_segment_retention_ms,
         SegmentCacheStatus::Ready { .. } => policy
             .cache_duration_ms
             .max(segment.duration_ms.saturating_add(session.longest_rendered_playlist_duration_ms)),
@@ -605,7 +619,8 @@ fn fifo_head_size_candidate(session: &HlsSession, protected: &ProtectedSet) -> O
 fn segment_last_relevant_at_ms(segment: &super::SegmentEntry) -> Option<u64> {
     let status_at = match segment.status {
         SegmentCacheStatus::Ready { ready_at_ms, .. } => Some(ready_at_ms),
-        SegmentCacheStatus::Failed { failed_at_ms } => Some(failed_at_ms),
+        SegmentCacheStatus::FailedRetryable { failed_at_ms, .. }
+        | SegmentCacheStatus::FailedPermanent { failed_at_ms, .. } => Some(failed_at_ms),
         SegmentCacheStatus::Expired => segment.last_rendered_at_ms,
         SegmentCacheStatus::Discovered | SegmentCacheStatus::Queued { .. } | SegmentCacheStatus::Fetching { .. } => {
             None
@@ -1117,10 +1132,7 @@ mod tests {
             let mut session = session.write().await;
             session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
             let segment = session.segments.get_mut(&1).expect("segment");
-            gc.cache
-                .write_bytes_and_commit(&segment.cache_key, b"segment-body")
-                .await
-                .expect("segment writes");
+            gc.cache.write_bytes_and_commit(&segment.cache_key, b"segment-body").await.expect("segment writes");
             segment.status = SegmentCacheStatus::Ready { content_length: 12, ready_at_ms: 100 };
             let key = TransientPassthroughState::transient_object_key(
                 &session.proxy_session_id,

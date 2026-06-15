@@ -11,9 +11,9 @@ use rand::Rng;
 use shared::error::TuliproxError;
 use shared::model::{ConfigPaths, GeoIpUnavailablePolicy};
 use shared::utils::{
-    CHANNEL_UNAVAILABLE, LOW_PRIORITY_PREEMPTED, PANEL_API_PROVISIONING, PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT,
-    PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX, PROVIDER_CONNECTIONS_EXHAUSTED, USER_ACCOUNT_EXPIRED,
-    USER_CONNECTIONS_EXHAUSTED,
+    CHANNEL_UNAVAILABLE, HLS_SESSION_OR_LEASE_EXPIRED, LOW_PRIORITY_PREEMPTED, PANEL_API_PROVISIONING,
+    PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT, PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX,
+    PROVIDER_CONNECTIONS_EXHAUSTED, USER_ACCOUNT_EXPIRED, USER_CONNECTIONS_EXHAUSTED,
 };
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -475,6 +475,7 @@ impl AppConfig {
                 .or_else(|| provider_connections_exhausted.clone());
             let user_account_expired = load_and_set_file(&path.join(USER_ACCOUNT_EXPIRED));
             let panel_api_provisioning = load_and_set_file(&path.join(PANEL_API_PROVISIONING));
+            let hls_session_or_lease_expired = load_and_set_file(&path.join(HLS_SESSION_OR_LEASE_EXPIRED));
             let panel_api_provisioning_hls_segments = (0..PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT)
                 .filter_map(|index| {
                     let filename = format!("{PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX}{index:03}.ts");
@@ -488,6 +489,7 @@ impl AppConfig {
                 low_priority_preempted,
                 user_account_expired,
                 panel_api_provisioning,
+                hls_session_or_lease_expired,
                 panel_api_provisioning_hls_segments,
             })));
         }

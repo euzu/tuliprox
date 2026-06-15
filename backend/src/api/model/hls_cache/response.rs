@@ -1,11 +1,10 @@
 #![allow(clippy::large_futures, clippy::large_enum_variant, clippy::too_many_lines)]
 
 use super::{
-    safe_hls_access_lease_id, safe_proxy_session_id, CacheAccessState, HlsAccessLeaseId, HlsCacheMetrics,
-    HlsMapFile, HlsRepairRenderedObjectId, HlsSegmentCache, HlsSegmentFile, HlsSegmentRepairManager,
-    HlsSegmentRepairObjectContext,
+    safe_hls_access_lease_id, safe_proxy_session_id, CacheAccessState, HlsAccessLeaseId, HlsCacheMetrics, HlsMapFile,
+    HlsRepairRenderedObjectId, HlsSegmentCache, HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
     HlsSegmentRepairSource, HlsSessionHandle, MapCacheKey, MapCacheStatus, ProxyMapId, SegmentCacheKey,
-    SegmentCacheStatus, TransientObjectCacheKey, TransientResourceFile,
+    SegmentCacheStatus, TransientObjectCacheKey, TransientResourceFile, TransientResourceKind,
 };
 use crate::api::api_utils::mark_response_as_uncompressed;
 use axum::{
@@ -32,7 +31,6 @@ use tokio_util::io::ReaderStream;
 const ACCEPT_RANGES_VALUE: &str = "bytes";
 const NOT_READY_RETRY_AFTER_SECS: &str = "1";
 const BODY_READER_WAIT_LOG_THRESHOLD_MS: u128 = 10;
-const BODY_CHUNK_YIELD_DELAY_LOG_THRESHOLD_MS: u128 = 1_000;
 static NEXT_HLS_BODY_LOG_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -56,16 +54,16 @@ struct CacheObjectLogContext {
     lease: String,
     session: String,
     resource_id: String,
+    object_kind: &'static str,
+    body_source: &'static str,
 }
 
 #[derive(Clone)]
 struct CacheBodyLogContext {
-    body_id: String,
-    lease: String,
     session: String,
     resource_id: String,
+    object_kind: &'static str,
     source: &'static str,
-    range: String,
     content_length: u64,
 }
 
@@ -91,13 +89,7 @@ impl HlsCacheResponseContext {
         segment_repair: Arc<HlsSegmentRepairManager>,
         now_ms: u64,
     ) -> Self {
-        Self {
-            hls_access_lease_id,
-            cache_duration_seconds,
-            metrics,
-            segment_repair,
-            now_ms,
-        }
+        Self { hls_access_lease_id, cache_duration_seconds, metrics, segment_repair, now_ms }
     }
 }
 
@@ -161,13 +153,8 @@ pub async fn serve_hls_transient_object_cache_response(
     range_header: Option<HeaderValue>,
     context: &HlsCacheResponseContext,
 ) -> Response<Body> {
-    match lookup_transient_object_cache_object(
-        &session,
-        &resource_file,
-        &context.hls_access_lease_id,
-        context.now_ms,
-    )
-    .await
+    match lookup_transient_object_cache_object(&session, &resource_file, &context.hls_access_lease_id, context.now_ms)
+        .await
     {
         CacheObjectLookup::Ready(object) => {
             serve_cache_object(
@@ -200,10 +187,7 @@ where
 {
     let guard = CacheReadGuard::new(Arc::clone(&object.access), now_ms);
     if let Some(repair_context) = object.repair_context.clone() {
-        if let Err(err) = segment_repair
-            .repair_ready_cache_hit(&segment_cache, &object.key, repair_context)
-            .await
-        {
+        if let Err(err) = segment_repair.repair_ready_cache_hit(&segment_cache, &object.key, repair_context).await {
             debug!(
                 "HLS segment repair skipped for ready cache hit: session={} resource={} error={err}",
                 object.log_context.session, object.log_context.resource_id
@@ -271,24 +255,12 @@ where
 
     let stream = ReaderStream::new(file.take(content_length));
     let body_context = CacheBodyLogContext {
-        body_id,
-        lease: object.log_context.lease.clone(),
         session: object.log_context.session.clone(),
         resource_id: object.log_context.resource_id.clone(),
-        source: "cache",
-        range: if status == StatusCode::PARTIAL_CONTENT { format!("{start}-{end}") } else { "full".to_string() },
+        object_kind: object.log_context.object_kind,
+        source: object.log_context.body_source,
         content_length,
     };
-    debug!(
-        "HLS body stream created: body_id={} lease={} session={} resource={} source={} range={} content_length={}",
-        body_context.body_id,
-        body_context.lease,
-        body_context.session,
-        body_context.resource_id,
-        body_context.source,
-        body_context.range,
-        body_context.content_length
-    );
     let stream = ActiveReaderStream::new(Box::pin(stream), guard, body_context);
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
@@ -320,18 +292,27 @@ async fn lookup_segment_cache_object(
     if entry.proxy_file_ext != segment_file.extension {
         return CacheObjectLookup::Missing;
     }
-    if !matches!(entry.status, SegmentCacheStatus::Ready { .. }) {
-        return CacheObjectLookup::NotReady;
+    match entry.status {
+        SegmentCacheStatus::Ready { .. } => {}
+        SegmentCacheStatus::Fetching { .. }
+        | SegmentCacheStatus::Queued { .. }
+        | SegmentCacheStatus::Discovered
+        | SegmentCacheStatus::FailedRetryable { .. } => return CacheObjectLookup::NotReady,
+        SegmentCacheStatus::FailedPermanent { .. } | SegmentCacheStatus::Expired => {
+            return CacheObjectLookup::Missing;
+        }
     }
     CacheObjectLookup::Ready(CacheObject {
         key: entry.cache_key.clone(),
         access: Arc::clone(&entry.access),
         content_type: entry.content_type.clone(),
-        log_context: CacheObjectLogContext {
-            lease: safe_hls_access_lease_id(hls_access_lease_id),
-            session: safe_proxy_session_id(&session.proxy_session_id),
-            resource_id: format!("{:06}", segment_file.proxy_seq),
-        },
+            log_context: CacheObjectLogContext {
+                lease: safe_hls_access_lease_id(hls_access_lease_id),
+                session: safe_proxy_session_id(&session.proxy_session_id),
+                resource_id: format!("{:06}", segment_file.proxy_seq),
+                object_kind: "Segment",
+                body_source: "normal",
+            },
         repair_context: Some(HlsSegmentRepairObjectContext {
             source: HlsSegmentRepairSource::Normal,
             proxy_session_id: session.proxy_session_id.clone(),
@@ -368,8 +349,15 @@ async fn lookup_map_cache_object(
     if entry.proxy_file_ext != map_file.extension {
         return CacheObjectLookup::Missing;
     }
-    if !matches!(entry.status, MapCacheStatus::Ready { .. }) {
-        return CacheObjectLookup::NotReady;
+    match entry.status {
+        MapCacheStatus::Ready { .. } => {}
+        MapCacheStatus::Fetching { .. }
+        | MapCacheStatus::Queued { .. }
+        | MapCacheStatus::Discovered
+        | MapCacheStatus::FailedRetryable { .. } => return CacheObjectLookup::NotReady,
+        MapCacheStatus::FailedPermanent { .. } | MapCacheStatus::Expired => {
+            return CacheObjectLookup::Missing;
+        }
     }
     CacheObjectLookup::Ready(CacheObject {
         key: entry.cache_key.clone(),
@@ -379,6 +367,8 @@ async fn lookup_map_cache_object(
             lease: safe_hls_access_lease_id(hls_access_lease_id),
             session: safe_proxy_session_id(&session.proxy_session_id),
             resource_id: format!("map:{:06}", map_file.proxy_map_id),
+            object_kind: "Map",
+            body_source: "normal",
         },
         repair_context: None,
     })
@@ -400,12 +390,18 @@ async fn lookup_transient_object_cache_object(
         &resource_file.resource_id,
         resource_file.extension.clone(),
     );
+    let resource_kind = session.transient.resources.get(&resource_file.resource_id).map(|resource| resource.kind);
     let Some(entry) = session.transient.ready_object(&key, now_ms) else {
         return match session.transient.object_cache.get(&key).map(|entry| &entry.status) {
-            Some(super::TransientObjectCacheStatus::Fetching { .. } | super::TransientObjectCacheStatus::Failed { .. }) => {
-                CacheObjectLookup::NotReady
-            }
-            Some(super::TransientObjectCacheStatus::Ready { .. }) | None => CacheObjectLookup::Missing,
+            Some(
+                super::TransientObjectCacheStatus::Fetching { .. }
+                | super::TransientObjectCacheStatus::FailedRetryable { .. },
+            ) => CacheObjectLookup::NotReady,
+            Some(
+                super::TransientObjectCacheStatus::FailedPermanent { .. }
+                | super::TransientObjectCacheStatus::Ready { .. },
+            )
+            | None => CacheObjectLookup::Missing,
         };
     };
     CacheObjectLookup::Ready(CacheObject {
@@ -416,12 +412,16 @@ async fn lookup_transient_object_cache_object(
             lease: safe_hls_access_lease_id(hls_access_lease_id),
             session: safe_proxy_session_id(&proxy_session_id),
             resource_id: resource_file.resource_id.0.clone(),
+            object_kind: transient_body_object_kind(resource_kind, &resource_file.extension),
+            body_source: "transient",
         },
         repair_context: Some(HlsSegmentRepairObjectContext {
             source: HlsSegmentRepairSource::Transient,
             proxy_session_id,
             hls_access_lease_id: Some(hls_access_lease_id.clone()),
-            rendered_object_id: HlsRepairRenderedObjectId::Transient { resource_id: resource_file.resource_id.0.clone() },
+            rendered_object_id: HlsRepairRenderedObjectId::Transient {
+                resource_id: resource_file.resource_id.0.clone(),
+            },
             resource_id: resource_file.resource_id.0.clone(),
             file_ext: resource_file.extension.clone(),
             normalized_origin_uri: resource_file.resource_id.0.clone(),
@@ -549,8 +549,8 @@ struct ActiveReaderStream {
     context: CacheBodyLogContext,
     started_at: Instant,
     last_yield_at: Instant,
-    first_chunk_logged: bool,
-    terminal_logged: bool,
+    max_idle_ms: u128,
+    completed_logged: bool,
     bytes_yielded: u64,
 }
 
@@ -566,10 +566,29 @@ impl ActiveReaderStream {
             context,
             started_at: Instant::now(),
             last_yield_at: Instant::now(),
-            first_chunk_logged: false,
-            terminal_logged: false,
+            max_idle_ms: 0,
+            completed_logged: false,
             bytes_yielded: 0,
         }
+    }
+
+    fn log_completed(&mut self, outcome: &'static str) {
+        if self.completed_logged {
+            return;
+        }
+        self.completed_logged = true;
+        debug!(
+            "{} '{}' body completed: session={} source={} elapsed_s={:.3} idle_max_s={:.3} bytes={}/{} outcome={}",
+            self.context.object_kind,
+            self.context.resource_id,
+            self.context.session,
+            self.context.source,
+            duration_secs(self.started_at.elapsed().as_millis()),
+            duration_secs(self.max_idle_ms),
+            self.bytes_yielded,
+            self.context.content_length,
+            outcome
+        );
     }
 }
 
@@ -579,63 +598,18 @@ impl Stream for ActiveReaderStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
-                if self.first_chunk_logged {
-                    let idle_ms = self.last_yield_at.elapsed().as_millis();
-                    if idle_ms >= BODY_CHUNK_YIELD_DELAY_LOG_THRESHOLD_MS {
-                        debug!(
-                            "HLS body chunk yield delayed: body_id={} lease={} session={} resource={} idle_ms={} bytes_yielded={} expected_bytes={}",
-                            self.context.body_id,
-                            self.context.lease,
-                            self.context.session,
-                            self.context.resource_id,
-                            idle_ms,
-                            self.bytes_yielded,
-                            self.context.content_length
-                        );
-                    }
-                } else {
-                    self.first_chunk_logged = true;
-                    debug!(
-                        "HLS body first chunk yielded: body_id={} lease={} session={} resource={} elapsed_ms={} chunk_len={}",
-                        self.context.body_id,
-                        self.context.lease,
-                        self.context.session,
-                        self.context.resource_id,
-                        self.started_at.elapsed().as_millis(),
-                        chunk.len()
-                    );
-                }
+                let idle_ms = self.last_yield_at.elapsed().as_millis();
+                self.max_idle_ms = self.max_idle_ms.max(idle_ms);
                 self.last_yield_at = Instant::now();
                 self.bytes_yielded = self.bytes_yielded.saturating_add(chunk.len() as u64);
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(err))) => {
-                self.terminal_logged = true;
-                debug!(
-                    "HLS body stream error: body_id={} lease={} session={} resource={} elapsed_ms={} bytes_yielded={} expected_bytes={} error={}",
-                    self.context.body_id,
-                    self.context.lease,
-                    self.context.session,
-                    self.context.resource_id,
-                    self.started_at.elapsed().as_millis(),
-                    self.bytes_yielded,
-                    self.context.content_length,
-                    err
-                );
+                self.log_completed("error");
                 Poll::Ready(Some(Err(err)))
             }
             Poll::Ready(None) => {
-                self.terminal_logged = true;
-                debug!(
-                    "HLS body source exhausted: body_id={} lease={} session={} resource={} elapsed_ms={} bytes_yielded={} expected_bytes={} client_delivery=unknown",
-                    self.context.body_id,
-                    self.context.lease,
-                    self.context.session,
-                    self.context.resource_id,
-                    self.started_at.elapsed().as_millis(),
-                    self.bytes_yielded,
-                    self.context.content_length
-                );
+                self.log_completed("ok");
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
@@ -645,32 +619,8 @@ impl Stream for ActiveReaderStream {
 
 impl Drop for ActiveReaderStream {
     fn drop(&mut self) {
-        if self.terminal_logged {
-            return;
-        }
-        if self.bytes_yielded >= self.context.content_length {
-            debug!(
-                "HLS body stream dropped after source exhausted: body_id={} lease={} session={} resource={} elapsed_ms={} bytes_yielded={} expected_bytes={} client_delivery=unknown",
-                self.context.body_id,
-                self.context.lease,
-                self.context.session,
-                self.context.resource_id,
-                self.started_at.elapsed().as_millis(),
-                self.bytes_yielded,
-                self.context.content_length
-            );
-        } else {
-            debug!(
-                "HLS body stream dropped before source exhausted: body_id={} lease={} session={} resource={} elapsed_ms={} bytes_yielded={} expected_bytes={}",
-                self.context.body_id,
-                self.context.lease,
-                self.context.session,
-                self.context.resource_id,
-                self.started_at.elapsed().as_millis(),
-                self.bytes_yielded,
-                self.context.content_length
-            );
-        }
+        let outcome = if self.bytes_yielded >= self.context.content_length { "ok" } else { "drop" };
+        self.log_completed(outcome);
     }
 }
 
@@ -694,9 +644,22 @@ fn log_body_reader_wait_if_slow(context: &CacheObjectLogContext, wait_for: &'sta
         return;
     }
     debug!(
-        "HLS body reader wait: lease={} session={} resource={} wait_for={} elapsed_ms={}",
+        "HLS cache reader wait: lease={} session={} resource={} wait_for={} elapsed_ms={}",
         context.lease, context.session, context.resource_id, wait_for, elapsed_ms
     );
+}
+
+fn duration_secs(elapsed_ms: u128) -> f64 { elapsed_ms as f64 / 1_000.0 }
+
+fn transient_body_object_kind(resource_kind: Option<TransientResourceKind>, extension: &str) -> &'static str {
+    match resource_kind {
+        Some(TransientResourceKind::Key) => "Key",
+        Some(TransientResourceKind::Map) => "Map",
+        Some(TransientResourceKind::Segment | TransientResourceKind::Other) => "Segment",
+        None => {
+            if extension.eq_ignore_ascii_case("key") { "Key" } else { "Segment" }
+        }
+    }
 }
 
 fn next_hls_body_log_id() -> String {
@@ -707,10 +670,14 @@ fn next_hls_body_log_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_range, serve_cache_object, CacheObject, CacheObjectLogContext, RangeDecision,
+        resolve_range, serve_cache_object, transient_body_object_kind, CacheObject, CacheObjectLogContext,
+        RangeDecision,
     };
     use crate::{
-        api::model::{CacheAccessState, HlsSegmentCache, HlsSegmentRepairManager, ProxySessionId, SegmentCacheKey},
+        api::model::{
+            CacheAccessState, HlsSegmentCache, HlsSegmentRepairManager, ProxySessionId, SegmentCacheKey,
+            TransientResourceKind,
+        },
         model::{HlsSegmentRepairConfig, HlsSegmentRepairMode},
     };
     use axum::http::{HeaderValue, StatusCode};
@@ -770,6 +737,21 @@ mod tests {
         assert_eq!(resolve_range(Some(&header("items=0-1")), 10), RangeDecision::Full);
     }
 
+    #[test]
+    fn transient_body_log_kind_uses_resource_kind() {
+        assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Key), "bin"), "Key");
+        assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Map), "bin"), "Map");
+        assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Segment), "key"), "Segment");
+        assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Other), "bin"), "Segment");
+    }
+
+    #[test]
+    fn transient_body_log_kind_falls_back_to_key_extension() {
+        assert_eq!(transient_body_object_kind(None, "key"), "Key");
+        assert_eq!(transient_body_object_kind(None, "KEY"), "Key");
+        assert_eq!(transient_body_object_kind(None, "ts"), "Segment");
+    }
+
     #[tokio::test]
     async fn cache_hit_bodies_use_independent_readers_for_same_object() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -785,6 +767,8 @@ mod tests {
                 lease: "lease-a".to_string(),
                 session: "proxy-se...".to_string(),
                 resource_id: "000012".to_string(),
+                object_kind: "Segment",
+                body_source: "normal",
             },
             repair_context: None,
         };
@@ -806,6 +790,8 @@ mod tests {
                     lease: "lease-b".to_string(),
                     session: "proxy-se...".to_string(),
                     resource_id: "000012".to_string(),
+                    object_kind: "Segment",
+                    body_source: "normal",
                 },
                 ..object
             },
@@ -821,10 +807,7 @@ mod tests {
         assert_eq!(second.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(access.active_readers(), 2);
 
-        let (first_body, second_body) = tokio::join!(
-            first.into_body().collect(),
-            second.into_body().collect(),
-        );
+        let (first_body, second_body) = tokio::join!(first.into_body().collect(), second.into_body().collect(),);
 
         assert_eq!(first_body.expect("first body").to_bytes(), Bytes::from_static(b"0123456789"));
         assert_eq!(second_body.expect("second body").to_bytes(), Bytes::from_static(b"0123456789"));

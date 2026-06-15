@@ -11,7 +11,7 @@ use crate::{
             CustomVideoStreamType, TransportStreamBuffer,
         },
     },
-    auth::{resolve_api_user_context, verify_access_token, Fingerprint},
+    auth::{check_network_access_only, resolve_api_user_context, verify_access_token, Fingerprint},
     model::{ConfigTarget, ProxyUserCredentials},
 };
 use axum::{
@@ -44,6 +44,18 @@ enum CvsRouteKind {
     Ts,
 }
 
+#[derive(Clone, Copy)]
+struct CvsApiResponseContext<'a> {
+    fingerprint: &'a Fingerprint,
+    username: &'a str,
+    password: &'a str,
+    stream_type: &'a str,
+    route_kind: CvsRouteKind,
+    request_headers: &'a HeaderMap,
+    raw_query: Option<&'a str>,
+    app_state: &'a Arc<AppState>,
+}
+
 fn resolve_cvs_user_context(
     app_state: &Arc<AppState>,
     fingerprint: &Fingerprint,
@@ -55,6 +67,23 @@ fn resolve_cvs_user_context(
     };
 
     if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state) {
+        return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
+    }
+
+    Ok((user, target))
+}
+
+fn resolve_hls_cvs_user_context(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    username: &str,
+    password: &str,
+) -> Result<CvsUserContext, Box<Response>> {
+    let Some((user, target)) = app_state.app_config.get_target_for_user(username, password) else {
+        return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
+    };
+
+    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
         return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
     }
 
@@ -77,7 +106,16 @@ async fn cvs_typed_api(
         "ts" => CvsRouteKind::Ts,
         _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
     };
-    cvs_api_response(&fingerprint, &username, &password, &stream_type, route_kind, &headers, None, &app_state)
+    cvs_api_response(CvsApiResponseContext {
+        fingerprint: &fingerprint,
+        username: &username,
+        password: &password,
+        stream_type: &stream_type,
+        route_kind,
+        request_headers: &headers,
+        raw_query: None,
+        app_state: &app_state,
+    })
 }
 
 async fn cvs_api(
@@ -87,28 +125,30 @@ async fn cvs_api(
     headers: HeaderMap,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    cvs_api_response(
-        &fingerprint,
-        &username,
-        &password,
-        &stream_type,
-        CvsRouteKind::Ts,
-        &headers,
-        raw_query.as_deref(),
-        &app_state,
-    )
+    cvs_api_response(CvsApiResponseContext {
+        fingerprint: &fingerprint,
+        username: &username,
+        password: &password,
+        stream_type: &stream_type,
+        route_kind: CvsRouteKind::Ts,
+        request_headers: &headers,
+        raw_query: raw_query.as_deref(),
+        app_state: &app_state,
+    })
 }
 
-fn cvs_api_response(
-    fingerprint: &Fingerprint,
-    username: &str,
-    password: &str,
-    stream_type: &str,
-    route_kind: CvsRouteKind,
-    request_headers: &HeaderMap,
-    raw_query: Option<&str>,
-    app_state: &Arc<AppState>,
-) -> Response {
+fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
+    let CvsApiResponseContext {
+        fingerprint,
+        username,
+        password,
+        stream_type,
+        route_kind,
+        request_headers,
+        raw_query,
+        app_state,
+    } = context;
+
     if route_kind == CvsRouteKind::Hls {
         if let Some(index) = parse_hls_panel_provisioning_segment_route_name(stream_type) {
             if let Err(response) = resolve_cvs_user_context(app_state, fingerprint, username, password) {
@@ -141,7 +181,11 @@ fn cvs_api_response(
         }
     }
 
-    if let Err(response) = resolve_cvs_user_context(app_state, fingerprint, username, password) {
+    let auth_result = match route_kind {
+        CvsRouteKind::Hls => resolve_hls_cvs_user_context(app_state, fingerprint, username, password),
+        CvsRouteKind::Ts => resolve_cvs_user_context(app_state, fingerprint, username, password),
+    };
+    if let Err(response) = auth_result {
         return *response;
     }
 
@@ -308,6 +352,9 @@ fn hls_custom_video_buffer(
         CustomVideoStreamType::LowPriorityPreempted => custom_stream_response.low_priority_preempted.clone(),
         CustomVideoStreamType::UserAccountExpired => custom_stream_response.user_account_expired.clone(),
         CustomVideoStreamType::Provisioning => custom_stream_response.panel_api_provisioning.clone(),
+        CustomVideoStreamType::HlsSessionOrLeaseExpired => {
+            custom_stream_response.hls_session_or_lease_expired.clone()
+        }
     }
 }
 
@@ -513,7 +560,9 @@ mod tests {
             SharedStreamManager, TransportStreamBuffer, UpdateGuard,
         },
         model::{
-            AppConfig, Config, ConfigInput, CustomStreamResponse, MediaToolCapabilities, SourcesConfig,
+            ApiProxyConfig, AppConfig, Config, ConfigInput, ConfigSource, ConfigTarget, CustomStreamResponse,
+            MediaToolCapabilities, ProxyUserCredentials, SourcesConfig, TargetOutput, TargetUser,
+            XtreamTargetFlagsSet, XtreamTargetOutput,
         },
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -523,7 +572,15 @@ mod tests {
     use tower::ServiceExt;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
-    use shared::model::{ConfigPaths, InputFetchMethod, InputType};
+    use shared::{foundation::Filter, model::{ConfigPaths, InputFetchMethod, InputType, ProcessingOrder}};
+
+    fn test_fingerprint() -> crate::auth::Fingerprint {
+        crate::auth::Fingerprint::new(
+            "test-fingerprint".to_string(),
+            "127.0.0.1".to_string(),
+            "127.0.0.1:12345".parse().expect("socket addr"),
+        )
+    }
 
     fn create_test_app_config_with_channel_unavailable() -> AppConfig {
         let input = Arc::new(ConfigInput {
@@ -541,13 +598,46 @@ mod tests {
             aliases: None,
             ..ConfigInput::default()
         });
-        let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
+        let target = Arc::new(ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "target".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![TargetOutput::Xtream(XtreamTargetOutput {
+                flags: XtreamTargetFlagsSet::default(),
+                trakt: None,
+                filter: None,
+            })],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::default()),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        });
+        let sources = SourcesConfig {
+            inputs: vec![Arc::clone(&input)],
+            sources: vec![ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![Arc::clone(&target)] }],
+            ..SourcesConfig::default()
+        };
+        let mut expired_user = ProxyUserCredentials::default();
+        expired_user.username = "viewer".to_string();
+        expired_user.password = "secret".to_string();
+        expired_user.exp_date = Some(0);
+        let expired_user = Arc::new(expired_user);
+        let api_proxy = ApiProxyConfig {
+            user: vec![TargetUser { target: target.name.clone(), credentials: vec![expired_user] }],
+            ..ApiProxyConfig::default()
+        };
 
         let app_cfg = AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            config: Arc::new(ArcSwap::from_pointee(Config { user_access_control: true, ..Config::default() })),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
-            api_proxy: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::from_pointee(api_proxy)),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
                 home_path: String::new(),
@@ -577,6 +667,7 @@ mod tests {
             low_priority_preempted: None,
             user_account_expired: None,
             panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
             panel_api_provisioning_hls_segments: Vec::new(),
         })));
         app_cfg
@@ -668,6 +759,46 @@ mod tests {
             .expect("request");
 
         let response = Router::into_service(router).oneshot(request).await.expect("response");
+
+        assert!(response.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn hls_cvs_segment_allows_expired_user_custom_response() {
+        let app_state = create_test_app_state();
+        let headers = axum::http::HeaderMap::new();
+        let fingerprint = test_fingerprint();
+
+        let response = super::cvs_api_response(super::CvsApiResponseContext {
+            fingerprint: &fingerprint,
+            username: "viewer",
+            password: "secret",
+            stream_type: "channel_unavailable.ts",
+            route_kind: super::CvsRouteKind::Hls,
+            request_headers: &headers,
+            raw_query: None,
+            app_state: &app_state,
+        });
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn hls_cvs_segment_rejects_unknown_credentials() {
+        let app_state = create_test_app_state();
+        let headers = axum::http::HeaderMap::new();
+        let fingerprint = test_fingerprint();
+
+        let response = super::cvs_api_response(super::CvsApiResponseContext {
+            fingerprint: &fingerprint,
+            username: "viewer",
+            password: "wrong",
+            stream_type: "channel_unavailable.ts",
+            route_kind: super::CvsRouteKind::Hls,
+            request_headers: &headers,
+            raw_query: None,
+            app_state: &app_state,
+        });
 
         assert!(response.status().is_client_error());
     }

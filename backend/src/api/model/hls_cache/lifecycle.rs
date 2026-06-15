@@ -9,17 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum HlsLifecycleEventKey {
-    AccessLeaseActive {
-        lease_id: HlsAccessLeaseId,
-        proxy_session_id: ProxySessionId,
-    },
-    AccessLeaseValidity {
-        lease_id: HlsAccessLeaseId,
-        proxy_session_id: ProxySessionId,
-    },
-    SessionIdle {
-        proxy_session_id: ProxySessionId,
-    },
+    AccessLeaseActive { lease_id: HlsAccessLeaseId, proxy_session_id: ProxySessionId },
+    AccessLeaseValidity { lease_id: HlsAccessLeaseId, proxy_session_id: ProxySessionId },
+    SessionIdle { proxy_session_id: ProxySessionId },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -43,10 +35,7 @@ struct QueueEntry {
 
 impl Ord for QueueEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .due_at_ms
-            .cmp(&self.due_at_ms)
-            .then_with(|| other.sequence.cmp(&self.sequence))
+        other.due_at_ms.cmp(&self.due_at_ms).then_with(|| other.sequence.cmp(&self.sequence))
     }
 }
 
@@ -112,10 +101,7 @@ impl HlsLifecycleManager {
                             break LifecycleWait::Notify;
                         };
                         state.scheduled.remove(&entry.key);
-                        break LifecycleWait::Ready(HlsLifecycleEvent {
-                            key: entry.key,
-                            due_at_ms: entry.due_at_ms,
-                        });
+                        break LifecycleWait::Ready(HlsLifecycleEvent { key: entry.key, due_at_ms: entry.due_at_ms });
                     }
                     break LifecycleWait::Sleep(Duration::from_millis(entry.due_at_ms.saturating_sub(now_ms)));
                 }
@@ -179,9 +165,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_removes_pending_key() {
         let lifecycle = HlsLifecycleManager::new();
-        let key = HlsLifecycleEventKey::SessionIdle {
-            proxy_session_id: ProxySessionId("proxy".to_string()),
-        };
+        let key = HlsLifecycleEventKey::SessionIdle { proxy_session_id: ProxySessionId("proxy".to_string()) };
 
         lifecycle.schedule(key.clone(), u64::MAX).await;
         lifecycle.cancel(&key).await;

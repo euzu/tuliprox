@@ -218,17 +218,17 @@ impl HlsAccessLeaseStore {
         self.by_lease_id.remove(lease_id)
     }
 
-    pub fn remove_access_leases_for_session(&mut self, proxy_session_id: &ProxySessionId) -> Vec<HlsAccessLeaseId> {
+    pub fn remove_access_leases_for_session(&mut self, proxy_session_id: &ProxySessionId) -> Vec<HlsAccessLease> {
         let lease_ids = self
             .by_lease_id
             .values()
             .filter(|lease| lease.proxy_session_id == *proxy_session_id)
             .map(|lease| lease.lease_id.clone())
             .collect::<Vec<_>>();
-        for lease_id in &lease_ids {
-            self.by_lease_id.remove(lease_id);
-        }
         lease_ids
+            .into_iter()
+            .filter_map(|lease_id| self.by_lease_id.remove(&lease_id))
+            .collect()
     }
 
     pub fn clear(&mut self) -> usize {
@@ -240,6 +240,22 @@ impl HlsAccessLeaseStore {
     pub fn len(&self) -> usize { self.by_lease_id.len() }
 
     pub fn is_empty(&self) -> bool { self.by_lease_id.is_empty() }
+
+    pub fn first_username_for_session(&self, proxy_session_id: &ProxySessionId) -> Option<String> {
+        self.by_lease_id
+            .values()
+            .find(|lease| lease.proxy_session_id == *proxy_session_id)
+            .map(|lease| lease.username.clone())
+    }
+
+    pub fn response_snapshot(&mut self, lease_id: &HlsAccessLeaseId, path_proxy_session_id: &ProxySessionId, now_ms: u64) -> Option<HlsAccessLease> {
+        let lease = self.by_lease_id.get_mut(lease_id)?;
+        if &lease.proxy_session_id != path_proxy_session_id {
+            return None;
+        }
+        lease.refresh_validity(now_ms);
+        Some(lease.clone())
+    }
 
     pub fn prune_expired_access_leases(&mut self, now_ms: u64) -> usize {
         let initial_len = self.by_lease_id.len();

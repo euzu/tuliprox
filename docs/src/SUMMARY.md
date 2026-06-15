@@ -8,6 +8,7 @@
 - [Configuration & Setup (Overview)](./configuration/overview.md)
   - [config.yml (Core System)](./configuration/config.md)
     - [Streaming & Proxy Behavior](./configuration/reverse-proxy.md)
+      - [HLS Cache State Machines](./configuration/hls-cache-state-machine.md)
       - [Connection Handling](./configuration/connection-handling.md)
       - [Connection Handling Runtime Flow](./configuration/connection-handling-runtime-flow.md)
       - [Priorities, Soft Connections and Preemption](./configuration/connection-handling-priorities-and-preemption.md)

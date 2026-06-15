@@ -1,11 +1,11 @@
 #![allow(clippy::large_futures)]
 
 use super::{
-    CachedSegmentMetadata, HlsCacheObjectKey, HlsSegmentCache, StagedCacheObject,
     segment_repair::{
-        HlsPostProcessingDeadline, HlsSegmentRepairObjectContext, ffmpeg_identity_version, run_command_with_deadline,
-        sha256_file,
+        ffmpeg_identity_version, run_command_with_deadline, sha256_file, HlsPostProcessingDeadline,
+        HlsSegmentRepairObjectContext,
     },
+    CachedSegmentMetadata, HlsCacheObjectKey, HlsSegmentCache, StagedCacheObject,
 };
 use crate::model::{HlsCorruptSegmentWatchdogConfig, HlsCorruptSegmentWatchdogMode};
 use log::debug;
@@ -144,8 +144,7 @@ impl HlsCorruptSegmentWatchdogManager {
         let result = {
             let _permit = permit;
             let _guard = lock.lock().await;
-            self.process_locked(segment_cache, key, raw, context, config, identity.clone(), raw_sha256, deadline)
-                .await
+            self.process_locked(segment_cache, key, raw, context, config, identity.clone(), raw_sha256, deadline).await
         };
         self.remove_lock_if_unused(&identity, &lock).await;
         result
@@ -202,17 +201,14 @@ impl HlsCorruptSegmentWatchdogManager {
             }
         };
         if raw_detect == 0 {
-            self.record_metadata(identity, HlsCorruptSegmentWatchdogStatus::Clean, raw.size, raw.size, None)
-                .await;
+            self.record_metadata(identity, HlsCorruptSegmentWatchdogStatus::Clean, raw.size, raw.size, None).await;
             debug_watchdog_event(context, config.mode, "clean", Some("packet_corrupt=0"));
             return segment_cache.commit_staged(key, raw).await;
         }
         if config.mode == HlsCorruptSegmentWatchdogMode::DetectOnly {
             self.record_metadata(
                 identity,
-                HlsCorruptSegmentWatchdogStatus::DetectedCorrupt {
-                    packet_corrupt_count: raw_detect,
-                },
+                HlsCorruptSegmentWatchdogStatus::DetectedCorrupt { packet_corrupt_count: raw_detect },
                 raw.size,
                 raw.size,
                 None,
@@ -275,7 +271,16 @@ impl HlsCorruptSegmentWatchdogManager {
                 return segment_cache.commit_staged(key, raw).await;
             }
         };
-        let validation = validate_sanitized_segment(&raw.path, raw.size, &fixed_path, fixed_size, fixed_detect, config.mode, deadline).await;
+        let validation = validate_sanitized_segment(
+            &raw.path,
+            raw.size,
+            &fixed_path,
+            fixed_size,
+            fixed_detect,
+            config.mode,
+            deadline,
+        )
+        .await;
         if let Err(reason) = validation {
             let _ = fs::remove_file(&fixed_path).await;
             self.record_metadata(
@@ -289,15 +294,8 @@ impl HlsCorruptSegmentWatchdogManager {
             return segment_cache.commit_staged(key, raw).await;
         }
         let _ = segment_cache.remove_staged(raw.clone()).await;
-        let committed = segment_cache
-            .commit_staged(
-                key,
-                StagedCacheObject {
-                    path: fixed_path,
-                    size: fixed_size,
-                },
-            )
-            .await?;
+        let committed =
+            segment_cache.commit_staged(key, StagedCacheObject { path: fixed_path, size: fixed_size }).await?;
         let status = if config.mode == HlsCorruptSegmentWatchdogMode::Diagnostic {
             HlsCorruptSegmentWatchdogStatus::DiagnosticSanitized {
                 packet_corrupt_before: raw_detect,
@@ -310,8 +308,7 @@ impl HlsCorruptSegmentWatchdogManager {
             }
         };
         let committed_sha = sha256_file(&committed.path).await.unwrap_or(raw_sha256);
-        self.record_metadata(identity, status, raw.size, committed.size, Some(committed_sha))
-            .await;
+        self.record_metadata(identity, status, raw.size, committed.size, Some(committed_sha)).await;
         debug_watchdog_event(context, config.mode, "sanitized", Some("action=fixed_commit"));
         Ok(committed)
     }
@@ -333,12 +330,7 @@ impl HlsCorruptSegmentWatchdogManager {
             let inserted_new = !metadata.contains_key(&identity);
             metadata.insert(
                 identity.clone(),
-                HlsWatchdogArtifactMetadata {
-                    status,
-                    raw_size,
-                    final_size,
-                    validation_reason,
-                },
+                HlsWatchdogArtifactMetadata { status, raw_size, final_size, validation_reason },
             );
             inserted_new
         };
@@ -355,11 +347,7 @@ impl HlsCorruptSegmentWatchdogManager {
 
     async fn remove_lock_if_unused(&self, identity: &HlsWatchdogSanitizeArtifactKey, lock: &Arc<Mutex<()>>) {
         let mut locks = self.locks.lock().await;
-        if Arc::strong_count(lock) <= 2
-            && locks
-                .get(identity)
-                .is_some_and(|current| Arc::ptr_eq(current, lock))
-        {
+        if Arc::strong_count(lock) <= 2 && locks.get(identity).is_some_and(|current| Arc::ptr_eq(current, lock)) {
             locks.remove(identity);
         }
     }
@@ -382,21 +370,7 @@ async fn detect_packet_corrupt(path: &Path, deadline: &HlsPostProcessingDeadline
     let path = path.to_str().ok_or_else(|| "invalid_path".to_string())?;
     let output = match run_command_with_deadline(
         "ffmpeg",
-        &[
-            "-hide_banner",
-            "-nostdin",
-            "-v",
-            "warning",
-            "-i",
-            path,
-            "-map",
-            "0",
-            "-c",
-            "copy",
-            "-f",
-            "null",
-            "-",
-        ],
+        &["-hide_banner", "-nostdin", "-v", "warning", "-i", path, "-map", "0", "-c", "copy", "-f", "null", "-"],
         deadline,
     )
     .await
@@ -445,11 +419,7 @@ fn parse_repeated_count(line: &str) -> Option<u32> {
 
 fn parse_packet_corrupt_dts(line: &str) -> Option<i64> {
     let (_, rest) = line.split_once("dts = ")?;
-    rest.split(|ch: char| !ch.is_ascii_digit() && ch != '-')
-        .next()
-        .filter(|value| !value.is_empty())?
-        .parse()
-        .ok()
+    rest.split(|ch: char| !ch.is_ascii_digit() && ch != '-').next().filter(|value| !value.is_empty())?.parse().ok()
 }
 
 async fn sanitize_corrupt_segment(
@@ -594,21 +564,12 @@ async fn probe_metadata(path: &Path, deadline: &HlsPostProcessingDeadline) -> Re
 
 fn parse_probe_metadata(output: &str) -> Result<WatchdogProbeMetadata, String> {
     let value: Value = serde_json::from_str(output).map_err(|err| err.to_string())?;
-    let streams = value
-        .get("streams")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "missing_streams".to_string())?;
-    let mut metadata = WatchdogProbeMetadata {
-        stream_count: streams.len(),
-        ..WatchdogProbeMetadata::default()
-    };
+    let streams = value.get("streams").and_then(Value::as_array).ok_or_else(|| "missing_streams".to_string())?;
+    let mut metadata = WatchdogProbeMetadata { stream_count: streams.len(), ..WatchdogProbeMetadata::default() };
     for stream in streams {
         let codec_type = stream.get("codec_type").and_then(Value::as_str);
         let codec_name = stream.get("codec_name").and_then(Value::as_str).map(str::to_string);
-        let start_time_ms = stream
-            .get("start_time")
-            .and_then(Value::as_str)
-            .and_then(parse_seconds_to_millis);
+        let start_time_ms = stream.get("start_time").and_then(Value::as_str).and_then(parse_seconds_to_millis);
         match codec_type {
             Some("video") if metadata.primary_video_codec.is_none() => {
                 metadata.primary_video_codec = codec_name;
@@ -705,9 +666,6 @@ Last message repeated 3 times
 
     #[test]
     fn parses_packet_corrupt_dts() {
-        assert_eq!(
-            parse_packet_corrupt_dts("[mpegts @ 0x1] Packet corrupt (stream = 0, dts = -42)."),
-            Some(-42)
-        );
+        assert_eq!(parse_packet_corrupt_dts("[mpegts @ 0x1] Packet corrupt (stream = 0, dts = -42)."), Some(-42));
     }
 }

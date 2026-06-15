@@ -180,10 +180,7 @@ impl HlsSegmentCache {
     pub fn new() -> Self { Self::with_cache_path(DEFAULT_HLS_CACHE_PATH) }
 
     pub fn with_cache_path(cache_path: impl Into<PathBuf>) -> Self {
-        Self {
-            cache_path: StdRwLock::new(cache_path.into()),
-            active_temp_files: Arc::new(RwLock::new(HashSet::new())),
-        }
+        Self { cache_path: StdRwLock::new(cache_path.into()), active_temp_files: Arc::new(RwLock::new(HashSet::new())) }
     }
 
     pub fn cache_path(&self) -> PathBuf { self.cache_path_snapshot() }

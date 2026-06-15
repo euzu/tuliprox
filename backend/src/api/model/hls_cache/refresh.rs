@@ -17,7 +17,10 @@ use crate::{
         },
         transient_manifest::{TransientManifestRewriter, TransientRewriteOptions},
     },
-    utils::request::{download_text_content, download_text_content_with_manual_redirects},
+    utils::request::{
+        download_text_content_with_manual_redirects_and_options, download_text_content_with_options,
+        RequestFetchOptions,
+    },
 };
 use axum::http::{header, HeaderMap, StatusCode};
 use log::{debug, info, warn};
@@ -40,6 +43,7 @@ pub struct OriginRefreshState {
     pub last_fetch_finished_at_ms: Option<u64>,
     pub next_fetch_allowed_at_ms: u64,
     pub consecutive_failures: u32,
+    pub consecutive_empty_refreshes: u32,
     pub last_success_at_ms: Option<u64>,
     pub last_error_at_ms: Option<u64>,
     pub in_flight: bool,
@@ -53,13 +57,29 @@ impl OriginRefreshState {
         self.in_flight = true;
     }
 
-    pub fn mark_success(&mut self, fetch_started_at_ms: u64, fetch_finished_at_ms: u64, refresh_interval_ms: u64) {
+    fn mark_success_with_timing(
+        &mut self,
+        fetch_started_at_ms: u64,
+        fetch_finished_at_ms: u64,
+        timing: HlsManifestRefreshTiming,
+    ) -> u64 {
+        let refresh_interval_ms = match timing.progress {
+            HlsManifestProgress::Advanced => {
+                self.consecutive_empty_refreshes = 0;
+                timing.base_interval_ms
+            }
+            HlsManifestProgress::Unchanged => {
+                self.consecutive_empty_refreshes = self.consecutive_empty_refreshes.saturating_add(1);
+                apply_empty_refresh_rampdown_ms(timing.base_interval_ms, self.consecutive_empty_refreshes)
+            }
+        };
         self.last_fetch_finished_at_ms = Some(fetch_finished_at_ms);
         self.last_success_at_ms = Some(fetch_finished_at_ms);
         self.last_error_at_ms = None;
         self.consecutive_failures = 0;
         self.in_flight = false;
         self.next_fetch_allowed_at_ms = fetch_started_at_ms.saturating_add(refresh_interval_ms);
+        refresh_interval_ms
     }
 
     pub fn mark_failure(&mut self, failed_at_ms: u64) {
@@ -192,6 +212,47 @@ pub enum OriginManifestFetchError {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum OriginManifestCommitError {
     TimelineRejected,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum HlsManifestProgress {
+    Advanced,
+    Unchanged,
+}
+
+impl HlsManifestProgress {
+    fn as_log_value(self) -> &'static str {
+        match self {
+            Self::Advanced => "advanced",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum HlsManifestTimingSource {
+    LastSegmentDuration,
+    TargetDuration,
+    Fallback,
+}
+
+impl HlsManifestTimingSource {
+    fn as_log_value(self) -> &'static str {
+        match self {
+            Self::LastSegmentDuration => "last_segment_duration",
+            Self::TargetDuration => "target_duration",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct HlsManifestRefreshTiming {
+    last_segment_duration_ms: Option<u64>,
+    target_duration_ms: Option<u64>,
+    base_interval_ms: u64,
+    source: HlsManifestTimingSource,
+    progress: HlsManifestProgress,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -370,11 +431,13 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
         match result {
             Ok(CommittedOriginManifest {
                 fetched,
-                refresh_interval_ms,
+                refresh_timing,
                 wake_segment_scheduler,
                 wake_map_scheduler,
             }) => {
-                session.origin_refresh.mark_success(fetch_started_at_ms, fetch_finished_at_ms, refresh_interval_ms);
+                let applied_refresh_interval_ms =
+                    session.origin_refresh.mark_success_with_timing(fetch_started_at_ms, fetch_finished_at_ms, refresh_timing);
+                log_manifest_refresh_timing(&session, refresh_timing, applied_refresh_interval_ms);
                 metrics.record_refresh_completed();
                 for _ in 1..fetched.attempts {
                     metrics.record_refresh_retried();
@@ -518,7 +581,7 @@ async fn touch_refresh_origin_account_binding(request: &OriginRefreshRequest, re
 
 struct CommittedOriginManifest {
     fetched: FetchedOriginManifest,
-    refresh_interval_ms: u64,
+    refresh_timing: HlsManifestRefreshTiming,
     wake_segment_scheduler: bool,
     wake_map_scheduler: bool,
 }
@@ -579,10 +642,10 @@ async fn fetch_and_commit_manifest_with_policy(
         };
 
         match commit_result {
-            Ok((refresh_interval_ms, wake_segment_scheduler, wake_map_scheduler)) => {
+            Ok((refresh_timing, wake_segment_scheduler, wake_map_scheduler)) => {
                 return Ok(CommittedOriginManifest {
                     fetched,
-                    refresh_interval_ms,
+                    refresh_timing,
                     wake_segment_scheduler,
                     wake_map_scheduler,
                 });
@@ -623,7 +686,7 @@ fn commit_fetched_manifest(
     fetched: &FetchedOriginManifest,
     request: &OriginRefreshRequest,
     fetch_finished_at_ms: u64,
-) -> Result<(u64, bool, bool), OriginManifestCommitError> {
+) -> Result<(HlsManifestRefreshTiming, bool, bool), OriginManifestCommitError> {
     let existing_transient_reason = match &session.mode {
         HlsSessionMode::TransientPassthrough { reason } => Some(reason.clone()),
         HlsSessionMode::NormalCacheTimeline => None,
@@ -640,7 +703,7 @@ fn commit_fetched_manifest(
                 &fetched.resolved_request_url,
                 fetch_finished_at_ms,
             );
-            result.map(|refresh_interval_ms| (refresh_interval_ms, true, true))
+            result.map(|refresh_timing| (refresh_timing, true, true))
         }
         (Some(reason), _) => {
             let timeline = validate_transient_manifest_continuity_for_commit(
@@ -754,7 +817,7 @@ fn commit_transient_manifest(
     transient_resource_ttl_ms: u64,
     rendered_at_ms: u64,
     timeline: ParsedOriginManifestTimeline,
-) -> u64 {
+) -> HlsManifestRefreshTiming {
     let was_normal = matches!(session.mode, HlsSessionMode::NormalCacheTimeline);
     let reason_log_fields = transient_reason_log_fields(&reason);
     session.mode = HlsSessionMode::TransientPassthrough { reason };
@@ -798,6 +861,7 @@ fn commit_transient_manifest(
     };
     session.transient.upsert_resources(rewritten.resources);
     session.transient.replace_manifest(rewritten.body, rendered_at_ms);
+    let previous_highwater = session.origin_seq_highwater;
     if let Some(highwater) = timeline.origin_highwater() {
         session.origin_seq_highwater =
             Some(session.origin_seq_highwater.map_or(highwater, |current| current.max(highwater)));
@@ -811,7 +875,8 @@ fn commit_transient_manifest(
     }
     let target_duration_ms =
         timing.target_duration_ms.or_else(|| session.target_duration.map(|duration| u64::from(duration) * 1_000));
-    log_and_compute_manifest_refresh_interval(session, timing.last_segment_duration_ms, target_duration_ms)
+    let progress = manifest_progress_from_highwater(previous_highwater, session.origin_seq_highwater);
+    build_manifest_refresh_timing(timing.last_segment_duration_ms, target_duration_ms, progress)
 }
 
 fn commit_normal_manifest(
@@ -822,7 +887,7 @@ fn commit_normal_manifest(
     request: &OriginRefreshRequest,
     resolved_request_url: &str,
     rendered_at_ms: u64,
-) -> Result<u64, OriginManifestCommitError> {
+) -> Result<HlsManifestRefreshTiming, OriginManifestCommitError> {
     validate_origin_manifest_continuity_for_commit(
         session,
         redirect_host,
@@ -832,6 +897,7 @@ fn commit_normal_manifest(
         },
     )?;
 
+    let previous_highwater = session.origin_seq_highwater;
     let segment_durations = manifest.segments.iter().map(|segment| segment.duration_ms).collect::<Vec<_>>();
     session.render_policy = RenderPolicy::from_strip_config(&request.strip, &segment_durations);
     session.apply_origin_manifest(manifest).map_err(|_| OriginManifestCommitError::TimelineRejected)?;
@@ -889,31 +955,68 @@ fn commit_normal_manifest(
 
     let last_segment_duration_ms = manifest.segments.last().map(|segment| segment.duration_ms);
     let target_duration_ms = manifest.target_duration.map(|duration| u64::from(duration) * 1_000);
-    Ok(log_and_compute_manifest_refresh_interval(session, last_segment_duration_ms, target_duration_ms))
+    let progress = manifest_progress_from_highwater(previous_highwater, session.origin_seq_highwater);
+    Ok(build_manifest_refresh_timing(last_segment_duration_ms, target_duration_ms, progress))
 }
 
-fn log_and_compute_manifest_refresh_interval(
-    session: &super::HlsSession,
+fn build_manifest_refresh_timing_base(
     last_segment_duration_ms: Option<u64>,
     target_duration_ms: Option<u64>,
-) -> u64 {
-    let refresh_interval_ms = compute_origin_refresh_interval_ms(last_segment_duration_ms, target_duration_ms);
-    let timing_source = if last_segment_duration_ms.is_some() {
-        "last_segment_duration"
+) -> HlsManifestRefreshTiming {
+    let source = if last_segment_duration_ms.is_some() {
+        HlsManifestTimingSource::LastSegmentDuration
     } else if target_duration_ms.is_some() {
-        "target_duration"
+        HlsManifestTimingSource::TargetDuration
     } else {
-        "fallback"
+        HlsManifestTimingSource::Fallback
     };
+    let base_interval_ms = compute_origin_refresh_interval_ms(last_segment_duration_ms, target_duration_ms);
+    HlsManifestRefreshTiming {
+        last_segment_duration_ms,
+        target_duration_ms,
+        base_interval_ms,
+        source,
+        progress: HlsManifestProgress::Unchanged,
+    }
+}
+
+fn build_manifest_refresh_timing(
+    last_segment_duration_ms: Option<u64>,
+    target_duration_ms: Option<u64>,
+    progress: HlsManifestProgress,
+) -> HlsManifestRefreshTiming {
+    let mut timing = build_manifest_refresh_timing_base(last_segment_duration_ms, target_duration_ms);
+    timing.progress = progress;
+    timing
+}
+
+fn manifest_progress_from_highwater(before: Option<u64>, after: Option<u64>) -> HlsManifestProgress {
+    match (before, after) {
+        (None, Some(_)) => HlsManifestProgress::Advanced,
+        (Some(before), Some(after)) if after > before => HlsManifestProgress::Advanced,
+        _ => HlsManifestProgress::Unchanged,
+    }
+}
+
+fn apply_empty_refresh_rampdown_ms(base_interval_ms: u64, empty_refresh_count: u32) -> u64 {
+    base_interval_ms.checked_shr(empty_refresh_count.min(16)).unwrap_or(0).max(1_000)
+}
+
+fn log_manifest_refresh_timing(
+    session: &super::HlsSession,
+    timing: HlsManifestRefreshTiming,
+    refresh_interval_ms: u64,
+) {
     debug!(
-        "HLS manifest timing parsed: session={} target_duration={} last_segment_duration={} next_refresh_in_s={} source={}",
+        "HLS manifest timing parsed: session={} target_duration={} last_segment_duration={} next_refresh_in_s={} source={} progress={} empty_refreshes={}",
         safe_session_key(&session.key),
-        format_optional_millis_as_seconds(target_duration_ms),
-        format_optional_millis_as_seconds(last_segment_duration_ms),
+        format_optional_millis_as_seconds(timing.target_duration_ms),
+        format_optional_millis_as_seconds(timing.last_segment_duration_ms),
         format_millis_as_seconds(refresh_interval_ms),
-        timing_source
+        timing.source.as_log_value(),
+        timing.progress.as_log_value(),
+        session.origin_refresh.consecutive_empty_refreshes
     );
-    refresh_interval_ms
 }
 
 fn format_optional_millis_as_seconds(value_ms: Option<u64>) -> String {
@@ -973,7 +1076,7 @@ pub fn compute_origin_refresh_interval_ms(
     last_segment_duration_ms: Option<u64>,
     target_duration_ms: Option<u64>,
 ) -> u64 {
-    last_segment_duration_ms.or(target_duration_ms).map_or(2_000, |duration_ms| duration_ms / 2).clamp(1_000, 6_000)
+    last_segment_duration_ms.or(target_duration_ms).map_or(2_000, |duration_ms| duration_ms / 2).max(1_000)
 }
 
 pub fn cold_start_retry_after_seconds() -> u64 { COLD_START_RETRY_AFTER_SECONDS }
@@ -1204,32 +1307,32 @@ async fn fetch_origin_manifest_with_global_policy(
         "HLS origin manifest request started: account_binding={account_binding} origin_entry={}",
         safe_origin_log_value(input_source.url.as_str())
     );
-    let download_result = timeout(Duration::from_millis(request.origin_manifest_timeout_ms.max(1)), async {
-        if request.use_manual_redirects {
-            download_text_content_with_manual_redirects(
-                &request.app_config,
-                &request.no_redirect_client,
-                input_source,
-                Some(&request.headers),
-                None,
-                false,
-                MAX_MANUAL_REDIRECTS,
-            )
-            .await
-        } else {
-            download_text_content(
-                &request.app_config,
-                &request.client,
-                input_source,
-                Some(&request.headers),
-                None,
-                false,
-            )
-            .await
-        }
-    })
-    .await
-    .map_err(|_| OriginManifestFetchError::Timeout)?;
+    let fetch_options =
+        RequestFetchOptions::with_attempt_idle_timeout(Duration::from_millis(request.origin_manifest_timeout_ms.max(1)));
+    let download_result = if request.use_manual_redirects {
+        download_text_content_with_manual_redirects_and_options(
+            &request.app_config,
+            &request.no_redirect_client,
+            input_source,
+            Some(&request.headers),
+            None,
+            false,
+            MAX_MANUAL_REDIRECTS,
+            fetch_options,
+        )
+        .await
+    } else {
+        download_text_content_with_options(
+            &request.app_config,
+            &request.client,
+            input_source,
+            Some(&request.headers),
+            None,
+            false,
+            fetch_options,
+        )
+        .await
+    };
     let (body, final_manifest_url) = download_result.map_err(|err| {
         OriginManifestFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
     })?;
@@ -1357,11 +1460,13 @@ fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into
 #[cfg(test)]
 mod tests {
     use super::{
-        can_use_redirect_manifest, classify_origin_manifest_status, commit_fetched_manifest,
-        compute_origin_refresh_interval_ms, format_millis_as_seconds, format_optional_millis_as_seconds,
+        build_manifest_refresh_timing, can_use_redirect_manifest, classify_origin_manifest_status,
+        commit_fetched_manifest, compute_origin_refresh_interval_ms, format_millis_as_seconds,
+        format_optional_millis_as_seconds, manifest_progress_from_highwater,
         refresh_from_live_hls_entrypoint_with_retries, resolved_hls_manifest_request_url_from_input,
-        retry_after_delay_ms, transient_reason_log_fields, FetchedOriginManifest, LiveHlsOriginEntry,
-        OriginManifestFetchError, OriginManifestStatusClass, OriginRefreshRequest, OriginRefreshState, RetryPolicy,
+        retry_after_delay_ms, transient_reason_log_fields, FetchedOriginManifest, HlsManifestProgress,
+        LiveHlsOriginEntry, OriginManifestFetchError, OriginManifestStatusClass, OriginRefreshRequest,
+        OriginRefreshState, RetryPolicy,
     };
     use crate::{
         api::model::{
@@ -1370,8 +1475,7 @@ mod tests {
         },
         model::{
             AppConfig, Config, ConfigProvider, HlsSegmentRepairConfig, HlsSegmentRepairMode,
-            ReverseProxyDisabledHeaderConfig,
-            SourcesConfig, StripConfig, StripMode,
+            ReverseProxyDisabledHeaderConfig, SourcesConfig, StripConfig, StripMode,
         },
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -1460,7 +1564,9 @@ mod tests {
         assert_eq!(state.next_fetch_allowed_at_ms, 3_000);
 
         state.mark_started(3_100);
-        state.mark_success(3_100, 3_200, 10_000);
+        let success_timing =
+            build_manifest_refresh_timing(Some(20_000), None, HlsManifestProgress::Advanced);
+        assert_eq!(state.mark_success_with_timing(3_100, 3_200, success_timing), 10_000);
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.last_error_at_ms, None);
         assert_eq!(state.next_fetch_allowed_at_ms, 13_100);
@@ -1536,11 +1642,78 @@ mod tests {
     }
 
     #[test]
-    fn refresh_interval_uses_half_duration_with_clamp() {
+    fn refresh_interval_uses_half_reference_duration_without_upper_clamp() {
         assert_eq!(compute_origin_refresh_interval_ms(Some(8_000), None), 4_000);
         assert_eq!(compute_origin_refresh_interval_ms(Some(500), None), 1_000);
-        assert_eq!(compute_origin_refresh_interval_ms(Some(20_000), None), 6_000);
+        assert_eq!(compute_origin_refresh_interval_ms(Some(20_000), None), 10_000);
         assert_eq!(compute_origin_refresh_interval_ms(None, None), 2_000);
+    }
+
+    #[test]
+    fn empty_refresh_rampdown_halves_until_one_second() {
+        let mut state = OriginRefreshState::default();
+        let timing = build_manifest_refresh_timing(None, Some(12_000), HlsManifestProgress::Unchanged);
+
+        state.mark_started(0);
+        assert_eq!(state.mark_success_with_timing(0, 100, timing), 3_000);
+        assert_eq!(state.consecutive_empty_refreshes, 1);
+        assert_eq!(state.next_fetch_allowed_at_ms, 3_000);
+
+        state.mark_started(3_000);
+        assert_eq!(state.mark_success_with_timing(3_000, 3_100, timing), 1_500);
+        assert_eq!(state.consecutive_empty_refreshes, 2);
+        assert_eq!(state.next_fetch_allowed_at_ms, 4_500);
+
+        state.mark_started(4_500);
+        assert_eq!(state.mark_success_with_timing(4_500, 4_600, timing), 1_000);
+        assert_eq!(state.consecutive_empty_refreshes, 3);
+        assert_eq!(state.next_fetch_allowed_at_ms, 5_500);
+
+        state.mark_started(5_500);
+        assert_eq!(state.mark_success_with_timing(5_500, 5_600, timing), 1_000);
+        assert_eq!(state.consecutive_empty_refreshes, 4);
+        assert_eq!(state.next_fetch_allowed_at_ms, 6_500);
+    }
+
+    #[test]
+    fn advanced_refresh_resets_empty_refresh_counter() {
+        let mut state = OriginRefreshState::default();
+        let unchanged = build_manifest_refresh_timing(None, Some(12_000), HlsManifestProgress::Unchanged);
+        let advanced = build_manifest_refresh_timing(None, Some(12_000), HlsManifestProgress::Advanced);
+
+        state.mark_started(0);
+        assert_eq!(state.mark_success_with_timing(0, 100, unchanged), 3_000);
+        state.mark_started(3_000);
+        assert_eq!(state.mark_success_with_timing(3_000, 3_100, unchanged), 1_500);
+        assert_eq!(state.consecutive_empty_refreshes, 2);
+
+        state.mark_started(4_500);
+        assert_eq!(state.mark_success_with_timing(4_500, 4_600, advanced), 6_000);
+        assert_eq!(state.consecutive_empty_refreshes, 0);
+        assert_eq!(state.next_fetch_allowed_at_ms, 10_500);
+    }
+
+    #[test]
+    fn failure_backoff_does_not_increment_empty_refresh_counter() {
+        let mut state = OriginRefreshState::default();
+        let unchanged = build_manifest_refresh_timing(None, Some(12_000), HlsManifestProgress::Unchanged);
+
+        state.mark_started(0);
+        assert_eq!(state.mark_success_with_timing(0, 100, unchanged), 3_000);
+        state.mark_started(3_000);
+        state.mark_failure(3_100);
+
+        assert_eq!(state.consecutive_failures, 1);
+        assert_eq!(state.consecutive_empty_refreshes, 1);
+    }
+
+    #[test]
+    fn manifest_progress_tracks_highwater_advancement() {
+        assert_eq!(manifest_progress_from_highwater(None, Some(10)), HlsManifestProgress::Advanced);
+        assert_eq!(manifest_progress_from_highwater(Some(10), Some(11)), HlsManifestProgress::Advanced);
+        assert_eq!(manifest_progress_from_highwater(Some(10), Some(10)), HlsManifestProgress::Unchanged);
+        assert_eq!(manifest_progress_from_highwater(Some(10), Some(9)), HlsManifestProgress::Unchanged);
+        assert_eq!(manifest_progress_from_highwater(None, None), HlsManifestProgress::Unchanged);
     }
 
     #[test]
