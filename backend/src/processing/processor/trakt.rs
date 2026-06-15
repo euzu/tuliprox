@@ -42,7 +42,7 @@ fn is_compatible_content_type(cluster: XtreamCluster, content_type: TraktContent
 
 fn is_matchable_playlist_item(item_type: PlaylistItemType, content_type: TraktContentType) -> bool {
     match content_type {
-        TraktContentType::Vod => matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo),
+        TraktContentType::Vod => item_type.is_video(),
         TraktContentType::Series => matches!(item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo),
         TraktContentType::Both => matches!(
             item_type,
@@ -246,7 +246,7 @@ fn series_children_by_parent_code(playlist: &[PlaylistGroup]) -> HashMap<Arc<str
     let mut children = HashMap::<Arc<str>, Vec<&PlaylistItem>>::new();
     for playlist_group in playlist {
         for channel in &playlist_group.channels {
-            if matches!(channel.header.item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
+            if channel.header.item_type.is_series()
                 && !channel.header.parent_code.is_empty()
             {
                 children.entry(channel.header.parent_code.clone()).or_default().push(channel);

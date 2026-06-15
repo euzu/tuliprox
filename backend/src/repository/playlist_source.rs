@@ -11,7 +11,7 @@ use shared::model::{M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem,
 use shared::model::UUIDType;
 use shared::utils::Internable;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -237,6 +237,21 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.update_playlist(plg),
             PlaylistSourceKind::MediaServerDisk(source) => source.update_playlist(plg),
             PlaylistSourceKind::Memory(source) => source.update_playlist(plg),
+        }
+    }
+
+    /// Batched, indexed equivalent of repeatedly calling [`Self::update_playlist`]
+    /// for in-memory playlists. Groups whose cluster is in the active skip set
+    /// are dropped, matching `update_playlist`. Only the in-memory source merges
+    /// groups, mirroring `FetchedPlaylist::update_playlist`.
+    pub fn extend_playlist(&mut self, groups: Vec<PlaylistGroup>) {
+        let filtered: Vec<PlaylistGroup> = if let Some(skip_set) = self.skip_set.as_ref() {
+            groups.into_iter().filter(|plg| !skip_set.contains(&plg.xtream_cluster)).collect()
+        } else {
+            groups
+        };
+        if let PlaylistSourceKind::Memory(source) = &mut self.kind {
+            source.merge_groups(filtered);
         }
     }
 
@@ -885,6 +900,46 @@ impl MemoryPlaylistSource {
     }
 
     pub fn into_source(self) -> PlaylistSource { PlaylistSource::memory(self) }
+
+    /// Merge a batch of groups into the in-memory playlist in a single pass.
+    ///
+    /// Equivalent to calling [`PlaylistSourceOps::update_playlist`] for every
+    /// incoming group, but builds `(cluster, normalized_title)` and
+    /// `(cluster, id)` indexes over the existing groups once instead of
+    /// re-scanning (and re-normalizing every existing title) for each incoming
+    /// group. This turns the series-expansion merge from O(groups^2) into a
+    /// single linear pass. Title matches take precedence over id matches, and
+    /// newly pushed groups are indexed so later groups in the same batch can
+    /// merge into them, preserving the sequential semantics.
+    pub(crate) fn merge_groups(&mut self, incoming: Vec<PlaylistGroup>) {
+        if incoming.is_empty() {
+            return;
+        }
+        let playlist = Arc::make_mut(&mut self.playlist);
+        let mut by_title: HashMap<(XtreamCluster, String), usize> = HashMap::with_capacity(playlist.len());
+        let mut by_id: HashMap<(XtreamCluster, u32), usize> = HashMap::with_capacity(playlist.len());
+        for (idx, grp) in playlist.iter().enumerate() {
+            by_title
+                .entry((grp.xtream_cluster, shared::utils::deunicode_string(&grp.title).to_lowercase()))
+                .or_insert(idx);
+            by_id.entry((grp.xtream_cluster, grp.id)).or_insert(idx);
+        }
+        for plg in incoming {
+            let title_key = (plg.xtream_cluster, shared::utils::deunicode_string(&plg.title).to_lowercase());
+            if let Some(&idx) = by_title.get(&title_key) {
+                playlist[idx].channels.extend(plg.channels);
+                continue;
+            }
+            if let Some(&idx) = by_id.get(&(plg.xtream_cluster, plg.id)) {
+                playlist[idx].channels.extend(plg.channels);
+                continue;
+            }
+            let new_idx = playlist.len();
+            by_title.entry(title_key).or_insert(new_idx);
+            by_id.entry((plg.xtream_cluster, plg.id)).or_insert(new_idx);
+            playlist.push(plg);
+        }
+    }
 }
 
 impl Default for MemoryPlaylistSource {

@@ -58,7 +58,7 @@ pub enum GenericProbeMetadataOutcome {
 }
 
 fn requires_provider_connection_for_generic_probe(input_type: InputType) -> bool {
-    !(matches!(input_type, InputType::Library) || input_type.is_media_server())
+    input_type.capabilities().requires_provider_connection_for_probe
 }
 
 fn uses_seekable_remote_probe(item_type: PlaylistItemType, is_remote_probe: bool) -> bool {
@@ -177,9 +177,9 @@ async fn prepare_generic_stream_metadata(
         InputType::Xtream | InputType::XtreamBatch => {
             let cluster = if item_type.is_live() {
                 XtreamCluster::Live
-            } else if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
+            } else if item_type.is_video() {
                 XtreamCluster::Video
-            } else if matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
+            } else if item_type.is_series() {
                 XtreamCluster::Series
             } else {
                 // Generic probing currently supports live/video/series payload shapes.
@@ -223,9 +223,7 @@ async fn prepare_generic_stream_metadata(
         debug!("Skipping unsupported generic stream probe for {unique_id}: {safe_probe_url}");
         return Ok(PreparedGenericProbeOutcome::Noop);
     }
-    let is_remote_probe = reqwest::Url::parse(&probe_url)
-        .ok()
-        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
+    let is_remote_probe = reqwest::Url::parse(&probe_url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"));
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
@@ -422,7 +420,7 @@ pub fn update_properties(
     raw_audio: Option<Arc<str>>,
     stats: ProbeStreamStats,
 ) {
-    if matches!(item_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo) {
+    if item_type.is_video() {
        let mut props = if let Some(StreamProperties::Video(p)) = props_opt {
            *p.clone()
        } else {
@@ -453,9 +451,8 @@ pub fn update_properties(
        }
        *props_opt = Some(StreamProperties::Video(Box::new(props)));
     }
-    else if matches!(item_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries) {
-       let mut props = if let Some(StreamProperties::Episode(p)) = props_opt {
-           *p.clone()
+    else if item_type.is_series() {
+       let mut props = if let Some(StreamProperties::Episode(p)) = props_opt {           *p.clone()
        } else {
            EpisodeStreamProperties {
                episode_id: virtual_id,

@@ -113,12 +113,75 @@ pub enum InputType {
 impl InputType {
     pub fn is_xtream(&self) -> bool { matches!(self, Self::Xtream | Self::XtreamBatch) }
     pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
+    pub fn is_batch(&self) -> bool { matches!(self, Self::M3uBatch | Self::XtreamBatch) }
     pub fn uses_standard_input_url(&self) -> bool {
         matches!(self, Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch)
     }
 
     pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
     pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
+
+    /// Single source of truth for the categorical behavior of an input type.
+    ///
+    /// Adding a new [`InputType`] variant forces an arm here (the match is
+    /// exhaustive), and every site that consumes [`InputCapabilities`] —
+    /// persistence/load routing, probe requirements, the custom-provider
+    /// endpoint gate — stays in sync automatically instead of relying on a
+    /// parallel `match` somewhere else that is easy to forget.
+    #[must_use]
+    pub const fn capabilities(self) -> InputCapabilities {
+        match self {
+            Self::M3u | Self::M3uBatch => InputCapabilities {
+                persistence: InputPersistence::M3u,
+                requires_provider_connection_for_probe: true,
+                served_on_custom_provider_endpoint: true,
+            },
+            Self::Xtream | Self::XtreamBatch => InputCapabilities {
+                persistence: InputPersistence::Xtream,
+                requires_provider_connection_for_probe: true,
+                served_on_custom_provider_endpoint: true,
+            },
+            Self::Library => InputCapabilities {
+                persistence: InputPersistence::Library,
+                requires_provider_connection_for_probe: false,
+                served_on_custom_provider_endpoint: false,
+            },
+            Self::Emby | Self::Jellyfin | Self::Plex => InputCapabilities {
+                persistence: InputPersistence::MediaServer,
+                requires_provider_connection_for_probe: false,
+                served_on_custom_provider_endpoint: false,
+            },
+        }
+    }
+
+    /// Persistence/load backend family for this input type.
+    #[must_use]
+    pub const fn persistence(self) -> InputPersistence { self.capabilities().persistence }
+}
+
+/// Storage/loading backend family an [`InputType`] maps onto.
+///
+/// Multiple input variants collapse onto the same persistence family (for
+/// example every media-server variant shares the same on-disk format), so
+/// persist/load routing can match on this instead of re-listing variants.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum InputPersistence {
+    M3u,
+    Xtream,
+    Library,
+    MediaServer,
+}
+
+/// Categorical capabilities of an [`InputType`], declared once in
+/// [`InputType::capabilities`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct InputCapabilities {
+    /// Storage/loading backend family.
+    pub persistence: InputPersistence,
+    /// Whether generic stream probing must open a provider connection.
+    pub requires_provider_connection_for_probe: bool,
+    /// Whether the custom-provider HTTP endpoint can serve this input.
+    pub served_on_custom_provider_endpoint: bool,
 }
 
 #[derive(
@@ -664,9 +727,7 @@ impl ConfigInputDto {
         if self.enabled {
             self.prepare_media_server_input()?;
         }
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
-            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
-        {
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) && self.input_type.is_batch() {
             return Err(TuliproxError::ConfigInput(format!(
                 "input type {} does not support provider:// URLs for batch definitions; use batch:// URL (input: {})",
                 self.input_type, self.name
@@ -855,9 +916,7 @@ impl ConfigInputDto {
     pub fn prepare_type(&mut self) -> Result<(), TuliproxError> {
         self.url = self.url.trim().to_string();
         self.normalize_input_type_from_batch_url();
-        if self.url.starts_with(PROVIDER_SCHEME_PREFIX)
-            && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch)
-        {
+        if self.url.starts_with(PROVIDER_SCHEME_PREFIX) && self.input_type.is_batch() {
             return Err(TuliproxError::ConfigInput(format!(
                 "input type {} does not support provider:// URLs for batch definitions; use batch:// URL",
                 self.input_type

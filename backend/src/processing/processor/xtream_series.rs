@@ -131,9 +131,7 @@ async fn playlist_resolve_series_info(
     }
 
     // Apply resolved episodes to playlist
-    for group in new_playlist {
-        fpl.update_playlist(&group).await;
-    }
+    fpl.extend_playlist(new_playlist);
 }
 
 fn sync_resolved_series_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {
@@ -198,8 +196,16 @@ fn queue_background_series_info(
     // Extract filter before iterating to avoid borrow conflict
     let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
 
+    let stage_started = Instant::now();
+    let mut total = 0usize;
+    let mut skipped_filter = 0usize;
+    let mut skipped_resolve_filter = 0usize;
+    let mut queued = 0usize;
+    let mut expanded = 0usize;
     for pli in fpl.items_mut() {
+        total += 1;
         if !filter(pli) {
+            skipped_filter += 1;
             continue;
         }
 
@@ -207,6 +213,7 @@ fn queue_background_series_info(
         if let Some(r_filter) = resolve_filter {
             let provider = ValueProvider { pli, match_as_ascii: false };
             if !r_filter.filter(&provider) {
+                skipped_resolve_filter += 1;
                 continue;
             }
         }
@@ -245,12 +252,21 @@ fn queue_background_series_info(
                     );
                 }
                 mgr.queue_task_background(input_name_arc.clone(), task);
+                queued += 1;
             }
         }
 
         if let Some(group_obj) = expand_series_item(pli, input) {
             groups_to_add.push(group_obj);
+            expanded += 1;
         }
+    }
+
+    if log_enabled!(Level::Debug) {
+        debug!(
+            "[Task] Series resolve queueing summary for input {input_name_arc}: total={total}, queued={queued}, expanded={expanded}, skipped_filter={skipped_filter}, skipped_resolve_filter={skipped_resolve_filter}, elapsed_ms={}",
+            stage_started.elapsed().as_millis()
+        );
     }
     groups_to_add
 }
@@ -997,8 +1013,7 @@ pub async fn update_series_metadata(
                                 active_handle,
                             );
                             let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
-                                .ok()
-                                .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                                .is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
                             let probe_params = crate::utils::ffmpeg::ProbeParams {
                                 url: probe_url.as_ref(),
                                 user_agent: user_agent.as_deref(),

@@ -139,12 +139,8 @@ impl Filter {
                 if let Some(value) = provider.get(field.as_ref()) {
                     get_filter_item_type(&value).is_some_and(|pli_type| {
                         let is_match = match item_type {
-                            PlaylistItemType::Video => {
-                                matches!(pli_type, PlaylistItemType::Video | PlaylistItemType::LocalVideo)
-                            }
-                            PlaylistItemType::Series => {
-                                matches!(pli_type, PlaylistItemType::Series | PlaylistItemType::LocalSeries)
-                            }
+                            PlaylistItemType::Video => pli_type.is_video(),
+                            PlaylistItemType::Series => pli_type.is_series(),
                             _ => pli_type.eq(item_type),
                         };
                         if log_enabled!(Level::Trace) {

@@ -12,12 +12,15 @@ where
 {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &B) -> Result<Self, Self::Rejection> {
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &B,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         if let Some(accept_type) = parts.headers.get(axum::http::header::ACCEPT) {
             if let Ok(val) = accept_type.to_str() {
-                return Ok(ExtractAcceptHeader(Some(val.to_string())));
+                return std::future::ready(Ok(ExtractAcceptHeader(Some(val.to_string()))));
             }
         }
-        Ok(ExtractAcceptHeader(None))
+        std::future::ready(Ok(ExtractAcceptHeader(None)))
     }
 }

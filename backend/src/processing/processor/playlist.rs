@@ -115,10 +115,15 @@ fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option
 }
 
 pub fn apply_filter_to_playlist(playlist: &mut [PlaylistGroup], filter: &Filter) -> Option<Vec<PlaylistGroup>> {
-    let mut new_playlist = Vec::with_capacity(128);
-    for pg in playlist.iter_mut() {
-        let channels =
-            pg.channels.iter().filter(|&pli| is_valid(pli, filter, false)).cloned().collect::<Vec<PlaylistItem>>();
+    // NOTE: the source `playlist` is intentionally cloned (not drained) here because
+    // the caller reuses the same slice for every target output and for the no-filter
+    // fallback path, so the survivors cannot be moved out of it. Cap the initial
+    // allocation so selective filters do not retain capacity for every source item.
+    const INITIAL_FILTERED_GROUP_CAPACITY: usize = 256;
+    let mut new_playlist = Vec::with_capacity(playlist.len());
+    for pg in playlist.iter() {
+        let mut channels = Vec::with_capacity(pg.channels.len().min(INITIAL_FILTERED_GROUP_CAPACITY));
+        channels.extend(pg.channels.iter().filter(|&pli| is_valid(pli, filter, false)).cloned());
         if !channels.is_empty() {
             new_playlist.push(PlaylistGroup {
                 id: pg.id,
@@ -1074,9 +1079,10 @@ fn execute_pipe<'a>(
 // This method is needed, because of duplicate group names in different inputs.
 // We merge the same group names considering cluster together.
 fn flatten_groups(playlistgroups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
-    let mut sort_order: Vec<PlaylistGroup> = vec![];
+    let upper_bound = playlistgroups.len();
+    let mut sort_order: Vec<PlaylistGroup> = Vec::with_capacity(upper_bound);
     let mut idx: usize = 0;
-    let mut group_map: HashMap<CategoryKey, usize> = HashMap::new();
+    let mut group_map: HashMap<CategoryKey, usize> = HashMap::with_capacity(upper_bound);
     for group in playlistgroups {
         let normalized_title: Arc<str> = shared::utils::deunicode_string(&group.title).to_lowercase().intern();
         let key = (group.xtream_cluster, normalized_title);

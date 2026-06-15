@@ -71,6 +71,11 @@ fn build_epg_rename_map(playlist: Option<&[PlaylistGroup]>) -> HashMap<Arc<str>,
 pub async fn epg_write_for_target(cfg: &Config, target: &ConfigTarget, target_path: &Path,
                                   epg: Option<&Epg>, output: &TargetOutput,
                                   playlist: Option<&[PlaylistGroup]>) -> Result<(), TuliproxError> {
+    if !output.target_type().supports_epg() {
+        // Formats without EPG support are skipped here via the shared capability
+        // table rather than a silent empty match arm.
+        return Ok(());
+    }
     if let Some(epg_data) = epg {
         let rename_map = Arc::new(build_epg_rename_map(playlist));
         let epg_data = Arc::new(epg_data.clone());

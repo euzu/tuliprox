@@ -4671,6 +4671,7 @@ dependencies = [
  "strum_macros",
  "sysinfo",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

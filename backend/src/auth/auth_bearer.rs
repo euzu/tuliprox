@@ -13,8 +13,11 @@ where
 {
     type Rejection = Rejection;
 
-    async fn from_request_parts(req: &mut Parts, _: &B) -> Result<Self, Self::Rejection> {
-        Self::decode_request_parts(req)
+    fn from_request_parts(
+        req: &mut Parts,
+        _: &B,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Self::decode_request_parts(req))
     }
 }
 

@@ -23,6 +23,15 @@ impl FetchedPlaylist<'_> {
         }
     }
 
+    /// Merge a batch of groups in one indexed pass instead of calling
+    /// [`Self::update_playlist`] once per group (which re-scans the whole
+    /// in-memory playlist each time). Only affects in-memory sources.
+    pub fn extend_playlist(&mut self, groups: Vec<PlaylistGroup>) {
+        if self.source.is_memory() {
+            self.source.extend_playlist(groups);
+        }
+    }
+
     pub fn is_memory(&self) -> bool {
         self.source.is_memory()
     }

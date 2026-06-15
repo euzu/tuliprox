@@ -64,7 +64,7 @@ async fn handle_connection<M, S>(
     remote_addr: SocketAddr,
     connection_manager: Arc<ConnectionManager>,
 ) where
-    M: for<'a> Service<IncomingStream, Error = Infallible, Response = S> + Send + 'static,
+    M: Service<IncomingStream, Error = Infallible, Response = S> + Send + 'static,
     for<'a> <M as Service<IncomingStream>>::Future: Send,
     S: Service<Request, Response = Response, Error = Infallible> + Clone + Send + 'static,
     S::Future: Send,

@@ -32,6 +32,7 @@ futures.workspace = true
 path-clean.workspace = true
 pest.workspace = true
 pest_derive.workspace = true
+thiserror.workspace = true
 aes = "0.8.4"
 ctr = "0.9.2"
 deunicode.workspace = true

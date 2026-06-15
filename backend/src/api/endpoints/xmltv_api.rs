@@ -76,6 +76,9 @@ pub(in crate::api) fn get_epg_path_for_target_by_type(
     target: &ConfigTarget,
     output_type: TargetType,
 ) -> Option<PathBuf> {
+    if !output_type.supports_epg() {
+        return None;
+    }
     match output_type {
         TargetType::Xtream => {
             if let Some(storage_path) = xtream_get_storage_path(config, &target.name) {
