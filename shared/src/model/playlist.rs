@@ -55,7 +55,7 @@ impl XtreamCluster {
     pub fn info_action_and_id_field(&self) -> (&'static str, &'static str) {
         match self {
             Self::Live => (xtream_const::XC_ACTION_GET_LIVE_INFO, xtream_const::XC_LIVE_ID),
-            Self::Video => (xtream_const::XC_ACTION_GET_VOD_INFO, xtream_const::XC_VOO_ID),
+            Self::Video => (xtream_const::XC_ACTION_GET_VOD_INFO, xtream_const::XC_VOD_ID),
             Self::Series => (xtream_const::XC_ACTION_GET_SERIES_INFO, xtream_const::XC_SERIES_ID),
         }
     }

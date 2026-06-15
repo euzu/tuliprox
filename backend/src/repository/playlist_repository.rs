@@ -16,7 +16,7 @@ use crate::repository::{
 };
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::utils;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{InputPersistence, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
@@ -488,7 +488,11 @@ async fn load_target_id_mapping_as_tree(app_config: &AppConfig, target_path: &Pa
         .map_err(|err| TuliproxError::Config(format!("Could not find path for target {target_name} err:{err}")))
 }
 
-async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Path, cluster: XtreamCluster) -> BPlusTree<u32, XtreamPlaylistItem> {
+async fn load_xtream_playlist_as_tree(
+    app_config: &AppConfig,
+    storage_path: &Path,
+    cluster: XtreamCluster,
+) -> Result<BPlusTree<u32, XtreamPlaylistItem>, TuliproxError> {
     let xtream_path = xtream_get_file_path(storage_path, cluster);
     let file_lock = app_config.file_locks.read_lock(&xtream_path).await;
     // Move B+Tree query and iteration to spawn_blocking to avoid blocking tokio runtime
@@ -497,19 +501,19 @@ async fn load_xtream_playlist_as_tree(app_config: &AppConfig, storage_path: &Pat
         let _guard = file_lock;
         BPlusTree::<u32, XtreamPlaylistItem>::load(&path_clone)
     }).await {
-        Ok(Ok(tree)) => tree,
-        Ok(Err(err)) => {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                debug!("No xtream {cluster} storage at {}, serving empty playlist", xtream_path.display());
-            } else {
-                error!("Failed to load xtream {cluster} storage at {}: {err}. Serving empty playlist", xtream_path.display());
-            }
-            BPlusTree::new()
+        Ok(Ok(tree)) => Ok(tree),
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            debug!("No xtream {cluster} storage at {}, serving empty playlist", xtream_path.display());
+            Ok(BPlusTree::new())
         }
-        Err(join_err) => {
-            error!("Xtream {cluster} storage load task panicked for {}: {join_err}. Serving empty playlist", xtream_path.display());
-            BPlusTree::new()
-        }
+        Ok(Err(err)) => Err(TuliproxError::RepositoryXtream(format!(
+            "Failed to load xtream {cluster} storage {}: {err}",
+            xtream_path.display()
+        ))),
+        Err(join_err) => Err(TuliproxError::RepositoryXtream(format!(
+            "Failed to join xtream {cluster} storage load task {}: {join_err}",
+            xtream_path.display()
+        ))),
     }
 }
 
@@ -527,9 +531,9 @@ async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarge
     let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(||
         TuliproxError::Config(format!("Could not find path for target {} xtream output", target.name)))?;
 
-    let live_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Live).await;
-    let vod_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Video).await;
-    let series_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Series).await;
+    let live_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Live).await?;
+    let vod_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Video).await?;
+    let series_storage = load_xtream_playlist_as_tree(app_config, &storage_path, XtreamCluster::Series).await?;
 
     Ok(PlaylistXtreamStorage {
         live: live_storage,
@@ -552,18 +556,18 @@ async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) 
         BPlusTree::<u32, M3uPlaylistItem>::load(&path_clone)
     }).await {
         Ok(Ok(tree)) => Ok(tree),
-        Ok(Err(err)) => {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                debug!("No m3u storage at {}, serving empty playlist", m3u_path.display());
-            } else {
-                error!("Failed to load m3u storage at {}: {err}. Serving empty playlist", m3u_path.display());
-            }
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            debug!("No m3u storage at {}, serving empty playlist", m3u_path.display());
             Ok(BPlusTree::new())
         }
-        Err(join_err) => {
-            error!("M3u storage load task panicked for {}: {join_err}. Serving empty playlist", m3u_path.display());
-            Ok(BPlusTree::new())
-        }
+        Ok(Err(err)) => Err(TuliproxError::RepositoryM3u(format!(
+            "Failed to load m3u storage {}: {err}",
+            m3u_path.display()
+        ))),
+        Err(join_err) => Err(TuliproxError::RepositoryM3u(format!(
+            "Failed to join m3u storage load task {}: {join_err}",
+            m3u_path.display()
+        ))),
     }
 }
 
