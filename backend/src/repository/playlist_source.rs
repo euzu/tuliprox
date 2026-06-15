@@ -11,7 +11,7 @@ use shared::model::{M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem,
 use shared::model::UUIDType;
 use shared::utils::Internable;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -237,21 +237,6 @@ impl PlaylistSource {
             PlaylistSourceKind::LocalLibraryDisk(source) => source.update_playlist(plg),
             PlaylistSourceKind::MediaServerDisk(source) => source.update_playlist(plg),
             PlaylistSourceKind::Memory(source) => source.update_playlist(plg),
-        }
-    }
-
-    /// Batched, indexed equivalent of repeatedly calling [`Self::update_playlist`]
-    /// for in-memory playlists. Groups whose cluster is in the active skip set
-    /// are dropped, matching `update_playlist`. Only the in-memory source merges
-    /// groups, mirroring `FetchedPlaylist::update_playlist`.
-    pub fn extend_playlist(&mut self, groups: Vec<PlaylistGroup>) {
-        let filtered: Vec<PlaylistGroup> = if let Some(skip_set) = self.skip_set.as_ref() {
-            groups.into_iter().filter(|plg| !skip_set.contains(&plg.xtream_cluster)).collect()
-        } else {
-            groups
-        };
-        if let PlaylistSourceKind::Memory(source) = &mut self.kind {
-            source.merge_groups(filtered);
         }
     }
 

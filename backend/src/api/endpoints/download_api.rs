@@ -391,26 +391,15 @@ async fn download_file(
                                     let mut last_progress_logged_bytes = downloaded;
                                     let mut last_snapshot_update_at = Instant::now();
                                     let mut last_snapshot_update_bytes = downloaded;
-                                    let mut last_control_poll_at = Instant::now();
+                                    let mut control_poll = time::interval(DOWNLOAD_CONTROL_POLL_INTERVAL);
+                                    control_poll.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+                                    control_poll.tick().await;
                                     let deadline_at = recording_deadline_instant(&file_download);
                                     let mut deadline_sleep = deadline_at.map(|deadline| {
                                         Box::pin(time::sleep_until(deadline)) as Pin<Box<Sleep>>
                                     });
 
                                     loop {
-                                        // The `select!` arms below react to control changes immediately
-                                        // while the worker is parked. This throttled poll only covers the
-                                        // race where a change fired during a chunk write, so it runs at
-                                        // most every `DOWNLOAD_CONTROL_POLL_INTERVAL` instead of per chunk.
-                                        if last_control_poll_at.elapsed() >= DOWNLOAD_CONTROL_POLL_INTERVAL {
-                                            last_control_poll_at = Instant::now();
-                                            if let Some(result) =
-                                                handle_download_control(&active, current_download_control(&control_signal), &mut buf_writer).await
-                                            {
-                                                return result;
-                                            }
-                                        }
-
                                         if deadline_at.is_some_and(|deadline| Instant::now() >= deadline) {
                                             if let Some(lock) = active.write().await.as_mut() {
                                                 lock.paused = false;
@@ -443,6 +432,16 @@ async fn download_file(
                                                     }
                                                     continue;
                                                 }
+                                                _ = control_poll.tick() => {
+                                                    if let Some(result) = handle_download_control(
+                                                        &active,
+                                                        current_download_control(&control_signal),
+                                                        &mut buf_writer,
+                                                    ).await {
+                                                        return result;
+                                                    }
+                                                    continue;
+                                                }
                                                 () = deadline_sleep.as_mut() => return DownloadExecutionResult::Completed,
                                                 next_item = stream.try_next() => next_item.map_err(to_io_error),
                                             }
@@ -454,6 +453,16 @@ async fn download_file(
                                                     if let Some(result) = handle_download_control(
                                                         &active,
                                                         *control_signal.read().await,
+                                                        &mut buf_writer,
+                                                    ).await {
+                                                        return result;
+                                                    }
+                                                    continue;
+                                                }
+                                                _ = control_poll.tick() => {
+                                                    if let Some(result) = handle_download_control(
+                                                        &active,
+                                                        current_download_control(&control_signal),
                                                         &mut buf_writer,
                                                     ).await {
                                                         return result;
@@ -475,6 +484,16 @@ async fn download_file(
                                                     }
                                                     continue;
                                                 }
+                                                _ = control_poll.tick() => {
+                                                    if let Some(result) = handle_download_control(
+                                                        &active,
+                                                        current_download_control(&control_signal),
+                                                        &mut buf_writer,
+                                                    ).await {
+                                                        return result;
+                                                    }
+                                                    continue;
+                                                }
                                                 () = deadline_sleep.as_mut() => return DownloadExecutionResult::Completed,
                                                 next_item = stream.try_next() => next_item.map_err(to_io_error),
                                             }
@@ -485,6 +504,16 @@ async fn download_file(
                                                     if let Some(result) = handle_download_control(
                                                         &active,
                                                         *control_signal.read().await,
+                                                        &mut buf_writer,
+                                                    ).await {
+                                                        return result;
+                                                    }
+                                                    continue;
+                                                }
+                                                _ = control_poll.tick() => {
+                                                    if let Some(result) = handle_download_control(
+                                                        &active,
+                                                        current_download_control(&control_signal),
                                                         &mut buf_writer,
                                                     ).await {
                                                         return result;

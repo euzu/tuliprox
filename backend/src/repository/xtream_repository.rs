@@ -1144,7 +1144,8 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
     let app_cfg = app_config.clone();
     for cluster in XTREAM_CLUSTER {
         let col_path = get_collection_path(&root_path, xtream_cluster_category_collection(cluster));
-        let data = fetched_categories.get_mut(cluster);        // if there is no data save only if no file exists! Prevent data loss from failed download attempt
+        let data = fetched_categories.get_mut(cluster);
+        // if there is no data save only if no file exists! Prevent data loss from failed download attempt
         if !data.is_empty() || !file_exists_async(&col_path).await {
             let lock = app_cfg.file_locks.write_lock(&col_path).await;
             if let Err(err) = json_write_documents_to_file(&col_path, data).await {

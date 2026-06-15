@@ -143,9 +143,8 @@ pub async fn update_live_stream_metadata(
 
     let mut success = false;
     let mut not_found = false;
-    let is_remote_probe = reqwest::Url::parse(probe_url_cow.as_ref())
-        .ok()
-        .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+    let is_remote_probe =
+        reqwest::Url::parse(probe_url_cow.as_ref()).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
     let probe_params = crate::utils::ffmpeg::ProbeParams {
         url: probe_url_cow.as_ref(),
         user_agent: user_agent.as_deref(),

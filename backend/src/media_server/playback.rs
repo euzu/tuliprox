@@ -258,6 +258,7 @@ mod tests {
         stream_error: Option<MediaServerError>,
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl MediaServerCatalogClient for MockPlaybackClient {
         async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> { unreachable!() }
         async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> { unreachable!() }

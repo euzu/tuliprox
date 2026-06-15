@@ -876,9 +876,8 @@ pub async fn update_vod_metadata(
                         temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
                         active_handle,
                     );
-                    let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
-                        .ok()
-                        .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                    let is_remote_probe =
+                        reqwest::Url::parse(probe_url.as_ref()).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
                     let probe_params = crate::utils::ffmpeg::ProbeParams {
                         url: probe_url.as_ref(),
                         user_agent: user_agent.as_deref(),

@@ -186,7 +186,7 @@ impl MetadataStorage {
 
         // Thumbnails referenced by any surviving entry must be kept. Compute the
         // set once instead of reloading the library for every orphaned entry.
-        let surviving_thumbnails: HashSet<String> = surviving
+        let mut surviving_thumbnails: HashSet<String> = surviving
             .iter()
             .flat_map(referenced_thumbnail_ids_for_entry)
             .collect();
@@ -201,6 +201,7 @@ impl MetadataStorage {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     error!("Failed to delete orphaned metadata: {e}");
+                    surviving_thumbnails.extend(referenced_thumbnail_ids_for_entry(entry));
                     continue;
                 }
             }

@@ -58,16 +58,41 @@ impl EpgChannel {
 
     pub fn get_programme_with_limit(&self, limit: u32) -> Vec<&EpgProgramme> {
         let now = Utc::now().timestamp();
+        self.get_programme_with_limit_at(limit, now)
+    }
 
-        // Programmes are stored sorted by start timestamp. The first relevant
-        // entry is the first programme that is currently airing or starts in the
-        // future, which is equivalent to the first programme whose stop is not in
-        // the past (`p.stop >= now`). Because the past programmes form a prefix,
-        // we can binary-search for the boundary in O(log p) instead of scanning.
-        let start_idx = self.programmes.partition_point(|p| p.stop < now);
-
-        // slice from start_idx, max. limit
+    fn get_programme_with_limit_at(&self, limit: u32, now: i64) -> Vec<&EpgProgramme> {
+        // Programmes are sorted by start, not by stop. Use binary search only
+        // for the first future entry, then scan the earlier prefix for an
+        // overlapping programme whose stop time has not passed.
+        let first_future = self.programmes.partition_point(|programme| programme.start < now);
+        let start_idx =
+            self.programmes[..first_future].iter().position(|programme| programme.stop >= now).unwrap_or(first_future);
         self.programmes.iter().skip(start_idx).take(limit as usize).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EpgChannel, EpgProgramme};
+    use crate::utils::Internable;
+
+    #[test]
+    fn programme_limit_handles_non_monotonic_stop_times() {
+        let channel = EpgChannel {
+            id: "channel".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(0, 100, "channel".intern()),
+                EpgProgramme::new(10, 20, "channel".intern()),
+                EpgProgramme::new(30, 40, "channel".intern()),
+            ],
+        };
+
+        let programmes = channel.get_programme_with_limit_at(1, 50);
+        assert_eq!(programmes.len(), 1);
+        assert_eq!(programmes[0].start, 0);
     }
 }
 

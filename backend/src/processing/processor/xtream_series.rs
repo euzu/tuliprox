@@ -1013,8 +1013,7 @@ pub async fn update_series_metadata(
                                 active_handle,
                             );
                             let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
-                                .ok()
-                                .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                                .is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
                             let probe_params = crate::utils::ffmpeg::ProbeParams {
                                 url: probe_url.as_ref(),
                                 user_agent: user_agent.as_deref(),

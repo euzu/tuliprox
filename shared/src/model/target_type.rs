@@ -23,10 +23,16 @@ impl TargetType {
     #[must_use]
     pub const fn capabilities(self) -> TargetCapabilities {
         match self {
-            Self::Xtream => TargetCapabilities { supports_filter: true, supports_epg: true, supports_memory_cache: true },
+            Self::Xtream => {
+                TargetCapabilities { supports_filter: true, supports_epg: true, supports_memory_cache: true }
+            }
             Self::M3u => TargetCapabilities { supports_filter: true, supports_epg: true, supports_memory_cache: true },
-            Self::Strm => TargetCapabilities { supports_filter: true, supports_epg: false, supports_memory_cache: false },
-            Self::HdHomeRun => TargetCapabilities { supports_filter: false, supports_epg: false, supports_memory_cache: false },
+            Self::Strm => {
+                TargetCapabilities { supports_filter: true, supports_epg: false, supports_memory_cache: false }
+            }
+            Self::HdHomeRun => {
+                TargetCapabilities { supports_filter: false, supports_epg: false, supports_memory_cache: false }
+            }
         }
     }
 

@@ -177,15 +177,6 @@ pub fn get_attr_value(attr: &quick_xml::events::attributes::Attribute) -> Option
 // This function filters a timeslot starting from yesterday.
 #[allow(clippy::too_many_lines)]
 async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Result<Vec<EpgChannel>, TuliproxError> {
-    let mut reader = quick_xml::reader::Reader::from_reader(async_file_reader(reader));
-    let mut buf = Vec::new();
-
-    let mut channels = Vec::new();
-    let mut programmes = Vec::new();
-
-    let mut current_channel: Option<EpgChannel> = None;
-    let mut current_programme: Option<EpgProgramme> = None;
-
     // Tracks which text-bearing element we are currently inside, without allocating
     // a String per XML event just to compare against a few known tag names.
     #[derive(Clone, Copy, PartialEq)]
@@ -195,6 +186,16 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
         Desc,
         Other,
     }
+
+    let mut reader = quick_xml::reader::Reader::from_reader(async_file_reader(reader));
+    let mut buf = Vec::new();
+
+    let mut channels = Vec::new();
+    let mut programmes = Vec::new();
+
+    let mut current_channel: Option<EpgChannel> = None;
+    let mut current_programme: Option<EpgProgramme> = None;
+
     let mut current_tag = TextTag::Other;
 
     // only 1 day old epg

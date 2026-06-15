@@ -215,6 +215,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl MediaServerCatalogClient for MockMediaServerCatalogClient {
         async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> {
             Ok(MediaServerStatus {

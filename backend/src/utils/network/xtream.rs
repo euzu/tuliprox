@@ -405,7 +405,7 @@ async fn download_xtream_from_source(
     } else {
         match input.resolve_url(&input_source.url) {
             Ok(url) => url.into_owned(),
-            Err(err) => return (Vec::with_capacity(0), vec![err], false),
+            Err(err) => return (Vec::new(), vec![err], false),
         }
     };
 
@@ -414,7 +414,7 @@ async fn download_xtream_from_source(
 
     if let Err(err) = xtream_login(app_config, client, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
-        return (Vec::with_capacity(0), vec![err], false);
+        return (Vec::new(), vec![err], false);
     }
 
     let mut playlist_groups: Vec<PlaylistGroup> = Vec::with_capacity(128);

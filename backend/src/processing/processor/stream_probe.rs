@@ -223,9 +223,7 @@ async fn prepare_generic_stream_metadata(
         debug!("Skipping unsupported generic stream probe for {unique_id}: {safe_probe_url}");
         return Ok(PreparedGenericProbeOutcome::Noop);
     }
-    let is_remote_probe = reqwest::Url::parse(&probe_url)
-        .ok()
-        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
+    let is_remote_probe = reqwest::Url::parse(&probe_url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"));
     let config = app_config.config.load();
     let metadata_update = config.metadata_update.clone().unwrap_or_default();
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
