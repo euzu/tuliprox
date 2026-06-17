@@ -680,6 +680,20 @@ impl ActiveUserManager {
         gate.lock_owned().await
     }
 
+    pub(crate) async fn acquire_user_admission(&self, username: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = Self::transition_gate_key(username, "__admission__");
+        let gate = {
+            let mut transition_gates = self.transition_gates.lock().await;
+            Self::cleanup_idle_transition_gates(&mut transition_gates);
+            Arc::clone(
+                transition_gates
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        gate.lock_owned().await
+    }
+
     fn should_reuse_stream_for_session(existing_stream: &StreamInfo, incoming_channel: &StreamChannel) -> bool {
         existing_stream.channel.item_type.requires_provider_affinity() || incoming_channel.item_type.requires_provider_affinity()
     }

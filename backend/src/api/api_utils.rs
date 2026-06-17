@@ -506,7 +506,7 @@ pub(crate) fn mark_response_as_uncompressed<B>(response: &mut Response<B>) {
     response.extensions_mut().insert(DisableResponseCompression);
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn should_compress_response<B>(response: &Response<B>) -> bool {
     should_compress_response_extensions(response.extensions())
 }
@@ -784,9 +784,9 @@ pub(crate) struct GraceResolutionContext {
     /// The original `ConnectionKind` from the admission decision that led to this grace.
     /// Preserved so that the remaining-strategy fallback can return the correct kind
     /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.
-    #[allow(dead_code)]
     // Stored so the original admission kind remains available when follow-up
     // grace fallback reconstruction starts using it again.
+    #[allow(dead_code)]
     pub(crate) kind: Option<crate::api::model::ConnectionKind>,
 }
 
@@ -967,6 +967,8 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
         kind: admission.kind,
     };
 
+    let _admission_guard = app_state.active_users.acquire_user_admission(username).await;
+
     if let Some(resolution) = evaluate_admission_strategy_loop(
         app_state,
         username,
@@ -1048,6 +1050,8 @@ pub(in crate::api) async fn evaluate_remaining_strategies_after_grace(
         kind: original_kind,
     };
 
+    let _admission_guard = app_state.active_users.acquire_user_admission(username).await;
+
     if let Some(resolution) = evaluate_admission_strategy_loop(
         app_state,
         username,
@@ -1125,10 +1129,11 @@ async fn activate_session_before_stream_open(
     // If caller passes FollowUp, verify the session is still counted under the guard.
     // A stale FollowUp would bypass admission — reclassify to catch this.
     let effective_request_class = if let Some(request_class) = request_class {
-        if request_class == PlaybackRequestClass::FollowUp {
-            // Re-read session under the guard to ensure the counted lease is still held.
+        if matches!(request_class, PlaybackRequestClass::FollowUp | PlaybackRequestClass::Activate) {
+            // Re-read session under the guard to ensure the counted lease is still held or acquired.
             // If it is no longer counted, classify it from the current lifecycle so
             // stale FollowUp requests cannot bypass admission.
+            // If it became counted, classify it so stale Activate requests don't double count.
             let current_session = app_state
                 .active_users
                 .get_and_update_user_session(&user.username, session_token)
@@ -1193,8 +1198,13 @@ async fn activate_session_before_stream_open(
                 }, Some(crate::api::model::GraceMode::Hold))
             }
             Some(crate::api::model::PlaybackLifecycle::GraceActive) => {
-                // Already in GraceActive — nothing to refresh.
-                (crate::api::model::PlaybackLifecycle::GraceActive, Some(crate::api::model::GraceMode::Instant))
+                // Already in GraceActive — infer mode from item_type.
+                let mode = if item_type.is_live() || item_type.is_live_adaptive() {
+                    crate::api::model::GraceMode::Hold
+                } else {
+                    crate::api::model::GraceMode::Instant
+                };
+                (crate::api::model::PlaybackLifecycle::GraceActive, Some(mode))
             }
             _ => {
                 // Session not yet in grace state — infer from item_type defaults.
@@ -1773,7 +1783,10 @@ async fn resolve_streaming_strategy(
 
     if release_failed_mapping {
         if let Some(handle) = provider_connection_handle.take() {
-            app_state.connection_manager.release_provider_handle(Some(handle)).await;
+            let connection_manager = Arc::clone(&app_state.connection_manager);
+            tokio::spawn(async move {
+                connection_manager.release_provider_handle(Some(handle)).await;
+            });
         }
     }
 
@@ -2003,12 +2016,15 @@ async fn create_stream_response_details(
                 }
             }
 
-            // If no upstream stream is ready, release the provider unless provider grace
-            // intentionally deferred the open until the grace check resolves.
-            let provider_handle = if stream.is_none() && !defer_provider_stream_until_grace_check {
+            // If no upstream stream is ready, release the provider.
+            // Even if provider grace intentionally deferred the open, we must release the handle
+            // here because the deferred open context will acquire a fresh slot when it resumes.
+            let provider_handle = if stream.is_none() {
                 let provider_handle = streaming_strategy.provider_handle.take();
                 app_state.connection_manager.release_provider_handle(provider_handle).await;
-                error!("Can't open stream {}", sanitize_sensitive_info(&request_url));
+                if !defer_provider_stream_until_grace_check {
+                    error!("Can't open stream {}", sanitize_sensitive_info(&request_url));
+                }
                 None
             } else {
                 streaming_strategy.provider_handle.take()
@@ -2647,6 +2663,11 @@ pub(crate) async fn stream_response(
         )
             .await;
 
+        // Captured before `stream_details` is moved into `create_active_client_stream`.
+        // The pinning rule is centralized in `should_pin_provider_for_session` so it stays
+        // testable in isolation and in sync with the call site below.
+        let should_pin_provider = should_pin_provider_for_session(&stream_details, app_state, item_type);
+
         let mut is_stream_shared = share_stream && !stream_details.has_deferred_provider_open();
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
             if stream_details.stream.is_some() {
@@ -2788,12 +2809,14 @@ pub(crate) async fn stream_response(
                             socket_bound,
                         })
                         .await;
-                    let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
-                    if reservation_ttl_secs > 0 {
-                        app_state
-                            .active_provider
-                            .refresh_provider_reservation(&provider, session_token, reservation_ttl_secs)
-                            .await;
+                    if should_pin_provider {
+                        let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
+                        if reservation_ttl_secs > 0 {
+                            app_state
+                                .active_provider
+                                .refresh_provider_reservation(&provider, session_token, reservation_ttl_secs)
+                                .await;
+                        }
                     }
                 }
             }
@@ -2853,18 +2876,17 @@ async fn prepare_stream_metering(
         return StreamMeteringConfig::default();
     }
 
-    if share_stream && !has_stream && !has_deferred_provider_open {
+    if share_stream {
+        let meter_uid = app_state
+            .shared_stream_manager
+            .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
+            .await;
         return StreamMeteringConfig {
-            meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
-            meter_stream: false,
+            meter_uid,
+            meter_stream: has_stream || has_deferred_provider_open,
         };
-    }
-
-    if has_stream || has_deferred_provider_open {
+    } else if has_stream || has_deferred_provider_open {
         let meter_uid = app_state.connection_manager.next_stream_uid();
-        if share_stream {
-            app_state.shared_stream_manager.register_meter_uid(stream_url, meter_uid).await;
-        }
         return StreamMeteringConfig { meter_uid, meter_stream: true };
     }
 
@@ -2919,6 +2941,29 @@ pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_t
     }
 }
 
+/// Whether the session should pin the provider account via `refresh_provider_reservation`.
+///
+/// A non-Provisioning custom video (`ChannelUnavailable`, `ProviderConnectionsExhausted`, …) means
+/// the upstream open already failed. The provider connection slot was released by
+/// `create_provider_stream`, and the custom video is a local fallback served to the client.
+/// Pinning the provider via `refresh_provider_reservation` would hold the provider account for
+/// the configured session TTL (e.g. `catchup_session_ttl_secs`), blocking other sessions of
+/// the same family from using it even though the slot is already free.
+///
+/// Only `Provisioning` custom videos represent a real provider handoff that benefits from
+/// keeping the same provider pinned, and real provider streams (`stream_info` carries no
+/// `CustomVideoStreamType`) obviously qualify.
+pub(crate) fn should_pin_provider_for_session(
+    stream_details: &StreamDetails,
+    _app_state: &Arc<AppState>,
+    _item_type: PlaylistItemType,
+) -> bool {
+    !matches!(
+        stream_details.stream_info.as_ref(),
+        Some((_, _, _, Some(cv))) if *cv != CustomVideoStreamType::Provisioning
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn try_shared_stream_response_if_any(
     app_state: &Arc<AppState>,
@@ -2931,10 +2976,6 @@ async fn try_shared_stream_response_if_any(
     session_token: &str,
     req_headers: &HeaderMap,
 ) -> Option<impl IntoResponse> {
-    if connect_permission == UserConnectionPermission::GracePeriod {
-        return None;
-    }
-
     if let Some((stream, provider)) = SharedStreamManager::subscribe_shared_stream(
         app_state,
         stream_url,
@@ -2974,10 +3015,13 @@ async fn try_shared_stream_response_if_any(
             }
             stream_channel.shared = true;
             stream_channel.shared_joined_existing = Some(true);
-            stream_channel.shared_stream_id =
-                app_state.shared_stream_manager.get_meter_uid(stream_url).await.map(u64::from);
+            let meter_uid = app_state
+                .shared_stream_manager
+                .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
+                .await;
+            stream_channel.shared_stream_id = Some(u64::from(meter_uid));
             let metering = StreamMeteringConfig {
-                meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
+                meter_uid,
                 meter_stream: false,
             };
             let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
@@ -3078,8 +3122,11 @@ pub(crate) async fn local_stream_response(
 
     let path = PathBuf::from(pli.url.strip_prefix("file://").unwrap_or(&pli.url));
 
+    let Ok(mut file) = tokio::fs::File::open(&path).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Ok(opened_metadata) = file.metadata().await else { return internal_server_error!() };
+
     // Canonicalize and validate the path
-    let path = match tokio::fs::canonicalize(&path).await {
+    let canonical = match tokio::fs::canonicalize(&path).await {
         Ok(canonical) => canonical,
         Err(err) => {
             error!("Local file path is corrupt {}: {err}", path.display());
@@ -3088,6 +3135,17 @@ pub(crate) async fn local_stream_response(
     };
 
     if check_path {
+        let Ok(canonical_metadata) = tokio::fs::metadata(&canonical).await else { return internal_server_error!() };
+        
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if opened_metadata.dev() != canonical_metadata.dev() || opened_metadata.ino() != canonical_metadata.ino() {
+                error!("TOCTOU race detected: file swapped during local_stream_response");
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+
         let Some(library_paths) = app_state
             .app_config
             .config
@@ -3101,14 +3159,12 @@ pub(crate) async fn local_stream_response(
 
         // Verify path is within allowed media directories
         // (requires configuration of allowed base paths)
-        if !is_path_within_allowed_directories(&path, &library_paths) {
+        if !is_path_within_allowed_directories(&canonical, &library_paths) {
             return StatusCode::FORBIDDEN.into_response();
         }
     }
 
-    let Ok(mut file) = tokio::fs::File::open(&path).await else { return StatusCode::NOT_FOUND.into_response() };
-    let Ok(metadata) = file.metadata().await else { return internal_server_error!() };
-    let file_size = metadata.len();
+    let file_size = opened_metadata.len();
 
     let range = req_headers.get("range").and_then(|v| v.to_str().ok()).and_then(parse_range);
 
@@ -3936,7 +3992,7 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::StreamHistoryConfig;
+    use crate::model::{GracePeriodOptions, StreamHistoryConfig};
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
@@ -7492,6 +7548,82 @@ mod tests {
                 .is_none(),
             "failed provider open must remove the provisional placeholder session"
         );
+    }
+
+    /// Regression test for: when a catchup request fails upstream (e.g. provider returns
+    /// 4xx/5xx) the connection-slot is released, but the provider account was being
+    /// pinned via `refresh_provider_reservation` for `catchup_session_ttl_secs`. This
+    /// blocked other sessions of the same family from acquiring the same provider even
+    /// though the slot was already free. The fix delegates the pinning decision to
+    /// `should_pin_provider_for_session` and skips the reservation when the response
+    /// is a non-Provisioning custom video (failure fallback). Provisioning custom videos
+    /// must keep their reservation since they represent a successful provider handoff.
+    #[tokio::test]
+    async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_video() {
+        let app_state = create_test_app_state();
+        let no_video_details = StreamDetails {
+            stream: None,
+            stream_info: Some((Vec::new(), StatusCode::OK, None, None)),
+            provider_name: Some("provider_1".intern()),
+            request_url: None,
+            grace_period: GracePeriodOptions::default(),
+            provider_grace_active: false,
+            disable_provider_grace: false,
+            reconnect_flag: None,
+            provider_handle: None,
+            grace_resolution_context: None,
+        };
+        assert!(
+            should_pin_provider_for_session(&no_video_details, &app_state, PlaylistItemType::Catchup),
+            "a real provider stream (no CustomVideoStreamType) must pin the provider"
+        );
+
+        let provisioning_details = StreamDetails {
+            stream: None,
+            stream_info: Some((
+                Vec::new(),
+                StatusCode::OK,
+                None,
+                Some(CustomVideoStreamType::Provisioning),
+            )),
+            provider_name: Some("provider_1".intern()),
+            request_url: None,
+            grace_period: GracePeriodOptions::default(),
+            provider_grace_active: false,
+            disable_provider_grace: false,
+            reconnect_flag: None,
+            provider_handle: None,
+            grace_resolution_context: None,
+        };
+        assert!(
+            should_pin_provider_for_session(&provisioning_details, &app_state, PlaylistItemType::Catchup),
+            "a Provisioning custom video represents a successful provider handoff and must pin"
+        );
+
+        for failure_type in [
+            CustomVideoStreamType::ChannelUnavailable,
+            CustomVideoStreamType::ProviderConnectionsExhausted,
+            CustomVideoStreamType::UserConnectionsExhausted,
+            CustomVideoStreamType::UserAccountExpired,
+            CustomVideoStreamType::LowPriorityPreempted,
+        ] {
+            let failure_details = StreamDetails {
+                stream: None,
+                stream_info: Some((Vec::new(), StatusCode::BAD_REQUEST, None, Some(failure_type))),
+                provider_name: Some("provider_1".intern()),
+                request_url: None,
+                grace_period: GracePeriodOptions::default(),
+                provider_grace_active: false,
+                disable_provider_grace: false,
+                reconnect_flag: None,
+                provider_handle: None,
+                grace_resolution_context: None,
+            };
+            assert!(
+                !should_pin_provider_for_session(&failure_details, &app_state, PlaylistItemType::Catchup),
+                "{failure_type:?} is a failure fallback — must NOT pin the provider"
+            );
+        }
     }
 
     #[tokio::test]
