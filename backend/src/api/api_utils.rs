@@ -1461,6 +1461,18 @@ fn rewrite_query_auth_fields(url: &mut Url, new_username: &str, new_password: &s
     true
 }
 
+fn collect_path_segments(url: &Url) -> Option<Vec<String>> {
+    url.path_segments()
+        .map(|segments| segments.map(ToOwned::to_owned).collect::<Vec<_>>())
+}
+
+fn find_path_auth_segment_index(segments: &[String], username: &str, password: &str) -> Option<usize> {
+    segments.windows(2).position(|pair| {
+        pair.first().is_some_and(|segment| segment == username)
+            && pair.get(1).is_some_and(|segment| segment == password)
+    })
+}
+
 fn rewrite_path_auth_fields(
     url: &mut Url,
     old_username: &str,
@@ -1468,28 +1480,11 @@ fn rewrite_path_auth_fields(
     new_username: &str,
     new_password: &str,
 ) -> bool {
-    let Some(mut segments) = url
-        .path_segments()
-        .map(|segments| segments.map(ToOwned::to_owned).collect::<Vec<_>>())
-    else {
+    let Some(mut segments) = collect_path_segments(url) else {
         return false;
     };
 
-    let credential_index = if segments.len() >= 3
-        && matches!(segments.first().map(String::as_str), Some("live" | "movie" | "series"))
-        && segments.get(1).is_some_and(|segment| segment == old_username)
-        && segments.get(2).is_some_and(|segment| segment == old_password)
-    {
-        Some(1)
-    } else if segments.len() >= 2
-        && segments.first().is_some_and(|segment| segment == old_username)
-        && segments.get(1).is_some_and(|segment| segment == old_password)
-    {
-        Some(0)
-    } else {
-        None
-    };
-
+    let credential_index = find_path_auth_segment_index(&segments, old_username, old_password);
     let Some(credential_index) = credential_index else {
         return false;
     };
@@ -1553,15 +1548,11 @@ fn stream_url_account_matches(stream_url: &str, user_info: &crate::model::InputU
         return has_query_username && has_query_password;
     }
 
-    let mut segments = url.path_segments().into_iter().flatten();
-    let first = segments.next();
-    let (username, password) = match first {
-        Some("live" | "movie" | "series") => (segments.next(), segments.next()),
-        Some(username) => (Some(username), segments.next()),
-        None => return false,
+    let Some(segments) = collect_path_segments(&url) else {
+        return false;
     };
 
-    username == Some(user_info.username.as_str()) && password == Some(user_info.password.as_str())
+    find_path_auth_segment_index(&segments, &user_info.username, &user_info.password).is_some()
 }
 
 fn stream_url_has_account_signature(stream_url: &str) -> bool {
@@ -4097,8 +4088,24 @@ mod tests {
             "http://same.example/live/selected-user/selected-pass/123.ts",
             &provider
         ));
+        assert!(stream_url_matches_provider(
+            "http://same.example/timeshift/selected-user/selected-pass/30/2026-06-15:20-00/123.ts",
+            &provider
+        ));
+        assert!(stream_url_matches_provider(
+            "http://same.example/future-route/selected-user/selected-pass/opaque/123.ts",
+            &provider
+        ));
         assert!(!stream_url_matches_provider(
             "http://same.example/live/other-user/other-pass/123.ts",
+            &provider
+        ));
+        assert!(!stream_url_matches_provider(
+            "http://same.example/timeshift/other-user/other-pass/30/2026-06-15:20-00/123.ts",
+            &provider
+        ));
+        assert!(!stream_url_matches_provider(
+            "http://same.example/future-route/other-user/other-pass/opaque/123.ts",
             &provider
         ));
     }
@@ -4245,6 +4252,46 @@ mod tests {
         assert_eq!(
             rewritten,
             Some("http://cdn.example/live/alias-user/alias-pass/123.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn get_stream_alternative_url_rewrites_timeshift_path_credentials_for_alias_account() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider("http://alias.example", "alias-user", "alias-pass");
+        let stream_url = "http://provider.example/timeshift/source-user/source-pass/30/2026-06-15:20-00/123.ts";
+
+        let rewritten = get_stream_alternative_url(stream_url, &input, &alias);
+        assert_eq!(
+            rewritten,
+            Some("http://alias.example/timeshift/alias-user/alias-pass/30/2026-06-15:20-00/123.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn get_stream_alternative_url_rewrites_future_route_path_credentials_for_alias_account() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider("http://alias.example", "alias-user", "alias-pass");
+        let stream_url = "http://provider.example/future-route/source-user/source-pass/opaque/123.ts";
+
+        let rewritten = get_stream_alternative_url(stream_url, &input, &alias);
+        assert_eq!(
+            rewritten,
+            Some("http://alias.example/future-route/alias-user/alias-pass/opaque/123.ts".to_string())
         );
     }
 
