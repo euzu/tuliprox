@@ -391,6 +391,12 @@ fn video_download_changed(a: &crate::model::VideoDownloadConfig, b: &crate::mode
 }
 
 #[derive(Clone)]
+pub struct ManualPlaylistUpdateRequest {
+    pub run_id: u64,
+    pub targets: Arc<ProcessTargets>,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub forced_targets: Arc<ArcSwap<ProcessTargets>>, // as program arguments
     pub app_config: Arc<AppConfig>,
@@ -412,7 +418,7 @@ pub struct AppState {
     /// `try_send` deduplicates rapid clicks: if an update is already pending
     /// or the channel is full, the request is silently dropped so at most one
     /// update is queued at any time regardless of how many times the button is clicked.
-    pub manual_update_sender: mpsc::Sender<Arc<ProcessTargets>>,
+    pub manual_update_sender: mpsc::Sender<ManualPlaylistUpdateRequest>,
 }
 
 impl AppState {

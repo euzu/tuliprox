@@ -110,6 +110,10 @@ fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &Eve
         EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
             mem.permissions.contains(Permission::DownloadRead)
         }
+        EventMessage::PlaylistUpdateProgress(_) | EventMessage::PlaylistUpdate(_) => {
+            mem.permissions.contains(Permission::PlaylistWrite)
+        }
+        EventMessage::LibraryScanProgress(_) => mem.permissions.contains(Permission::LibraryWrite),
         _ => mem.permissions.contains(Permission::SystemRead),
     }
 }
@@ -364,10 +368,10 @@ async fn handle_event_message(
                         )
                         .await?;
                     }
-                    EventMessage::PlaylistUpdateProgress(target, msg) => {
+                    EventMessage::PlaylistUpdateProgress(progress) => {
                         send_event_response(
                             socket,
-                            ProtocolMessage::PlaylistUpdateProgressResponse(target, msg),
+                            ProtocolMessage::PlaylistUpdateProgressResponse(progress),
                             "Playlist update progress event",
                         )
                         .await?;
@@ -380,10 +384,10 @@ async fn handle_event_message(
                         )
                         .await?;
                     }
-                    EventMessage::LibraryScanProgress(summary) => {
+                    EventMessage::LibraryScanProgress(progress) => {
                         send_event_response(
                             socket,
-                            ProtocolMessage::LibraryScanProgressResponse(summary),
+                            ProtocolMessage::LibraryScanProgressResponse(progress),
                             "Library scan progress event",
                         )
                         .await?;
@@ -511,7 +515,11 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 mod tests {
     use super::websocket_can_receive_runtime_events;
     use crate::api::model::EventMessage;
-    use shared::model::{DownloadsDelta, DownloadsResponse, FileDownloadDto, Permission, ProtocolHandlerMemory, TaskKindDto, TaskPriorityDto, TransferStatusDto, UserRole};
+    use shared::model::{
+        DownloadsDelta, DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary,
+        LibraryScanSummaryStatus, Permission, PlaylistUpdateProgressEvent, ProtocolHandlerMemory, TaskKindDto,
+        TaskPriorityDto, TransferStatusDto, UserRole,
+    };
 
     #[test]
     fn test_websocket_runtime_events_allowed_for_admin() {
@@ -565,6 +573,45 @@ mod tests {
         assert!(!websocket_can_receive_runtime_events(
             &mem,
             &EventMessage::ServerError("err".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_websocket_playlist_progress_allowed_for_playlist_write_without_system_read() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::PlaylistWrite.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                run_id: 42,
+                target: "target".to_string(),
+                message: "step".to_string(),
+            })
+        ));
+    }
+
+    #[test]
+    fn test_websocket_library_progress_allowed_for_library_write_without_system_read() {
+        let mut mem = ProtocolHandlerMemory {
+            permissions: Permission::LibraryWrite.into(),
+            ..ProtocolHandlerMemory::default()
+        };
+        mem.role = UserRole::User;
+
+        assert!(websocket_can_receive_runtime_events(
+            &mem,
+            &EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
+                run_id: 7,
+                summary: LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Success,
+                    message: "done".to_string(),
+                    result: None,
+                },
+            })
         ));
     }
 

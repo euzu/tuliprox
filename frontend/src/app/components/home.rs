@@ -185,9 +185,9 @@ pub fn Home() -> Html {
                         services_ctx_clone.toastr.error(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.FAIL_FINISH"))
                     }
                 },
-                EventMessage::LibraryScanProgress(summary) => match summary.status {
-                    LibraryScanSummaryStatus::Success => services_ctx_clone.toastr.success(summary.message),
-                    LibraryScanSummaryStatus::Error => services_ctx_clone.toastr.error(summary.message),
+                EventMessage::LibraryScanProgress(progress) => match progress.summary.status {
+                    LibraryScanSummaryStatus::Success => services_ctx_clone.toastr.success(progress.summary.message),
+                    LibraryScanSummaryStatus::Error => services_ctx_clone.toastr.error(progress.summary.message),
                 },
                 _ => {}
             });

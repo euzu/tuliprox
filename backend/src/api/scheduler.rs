@@ -185,6 +185,7 @@ async fn run_playlist_update_inner(
         Some(Arc::clone(&app_state.metadata_manager)),
         None,
         None,
+        None,
     )
     .await;
 }
@@ -231,6 +232,8 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
         if lib_config.enabled {
             if let Some(permit) = app_state.update_guard.try_library() {
                 let event_manager = Arc::clone(&app_state.event_manager);
+                let run_id = event_manager.next_progress_run_id();
+                event_manager.set_library_scan_run_id(run_id);
                 spawn_library_scan(
                     event_manager,
                     lib_config.clone(),
@@ -240,6 +243,7 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
                         force_rescan: false,
                         message_prefix: "Scheduled ",
                         storage_dir: config.storage_dir.clone(),
+                        run_id,
                     },
                     permit,
                 );

@@ -14,6 +14,15 @@
   - MVP supports `movies/shows` with `trending` and `popular`.
   - User-owned Trakt lists remain configured separately under `trakt.lists[]`.
 
+- **Update Log In Playlist Update View**:
+  - The Playlists → Update view now shows a terminal-style log that accumulates `PlaylistUpdateProgress` and
+    `LibraryScanProgress` events in real time, prefixed with `[playlist]` / `[library]` and a local `HH:MM:SS`
+    timestamp, with auto-scroll to the latest line and a FIFO cap of 500 entries.
+  - The log is cleared synchronously when the user clicks either the playlist Update or the library Update button,
+    so each run starts with a fresh view.
+  - Styled to match the dark monospace look of a console (uses existing theme CSS variables for background, border,
+    and text color) and honors the same touch / overflow behavior as the rest of the view.
+
 - **Session Expiry Handling**:
   - The Web UI now schedules a client-side logout when the JWT expires, showing a notification and returning the
     user to the login screen instead of silently failing with 401 errors.

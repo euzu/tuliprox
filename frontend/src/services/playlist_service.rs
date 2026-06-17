@@ -4,9 +4,9 @@ use indexmap::IndexMap;
 use log::error;
 use shared::{
     model::{
-        EpgChannel, EpgTv, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, SeriesStreamProperties,
-        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, UiPlaylistCategories, UiPlaylistGroup,
-        UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
+        EpgChannel, EpgTv, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest,
+        SeriesStreamProperties, StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, UiPlaylistCategories,
+        UiPlaylistGroup, UiPlaylistItem, XtreamCluster, XtreamSeriesInfoDoc,
     },
     utils::concat_path_leading_slash,
 };
@@ -44,10 +44,10 @@ impl PlaylistService {
             stream_epg_path: api("epg/stream"),
         }
     }
-    pub async fn update_targets(&self, targets: &[&str]) -> bool {
-        request_post::<&[&str], ()>(&self.target_update_api_path, targets, None, None)
+    pub async fn update_targets(&self, targets: &[&str]) -> Option<OperationRunAccepted> {
+        request_post::<&[&str], OperationRunAccepted>(&self.target_update_api_path, targets, None, None)
             .await
-            .map_or_else(|_err| false, |_| true)
+            .unwrap_or(None)
     }
 
     pub async fn get_playlist_categories(
