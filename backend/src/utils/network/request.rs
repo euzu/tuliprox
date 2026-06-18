@@ -1544,13 +1544,18 @@ fn same_origin(lhs: &Url, rhs: &Url) -> bool {
         && lhs.port_or_known_default() == rhs.port_or_known_default()
 }
 
+fn is_safe_cross_origin_redirect_header(key: &str) -> bool {
+    key.eq_ignore_ascii_case("accept")
+        || key.eq_ignore_ascii_case("accept-encoding")
+        || key.eq_ignore_ascii_case("accept-language")
+        || key.eq_ignore_ascii_case("user-agent")
+        || key.eq_ignore_ascii_case("range")
+        || key.eq_ignore_ascii_case("if-range")
+        || key.eq_ignore_ascii_case("icy-metadata")
+}
+
 fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HashMap<String, String>) {
-    headers.retain(|key, _| {
-        !key.eq_ignore_ascii_case("authorization")
-            && !key.eq_ignore_ascii_case("cookie")
-            && !key.eq_ignore_ascii_case("proxy-authorization")
-            && !key.eq_ignore_ascii_case("host")
-    });
+    headers.retain(|key, _| is_safe_cross_origin_redirect_header(key));
 }
 
 async fn download_epg_content_as_file(
@@ -1976,6 +1981,7 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        is_safe_cross_origin_redirect_header,
         next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
         resolve_attempt_target, same_origin, send_with_retry_and_provider, send_with_retry_and_provider_policy,
         should_try_next_ip_on_connect_error, strip_sensitive_headers_for_cross_origin_redirect,
@@ -2137,7 +2143,9 @@ mod tests {
         headers.insert("Cookie".to_string(), "sid=123".to_string());
         headers.insert("Proxy-Authorization".to_string(), "Basic abc".to_string());
         headers.insert("Host".to_string(), "old.host".to_string());
-        headers.insert("X-Test".to_string(), "ok".to_string());
+        headers.insert("X-API-Key".to_string(), "secret".to_string());
+        headers.insert("Accept".to_string(), "application/x-mpegurl".to_string());
+        headers.insert("User-Agent".to_string(), "mpv".to_string());
 
         strip_sensitive_headers_for_cross_origin_redirect(&mut headers);
 
@@ -2145,7 +2153,20 @@ mod tests {
         assert!(!headers.contains_key("Cookie"));
         assert!(!headers.contains_key("Proxy-Authorization"));
         assert!(!headers.contains_key("Host"));
-        assert_eq!(headers.get("X-Test").map(String::as_str), Some("ok"));
+        assert!(!headers.contains_key("X-API-Key"));
+        assert_eq!(headers.get("Accept").map(String::as_str), Some("application/x-mpegurl"));
+        assert_eq!(headers.get("User-Agent").map(String::as_str), Some("mpv"));
+    }
+
+    #[test]
+    fn test_cross_origin_redirect_header_allowlist_is_minimal() {
+        assert!(is_safe_cross_origin_redirect_header("accept"));
+        assert!(is_safe_cross_origin_redirect_header("user-agent"));
+        assert!(is_safe_cross_origin_redirect_header("icy-metadata"));
+        assert!(!is_safe_cross_origin_redirect_header("authorization"));
+        assert!(!is_safe_cross_origin_redirect_header("cookie"));
+        assert!(!is_safe_cross_origin_redirect_header("x-api-key"));
+        assert!(!is_safe_cross_origin_redirect_header("x-auth-token"));
     }
 
     #[test]
