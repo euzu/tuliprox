@@ -180,11 +180,9 @@ pub fn PlaylistUpdateView() -> Html {
                     _ => 0,
                 };
                 if mode > 0 {
+                    log_lines.dispatch(LogLinesAction::Clear);
                     match services.config.update_library(mode == 2).await {
-                        Ok(()) => {
-                            log_lines.dispatch(LogLinesAction::Clear);
-                            services.toastr.success(translate.t("MESSAGES.LIBRARY_UPDATE.SUCCESS"));
-                        }
+                        Ok(()) => services.toastr.success(translate.t("MESSAGES.LIBRARY_UPDATE.SUCCESS")),
                         Err(_err) => services.toastr.error(translate.t("MESSAGES.LIBRARY_UPDATE.FAIL")),
                     }
                 }
