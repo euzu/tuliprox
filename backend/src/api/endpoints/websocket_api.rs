@@ -587,7 +587,6 @@ mod tests {
         assert!(websocket_can_receive_runtime_events(
             &mem,
             &EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                run_id: 42,
                 target: "target".to_string(),
                 message: "step".to_string(),
             })
@@ -605,7 +604,6 @@ mod tests {
         assert!(websocket_can_receive_runtime_events(
             &mem,
             &EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
-                run_id: 7,
                 summary: LibraryScanSummary {
                     status: LibraryScanSummaryStatus::Success,
                     message: "done".to_string(),

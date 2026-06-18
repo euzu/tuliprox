@@ -148,13 +148,10 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                         let dto_name = selected_dto.as_ref().map_or_else(String::new, |d| d.name.to_string());
                         spawn_local(async move {
                             let targets = vec![dto_name.as_str()];
-                            match services_ctx.playlist.update_targets(&targets).await {
-                                Some(_) => {
-                                    services_ctx.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
-                                }
-                                None => {
-                                    services_ctx.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL"));
-                                }
+                            if services_ctx.playlist.update_targets(&targets).await {
+                                services_ctx.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
+                            } else {
+                                services_ctx.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL"));
                             }
                         });
                     }

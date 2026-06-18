@@ -87,20 +87,12 @@ pub fn PlaylistUpdateView() -> Html {
             let services_for_cleanup = services.clone();
             let sub_id = services.event.subscribe(move |msg| match msg {
                 EventMessage::PlaylistUpdateProgress(progress) => {
-                    push_log_line(
-                        &log_lines,
-                        format!("{} [playlist:{}] {}", format_hms_now(), progress.run_id, progress.message),
-                    );
+                    push_log_line(&log_lines, format!("{} [playlist] {}", format_hms_now(), progress.message));
                 }
                 EventMessage::LibraryScanProgress(progress) => {
                     push_log_line(
                         &log_lines,
-                        format!(
-                            "{} [library:{}] {}",
-                            format_hms_now(),
-                            progress.run_id,
-                            format_library_log_line(&progress.summary)
-                        ),
+                        format!("{} [library] {}", format_hms_now(), format_library_log_line(&progress.summary)),
                     );
                 }
                 _ => {}
@@ -161,14 +153,10 @@ pub fn PlaylistUpdateView() -> Html {
                     targets.iter().map(|t| t.name.clone()).collect::<Vec<String>>()
                 };
                 let update_target_names = target_names.iter().map(|t| t.as_str()).collect::<Vec<&str>>();
-                match services.playlist.update_targets(&update_target_names).await {
-                    Some(accepted) => {
-                        services.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
-                        let _ = accepted;
-                    }
-                    None => {
-                        services.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL"));
-                    }
+                if services.playlist.update_targets(&update_target_names).await {
+                    services.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
+                } else {
+                    services.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL"));
                 }
             });
         })
@@ -193,12 +181,10 @@ pub fn PlaylistUpdateView() -> Html {
                 };
                 if mode > 0 {
                     match services.config.update_library(mode == 2).await {
-                        Ok(Some(accepted)) => {
+                        Ok(()) => {
                             log_lines.dispatch(LogLinesAction::Clear);
                             services.toastr.success(translate.t("MESSAGES.LIBRARY_UPDATE.SUCCESS"));
-                            let _ = accepted;
                         }
-                        Ok(None) => services.toastr.error(translate.t("MESSAGES.LIBRARY_UPDATE.FAIL")),
                         Err(_err) => services.toastr.error(translate.t("MESSAGES.LIBRARY_UPDATE.FAIL")),
                     }
                 }

@@ -1359,10 +1359,10 @@ fn get_stream_alternative_url_m3u(
     input: &ConfigInput,
     alias_input: &Arc<ProviderConfig>,
 ) -> Option<String> {
+    let alt_input_user_info = alias_input.get_user_info()?;
     if let Some((source_base_url, source_username, source_password)) =
         find_input_account_by_signature(stream_url, input)
     {
-        let alt_input_user_info = alias_input.get_user_info()?;
         let modified = stream_url.replacen(&source_base_url, &alt_input_user_info.base_url, 1);
         let mut url = Url::parse(&modified).ok()?;
 
@@ -1381,7 +1381,7 @@ fn get_stream_alternative_url_m3u(
 
         return Some(url.to_string());
     }
-    if stream_url_has_account_signature(stream_url) {
+    if stream_url_has_account_signature(stream_url, &alt_input_user_info) {
         return None;
     }
     Some(stream_url.to_string())
@@ -1523,7 +1523,7 @@ fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) 
     // For M3U inputs, the stored playlist entry itself is the trust anchor.
     // Open external URLs are therefore allowed, but external URLs that carry
     // explicit account markers must still match the selected provider account.
-    if stream_url_has_account_signature(stream_url) {
+    if stream_url_has_account_signature(stream_url, &user_info) {
         return stream_url_account_matches(stream_url, &user_info);
     }
     true
@@ -1565,7 +1565,7 @@ fn stream_url_account_matches(stream_url: &str, user_info: &crate::model::InputU
     find_path_auth_segment_index(&segments, &user_info.username, &user_info.password).is_some()
 }
 
-fn stream_url_has_account_signature(stream_url: &str) -> bool {
+fn stream_url_has_account_signature(stream_url: &str, user_info: &crate::model::InputUserInfo) -> bool {
     let Ok(url) = Url::parse(stream_url) else {
         return false;
     };
@@ -1587,6 +1587,17 @@ fn stream_url_has_account_signature(stream_url: &str) -> bool {
     if has_query_username || has_query_password {
         return has_query_username && has_query_password;
     }
+
+    // Path-based credentials: some Xtream endpoints embed the account in the URL
+    // path (e.g. /live/<user>/<pass>/...). Only flag a signature when the
+    // consecutive segments actually match the configured user/pass — arbitrary
+    // open paths must not be treated as account signatures.
+    if let Some(segments) = collect_path_segments(&url) {
+        if find_path_auth_segment_index(&segments, &user_info.username, &user_info.password).is_some() {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -4210,6 +4221,25 @@ mod tests {
 
         assert!(!stream_url_matches_provider(
             "http://cdn.example/segment.ts?username=other-user&password=other-pass",
+            &provider
+        ));
+    }
+
+    #[test]
+    fn stream_url_matches_provider_detects_m3u_path_credentials_against_alias_account() {
+        // Regression: a cross-host M3U URL whose path embeds the alias's
+        // account credentials must be detected as an account signature and
+        // validated, not silently allowed as an open URL.
+        let provider = test_runtime_provider_with_type(
+            "http://provider.example",
+            "selected-user",
+            "selected-pass",
+            InputType::M3u,
+        );
+
+        // Matching path credentials -> allowed (account matches).
+        assert!(stream_url_matches_provider(
+            "http://cdn.example/live/selected-user/selected-pass/123.ts",
             &provider
         ));
     }

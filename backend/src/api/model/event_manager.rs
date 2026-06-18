@@ -6,11 +6,7 @@ use shared::model::{
 };
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        atomic::AtomicU64,
-        Arc,
-    },
+    sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
     time::Duration,
 };
 use tokio::sync::RwLock;
@@ -42,8 +38,6 @@ pub struct EventManager {
     meter_registry: Arc<RwLock<MeterRegistry>>,
     stream_meter_subscriber_count: Arc<AtomicUsize>,
     meter_sampler_cancel: CancellationToken,
-    progress_run_seq: AtomicU64,
-    progress_run_id: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -74,8 +68,6 @@ impl EventManager {
             meter_registry,
             stream_meter_subscriber_count,
             meter_sampler_cancel,
-            progress_run_seq: AtomicU64::new(1),
-            progress_run_id: AtomicU64::new(0),
         }
     }
 
@@ -116,16 +108,6 @@ impl EventManager {
     pub fn get_meter_channel(&self) -> tokio::sync::broadcast::Receiver<Vec<StreamMeterEntry>> {
         self.meter_channel_tx.subscribe()
     }
-
-    pub fn next_progress_run_id(&self) -> u64 { self.progress_run_seq.fetch_add(1, Ordering::Relaxed) }
-
-    pub fn set_manual_playlist_run_id(&self, run_id: u64) { self.progress_run_id.store(run_id, Ordering::Relaxed); }
-
-    pub fn current_manual_playlist_run_id(&self) -> u64 { self.progress_run_id.load(Ordering::Relaxed) }
-
-    pub fn set_library_scan_run_id(&self, run_id: u64) { self.progress_run_id.store(run_id, Ordering::Relaxed); }
-
-    pub fn current_library_scan_run_id(&self) -> u64 { self.progress_run_id.load(Ordering::Relaxed) }
 
     pub fn send_event(&self, event: EventMessage) -> bool {
         if let Err(err) = self.channel_tx.send(event) {

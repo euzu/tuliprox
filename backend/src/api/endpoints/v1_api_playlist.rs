@@ -210,27 +210,17 @@ async fn playlist_update(
     match process_targets {
         Ok(valid_targets) => {
             let valid_targets = Arc::new(valid_targets);
-            let run_id = app_state.event_manager.next_progress_run_id();
             // Deduplicate rapid clicks: the channel has capacity 1, so at most one
             // update is queued at any time.  Additional requests while the channel
             // is full are silently dropped — the pending run already covers them.
             match app_state
                 .manual_update_sender
-                .try_send(crate::api::model::ManualPlaylistUpdateRequest { run_id, targets: valid_targets })
+                .try_send(crate::api::model::ManualPlaylistUpdateRequest { targets: valid_targets })
             {
-                Ok(()) => {
-                    app_state.event_manager.set_manual_playlist_run_id(run_id);
-                    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted { run_id })).into_response()
-                }
+                Ok(()) => (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response(),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     debug!("Manual playlist update deduplicated: an update is already pending or running");
-                    (
-                        axum::http::StatusCode::ACCEPTED,
-                        axum::Json(OperationRunAccepted {
-                            run_id: app_state.event_manager.current_manual_playlist_run_id(),
-                        }),
-                    )
-                        .into_response()
+                    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response()
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     debug!("Manual playlist update rejected: worker channel closed (server shutting down)");

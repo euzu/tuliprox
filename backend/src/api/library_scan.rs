@@ -11,7 +11,6 @@ pub(crate) struct LibraryScanTaskOptions {
     pub force_rescan: bool,
     pub message_prefix: &'static str,
     pub storage_dir: String,
-    pub run_id: u64,
 }
 
 pub(crate) fn spawn_library_scan(
@@ -22,7 +21,7 @@ pub(crate) fn spawn_library_scan(
     options: LibraryScanTaskOptions,
     permit: UpdateGuardPermit,
 ) {
-    let LibraryScanTaskOptions { force_rescan, message_prefix, storage_dir, run_id } = options;
+    let LibraryScanTaskOptions { force_rescan, message_prefix, storage_dir } = options;
     let prefix = message_prefix.to_string();
     tokio::spawn(async move {
         let _permit = permit;
@@ -38,10 +37,8 @@ pub(crate) fn spawn_library_scan(
                     ),
                     result: Some(result),
                 };
-                let _ = event_manager.send_event(EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
-                    run_id,
-                    summary: response,
-                }));
+                let _ = event_manager
+                    .send_event(EventMessage::LibraryScanProgress(LibraryScanProgressEvent { summary: response }));
             }
             Err(err) => {
                 error!("{prefix}Library scan failed: {err}");
@@ -50,10 +47,8 @@ pub(crate) fn spawn_library_scan(
                     message: format!("{prefix}Scan failed: {err}"),
                     result: None,
                 };
-                let _ = event_manager.send_event(EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
-                    run_id,
-                    summary: response,
-                }));
+                let _ = event_manager
+                    .send_event(EventMessage::LibraryScanProgress(LibraryScanProgressEvent { summary: response }));
             }
         }
     });

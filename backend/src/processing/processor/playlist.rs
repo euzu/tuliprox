@@ -624,7 +624,7 @@ async fn process_source(
     let mut target_stats = Vec::<TargetStats>::new();
     if let Some(source) = sources.get_source_at(source_idx) {
         let mut source_playlists = Vec::with_capacity(source.inputs.len());
-        let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref(), ctx.progress_run_id);
+        let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
         // Download the sources
         let mut source_downloaded = false;
         let mut disabled_inputs: Vec<Arc<str>> = vec![];
@@ -884,13 +884,11 @@ async fn download_input(
     (playlist_download_result.download_err, playlist, error)
 }
 
-fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>, run_id: Option<u64>) -> StepMeasureCallback {
+fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepMeasureCallback {
     if let Some(event_mgr) = event_manager {
         let events = event_mgr.clone();
-        let run_id = run_id.unwrap_or_default();
         Box::new(move |context: &str, msg: &str| {
             events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                run_id,
                 target: context.to_owned(),
                 message: msg.to_owned(),
             }));
@@ -924,7 +922,6 @@ pub struct PlaylistProcessingContext {
     pub config: Arc<AppConfig>,
     pub user_targets: Arc<ProcessTargets>,
     pub event_manager: Option<Arc<EventManager>>,
-    pub progress_run_id: Option<u64>,
     pub playlist_state: Option<Arc<PlaylistStorageState>>,
     pub disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
 
@@ -1125,7 +1122,7 @@ async fn process_playlist_for_target(
     let mut new_playlist: Vec<PlaylistGroup> = vec![];
 
     debug!("Executing processing pipes");
-    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref(), ctx.progress_run_id);
+    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
 
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
@@ -1553,7 +1550,6 @@ pub async fn exec_processing(
     metadata_manager: Option<Arc<MetadataUpdateManager>>,
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
     acquired_permit: Option<crate::api::model::UpdateGuardPermit>,
-    progress_run_id: Option<u64>,
 ) {
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {
@@ -1593,8 +1589,6 @@ pub async fn exec_processing(
         None
     };
 
-    let progress_run_id = progress_run_id.or_else(|| event_manager.as_ref().map(|events| events.next_progress_run_id()));
-
     info!("🌷 Update process started.");
 
     log_memory_snapshot("exec_processing start");
@@ -1605,7 +1599,6 @@ pub async fn exec_processing(
         config: app_config.clone(),
         user_targets: targets.clone(),
         event_manager: event_manager.clone(),
-        progress_run_id,
         playlist_state: playlist_state.clone(),
         processed_inputs: Arc::new(Mutex::new(HashSet::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -1675,7 +1668,6 @@ pub async fn exec_processing(
 
     if let Some(events) = event_manager.as_deref() {
         events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-            run_id: progress_run_id.unwrap_or_default(),
             target: "Playlist Update".to_string(),
             message: update_finished_message.clone(),
         }));

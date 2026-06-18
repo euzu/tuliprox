@@ -433,10 +433,10 @@ impl ConfigService {
         request_get::<()>(&self.geoip_path, None, None).await
     }
 
-    pub async fn update_library(&self, force_rescan: bool) -> Result<Option<OperationRunAccepted>, Error> {
+    pub async fn update_library(&self, force_rescan: bool) -> Result<(), Error> {
         let path = concat_path(&self.library_path, "scan");
         let params = LibraryScanRequest { force_rescan };
-        request_post::<LibraryScanRequest, OperationRunAccepted>(&path, params, None, None).await
+        request_post::<LibraryScanRequest, OperationRunAccepted>(&path, params, None, None).await.map(|_| ())
     }
 
     pub async fn complete_setup(&self, payload: SetupCompleteRequestDto) -> Result<(), Error> {

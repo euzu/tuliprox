@@ -392,7 +392,6 @@ fn video_download_changed(a: &crate::model::VideoDownloadConfig, b: &crate::mode
 
 #[derive(Clone)]
 pub struct ManualPlaylistUpdateRequest {
-    pub run_id: u64,
     pub targets: Arc<ProcessTargets>,
 }
 

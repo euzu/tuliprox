@@ -201,7 +201,6 @@ fn spawn_metadata_trigger_update(
                             Some(app_state_clone.metadata_manager.clone()),
                             pre_processed_inputs.clone(),
                             Some(lock),
-                            None,
                         )
                         .await;
                         break;
@@ -351,7 +350,6 @@ async fn run_manual_update_worker(
             Some(Arc::clone(&app_state.metadata_manager)),
             None,
             None,
-            Some(request.run_id),
         )
         .await;
     }
@@ -423,7 +421,6 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                 disabled_headers,
                 Some(provider_manager),
                 Some(metadata_manager),
-                None,
                 None,
                 None,
             )

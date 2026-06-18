@@ -44,10 +44,8 @@ impl PlaylistService {
             stream_epg_path: api("epg/stream"),
         }
     }
-    pub async fn update_targets(&self, targets: &[&str]) -> Option<OperationRunAccepted> {
-        request_post::<&[&str], OperationRunAccepted>(&self.target_update_api_path, targets, None, None)
-            .await
-            .unwrap_or(None)
+    pub async fn update_targets(&self, targets: &[&str]) -> bool {
+        request_post::<&[&str], OperationRunAccepted>(&self.target_update_api_path, targets, None, None).await.is_ok()
     }
 
     pub async fn get_playlist_categories(
