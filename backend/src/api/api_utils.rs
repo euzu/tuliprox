@@ -8384,7 +8384,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_playback_session_fingerprint_is_unique_per_initial_socket() {
+    fn adaptive_playback_session_fingerprint_is_logical_across_initial_sockets() {
         let Some(first_addr) = "127.0.0.1:55177".parse().ok() else {
             return;
         };
@@ -8397,9 +8397,10 @@ mod tests {
         let first_token = create_playback_session_fingerprint(&first, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
         let second_token = create_playback_session_fingerprint(&second, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
 
-        assert_ne!(first_token, second_token);
-        assert!(first_token.contains(&first.addr.to_string()));
-        assert!(second_token.contains(&second.addr.to_string()));
+        assert_eq!(first_token, second_token);
+        assert!(first_token.contains(&first.key));
+        assert!(!first_token.contains(&first.addr.to_string()));
+        assert!(!second_token.contains(&second.addr.to_string()));
     }
 
     #[test]

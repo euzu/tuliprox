@@ -31,6 +31,8 @@
 
   .tp__stats {
     &__body {
+      padding-right: var(--padding-default);
+      padding-bottom: var(--padding-default);
       &-group-mobile {
         display: none;
         width: 100%;

@@ -18,6 +18,8 @@
     display: flex;
     flex-flow: column;
     gap: var(--gap-default);
+    padding-right: var(--padding-default);
+    padding-bottom: var(--padding-default);
     overflow: auto;
     pointer-events: auto;
     touch-action: pan-x pan-y;

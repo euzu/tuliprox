@@ -26,6 +26,8 @@
       display: grid;
       grid-template-columns: var(--action-card-width) var(--action-card-width);
       gap: var(--gap-large);
+      padding-right: var(--padding-default);
+      padding-bottom: var(--padding-default);
 
       @media (max-width: size.$dashboard-mobile-breakpoint) {
         grid-template-columns: var(--action-card-width);
