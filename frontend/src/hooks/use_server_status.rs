@@ -52,6 +52,14 @@ fn dedupe_streams_by_identity(streams: &mut Vec<StreamInfo>) {
     streams.retain(|stream| seen.insert(stream_identity_key(stream)));
 }
 
+fn should_keep_preserved_stream_visible(stream: &StreamInfo) -> bool {
+    stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
+}
+
+fn should_keep_stream_when_connections_drop_to_zero(stream: &StreamInfo) -> bool {
+    stream.preserved && should_keep_preserved_stream_visible(stream)
+}
+
 fn is_running_download(download: &FileDownloadDto) -> bool { download.status == TransferStatusDto::Running }
 
 fn download_stream_uid(id: &str) -> u32 {
@@ -177,7 +185,14 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
     match event {
         ActiveUserConnectionChange::Updated(stream_info) => {
             if stream_info.preserved {
-                if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
+                if should_keep_preserved_stream_visible(&stream_info) {
+                    if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
+                        server_status.active_user_streams[pos] = stream_info;
+                    } else {
+                        server_status.active_user_streams.push(stream_info);
+                    }
+                    dedupe_streams_by_identity(&mut server_status.active_user_streams);
+                } else if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
                     server_status.active_user_streams.remove(pos);
                 }
                 return;
@@ -199,7 +214,7 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
             server_status.active_users = user_count;
             server_status.active_user_connections = connections;
             if connections == 0 {
-                server_status.active_user_streams.clear();
+                server_status.active_user_streams.retain(should_keep_stream_when_connections_drop_to_zero);
             }
         }
     }
@@ -444,7 +459,26 @@ mod tests {
     }
 
     #[test]
-    fn test_preserved_update_removes_active_stream_without_clearing_other_rows() {
+    fn test_connections_zero_keeps_preserved_adaptive_rows_for_ttl_cleanup() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls);
+        preserved.preserved = true;
+        let non_adaptive = test_stream(2, "127.0.0.1:5678", Some("tok-vod"), PlaylistItemType::Video);
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![preserved.clone(), non_adaptive],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Connections(1, 0));
+
+        assert_eq!(status.active_users, 1);
+        assert_eq!(status.active_user_connections, 0);
+        assert_eq!(status.active_user_streams, vec![preserved]);
+    }
+
+    #[test]
+    fn test_preserved_adaptive_update_stays_visible_for_frontend_ttl_cleanup() {
         let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls);
         preserved.preserved = true;
         let other = test_stream(2, "127.0.0.1:5678", Some("tok-other"), PlaylistItemType::LiveHls);
@@ -453,6 +487,34 @@ mod tests {
             active_user_connections: 2,
             active_user_streams: vec![
                 test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls),
+                other.clone(),
+            ],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(preserved));
+
+        assert_eq!(status.active_user_streams.len(), 2);
+        assert!(status
+            .active_user_streams
+            .iter()
+            .any(|stream| stream.addr == "127.0.0.1:1234".parse::<SocketAddr>().unwrap_or_else(|_| unreachable!())
+                && stream.preserved));
+        assert!(status.active_user_streams.iter().any(|stream| stream == &other));
+        assert_eq!(status.active_users, 2);
+        assert_eq!(status.active_user_connections, 2);
+    }
+
+    #[test]
+    fn test_preserved_non_adaptive_update_removes_active_stream_without_clearing_other_rows() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-vod"), PlaylistItemType::Video);
+        preserved.preserved = true;
+        let other = test_stream(2, "127.0.0.1:5678", Some("tok-other"), PlaylistItemType::LiveHls);
+        let mut status = shared::model::StatusCheck {
+            active_users: 2,
+            active_user_connections: 2,
+            active_user_streams: vec![
+                test_stream(1, "127.0.0.1:1234", Some("tok-vod"), PlaylistItemType::Video),
                 other.clone(),
             ],
             ..Default::default()

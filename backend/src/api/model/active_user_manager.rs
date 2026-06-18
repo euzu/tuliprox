@@ -128,6 +128,7 @@ pub struct UserSession {
     pub virtual_id: u32,
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
+    pub provider_session_headers: HashMap<String, String>,
     pub addr: SocketAddr,
     pub socket_bound: bool,
     pub active_addrs: Vec<SocketAddr>,
@@ -1600,6 +1601,7 @@ impl ActiveUserManager {
             virtual_id: params.virtual_id,
             provider: params.provider.intern(),
             stream_url: params.stream_url.intern(),
+            provider_session_headers: HashMap::new(),
             addr: *params.addr,
             socket_bound: params.socket_bound,
             active_addrs: vec![*params.addr],
@@ -1975,11 +1977,17 @@ impl ActiveUserManager {
                 session.socket_bound = socket_bound;
                 remember_session_addr(session, *addr);
                 Self::bump_session_transition_version(session);
+                let mut reset_provider_session_headers = false;
                 if &*session.stream_url != stream_url {
                     session.stream_url = stream_url.intern();
+                    reset_provider_session_headers = true;
                 }
                 if &*session.provider != provider {
                     session.provider = provider.intern();
+                    reset_provider_session_headers = true;
+                }
+                if reset_provider_session_headers {
+                    session.provider_session_headers.clear();
                 }
                 // Normalize stale lifecycle states on session refresh.
                 // Expired, PendingProvider, and Preserved sessions cannot stay in those states
@@ -2687,6 +2695,24 @@ impl ActiveUserManager {
         self.update_user_session(username, token).await
     }
 
+    pub async fn update_session_provider_headers(
+        &self,
+        username: &str,
+        token: &str,
+        provider_session_headers: &HashMap<String, String>,
+    ) -> bool {
+        let mut user_connections = self.connections.write().await;
+        let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+            return false;
+        };
+        let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) else {
+            return false;
+        };
+        session.provider_session_headers.clone_from(provider_session_headers);
+        session.ts = current_time_secs();
+        true
+    }
+
     pub async fn pending_provider_version(&self, username: &str, token: &str) -> Option<u64> {
         let user_connections = self.connections.read().await;
         let connection_data = user_connections.by_key.get(username)?;
@@ -3340,6 +3366,7 @@ mod tests {
                 virtual_id: 7001,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/live.m3u8".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -3401,6 +3428,7 @@ mod tests {
                 virtual_id: 7002,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/live.m3u8".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -7801,6 +7829,7 @@ mod tests {
                 virtual_id: 9002,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/stream.ts".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -7842,6 +7871,7 @@ mod tests {
                 virtual_id: 9003,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/stream.ts".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -7916,6 +7946,7 @@ mod tests {
                 virtual_id: 9004,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/stream.ts".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],

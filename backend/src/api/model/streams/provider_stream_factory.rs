@@ -80,6 +80,7 @@ pub(crate) struct ProviderStreamFactoryParams<'a> {
     pub stream_url: &'a Url,
     pub req_headers: &'a HeaderMap,
     pub input_headers: Option<&'a HashMap<String, String>>,
+    pub session_headers: Option<&'a HashMap<String, String>>,
     pub disabled_headers: Option<&'a ReverseProxyDisabledHeaderConfig>,
     pub default_user_agent: Option<&'a str>,
     pub username: Option<&'a str>,
@@ -98,6 +99,7 @@ impl ProviderStreamFactoryOptions {
             stream_url,
             req_headers,
             input_headers,
+            session_headers,
             disabled_headers,
             default_user_agent,
             username,
@@ -115,8 +117,15 @@ impl ProviderStreamFactoryOptions {
         let requested_range = get_request_range_start_bytes(&req_headers);
         req_headers.remove("range");
 
+        let merged_input_headers = merge_provider_request_headers(*input_headers, *session_headers);
+
         // We merge configured input headers with the headers from the request.
-        let headers = get_request_headers(*input_headers, Some(&req_headers), *disabled_headers, *default_user_agent);
+        let headers = get_request_headers(
+            merged_input_headers.as_ref(),
+            Some(&req_headers),
+            *disabled_headers,
+            *default_user_agent,
+        );
 
         let default_user_agent = default_user_agent
             .and_then(|ua| {
@@ -245,6 +254,23 @@ impl ProviderStreamFactoryOptions {
 
     fn get_connect_failure_stage(&self) -> Option<FailureStage> { self.connect_failure_stage }
 
+}
+
+fn merge_provider_request_headers(
+    input_headers: Option<&HashMap<String, String>>,
+    session_headers: Option<&HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    match (input_headers, session_headers) {
+        (None, None) => None,
+        (Some(headers), None) | (None, Some(headers)) => Some(headers.clone()),
+        (Some(input), Some(session)) => {
+            let mut merged = input.clone();
+            for (key, value) in session {
+                merged.insert(key.clone(), value.clone());
+            }
+            Some(merged)
+        }
+    }
 }
 
 fn record_provider_open_failure(
@@ -871,6 +897,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -891,6 +918,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -911,6 +939,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -932,6 +961,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -959,6 +989,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: None,
@@ -975,6 +1006,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: None,
@@ -1005,6 +1037,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: None,
@@ -1035,6 +1068,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: Some("alice"),
@@ -1085,5 +1119,38 @@ mod tests {
 
         assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveHls, &headers));
         assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveDash, &headers));
+    }
+
+    #[test]
+    fn session_headers_are_forwarded_to_provider_requests() {
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let stream_url = Url::parse("http://example.com/live/segment.ts").unwrap();
+        let req_headers = HeaderMap::new();
+        let mut session_headers = HashMap::new();
+        session_headers.insert(String::from("cookie"), String::from("sid=abc; pref=1"));
+        let stream_options =
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
+            addr,
+            item_type: PlaylistItemType::LiveHls,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
+            session_headers: Some(&session_headers),
+            disabled_headers: None,
+            default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
+        });
+
+        assert_eq!(
+            options.get_headers().get(axum::http::header::COOKIE).and_then(|value| value.to_str().ok()),
+            Some("sid=abc; pref=1")
+        );
     }
 }

@@ -724,6 +724,7 @@ struct StreamingAcquireOptions<'a> {
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
     session_owner: Option<&'a str>,
+    accept_requested_stream_url: bool,
 }
 
 pub(crate) fn connection_priority_for_kind(user: &ProxyUserCredentials, kind: crate::api::model::ConnectionKind) -> i8 {
@@ -1605,7 +1606,11 @@ fn select_provider_stream_url(
     stream_url: &str,
     input: &ConfigInput,
     provider_cfg: &Arc<ProviderConfig>,
+    accept_requested_stream_url: bool,
 ) -> Option<(Arc<str>, String)> {
+    if accept_requested_stream_url {
+        return Some((provider_cfg.name.clone(), stream_url.to_string()));
+    }
     if stream_url_matches_provider(stream_url, provider_cfg) {
         Some((provider_cfg.name.clone(), stream_url.to_string()))
     } else {
@@ -1741,6 +1746,7 @@ async fn resolve_streaming_strategy(
     options: StreamingAcquireOptions<'_>,
 ) -> StreamingStrategy {
     // allocate a provider connection
+    let accept_requested_stream_url = options.accept_requested_stream_url;
     let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, options).await;
 
     // panel_api provisioning/loading is handled later in the stream creation flow
@@ -1756,7 +1762,12 @@ async fn resolve_streaming_strategy(
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
                 // alias URLs in persisted playlists until the next processing run.
-                if let Some((selected_provider_name, url)) = select_provider_stream_url(stream_url, input, provider_cfg) {
+                if let Some((selected_provider_name, url)) = select_provider_stream_url(
+                    stream_url,
+                    input,
+                    provider_cfg,
+                    accept_requested_stream_url,
+                ) {
                     debug_if_enabled!(
                         "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",
                         sanitize_sensitive_info(&input.name),
@@ -1865,6 +1876,8 @@ async fn create_stream_response_details(
     connection_kind: crate::api::model::ConnectionKind,
     is_reopen: bool,
     session_owner: Option<&str>,
+    session_headers: Option<&HashMap<String, String>>,
+    accept_requested_stream_url: bool,
     grace_hold_override: Option<bool>,
     grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
 ) -> Result<StreamDetails, TuliproxError> {
@@ -1880,6 +1893,7 @@ async fn create_stream_response_details(
             user_priority,
             connection_kind,
             session_owner,
+            accept_requested_stream_url,
         },
     )
         .await;
@@ -1930,6 +1944,7 @@ async fn create_stream_response_details(
                 stream_info,
                 provider_name: Some(provider_name),
                 request_url: None,
+                session_headers: session_headers.cloned(),
                 grace_period: grace_period_options,
                 provider_grace_active: false,
                 disable_provider_grace: false,
@@ -1987,6 +2002,7 @@ async fn create_stream_response_details(
                             stream_url: &url,
                             req_headers,
                             input_headers: streaming_strategy.input_headers.as_ref(),
+                            session_headers,
                             disabled_headers: disabled_headers.as_ref(),
                             default_user_agent: default_user_agent.as_deref(),
                             username: Some(username),
@@ -2046,6 +2062,7 @@ async fn create_stream_response_details(
                 stream_info,
                 provider_name: guard_provider_name.clone(),
                 request_url: Some(request_url.clone()),
+                session_headers: session_headers.cloned(),
                 grace_period: grace_period_options,
                 provider_grace_active,
                 disable_provider_grace: false,
@@ -2365,6 +2382,8 @@ pub async fn force_provider_stream_response(
         connection_kind,
         true,
         Some(user_session.token.as_str()),
+        Some(&user_session.provider_session_headers),
+        true,
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
         None,
     )
@@ -2595,6 +2614,10 @@ pub(crate) async fn stream_response(
     }
 
     let stream_options = get_stream_options(app_state);
+    let session_state = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await;
     let mut stream_details = match create_stream_response_details(
         app_state,
         &stream_options,
@@ -2615,6 +2638,8 @@ pub(crate) async fn stream_response(
         connection_kind,
         false,
         Some(session_token),
+        session_state.as_ref().map(|session| &session.provider_session_headers),
+        pinned_provider.is_some(),
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
         activation.grace_context.clone(),
     )
@@ -3774,8 +3799,8 @@ pub(crate) fn create_playback_session_fingerprint(
     // Adaptive playlist starts need a per-initial-socket token so two players behind
     // the same IP/UA can watch the same HLS/DASH stream independently. The created
     // UserSession itself can still be non-socket-bound.
-    let socket_bound =
-        is_socket_bound_playback_session(item_type, extension) || is_session_based_playback(item_type, extension);
+    let session_bound = is_session_based_playback(item_type, extension);
+    let socket_bound = !session_bound && is_socket_bound_playback_session(item_type, extension);
     create_session_fingerprint(fingerprint, username, virtual_id, socket_bound)
 }
 
@@ -4616,6 +4641,7 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("vod-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
@@ -4637,6 +4663,7 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("live-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
@@ -4677,6 +4704,7 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("live-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
@@ -4715,12 +4743,52 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("live-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
 
         assert!(strategy.provider_handle.is_none());
         assert!(matches!(strategy.provider_stream_state, ProviderStreamState::Custom(_)));
+
+        app_state.active_provider.release_connection(&addr).await;
+    }
+
+    #[tokio::test]
+    async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
+        let app_state = create_test_dual_provider_app_state();
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .sources
+            .load()
+            .get_input_by_name(&input_name)
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        let addr: SocketAddr = "127.0.0.1:55306".parse().unwrap_or_else(|_| unreachable!());
+        let trusted_url = "http://unmapped.example/live/user1/pass1/100.ts";
+        let strategy = resolve_streaming_strategy(
+            &app_state,
+            trusted_url,
+            &create_test_fingerprint(addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: None,
+                allow_forced_provider_fallback: false,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("live-session"),
+                accept_requested_stream_url: true,
+            },
+        )
+        .await;
+
+        let ProviderStreamState::Available(Some(provider), url) = strategy.provider_stream_state else {
+            panic!("session-requested URL should be accepted for the pinned provider")
+        };
+        assert_eq!(provider.as_ref(), "provider_1");
+        assert_eq!(url.as_ref(), trusted_url);
 
         app_state.active_provider.release_connection(&addr).await;
     }
@@ -4734,6 +4802,7 @@ mod tests {
             virtual_id: 282,
             provider: Arc::<str>::from("provider"),
             stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
+            provider_session_headers: HashMap::new(),
             addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
             socket_bound: false,
             active_addrs: vec!["127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!())],
@@ -5041,6 +5110,7 @@ mod tests {
                 PlaylistItemType::LiveHls => "http://provider-1.example/live/42.m3u8",
                 _ => "http://provider-1.example/live/42.ts",
             }),
+            provider_session_headers: HashMap::new(),
             addr: "127.0.0.1:55555".parse().unwrap_or_else(|_| unreachable!()),
             socket_bound: item_type.uses_socket_bound_session(),
             active_addrs: Vec::new(),
@@ -7596,6 +7666,7 @@ mod tests {
             stream_info: Some((Vec::new(), StatusCode::OK, None, None)),
             provider_name: Some("provider_1".intern()),
             request_url: None,
+            session_headers: None,
             grace_period: GracePeriodOptions::default(),
             provider_grace_active: false,
             disable_provider_grace: false,
@@ -7618,6 +7689,7 @@ mod tests {
             )),
             provider_name: Some("provider_1".intern()),
             request_url: None,
+            session_headers: None,
             grace_period: GracePeriodOptions::default(),
             provider_grace_active: false,
             disable_provider_grace: false,
@@ -7642,6 +7714,7 @@ mod tests {
                 stream_info: Some((Vec::new(), StatusCode::BAD_REQUEST, None, Some(failure_type))),
                 provider_name: Some("provider_1".intern()),
                 request_url: None,
+                session_headers: None,
                 grace_period: GracePeriodOptions::default(),
                 provider_grace_active: false,
                 disable_provider_grace: false,
@@ -8564,6 +8637,7 @@ mod tests {
             virtual_id: 9001,
             provider: "provider-a".intern(),
             stream_url: "http://localhost/movie.mkv".intern(),
+            provider_session_headers: HashMap::new(),
             addr: seek,
             socket_bound: false,
             active_addrs: vec![primary, overlap, seek, overlap],

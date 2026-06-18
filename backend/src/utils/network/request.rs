@@ -1298,6 +1298,57 @@ async fn get_remote_content(
     Ok((content, response_url))
 }
 
+async fn get_remote_content_with_headers(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    url: &Url,
+) -> Result<(String, String, HeaderMap), Error> {
+    let custom_headers = headers
+        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
+
+    let config = app_config.config.load();
+    let default_user_agent = config.default_user_agent.clone();
+    let disabled_headers = config.get_disabled_headers();
+    drop(config);
+
+    let merged = get_request_headers(
+        Some(&input.headers),
+        custom_headers.as_ref(),
+        disabled_headers.as_ref(),
+        default_user_agent.as_deref(),
+    );
+
+    let headers: HashMap<String, String> = merged
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
+        .collect();
+
+    let response = send_with_retry_and_provider(app_config, url, input.get_provider(), false, |resolved_url| {
+        get_client_request(
+            client,
+            input.method,
+            Some(&headers),
+            resolved_url,
+            None,
+            None,
+            default_user_agent.as_deref(),
+        )
+    })
+    .await?;
+
+    let response_url = response.url().to_string();
+    let response_headers = response.headers().clone();
+    let mut stream = build_decoded_stream_reader(response).await?;
+    let mut content = String::new();
+    stream
+        .read_to_string(&mut content)
+        .await
+        .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
+    Ok((content, response_url, response_headers))
+}
+
 async fn get_remote_content_with_manual_redirects(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -1389,6 +1440,101 @@ async fn get_remote_content_with_manual_redirects(
             .await
             .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
         return Ok((content, response_url));
+    }
+}
+
+async fn get_remote_content_with_manual_redirects_and_headers(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    url: &Url,
+    max_redirects: usize,
+) -> Result<(String, String, HeaderMap), Error> {
+    let custom_headers = headers
+        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
+
+    let config = app_config.config.load();
+    let default_user_agent = config.default_user_agent.clone();
+    let disabled_headers = config.get_disabled_headers();
+    drop(config);
+
+    let merged = get_request_headers(
+        Some(&input.headers),
+        custom_headers.as_ref(),
+        disabled_headers.as_ref(),
+        default_user_agent.as_deref(),
+    );
+
+    let headers: HashMap<String, String> = merged
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
+        .collect();
+
+    let mut current_url = url.clone();
+    let mut current_headers = headers;
+    let mut remaining_redirects = max_redirects;
+    loop {
+        let response =
+            send_with_retry_and_provider(app_config, &current_url, input.get_provider(), true, |resolved_url| {
+                get_client_request(
+                    client,
+                    input.method,
+                    Some(&current_headers),
+                    resolved_url,
+                    None,
+                    None,
+                    default_user_agent.as_deref(),
+                )
+            })
+            .await?;
+        let response_base_url = response.url().clone();
+
+        if response.status().is_redirection() {
+            if remaining_redirects == 0 {
+                return Err(string_to_io_error(format!(
+                    "Too many redirects while requesting {}",
+                    sanitize_sensitive_info(url.as_str())
+                )));
+            }
+
+            let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+                return Err(string_to_io_error(format!(
+                    "Redirect response missing location header for {}",
+                    sanitize_sensitive_info(current_url.as_str())
+                )));
+            };
+            let Ok(location_str) = location.to_str() else {
+                return Err(string_to_io_error(format!(
+                    "Redirect response contains invalid location header for {}",
+                    sanitize_sensitive_info(current_url.as_str())
+                )));
+            };
+            let next_url =
+                response_base_url.join(location_str).or_else(|_| Url::parse(location_str)).map_err(|_| {
+                    string_to_io_error(format!(
+                        "Redirect response contains invalid location URL for {}",
+                        sanitize_sensitive_info(current_url.as_str())
+                    ))
+                })?;
+
+            if !same_origin(&response_base_url, &next_url) {
+                strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
+            }
+            current_url = next_url;
+            remaining_redirects = remaining_redirects.saturating_sub(1);
+            continue;
+        }
+
+        let response_url = response.url().to_string();
+        let response_headers = response.headers().clone();
+        let mut stream = build_decoded_stream_reader(response).await?;
+        let mut content = String::new();
+        stream
+            .read_to_string(&mut content)
+            .await
+            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
+        return Ok((content, response_url, response_headers));
     }
 }
 
@@ -1486,6 +1632,43 @@ pub async fn download_text_content(
     result
 }
 
+pub async fn download_text_content_with_headers(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    trace_log: bool,
+) -> Result<(String, String, HeaderMap), Error> {
+    let start_time = tokio::time::Instant::now();
+    let result = if let Ok(url) = input.url.parse::<url::Url>() {
+        let result = if url.scheme() == "file" {
+            match url.to_file_path() {
+                Ok(file_path) => get_local_file_content(&file_path).await.map(|content| (content, url.to_string(), HeaderMap::new())),
+                Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
+            }
+        } else {
+            get_remote_content_with_headers(app_config, client, input, headers, &url).await
+        };
+        result
+    } else {
+        Err(string_to_io_error(format!("Malformed URL {}", sanitize_sensitive_info(&input.url))))
+    };
+
+    let level = if trace_log { log::Level::Trace } else { log::Level::Debug };
+    if log_enabled!(level) {
+        if let Ok((_, response_url, _)) = result.as_ref() {
+            log::log!(
+                level,
+                "Request took: {} {}",
+                format_elapsed_time(start_time.elapsed().as_secs()),
+                sanitize_sensitive_info(response_url.as_str())
+            );
+        }
+    }
+
+    result
+}
+
 pub async fn download_text_content_with_manual_redirects(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -1521,6 +1704,44 @@ pub async fn download_text_content_with_manual_redirects(
     let level = if trace_log { log::Level::Trace } else { log::Level::Debug };
     if log_enabled!(level) {
         if let Ok((_content, response_url)) = result.as_ref() {
+            log::log!(
+                level,
+                "Request took: {} {}",
+                format_elapsed_time(start_time.elapsed().as_secs()),
+                sanitize_sensitive_info(response_url.as_str())
+            );
+        }
+    }
+
+    result
+}
+
+pub async fn download_text_content_with_manual_redirects_and_headers(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    trace_log: bool,
+    max_redirects: usize,
+) -> Result<(String, String, HeaderMap), Error> {
+    let start_time = tokio::time::Instant::now();
+    let result = if let Ok(url) = input.url.parse::<url::Url>() {
+        let result = if url.scheme() == "file" {
+            match url.to_file_path() {
+                Ok(file_path) => get_local_file_content(&file_path).await.map(|content| (content, url.to_string(), HeaderMap::new())),
+                Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
+            }
+        } else {
+            get_remote_content_with_manual_redirects_and_headers(app_config, client, input, headers, &url, max_redirects).await
+        };
+        result
+    } else {
+        Err(string_to_io_error(format!("Malformed URL {}", sanitize_sensitive_info(&input.url))))
+    };
+
+    let level = if trace_log { log::Level::Trace } else { log::Level::Debug };
+    if log_enabled!(level) {
+        if let Ok((_, response_url, _)) = result.as_ref() {
             log::log!(
                 level,
                 "Request took: {} {}",
