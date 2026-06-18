@@ -128,6 +128,7 @@ pub struct UserSession {
     pub virtual_id: u32,
     pub provider: Arc<str>,
     pub stream_url: Arc<str>,
+    pub provider_session_headers: HashMap<String, String>,
     pub addr: SocketAddr,
     pub socket_bound: bool,
     pub active_addrs: Vec<SocketAddr>,
@@ -662,12 +663,34 @@ impl ActiveUserManager {
         key
     }
 
+    fn admission_gate_key(username: &str) -> String {
+        let mut key = String::with_capacity(username.len() + 11);
+        key.push_str("admission");
+        key.push('\0');
+        key.push_str(username);
+        key
+    }
+
     fn cleanup_idle_transition_gates(transition_gates: &mut HashMap<String, Arc<Mutex<()>>>) {
         transition_gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     }
 
     pub(crate) async fn acquire_playback_transition(&self, username: &str, token: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let key = Self::transition_gate_key(username, token);
+        let gate = {
+            let mut transition_gates = self.transition_gates.lock().await;
+            Self::cleanup_idle_transition_gates(&mut transition_gates);
+            Arc::clone(
+                transition_gates
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        gate.lock_owned().await
+    }
+
+    pub(crate) async fn acquire_user_admission(&self, username: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = Self::admission_gate_key(username);
         let gate = {
             let mut transition_gates = self.transition_gates.lock().await;
             Self::cleanup_idle_transition_gates(&mut transition_gates);
@@ -1586,6 +1609,7 @@ impl ActiveUserManager {
             virtual_id: params.virtual_id,
             provider: params.provider.intern(),
             stream_url: params.stream_url.intern(),
+            provider_session_headers: HashMap::new(),
             addr: *params.addr,
             socket_bound: params.socket_bound,
             active_addrs: vec![*params.addr],
@@ -1961,11 +1985,17 @@ impl ActiveUserManager {
                 session.socket_bound = socket_bound;
                 remember_session_addr(session, *addr);
                 Self::bump_session_transition_version(session);
+                let mut reset_provider_session_headers = false;
                 if &*session.stream_url != stream_url {
                     session.stream_url = stream_url.intern();
+                    reset_provider_session_headers = true;
                 }
                 if &*session.provider != provider {
                     session.provider = provider.intern();
+                    reset_provider_session_headers = true;
+                }
+                if reset_provider_session_headers {
+                    session.provider_session_headers.clear();
                 }
                 // Normalize stale lifecycle states on session refresh.
                 // Expired, PendingProvider, and Preserved sessions cannot stay in those states
@@ -2673,6 +2703,24 @@ impl ActiveUserManager {
         self.update_user_session(username, token).await
     }
 
+    pub async fn update_session_provider_headers(
+        &self,
+        username: &str,
+        token: &str,
+        provider_session_headers: &HashMap<String, String>,
+    ) -> bool {
+        let mut user_connections = self.connections.write().await;
+        let Some(connection_data) = user_connections.by_key.get_mut(username) else {
+            return false;
+        };
+        let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) else {
+            return false;
+        };
+        session.provider_session_headers.clone_from(provider_session_headers);
+        session.ts = current_time_secs();
+        true
+    }
+
     pub async fn pending_provider_version(&self, username: &str, token: &str) -> Option<u64> {
         let user_connections = self.connections.read().await;
         let connection_data = user_connections.by_key.get(username)?;
@@ -3258,7 +3306,7 @@ mod tests {
         model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
         utils::Internable,
     };
-    use std::{borrow::Cow, sync::Arc};
+    use std::{borrow::Cow, collections::HashMap, sync::Arc};
     use shared::model::ProxyType;
 
     fn test_channel(virtual_id: u32) -> StreamChannel {
@@ -3326,6 +3374,7 @@ mod tests {
                 virtual_id: 7001,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/live.m3u8".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -3387,6 +3436,7 @@ mod tests {
                 virtual_id: 7002,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/live.m3u8".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -3428,6 +3478,134 @@ mod tests {
             matches!(session.lifecycle, PlaybackLifecycle::PendingProvider { .. }),
             "PendingProvider session should NOT be normalized on refresh - pending wait must continue"
         );
+    }
+
+    #[tokio::test]
+    async fn update_session_provider_headers_updates_existing_session_and_timestamp() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55402".parse().unwrap_or_else(|_| unreachable!());
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-provider-headers".to_string();
+
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-provider-headers",
+                virtual_id: 7003,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        let before = manager
+            .get_and_update_user_session(&user.username, "tok-provider-headers")
+            .await
+            .expect("session should exist");
+        let previous_ts = before.ts;
+        let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
+
+        assert!(manager
+            .update_session_provider_headers(&user.username, "tok-provider-headers", &headers)
+            .await);
+
+        let after = manager
+            .get_and_update_user_session(&user.username, "tok-provider-headers")
+            .await
+            .expect("session should exist");
+        assert_eq!(after.provider_session_headers, headers);
+        assert!(after.ts >= previous_ts);
+    }
+
+    #[tokio::test]
+    async fn update_session_provider_headers_returns_false_for_missing_user_or_token() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+        let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
+
+        assert!(!manager
+            .update_session_provider_headers("missing-user", "missing-token", &headers)
+            .await);
+
+        let addr: SocketAddr = "127.0.0.1:55403".parse().unwrap_or_else(|_| unreachable!());
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-missing-token".to_string();
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-existing",
+                virtual_id: 7004,
+                provider: "provider-a",
+                stream_url: "http://localhost/live.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        assert!(!manager
+            .update_session_provider_headers(&user.username, "tok-missing", &headers)
+            .await);
+    }
+
+    #[tokio::test]
+    async fn create_user_session_clears_provider_headers_when_provider_or_stream_url_changes() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55404".parse().unwrap_or_else(|_| unreachable!());
+        let mut user = ProxyUserCredentials::default();
+        user.username = "user-provider-header-reset".to_string();
+        let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
+
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-reset",
+                virtual_id: 7005,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-a.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        assert!(manager
+            .update_session_provider_headers(&user.username, "tok-reset", &headers)
+            .await);
+
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-reset",
+                virtual_id: 7005,
+                provider: "provider-b",
+                stream_url: "http://localhost/live-b.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        let session = manager
+            .get_and_update_user_session(&user.username, "tok-reset")
+            .await
+            .expect("session should exist");
+        assert!(session.provider_session_headers.is_empty());
     }
 
     /// `terminate_session` expires a session and removes it.
@@ -7787,6 +7965,7 @@ mod tests {
                 virtual_id: 9002,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/stream.ts".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -7828,6 +8007,7 @@ mod tests {
                 virtual_id: 9003,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/stream.ts".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],
@@ -7902,6 +8082,7 @@ mod tests {
                 virtual_id: 9004,
                 provider: "provider-a".intern(),
                 stream_url: "http://localhost/stream.ts".intern(),
+                provider_session_headers: HashMap::new(),
                 addr,
                 socket_bound: false,
                 active_addrs: vec![addr],

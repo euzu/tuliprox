@@ -56,7 +56,7 @@ create_bitset!(
 #[derive(Debug, Clone)]
 pub struct ProviderStreamFactoryOptions {
     addr: SocketAddr,
-    // item_type: PlaylistItemType,
+    item_type: PlaylistItemType,
     flags: ProviderStreamFactoryFlagsSet,
     buffer_size: usize,
     url: Url,
@@ -80,6 +80,7 @@ pub(crate) struct ProviderStreamFactoryParams<'a> {
     pub stream_url: &'a Url,
     pub req_headers: &'a HeaderMap,
     pub input_headers: Option<&'a HashMap<String, String>>,
+    pub session_headers: Option<&'a HashMap<String, String>>,
     pub disabled_headers: Option<&'a ReverseProxyDisabledHeaderConfig>,
     pub default_user_agent: Option<&'a str>,
     pub username: Option<&'a str>,
@@ -98,6 +99,7 @@ impl ProviderStreamFactoryOptions {
             stream_url,
             req_headers,
             input_headers,
+            session_headers,
             disabled_headers,
             default_user_agent,
             username,
@@ -115,8 +117,15 @@ impl ProviderStreamFactoryOptions {
         let requested_range = get_request_range_start_bytes(&req_headers);
         req_headers.remove("range");
 
+        let merged_input_headers = merge_provider_request_headers(*input_headers, *session_headers);
+
         // We merge configured input headers with the headers from the request.
-        let headers = get_request_headers(*input_headers, Some(&req_headers), *disabled_headers, *default_user_agent);
+        let headers = get_request_headers(
+            merged_input_headers.as_ref(),
+            Some(&req_headers),
+            *disabled_headers,
+            *default_user_agent,
+        );
 
         let default_user_agent = default_user_agent
             .and_then(|ua| {
@@ -151,7 +160,7 @@ impl ProviderStreamFactoryOptions {
         }
 
         Self {
-            // item_type,
+            item_type: *item_type,
             addr: *addr,
             flags,
             buffer_size,
@@ -193,6 +202,9 @@ impl ProviderStreamFactoryOptions {
 
     #[inline]
     pub fn get_url_as_str(&self) -> &str { self.url.as_str() }
+
+    #[inline]
+    fn get_item_type(&self) -> PlaylistItemType { self.item_type }
 
     #[inline]
     pub fn should_retry_provider_request(&self) -> bool { self.flags.contains(ProviderStreamFactoryFlags::RetryEnabled) }
@@ -244,6 +256,23 @@ impl ProviderStreamFactoryOptions {
 
 }
 
+fn merge_provider_request_headers(
+    input_headers: Option<&HashMap<String, String>>,
+    session_headers: Option<&HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    match (input_headers, session_headers) {
+        (None, None) => None,
+        (Some(headers), None) | (None, Some(headers)) => Some(headers.clone()),
+        (Some(input), Some(session)) => {
+            let mut merged = input.clone();
+            for (key, value) in session {
+                merged.insert(key.clone(), value.clone());
+            }
+            Some(merged)
+        }
+    }
+}
+
 fn record_provider_open_failure(
     app_state: &Arc<AppState>,
     stream_options: &ProviderStreamFactoryOptions,
@@ -284,6 +313,17 @@ fn classify_provider_status_error(status: StatusCode) -> &'static str {
     } else {
         "http_other"
     }
+}
+
+fn provider_content_type_looks_like_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(';').next().unwrap_or_default().trim().eq_ignore_ascii_case("text/html"))
+}
+
+fn should_reject_success_response_content_type(item_type: PlaylistItemType, headers: &HeaderMap) -> bool {
+    !item_type.is_live_adaptive() && provider_content_type_looks_like_html(headers)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -588,6 +628,17 @@ async fn provider_stream_request(
                 debug!("{}", sanitize_sensitive_info(&message));
             }
             if status.is_success() {
+                if should_reject_success_response_content_type(stream_options.get_item_type(), response.headers()) {
+                    debug!(
+                        "Provider returned HTML content for non-adaptive stream {}",
+                        sanitize_sensitive_info(stream_options.get_log_url().as_ref())
+                    );
+                    return Err(ProviderStreamRequestFailure::Status {
+                        status: StatusCode::BAD_GATEWAY,
+                        provider_error_class: "unexpected_content_type",
+                        serve_channel_unavailable: true,
+                    });
+                }
                 let response_info = {
                     // Unfortunately, the HEAD request does not work, so we need this workaround.
                     // We need some header information from the provider, we extract the necessary headers and forward them to the client
@@ -846,6 +897,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -866,6 +918,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -886,6 +939,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -907,6 +961,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers,
             default_user_agent: None,
             username: None,
@@ -934,6 +989,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: None,
@@ -950,6 +1006,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: None,
@@ -980,6 +1037,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: None,
@@ -1010,6 +1068,7 @@ mod tests {
             stream_url: &stream_url,
             req_headers: &req_headers,
             input_headers: None,
+            session_headers: None,
             disabled_headers: None,
             default_user_agent: None,
             username: Some("alice"),
@@ -1041,5 +1100,57 @@ mod tests {
         assert_eq!(info.provider.as_ref(), "provider-a");
         assert_eq!(info.channel.input_name.as_ref(), "input-a");
         assert_eq!(info.channel.virtual_id, 77);
+    }
+
+    #[test]
+    fn html_content_type_is_rejected_for_catchup_streams() {
+        let mut headers = HeaderMap::new();
+        headers.insert(reqwest::header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+
+        assert!(should_reject_success_response_content_type(PlaylistItemType::Catchup, &headers));
+        assert!(should_reject_success_response_content_type(PlaylistItemType::Video, &headers));
+        assert!(should_reject_success_response_content_type(PlaylistItemType::Live, &headers));
+    }
+
+    #[test]
+    fn html_content_type_is_allowed_for_live_adaptive_streams() {
+        let mut headers = HeaderMap::new();
+        headers.insert(reqwest::header::CONTENT_TYPE, "text/html; charset=UTF-8".parse().unwrap());
+
+        assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveHls, &headers));
+        assert!(!should_reject_success_response_content_type(PlaylistItemType::LiveDash, &headers));
+    }
+
+    #[test]
+    fn session_headers_are_forwarded_to_provider_requests() {
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let stream_url = Url::parse("http://example.com/live/segment.ts").unwrap();
+        let req_headers = HeaderMap::new();
+        let mut session_headers = HashMap::new();
+        session_headers.insert(String::from("cookie"), String::from("sid=abc; pref=1"));
+        let stream_options =
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
+            addr,
+            item_type: PlaylistItemType::LiveHls,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
+            session_headers: Some(&session_headers),
+            disabled_headers: None,
+            default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
+        });
+
+        assert_eq!(
+            options.get_headers().get(axum::http::header::COOKIE).and_then(|value| value.to_str().ok()),
+            Some("sid=abc; pref=1")
+        );
     }
 }

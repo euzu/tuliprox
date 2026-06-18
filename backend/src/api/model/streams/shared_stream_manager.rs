@@ -696,12 +696,9 @@ impl SharedStreamManager {
         self.get_shared_state(stream_url).await.map(|s| s.headers.clone())
     }
 
-    pub async fn register_meter_uid(&self, stream_url: &str, meter_uid: u32) {
-        self.meter_uids.write().await.insert(stream_url.to_string(), meter_uid);
-    }
-
-    pub async fn get_meter_uid(&self, stream_url: &str) -> Option<u32> {
-        self.meter_uids.read().await.get(stream_url).copied()
+    pub async fn get_or_register_meter_uid(&self, stream_url: &str, uid_factory: impl FnOnce() -> u32) -> u32 {
+        let mut uids = self.meter_uids.write().await;
+        *uids.entry(stream_url.to_string()).or_insert_with(uid_factory)
     }
 
     async fn forget_subscriber_addr(&self, addr: &SocketAddr) -> Option<Arc<str>> {

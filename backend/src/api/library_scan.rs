@@ -4,7 +4,7 @@ use crate::{
     model::{LibraryConfig, MetadataUpdateConfig},
 };
 use log::{error, info};
-use shared::model::{LibraryScanSummary, LibraryScanSummaryStatus};
+use shared::model::{LibraryScanProgressEvent, LibraryScanSummary, LibraryScanSummaryStatus};
 use std::sync::Arc;
 
 pub(crate) struct LibraryScanTaskOptions {
@@ -37,7 +37,8 @@ pub(crate) fn spawn_library_scan(
                     ),
                     result: Some(result),
                 };
-                let _ = event_manager.send_event(EventMessage::LibraryScanProgress(response));
+                let _ = event_manager
+                    .send_event(EventMessage::LibraryScanProgress(LibraryScanProgressEvent { summary: response }));
             }
             Err(err) => {
                 error!("{prefix}Library scan failed: {err}");
@@ -46,7 +47,8 @@ pub(crate) fn spawn_library_scan(
                     message: format!("{prefix}Scan failed: {err}"),
                     result: None,
                 };
-                let _ = event_manager.send_event(EventMessage::LibraryScanProgress(response));
+                let _ = event_manager
+                    .send_event(EventMessage::LibraryScanProgress(LibraryScanProgressEvent { summary: response }));
             }
         }
     });

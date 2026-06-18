@@ -16,7 +16,7 @@ use serde_json::json;
 use shared::utils::deobfuscate_text;
 use shared::{
     model::{
-        permission::Permission, EpgChannel,
+        permission::Permission, EpgChannel, OperationRunAccepted,
         InputType, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem,
         XtreamCluster,
     },
@@ -213,11 +213,14 @@ async fn playlist_update(
             // Deduplicate rapid clicks: the channel has capacity 1, so at most one
             // update is queued at any time.  Additional requests while the channel
             // is full are silently dropped — the pending run already covers them.
-            match app_state.manual_update_sender.try_send(valid_targets) {
-                Ok(()) => axum::http::StatusCode::ACCEPTED.into_response(),
+            match app_state
+                .manual_update_sender
+                .try_send(crate::api::model::ManualPlaylistUpdateRequest { targets: valid_targets })
+            {
+                Ok(()) => (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response(),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     debug!("Manual playlist update deduplicated: an update is already pending or running");
-                    axum::http::StatusCode::ACCEPTED.into_response()
+                    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response()
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     debug!("Manual playlist update rejected: worker channel closed (server shutting down)");
@@ -765,7 +768,7 @@ mod tests {
             downloads: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<Arc<crate::model::ProcessTargets>>(1);
+        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
             forced_targets: Arc::new(ArcSwap::from_pointee(crate::model::ProcessTargets {

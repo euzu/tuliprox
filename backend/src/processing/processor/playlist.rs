@@ -44,8 +44,8 @@ use shared::{
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
         ClusterSource, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
-        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats, StreamProperties,
-        TargetStats, UUIDType, XtreamCluster,
+        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateProgressEvent, PlaylistStats, ProcessingOrder,
+        SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
     utils::{
         create_alias_uuid, default_as_default, default_probe_delay_secs, default_probe_live_interval, interner_gc,
@@ -888,7 +888,10 @@ fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepM
     if let Some(event_mgr) = event_manager {
         let events = event_mgr.clone();
         Box::new(move |context: &str, msg: &str| {
-            events.send_event(EventMessage::PlaylistUpdateProgress(context.to_owned(), msg.to_owned()));
+            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                target: context.to_owned(),
+                message: msg.to_owned(),
+            }));
         })
     } else {
         Box::new(move |_context: &str, _msg: &str| { /* noop */ })
@@ -1664,10 +1667,10 @@ pub async fn exec_processing(
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
     if let Some(events) = event_manager.as_deref() {
-        events.send_event(EventMessage::PlaylistUpdateProgress(
-            "Playlist Update".to_string(),
-            update_finished_message.clone(),
-        ));
+        events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+            target: "Playlist Update".to_string(),
+            message: update_finished_message.clone(),
+        }));
     }
     log_memory_snapshot("exec_processing before_interner_gc");
     debug!("StringInterner GC removed {} strings", interner_gc());

@@ -197,4 +197,39 @@ mod tests {
 
         set_sanitize_sensitive_info(previous);
     }
+
+    #[test]
+    fn sanitize_sensitive_info_masks_path_credentials_for_all_xtream_contexts() {
+        // Regression: only `live|video|movie|series|m3u-stream|resource` were originally
+        // listed in `re_stream_url`, so URLs like `/timeshift/{user}/{pass}/...` leaked
+        // the username and password into log lines. The regex was extended to also
+        // cover `timeshift`, `streaming`, `xtream`, and `timeshift.php`.
+        let previous = super::is_sanitize_sensitive_info_enabled();
+        set_sanitize_sensitive_info(true);
+
+        let cases: &[(&str, &str)] = &[
+            (
+                "http://example/timeshift/myuser/mypass/3/2026-06-17:14-00/449.ts",
+                "http://***/timeshift/***/3/2026-06-17:14-00/449.ts",
+            ),
+            ("http://example/streaming/myuser/mypass/123.ts", "http://***/streaming/***/123.ts"),
+            ("http://example/xtream/myuser/mypass/123.ts", "http://***/xtream/***/123.ts"),
+            ("http://example/timeshift.php/myuser/mypass/123.ts", "http://***/timeshift.php/***/123.ts"),
+            ("https://provider.example/movie/myuser/mypass/456.ts", "https://***/movie/***/456.ts"),
+            ("https://provider.example/series/myuser/mypass/789.ts", "https://***/series/***/789.ts"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(sanitize_sensitive_info(input).as_ref(), *expected, "input: {input}");
+        }
+
+        // Query-string credentials are masked by `re_credentials`, not by the
+        // stream-URL rewriter — the host is still masked by `re_url`.
+        assert_eq!(
+            sanitize_sensitive_info("http://example/player_api.php?username=foo&password=bar"),
+            "http://***/player_api.php?username=***&password=***"
+        );
+
+        set_sanitize_sensitive_info(previous);
+    }
 }

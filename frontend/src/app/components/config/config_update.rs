@@ -357,7 +357,7 @@ mod tests {
         let mut config = ConfigDto {
             web_ui: Some(WebUiConfigDto {
                 enabled: true,
-                landing_page: ViewType::Streams, // existing is non-default
+                landing_page: Some(ViewType::Streams), // existing is non-default
                 ..Default::default()
             }),
             ..ConfigDto::default()
@@ -369,7 +369,7 @@ mod tests {
                 true, // modified=true: explicit edit
                 WebUiConfigDto {
                     enabled: false,
-                    landing_page: ViewType::Dashboard, // reset to default
+                    landing_page: None, // reset to last-page default
                     ..Default::default()
                 },
             )],
@@ -377,7 +377,7 @@ mod tests {
 
         let web_ui = config.web_ui.expect("webui config should be present");
         assert!(!web_ui.enabled);
-        assert_eq!(web_ui.landing_page, ViewType::Dashboard, "landing_page reset to default must be applied");
+        assert_eq!(web_ui.landing_page, None, "landing_page reset to default must be applied");
     }
 
     #[test]
@@ -418,7 +418,7 @@ mod tests {
         let mut config = ConfigDto {
             web_ui: Some(WebUiConfigDto {
                 enabled: true,
-                landing_page: ViewType::Streams, // existing is non-default
+                landing_page: Some(ViewType::Streams), // existing is non-default
                 ..Default::default()
             }),
             ..ConfigDto::default()
@@ -430,7 +430,7 @@ mod tests {
                 false, // modified=false: toggle-only, landing_page unchanged in form
                 WebUiConfigDto {
                     enabled: false,
-                    landing_page: ViewType::Streams, // form syncs from existing on open
+                    landing_page: Some(ViewType::Streams), // form syncs from existing on open
                     ..Default::default()
                 },
             )],
@@ -438,7 +438,7 @@ mod tests {
 
         let web_ui = config.web_ui.expect("webui config should be present");
         assert!(!web_ui.enabled);
-        assert_eq!(web_ui.landing_page, ViewType::Streams, "landing_page should be preserved on toggle-only");
+        assert_eq!(web_ui.landing_page, Some(ViewType::Streams), "landing_page should be preserved on toggle-only");
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
         let mut config = ConfigDto {
             web_ui: Some(WebUiConfigDto {
                 enabled: true,
-                landing_page: ViewType::Streams,
+                landing_page: Some(ViewType::Streams),
                 auth: Some(WebAuthConfigDto { issuer: "test".to_string(), ..Default::default() }),
                 ..Default::default()
             }),
@@ -461,7 +461,7 @@ mod tests {
                 true, // explicit edit: nested values must be applied
                 WebUiConfigDto {
                     enabled: false,
-                    landing_page: ViewType::Streams, // form syncs from existing
+                    landing_page: Some(ViewType::Streams), // form syncs from existing
                     auth: Some(WebAuthConfigDto { issuer: "other".to_string(), ..Default::default() }),
                     ..Default::default()
                 },
@@ -471,7 +471,7 @@ mod tests {
         // Selective update: scalars and landing_page applied, auth preserved (nested change).
         let web_ui = config.web_ui.expect("webui config should be present");
         assert!(!web_ui.enabled);
-        assert_eq!(web_ui.landing_page, ViewType::Streams);
+        assert_eq!(web_ui.landing_page, Some(ViewType::Streams));
         assert_eq!(web_ui.auth.as_ref().map(|a| a.issuer.as_str()), Some("other"));
     }
 

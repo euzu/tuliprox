@@ -200,10 +200,14 @@ fn extract_suffix_from_filename(file_name: &str) -> &str {
         .unwrap_or_default()
 }
 
+fn is_append_like_query_source(mode: &str, source: &str) -> bool {
+    mode_alias(mode) == "append" || source.starts_with('?')
+}
+
 fn derived_template_for_mode<'a>(source_url: &'a str, catchup: &'a CatchupProperties) -> Option<Cow<'a, str>> {
     let mode = catchup.mode.as_deref().unwrap_or_default();
     if let Some(source) = catchup.source.as_deref().filter(|source| !source.is_empty()) {
-        return Some(if mode_alias(mode) == "append" {
+        return Some(if is_append_like_query_source(mode, source) {
             append_query_template(source_url, source).map(Cow::Owned)?
         } else {
             Cow::Borrowed(source)
@@ -290,9 +294,10 @@ pub fn build_m3u_catchup_rewrite(
     let segments = parse_template(template.as_ref());
     let placeholders = collect_placeholders(&segments);
     let append_mode = catchup
-        .mode
+        .source
         .as_deref()
-        .is_some_and(|mode| mode_alias(mode) == "append" && catchup.source.as_ref().is_some_and(|source| !source.is_empty()));
+        .filter(|source| !source.is_empty())
+        .is_some_and(|source| is_append_like_query_source(catchup.mode.as_deref().unwrap_or_default(), source));
 
     let source = build_local_source(base_url, "", &token, &placeholders, append_mode);
     let mode = if append_mode { "append" } else { "default" };
@@ -427,6 +432,50 @@ mod tests {
             resolved.url,
             "http://provider.example/live/42.m3u8?token=abc&offset=-120&utcstart=1717200000"
         );
+    }
+
+    #[test]
+    fn resolve_default_mode_query_template_keeps_base_stream_url() {
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                mode: Some("default".intern()),
+                source: Some("?playseek=${timestamp}&duration=${duration}".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("v0=1717200000&v1=120"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/live/42.ts?playseek=1717200000&duration=120"
+        );
+    }
+
+    #[test]
+    fn default_mode_query_template_rewrite_uses_append_route_marker() {
+        let rewrite = build_m3u_catchup_rewrite(
+            &[7u8; 16],
+            "http://proxy.example",
+            "alice",
+            7,
+            42,
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                mode: Some("default".intern()),
+                source: Some("?playseek=${timestamp}&duration=${duration}".intern()),
+                ..CatchupProperties::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(rewrite.mode.as_ref(), "append");
+        assert!(rewrite.source.starts_with("?tuliprox-catchup="));
+        assert!(rewrite.source.contains("&v0=${timestamp}"));
+        assert!(rewrite.source.contains("&v1=${duration}"));
     }
 
     #[test]

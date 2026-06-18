@@ -1,6 +1,7 @@
 use crate::model::{
     user_command::UserCommand, ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
-    LibraryScanSummary, PermissionSet, PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo,
+    LibraryScanProgressEvent, PermissionSet, PlaylistUpdateProgressEvent, PlaylistUpdateState, StatusCheck,
+    StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -92,10 +93,10 @@ pub enum ProtocolMessage {
     ActiveProviderCountResponse(usize),
     ConfigChangeResponse(ConfigType),
     PlaylistUpdateResponse(PlaylistUpdateState),
-    PlaylistUpdateProgressResponse(String, String),
+    PlaylistUpdateProgressResponse(PlaylistUpdateProgressEvent),
     UserActionResponse(bool),
     SystemInfoResponse(SystemInfo),
-    LibraryScanProgressResponse(LibraryScanSummary),
+    LibraryScanProgressResponse(LibraryScanProgressEvent),
     StreamMeterBatchResponse(Vec<StreamMeterEntry>),
     DownloadsResponse(DownloadsResponse),
     DownloadsDeltaResponse(DownloadsDelta),

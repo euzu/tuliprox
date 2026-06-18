@@ -83,6 +83,15 @@ fn encoding_from_content_type(content_type: &str) -> Option<Encoding> {
     }
 }
 
+fn should_decode_success_body<T>(status: u16, content_type: &str) -> bool
+where
+    T: 'static,
+{
+    status != 204
+        && std::any::TypeId::of::<T>() != std::any::TypeId::of::<()>()
+        && encoding_from_content_type(content_type).is_some()
+}
+
 async fn decode_response_body<T>(response: Response, encoding: Encoding) -> Result<T, Error>
 where
     T: DeserializeOwned + 'static + std::fmt::Debug,
@@ -201,10 +210,9 @@ where
                 }
             }
             match status {
-                200 | 205 | 206 => {
+                200 | 201 | 202 | 205 | 206 => {
                     let content_type = response.headers().get("content-type").unwrap_or_default().to_ascii_lowercase();
-                    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<()>() {
-                        // `T = ()` valid
+                    if !should_decode_success_body::<T>(status, &content_type) {
                         let _ = response.binary().await;
                         return Ok(ResponseMeta { body: None, headers: response_headers });
                     }
@@ -212,7 +220,7 @@ where
                     let decoded = decode_response_body::<T>(response, decode_encoding).await?;
                     Ok(ResponseMeta { body: Some(decoded), headers: response_headers })
                 }
-                201 | 202 | 204 => Ok(ResponseMeta { body: None, headers: response_headers }),
+                204 => Ok(ResponseMeta { body: None, headers: response_headers }),
                 400 => {
                     let message = extract_error_message(response).await;
                     if message.trim().is_empty() {
@@ -473,4 +481,25 @@ pub fn get_base_href() -> String {
             href
         })
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_decode_success_body;
+
+    #[test]
+    fn accepted_json_response_with_body_is_decoded() {
+        assert!(should_decode_success_body::<serde_json::Value>(202, "application/json"));
+    }
+
+    #[test]
+    fn accepted_response_without_decodable_content_type_is_not_decoded() {
+        assert!(!should_decode_success_body::<serde_json::Value>(202, ""));
+    }
+
+    #[test]
+    fn no_content_and_unit_responses_are_not_decoded() {
+        assert!(!should_decode_success_body::<serde_json::Value>(204, "application/json"));
+        assert!(!should_decode_success_body::<()>(202, "application/json"));
+    }
 }

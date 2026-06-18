@@ -167,8 +167,8 @@ pub struct WebUiConfigDto {
     pub kick_secs: u64,
     #[serde(default, skip_serializing_if = "is_false")]
     pub combine_views_stats_streams: bool,
-    #[serde(default, skip_serializing_if = "ViewType::is_default")]
-    pub landing_page: ViewType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing_page: Option<ViewType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_info: Option<StreamInfoConfigDto>,
 }
@@ -184,7 +184,7 @@ impl Default for WebUiConfigDto {
             player_server: None,
             kick_secs: default_kick_secs(),
             combine_views_stats_streams: false,
-            landing_page: ViewType::default(),
+            landing_page: None,
             stream_info: None,
         }
     }
@@ -196,7 +196,7 @@ impl WebUiConfigDto {
         self.enabled == empty.enabled
             && self.user_ui_enabled == empty.user_ui_enabled
             && !self.combine_views_stats_streams
-            && self.landing_page == ViewType::default()
+            && self.landing_page.is_none()
             && is_blank_or_default_web_ui_path(&self.path)
             && is_blank_optional_str(self.player_server.as_deref())
             && self.kick_secs == default_kick_secs()
@@ -301,5 +301,19 @@ mod tests {
         let dto = WebUiConfigDto::default();
         assert!(dto.stream_info.is_none());
         assert!(dto.is_empty());
+    }
+
+    #[test]
+    fn web_ui_config_dto_default_uses_last_page_landing_page() {
+        let dto = WebUiConfigDto::default();
+
+        assert_eq!(dto.landing_page, None);
+    }
+
+    #[test]
+    fn web_ui_config_dto_is_not_empty_when_explicit_landing_page_is_set() {
+        let dto = WebUiConfigDto { landing_page: Some(ViewType::Streams), ..WebUiConfigDto::default() };
+
+        assert!(!dto.is_empty());
     }
 }

@@ -15,7 +15,10 @@ use crate::{
     model::{EventMessage, ViewType},
     provider::DialogProvider,
     services::{FlagsLoadState, ToastCloseMode, ToastOptions},
-    utils::{get_location_hash, set_location_hash},
+    utils::{
+        get_location_hash, get_session_storage_item, remove_session_storage_item, set_location_hash,
+        set_session_storage_item,
+    },
 };
 use gloo_timers::future::TimeoutFuture;
 use log::error;
@@ -30,6 +33,8 @@ use std::{cell::Cell, future, rc::Rc, str::FromStr};
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::window;
 use yew::{platform::spawn_local, prelude::*, suspense::use_future};
+
+const LAST_HOME_VIEW_STORAGE_KEY: &str = "tp_last_home_view";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HomeViewAccess {
@@ -52,6 +57,10 @@ fn configured_home_fallback(landing_page: ViewType, combine_views_stats_streams:
     } else {
         landing_page
     }
+}
+
+fn configured_last_home_view(last_home_view: ViewType, combine_views_stats_streams: bool) -> ViewType {
+    configured_home_fallback(last_home_view, combine_views_stats_streams)
 }
 
 fn normalize_requested_home_view(view: ViewType, access: HomeViewAccess) -> ViewType {
@@ -117,6 +126,27 @@ fn resolve_home_view(requested: Option<ViewType>, fallback: ViewType, access: Ho
             is_allowed_home_view(fallback, access).then_some(fallback)
         })
         .unwrap_or_else(|| first_allowed_home_view(access))
+}
+
+fn resolve_visible_home_view(
+    requested: Option<ViewType>,
+    configured_landing_page: Option<Option<ViewType>>,
+    last_home_view: Option<ViewType>,
+    access: HomeViewAccess,
+) -> Option<ViewType> {
+    if access.setup_mode {
+        return Some(ViewType::Config);
+    }
+
+    if let Some(view) = requested {
+        return Some(resolve_home_view(Some(view), ViewType::Dashboard, access));
+    }
+
+    match configured_landing_page {
+        None => None,
+        Some(Some(fallback)) => Some(resolve_home_view(None, fallback, access)),
+        Some(None) => Some(resolve_home_view(last_home_view, first_allowed_home_view(access), access)),
+    }
 }
 
 #[component]
@@ -185,9 +215,9 @@ pub fn Home() -> Html {
                         services_ctx_clone.toastr.error(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.FAIL_FINISH"))
                     }
                 },
-                EventMessage::LibraryScanProgress(summary) => match summary.status {
-                    LibraryScanSummaryStatus::Success => services_ctx_clone.toastr.success(summary.message),
-                    LibraryScanSummaryStatus::Error => services_ctx_clone.toastr.error(summary.message),
+                EventMessage::LibraryScanProgress(progress) => match progress.summary.status {
+                    LibraryScanSummaryStatus::Success => services_ctx_clone.toastr.success(progress.summary.message),
+                    LibraryScanSummaryStatus::Error => services_ctx_clone.toastr.error(progress.summary.message),
                 },
                 _ => {}
             });
@@ -270,13 +300,20 @@ pub fn Home() -> Html {
         can_read_downloads,
         is_admin,
     };
-    let configured_fallback = config_context
-        .config
-        .as_ref()
-        .and_then(|app_cfg| app_cfg.config.web_ui.as_ref())
-        .map_or(ViewType::Dashboard, |web_ui| {
-            configured_home_fallback(web_ui.landing_page, web_ui.combine_views_stats_streams)
-        });
+    let configured_landing_page = config_context.config.as_ref().map(|app_cfg| {
+        app_cfg.config.web_ui.as_ref().and_then(|web_ui| {
+            web_ui
+                .landing_page
+                .map(|landing_page| configured_home_fallback(landing_page, web_ui.combine_views_stats_streams))
+        })
+    });
+    let stored_last_home_view = config_context.config.as_ref().and_then(|app_cfg| {
+        let combine_views_stats_streams =
+            app_cfg.config.web_ui.as_ref().is_some_and(|web_ui| web_ui.combine_views_stats_streams);
+        get_session_storage_item(LAST_HOME_VIEW_STORAGE_KEY)
+            .and_then(|hash| ViewType::from_str(&hash).ok())
+            .map(|view| configured_last_home_view(view, combine_views_stats_streams))
+    });
 
     //<div class={"app-header__toolbar"}><select onchange={handle_language} defaultValue={i18next.language}>{services.config().getUiConfig().languages.map(l => <option key={l} value={l}>{l}</option>)}</select></div>
 
@@ -320,13 +357,16 @@ pub fn Home() -> Html {
 
     {
         use_effect_with(
-            (*view_visible, configured_fallback, home_access),
-            move |(current, configured_fallback, access)| {
+            (*view_visible, configured_landing_page, stored_last_home_view, home_access),
+            move |(current, configured_landing_page, stored_last_home_view, access)| {
                 if !setup_mode {
-                    let resolved = resolve_home_view(*current, *configured_fallback, *access);
-                    let want = resolved.as_str();
-                    if get_location_hash().as_deref() != Some(want) {
-                        set_location_hash(want);
+                    if let Some(resolved) =
+                        resolve_visible_home_view(*current, *configured_landing_page, *stored_last_home_view, *access)
+                    {
+                        let want = resolved.as_str();
+                        if get_location_hash().as_deref() != Some(want) {
+                            set_location_hash(want);
+                        }
                     }
                 }
                 || ()
@@ -336,35 +376,59 @@ pub fn Home() -> Html {
 
     {
         let view_vis = view_visible.clone();
-        use_effect_with((configured_fallback, home_access), move |(configured_fallback, access)| {
-            let configured_fallback = *configured_fallback;
-            let access = *access;
-            let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| {
-                let requested = get_location_hash().and_then(|hash| ViewType::from_str(&hash).ok());
-                let resolved = resolve_home_view(requested, configured_fallback, access);
-                view_vis.set(Some(resolved));
-            }));
-            let win = window();
-            if let Some(win) = win.as_ref() {
-                if win.add_event_listener_with_callback("hashchange", closure.as_ref().unchecked_ref()).is_err() {
-                    error!("failed to register hashchange listener");
+        use_effect_with(
+            (configured_landing_page, stored_last_home_view, home_access),
+            move |(configured_landing_page, stored_last_home_view, access)| {
+                let configured_landing_page = *configured_landing_page;
+                let stored_last_home_view = *stored_last_home_view;
+                let access = *access;
+                let closure = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_event: Event| {
+                    let requested = get_location_hash().and_then(|hash| ViewType::from_str(&hash).ok());
+                    let resolved =
+                        resolve_visible_home_view(requested, configured_landing_page, stored_last_home_view, access);
+                    view_vis.set(resolved);
+                }));
+                let win = window();
+                if let Some(win) = win.as_ref() {
+                    if win.add_event_listener_with_callback("hashchange", closure.as_ref().unchecked_ref()).is_err() {
+                        error!("failed to register hashchange listener");
+                    }
                 }
-            }
-            move || {
-                if let Some(win) = window() {
-                    let _ = win.remove_event_listener_with_callback("hashchange", closure.as_ref().unchecked_ref());
+                move || {
+                    if let Some(win) = window() {
+                        let _ = win.remove_event_listener_with_callback("hashchange", closure.as_ref().unchecked_ref());
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     {
         let view_vis = view_visible.clone();
-        use_effect_with((configured_fallback, home_access), move |(configured_fallback, access)| {
-            let current = *view_vis;
-            let resolved = resolve_home_view(current, *configured_fallback, *access);
-            if current != Some(resolved) {
-                view_vis.set(Some(resolved));
+        use_effect_with(
+            (configured_landing_page, stored_last_home_view, home_access),
+            move |(configured_landing_page, stored_last_home_view, access)| {
+                let current = *view_vis;
+                let resolved =
+                    resolve_visible_home_view(current, *configured_landing_page, *stored_last_home_view, *access);
+                if current != resolved {
+                    view_vis.set(resolved);
+                }
+                || ()
+            },
+        );
+    }
+
+    {
+        use_effect_with((configured_landing_page, *view_visible), move |(configured_landing_page, view_visible)| {
+            match configured_landing_page {
+                Some(None) => {
+                    if let Some(view) = view_visible {
+                        set_session_storage_item(LAST_HOME_VIEW_STORAGE_KEY, view.as_str());
+                    }
+                }
+                Some(Some(_)) => remove_session_storage_item(LAST_HOME_VIEW_STORAGE_KEY),
+                None => {}
             }
             || ()
         });
@@ -405,7 +469,9 @@ pub fn Home() -> Html {
         };
     }
 
-    let resolved_view = resolve_home_view(*view_visible, configured_fallback, home_access);
+    let resolved_view =
+        resolve_visible_home_view(*view_visible, configured_landing_page, stored_last_home_view, home_access)
+            .unwrap_or(ViewType::Dashboard);
     let view_page = resolved_view.intern();
     html! {
         <ContextProvider<ConfigContext> context={config_context}>
@@ -571,7 +637,7 @@ pub fn Home() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_allowed_home_view, resolve_home_view};
+    use super::{is_allowed_home_view, resolve_home_view, resolve_visible_home_view};
     use crate::model::ViewType;
 
     fn full_access() -> super::HomeViewAccess {
@@ -595,6 +661,27 @@ mod tests {
         let resolved = resolve_home_view(None, ViewType::Dashboard, full_access());
 
         assert_eq!(resolved, ViewType::Dashboard);
+    }
+
+    #[test]
+    fn resolve_visible_home_view_waits_for_configured_landing_page_without_hash() {
+        let resolved = resolve_visible_home_view(None, None, None, full_access());
+
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_visible_home_view_uses_configured_landing_page_when_hash_missing() {
+        let resolved = resolve_visible_home_view(None, Some(Some(ViewType::Streams)), None, full_access());
+
+        assert_eq!(resolved, Some(ViewType::Streams));
+    }
+
+    #[test]
+    fn resolve_visible_home_view_uses_last_page_when_landing_page_is_none() {
+        let resolved = resolve_visible_home_view(None, Some(None), Some(ViewType::Streams), full_access());
+
+        assert_eq!(resolved, Some(ViewType::Streams));
     }
 
     #[test]

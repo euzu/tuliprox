@@ -364,14 +364,14 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::PlaylistUpdateResponse(update_state) => {
                         event_service.broadcast(EventMessage::PlaylistUpdate(update_state));
                     }
-                    ProtocolMessage::PlaylistUpdateProgressResponse(target, msg) => {
-                        event_service.broadcast(EventMessage::PlaylistUpdateProgress(target, msg));
+                    ProtocolMessage::PlaylistUpdateProgressResponse(progress) => {
+                        event_service.broadcast(EventMessage::PlaylistUpdateProgress(progress));
                     }
                     ProtocolMessage::SystemInfoResponse(system_info) => {
                         event_service.broadcast(EventMessage::SystemInfoUpdate(system_info));
                     }
-                    ProtocolMessage::LibraryScanProgressResponse(msg) => {
-                        event_service.broadcast(EventMessage::LibraryScanProgress(msg));
+                    ProtocolMessage::LibraryScanProgressResponse(progress) => {
+                        event_service.broadcast(EventMessage::LibraryScanProgress(progress));
                     }
                     ProtocolMessage::DownloadsResponse(downloads) => {
                         event_service.broadcast(EventMessage::DownloadsUpdate(Rc::new(downloads)));

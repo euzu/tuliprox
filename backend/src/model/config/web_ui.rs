@@ -77,7 +77,7 @@ pub struct WebUiConfig {
     pub player_server: Option<String>,
     pub kick_secs: u64,
     pub combine_views_stats_streams: bool,
-    pub landing_page: ViewType,
+    pub landing_page: Option<ViewType>,
     pub stream_info: Option<StreamInfoConfig>,
 }
 

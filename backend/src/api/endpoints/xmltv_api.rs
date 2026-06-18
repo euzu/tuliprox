@@ -677,9 +677,7 @@ pub(crate) async fn stream_epg_api(
             return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
         };
 
-        let epg_path = get_epg_path_for_target_by_type(config.as_ref(), &target, TargetType::M3u)
-            .or_else(|| get_epg_path_for_target_by_type(config.as_ref(), &target, TargetType::Xtream));
-        let Some(epg_path) = epg_path else {
+        let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {
             entries.extend(empty_stream_epg_entries(target_id, &items));
             continue;
         };
@@ -842,6 +840,29 @@ mod tests {
         }
     }
 
+    fn test_target_with_xtream_only() -> ConfigTarget {
+        ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "xtream-only".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![TargetOutput::Xtream(XtreamTargetOutput {
+                flags: XtreamTargetFlagsSet::new(),
+                trakt: None,
+                filter: None,
+            })],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::new(None)),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        }
+    }
+
     fn test_config_with_storage(storage_dir: &str) -> Config {
         Config {
             storage_dir: storage_dir.to_string(),
@@ -889,6 +910,26 @@ mod tests {
         fs::write(&m3u_epg, b"m3u").expect("write m3u epg");
 
         let picked = get_epg_path_for_target(&config, &target).expect("fallback path");
+        assert_eq!(picked, xtream_epg);
+    }
+
+    #[test]
+    fn get_epg_path_for_target_xtream_only_target_uses_xtream_path() {
+        // Regression: stream_epg_api used to probe m3u first regardless of the target's
+        // configured outputs, producing a misleading "Can't find epg file" TRACE for
+        // xtream-only targets. After the fix, get_epg_path_for_target iterates
+        // target.output and must not look for an m3u epg at all.
+        let dir = tempdir().expect("temp dir");
+        let config = test_config_with_storage(dir.path().to_string_lossy().as_ref());
+        let target = test_target_with_xtream_only();
+
+        let xtream_storage = crate::repository::xtream_get_storage_path(&config, &target.name).expect("xtream storage");
+        let xtream_epg = crate::repository::xtream_get_epg_file_path_for_target(&xtream_storage);
+
+        fs::create_dir_all(&xtream_storage).expect("create xtream dir");
+        fs::write(&xtream_epg, b"xtream").expect("write xtream epg");
+
+        let picked = get_epg_path_for_target(&config, &target).expect("xtream path");
         assert_eq!(picked, xtream_epg);
     }
 
