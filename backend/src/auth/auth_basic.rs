@@ -3,7 +3,6 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose;
-use std::future::{ready, Future};
 use crate::auth::Rejection;
 
 #[derive(Debug, PartialEq, Eq, Clone)]

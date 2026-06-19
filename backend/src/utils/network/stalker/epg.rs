@@ -187,11 +187,12 @@ where
             }
         };
         if !response.status().is_success() {
-            return Err(StalkerError::BadStatus {
+            last_err = Some(StalkerError::BadStatus {
                 status: response.status().as_u16(),
                 action: "get_epg_bulk".to_string(),
                 body_snippet: String::new(),
             });
+            continue;
         }
         client.ingest_response_cookies(&response);
         let cap = client.body_caps().get_epg_bytes;
@@ -205,36 +206,34 @@ where
                     Ok(chunk)
                 }
             }
-            Err(err) => Err(IoError::other(err)),
+            Err(err) => Err(IoError::other(err.without_url())),
         });
         let reader = StreamReader::new(body_stream);
         let bridge = SyncIoBridge::new(reader);
         // Bounded async channel between the blocking parser and the async consumer.
-        // The parser side lives in a `spawn_blocking` thread, so we cannot `await` on
-        // a send there; `blocking_send` would stall the executor if the consumer is
-        // slow. `try_send` is non-blocking: a full channel signals backpressure, and
-        // we count/log the dropped records instead of silently losing them.
+        // The parser side lives on a `spawn_blocking` thread, so blocking that thread
+        // with `blocking_send` is the correct backpressure primitive: a full channel
+        // pauses the parser until the consumer catches up, and no record is ever
+        // dropped. A send error means the receiver was dropped; the serde walk cannot
+        // be aborted mid-stream, so we just stop forwarding records.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<StalkerProgramRecord>(256);
         let parse_task = tokio::task::spawn_blocking(move || {
-            let mut dropped: u64 = 0;
-            let parse_result = stream_bulk_epg_from_reader(bridge, &mut |record| {
-                match tx.try_send(record) {
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        dropped = dropped.saturating_add(1);
-                    }
-                    Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        // Consumer dropped — the outer recv loop already exited.
-                    }
+            let mut receiver_closed = false;
+            stream_bulk_epg_from_reader(bridge, &mut |record| {
+                if receiver_closed {
+                    return;
                 }
-            });
-            parse_result.map(|_| dropped)
+                if tx.blocking_send(record).is_err() {
+                    receiver_closed = true;
+                }
+            })
         });
         let mut emitted = 0_u64;
         while let Some(record) = rx.recv().await {
             emitted = emitted.saturating_add(1);
             on_program(record);
         }
-        let dropped = parse_task
+        parse_task
             .await
             .map_err(|err| StalkerError::BodyDecode {
                 message: format!("get_epg_bulk parser join error: {err}"),
@@ -247,11 +246,6 @@ where
                     message: format!("get_epg_bulk json decode: {err}"),
                 },
             })?;
-        if dropped > 0 {
-            log::warn!(
-                "Stalker bulk EPG: dropped {dropped} records due to consumer backpressure (received={emitted})"
-            );
-        }
         if emitted == 0 {
             warn!("Stalker bulk EPG returned zero programs for period {period_hours}");
         }

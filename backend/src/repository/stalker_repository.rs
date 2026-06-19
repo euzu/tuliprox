@@ -25,9 +25,10 @@ use crate::utils::network::stalker::epg::StalkerProgramRecord;
 
 use crate::api::model::AppState;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget};
-use crate::repository::bplustree::{BPlusTreeQuery, BPlusTreeUpdate};
+use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 use crate::repository::storage::ensure_input_storage_path;
 use crate::repository::storage_const;
+use serde::{de::DeserializeOwned, Serialize};
 use shared::model::stalker::StalkerStreamKind;
 
 macro_rules! repo_err {
@@ -50,25 +51,25 @@ pub fn get_stalker_file_path(storage_path: &Path, kind: StalkerStreamKind) -> Pa
     // Archive and Live share the live tree on disk (the cmd pipeline emits them
     // to the same per-portal file).
     let name = match kind {
-        StalkerStreamKind::Live | StalkerStreamKind::Archive => "stalker_live",
-        StalkerStreamKind::Movie => "stalker_vod",
-        StalkerStreamKind::Episode => "stalker_episode",
+        StalkerStreamKind::Live | StalkerStreamKind::Archive => storage_const::STALKER_LIVE_FILE,
+        StalkerStreamKind::Movie => storage_const::STALKER_VOD_FILE,
+        StalkerStreamKind::Episode => storage_const::STALKER_EPISODE_FILE,
     };
     stalker_file_path_for_name(storage_path, name)
 }
 
 pub fn get_stalker_season_file_path(storage_path: &Path) -> PathBuf {
-    stalker_file_path_for_name(storage_path, "stalker_seasons")
+    stalker_file_path_for_name(storage_path, storage_const::STALKER_SEASONS_FILE)
 }
 
 pub fn get_stalker_series_root_file_path(storage_path: &Path) -> PathBuf {
-    stalker_file_path_for_name(storage_path, "stalker_series_roots")
+    stalker_file_path_for_name(storage_path, storage_const::STALKER_SERIES_ROOTS_FILE)
 }
 
 /// Path of the Stalker EPG B+Tree file. Stores bulk-fetched program records
 /// keyed by `<channel_id>:<start_epoch>` so a given (channel, programme) is unique.
 pub fn get_stalker_epg_file_path(storage_path: &Path) -> PathBuf {
-    stalker_file_path_for_name(storage_path, "stalker_epg")
+    stalker_file_path_for_name(storage_path, storage_const::STALKER_EPG_FILE)
 }
 
 fn get_stalker_item_file_path(storage_path: &Path, item: &StalkerPlaylistItem) -> PathBuf {
@@ -123,50 +124,106 @@ pub async fn persist_stalker_item(
     .map_err(|err| repo_err!("blocking task join error: {err}"))?
 }
 
-/// Bulk-insert a list of `StalkerPlaylistItem` into the appropriate tree. The
-/// caller is expected to have already grouped items by `stream_kind` if it
-/// wants to avoid repeated disk opens; we route each item to its own tree
-/// internally.
+/// Check whether a path exists, logging (instead of silently swallowing)
+/// IO errors such as permission failures before treating the path as absent.
+async fn stalker_path_exists(path: &Path) -> bool {
+    match tokio::fs::try_exists(path).await {
+        Ok(exists) => exists,
+        Err(err) => {
+            warn!("Failed to check existence of {}: {err}", path.display());
+            false
+        }
+    }
+}
+
+/// Blocking: write a full snapshot of `pairs` into a fresh ghost tree next to
+/// `file_path` and atomically swap it into place (mirrors the Xtream ghost-tree
+/// pattern). The caller must hold the per-file write lock for `file_path` for
+/// the duration of the call.
+fn write_stalker_snapshot_blocking<K, V>(file_path: &Path, pairs: &[(K, V)]) -> Result<u64, TuliproxError>
+where
+    K: Ord + Serialize + DeserializeOwned + Clone,
+    V: Serialize + DeserializeOwned + Clone,
+{
+    let tmp_path = file_path.with_extension("tmp");
+    BPlusTree::<K, V>::new()
+        .store(&tmp_path)
+        .map_err(|err| repo_err!("failed to create snapshot {}: {err}", tmp_path.display()))?;
+    let written = {
+        let mut tree = BPlusTreeUpdate::<K, V>::try_new_with_backoff(&tmp_path)
+            .map_err(|err| repo_err!("failed to open snapshot {}: {err}", tmp_path.display()))?;
+        tree.set_flush_policy(FlushPolicy::Batch);
+        let refs: Vec<(&K, &V)> = pairs.iter().map(|(k, v)| (k, v)).collect();
+        let prepared = BPlusTreeUpdate::<K, V>::prepare_upsert_batch(&refs)
+            .map_err(|err| repo_err!("failed to encode snapshot batch for {}: {err}", tmp_path.display()))?;
+        let written = tree
+            .upsert_batch_encoded(prepared)
+            .map_err(|err| repo_err!("snapshot batch write failed for {}: {err}", tmp_path.display()))?;
+        tree.commit()
+            .map_err(|err| repo_err!("snapshot commit failed for {}: {err}", tmp_path.display()))?;
+        written
+    };
+    crate::utils::rename_or_copy(&tmp_path, file_path, false)
+        .map_err(|err| repo_err!("failed to swap snapshot into {}: {err}", file_path.display()))?;
+    Ok(written)
+}
+
+/// Replace the contents of one tree file with the given items (full snapshot).
+async fn snapshot_stalker_file(
+    app_config: &Arc<AppConfig>,
+    file_path: PathBuf,
+    pairs: Vec<(u32, StalkerPlaylistItem)>,
+) -> Result<u64, TuliproxError> {
+    // Per-file write lock held for the duration of the blocking snapshot swap
+    // so concurrent readers cannot observe a half-written tree.
+    let file_lock = app_config.file_locks.write_lock(&file_path).await;
+    tokio::task::spawn_blocking(move || -> Result<u64, TuliproxError> {
+        let _guard = file_lock;
+        write_stalker_snapshot_blocking(&file_path, &pairs)
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
+/// Persist the full result of one cluster refresh as a snapshot: every tree
+/// file belonging to `kind` is rebuilt from scratch and atomically swapped in,
+/// so items removed upstream disappear from the store instead of lingering
+/// forever (snapshot, not upsert, semantics).
+///
+/// For `Episode`, items are split between the episode tree and the series-root
+/// tree; both are replaced even when one of the partitions is empty.
 pub async fn persist_stalker_items(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
+    kind: StalkerStreamKind,
     items: &[StalkerPlaylistItem],
 ) -> Result<u64, TuliproxError> {
-    if items.is_empty() {
-        return Ok(0);
-    }
-    // Group by kind so we open each tree at most once. IndexMap gives us
-    // deterministic iteration order and avoids the `Hash` bound on the kind
-    // enum (we don't need O(1) lookup, only the grouping).
-    let mut by_path: indexmap::IndexMap<PathBuf, Vec<StalkerPlaylistItem>> =
-        indexmap::IndexMap::new();
-    for item in items {
-        by_path.entry(get_stalker_item_file_path(storage_path, item)).or_default().push(item.clone());
-    }
     let mut total: u64 = 0;
-    for (file_path, batch) in by_path {
-        // Per-file write lock held for the duration of the blocking upsert —
-        // see `persist_stalker_item` for the rationale.
-        let file_lock = app_config.file_locks.write_lock(&file_path).await;
-        let key_value_pairs: Vec<(u32, StalkerPlaylistItem)> =
-            batch.iter().map(|i| (i.stream_id, i.clone())).collect();
-        let file_path_for_blocking = file_path.clone();
-        let key_value_pairs_for_blocking: Vec<(u32, StalkerPlaylistItem)> = key_value_pairs.clone();
-        let inserted = tokio::task::spawn_blocking(move || -> Result<u64, TuliproxError> {
-            let _guard = file_lock;
-            let pairs: Vec<(&u32, &StalkerPlaylistItem)> = key_value_pairs_for_blocking
-                .iter()
-                .map(|(k, v)| (k, v))
-                .collect();
-            BPlusTreeUpdate::<u32, StalkerPlaylistItem>::upsert_batch_prepared_with_backoff(
-                &file_path_for_blocking,
-                &pairs,
-            )
-            .map_err(|err| repo_err!("bulk upsert failed for {}: {err}", file_path_for_blocking.display()))
-        })
-        .await
-        .map_err(|err| repo_err!("blocking task join error: {err}"))??;
-        total = total.saturating_add(inserted);
+    match kind {
+        StalkerStreamKind::Live | StalkerStreamKind::Archive | StalkerStreamKind::Movie => {
+            let pairs: Vec<(u32, StalkerPlaylistItem)> =
+                items.iter().map(|i| (i.stream_id, i.clone())).collect();
+            total = total.saturating_add(
+                snapshot_stalker_file(app_config, get_stalker_file_path(storage_path, kind), pairs).await?,
+            );
+        }
+        StalkerStreamKind::Episode => {
+            let mut episodes: Vec<(u32, StalkerPlaylistItem)> = Vec::new();
+            let mut roots: Vec<(u32, StalkerPlaylistItem)> = Vec::new();
+            for item in items {
+                if item.is_series_root() {
+                    roots.push((item.stream_id, item.clone()));
+                } else {
+                    episodes.push((item.stream_id, item.clone()));
+                }
+            }
+            total = total.saturating_add(
+                snapshot_stalker_file(app_config, get_stalker_file_path(storage_path, kind), episodes).await?,
+            );
+            total = total.saturating_add(
+                snapshot_stalker_file(app_config, get_stalker_series_root_file_path(storage_path), roots).await?,
+            );
+        }
     }
     Ok(total)
 }
@@ -217,7 +274,7 @@ async fn iter_stalker_file(
 ) -> Result<Option<Box<dyn Stream<Item = StalkerPlaylistItem> + Send + Unpin>>, TuliproxError> {
     use tokio::sync::mpsc;
 
-    if !tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
+    if !stalker_path_exists(&file_path).await {
         return Ok(None);
     }
     // Bounded channel — large enough to keep the disk iterator ahead of the
@@ -254,7 +311,7 @@ pub async fn clear_stalker_storage(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
 ) -> Result<(), TuliproxError> {
-    if !tokio::fs::try_exists(storage_path).await.unwrap_or(false) {
+    if !stalker_path_exists(storage_path).await {
         return Ok(());
     }
     for kind in [
@@ -263,26 +320,24 @@ pub async fn clear_stalker_storage(
         StalkerStreamKind::Episode,
     ] {
         let file_path = get_stalker_file_path(storage_path, kind);
-        if tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
+        if stalker_path_exists(&file_path).await {
             let _lock = app_config.file_locks.write_lock(&file_path).await;
             tokio::fs::remove_file(&file_path).await.map_err(|err| {
                 repo_err!("failed to remove {}: {err}", file_path.display())
             })?;
         }
     }
-    let season_path = get_stalker_season_file_path(storage_path);
-    if tokio::fs::try_exists(&season_path).await.unwrap_or(false) {
-        let _lock = app_config.file_locks.write_lock(&season_path).await;
-        tokio::fs::remove_file(&season_path).await.map_err(|err| {
-            repo_err!("failed to remove {}: {err}", season_path.display())
-        })?;
-    }
-    let series_root_path = get_stalker_series_root_file_path(storage_path);
-    if tokio::fs::try_exists(&series_root_path).await.unwrap_or(false) {
-        let _lock = app_config.file_locks.write_lock(&series_root_path).await;
-        tokio::fs::remove_file(&series_root_path).await.map_err(|err| {
-            repo_err!("failed to remove {}: {err}", series_root_path.display())
-        })?;
+    for file_path in [
+        get_stalker_season_file_path(storage_path),
+        get_stalker_series_root_file_path(storage_path),
+        get_stalker_epg_file_path(storage_path),
+    ] {
+        if stalker_path_exists(&file_path).await {
+            let _lock = app_config.file_locks.write_lock(&file_path).await;
+            tokio::fs::remove_file(&file_path).await.map_err(|err| {
+                repo_err!("failed to remove {}: {err}", file_path.display())
+            })?;
+        }
     }
     Ok(())
 }
@@ -334,16 +389,12 @@ pub async fn read_stalker_season(
     .map_err(|err| repo_err!("blocking task join error: {err}"))?
 }
 
-/// Compute the on-disk path for a Stalker input. The result is `<input_dir>/stalker/`.
-pub fn get_stalker_input_path(input_root: &Path) -> PathBuf {
-    get_stalker_storage_path(input_root)
-}
-
-/// Persist a batch of Stalker EPG program records. The bulk-EPG endpoint can
-/// emit hundreds of thousands of records per portal, so callers should batch
-/// in memory (e.g. 500 at a time) before calling this helper. Records are
-/// keyed by `<channel_id>:<start_epoch>` so re-fetches replace stale entries
-/// on the same (channel, programme) slot.
+/// Persist the full bulk-EPG fetch result as a snapshot. The bulk-EPG endpoint
+/// can emit hundreds of thousands of records per portal; the processor collects
+/// the whole fetch and calls this once per refresh. Records are keyed by
+/// `<channel_id>:<start_epoch>`; the tree is rebuilt from scratch and atomically
+/// swapped in so stale programmes from earlier fetches do not accumulate.
+/// An empty fetch is treated as "no data" and leaves the existing store intact.
 pub async fn persist_stalker_epg_programs(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
@@ -353,8 +404,6 @@ pub async fn persist_stalker_epg_programs(
         return Ok(0);
     }
     let file_path = get_stalker_epg_file_path(storage_path);
-    let file_lock = app_config.file_locks.write_lock(&file_path).await;
-    let blocking_path = file_path.clone();
     let pairs: Vec<(String, StalkerProgramRecord)> = programs
         .iter()
         .map(|p| {
@@ -363,15 +412,10 @@ pub async fn persist_stalker_epg_programs(
             (format!("{ch}:{start}"), p.clone())
         })
         .collect();
+    let file_lock = app_config.file_locks.write_lock(&file_path).await;
     tokio::task::spawn_blocking(move || -> Result<u64, TuliproxError> {
         let _guard = file_lock;
-        let pairs_ref: Vec<(&String, &StalkerProgramRecord)> =
-            pairs.iter().map(|(k, v)| (k, v)).collect();
-        BPlusTreeUpdate::<String, StalkerProgramRecord>::upsert_batch_prepared_with_backoff(
-            &blocking_path,
-            &pairs_ref,
-        )
-        .map_err(|err| repo_err!("stalker EPG bulk upsert failed: {err}"))
+        write_stalker_snapshot_blocking(&file_path, &pairs)
     })
     .await
     .map_err(|err| repo_err!("blocking task join error: {err}"))?
@@ -397,7 +441,7 @@ pub async fn resolve_stalker_storage_for_input(
 /// duplicate the `ensure_*` / `get_stalker_storage_path` logic.
 pub async fn resolve_stalker_storage_for_target(
     app_state: &Arc<AppState>,
-    target: &ConfigTarget,
+    _target: &ConfigTarget,
     inputs: &[Arc<ConfigInput>],
 ) -> Option<(PathBuf, Arc<ConfigInput>)> {
     // Find the first Stalker input that contributes to the target. A target can
@@ -409,7 +453,6 @@ pub async fn resolve_stalker_storage_for_target(
             return Some((path, input.clone()));
         }
     }
-    let _ = target;
     None
 }
 

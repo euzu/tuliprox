@@ -17,76 +17,94 @@ pub struct StalkerLoadUrl {
     pub referer: String,
 }
 
-/// Build a list of `StalkerLoadUrl` candidates for a given portal root URL. The portal root
-/// may itself be either `<scheme>://host` or a full URL pointing at one of the candidate
-/// paths; if it is one of the candidate paths we use that exact URL as the only candidate
-/// (no siblings), otherwise we generate the full sibling list.
+/// Build a list of `StalkerLoadUrl` candidates for a given portal root URL. The portal
+/// root may itself live under a sub-path (the classic install is
+/// `http://host/stalker_portal/`), so the supplied path is preserved and used as the
+/// prefix for every candidate. A URL that already points at `server/load.php` or
+/// `portal.php` is treated as the single authoritative endpoint (no sibling fallback);
+/// a URL ending in the `c/` web-UI path has that suffix stripped before generating the
+/// sibling list.
 pub fn load_url_candidates(portal_url: &str) -> StalkerResult<Vec<StalkerLoadUrl>> {
     let parsed = Url::parse(portal_url).map_err(|err| StalkerError::BodyDecode {
         message: format!("portal url parse failed: {err}"),
     })?;
-    let base = {
+    let origin = {
         let mut trimmed = parsed.clone();
         trimmed.set_path("");
         trimmed.set_query(None);
         trimmed.set_fragment(None);
         trimmed.to_string().trim_end_matches('/').to_string()
     };
-    if base.is_empty() {
+    if origin.is_empty() {
         return Err(StalkerError::NoEndpoint { portal: portal_url.to_string() });
     }
+    let supplied_path = parsed.path().trim_matches('/').to_string();
 
-    // If the user already supplied a URL that points at one of the known load paths, we
+    // If the user already supplied a URL that points at one of the load endpoints, we
     // treat it as the single authoritative endpoint — no sibling fallback, since the user
     // has effectively told us "this is the right path".
-    let normalized = portal_url.trim_end_matches('/');
-    for path in STALKER_LOAD_PATHS {
-        let candidate = format!("{base}/{path}");
-        if normalized == candidate {
-            let referer = portal_referer(&candidate);
+    for endpoint in ["server/load.php", "portal.php"] {
+        let matches_endpoint = supplied_path == endpoint || supplied_path.ends_with(&format!("/{endpoint}"));
+        if matches_endpoint {
+            let prefix = supplied_path[..supplied_path.len() - endpoint.len()].trim_matches('/');
+            let base = join_base(&origin, prefix);
             return Ok(vec![StalkerLoadUrl {
-                load_url: candidate,
-                referer,
+                load_url: format!("{base}/{endpoint}"),
+                referer: format!("{base}/c/"),
             }]);
         }
     }
 
-    let mut candidates: Vec<StalkerLoadUrl> = STALKER_LOAD_PATHS
+    // `<base>/c/` is the MAG web-UI path, not an API base — strip it before generating
+    // the sibling candidates so `http://host/stalker_portal/c/` resolves the same set as
+    // `http://host/stalker_portal/`.
+    let base_path = supplied_path
+        .strip_suffix("/c")
+        .or_else(|| (supplied_path == "c").then_some(""))
+        .unwrap_or(supplied_path.as_str())
+        .trim_matches('/');
+    let base = join_base(&origin, base_path);
+    let referer = format!("{base}/c/");
+    let candidates: Vec<StalkerLoadUrl> = STALKER_LOAD_PATHS
         .iter()
         .map(|path| StalkerLoadUrl {
             load_url: format!("{base}/{path}"),
-            referer: portal_referer(&format!("{base}/{path}")),
+            referer: referer.clone(),
         })
         .collect();
-
-    candidates.dedup_by(|a, b| a.load_url == b.load_url);
-    if candidates.is_empty() {
-        return Err(StalkerError::NoEndpoint { portal: portal_url.to_string() });
-    }
     Ok(candidates)
 }
 
-/// The `Referer` header Stalker portals expect on every API call. By convention this is
-/// `<portal root>/c/` — the same path the MAG portal uses for its web UI.
-pub fn portal_referer(load_url: &str) -> String {
-    if let Ok(mut url) = Url::parse(load_url) {
-        url.set_query(None);
-        url.set_fragment(None);
-        // Strip the path component entirely; the referer is the portal root + `c/`.
-        // We retain a single trailing slash so the output is `<root>/c/`.
-        let mut s = url.to_string();
-        if let Some(scheme_end) = s.find("://") {
-            let after_scheme = scheme_end + 3;
-            if let Some(path_idx) = s[after_scheme..].find('/') {
-                s.truncate(after_scheme + path_idx);
-            }
-        }
-        let trimmed = s.trim_end_matches('/');
-        format!("{trimmed}/c/")
+fn join_base(origin: &str, prefix: &str) -> String {
+    if prefix.is_empty() {
+        origin.to_string()
     } else {
-        let trimmed = load_url.trim_end_matches('/');
-        format!("{trimmed}/c/")
+        format!("{origin}/{prefix}")
     }
+}
+
+/// The `Referer` header Stalker portals expect on every API call. By convention this is
+/// `<portal base>/c/` — the same path the MAG portal uses for its web UI. Any known load
+/// endpoint suffix is stripped from the input first so a sub-path install keeps its
+/// prefix (`http://host/stalker_portal/server/load.php` → `http://host/stalker_portal/c/`).
+pub fn portal_referer(load_url: &str) -> String {
+    let without_query = match Url::parse(load_url) {
+        Ok(mut url) => {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => load_url.to_string(),
+    };
+    let mut base = without_query.trim_end_matches('/');
+    for path in STALKER_LOAD_PATHS {
+        let suffix = format!("/{}", path.trim_end_matches('/'));
+        if let Some(stripped) = base.strip_suffix(suffix.as_str()) {
+            base = stripped.trim_end_matches('/');
+            break;
+        }
+    }
+    format!("{base}/c/")
 }
 
 #[cfg(test)]
@@ -111,12 +129,48 @@ mod tests {
             load_url_candidates("http://portal.example/server/load.php").expect("ok");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].load_url, "http://portal.example/server/load.php");
+        assert_eq!(candidates[0].referer, "http://portal.example/c/");
+    }
+
+    #[test]
+    fn preserves_sub_path_prefix_for_candidates() {
+        let candidates = load_url_candidates("http://portal.example/stalker_portal/").expect("ok");
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].load_url, "http://portal.example/stalker_portal/server/load.php");
+        assert_eq!(candidates[1].load_url, "http://portal.example/stalker_portal/portal.php");
+        assert_eq!(candidates[2].load_url, "http://portal.example/stalker_portal/c/");
+        for c in &candidates {
+            assert_eq!(c.referer, "http://portal.example/stalker_portal/c/");
+        }
+    }
+
+    #[test]
+    fn sub_path_load_url_is_single_authoritative_candidate() {
+        let candidates =
+            load_url_candidates("http://portal.example/stalker_portal/server/load.php").expect("ok");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].load_url, "http://portal.example/stalker_portal/server/load.php");
+        assert_eq!(candidates[0].referer, "http://portal.example/stalker_portal/c/");
+    }
+
+    #[test]
+    fn web_ui_path_is_stripped_before_generating_candidates() {
+        let candidates = load_url_candidates("http://portal.example/stalker_portal/c/").expect("ok");
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].load_url, "http://portal.example/stalker_portal/server/load.php");
+        assert_eq!(candidates[2].load_url, "http://portal.example/stalker_portal/c/");
     }
 
     #[test]
     fn referer_truncates_load_path() {
         let referer = portal_referer("http://portal.example/server/load.php");
         assert_eq!(referer, "http://portal.example/c/");
+    }
+
+    #[test]
+    fn referer_preserves_sub_path_prefix() {
+        let referer = portal_referer("http://portal.example/stalker_portal/server/load.php");
+        assert_eq!(referer, "http://portal.example/stalker_portal/c/");
     }
 
     #[test]

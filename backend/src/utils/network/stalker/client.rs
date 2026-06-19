@@ -4,12 +4,9 @@ use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE, REFERER, USER_AGENT};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::fmt::Write;
 
-/// Stalker portals expect a `X-User-Agent` header on every call. The `reqwest` re-export
-/// does not ship a constant for it (the upstream convention is to use a custom name), so
-/// we declare a static one and resolve it to a `HeaderName` once.
-const X_USER_AGENT_NAME: HeaderName = HeaderName::from_static("x-user-agent");
 use reqwest::{Client, RequestBuilder, Response, Url};
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
@@ -27,8 +24,23 @@ use crate::utils::network::stalker::recipes::apply_endpoint_preference;
 use crate::utils::network::stalker::session::StalkerSession;
 use crate::utils::network::stalker::url_factory::{load_url_candidates, StalkerLoadUrl};
 
+/// Stalker portals expect a `X-User-Agent` header on every call. The `reqwest` re-export
+/// does not ship a constant for it (the upstream convention is to use a custom name), so
+/// we declare a static one and resolve it to a `HeaderName` once.
+const X_USER_AGENT_NAME: HeaderName = HeaderName::from_static("x-user-agent");
+
 static STALKER_DEBUG_DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
 pub(crate) const DEFAULT_STALKER_CATALOG_MAX_PAGES: u32 = 4_096;
+
+/// Upper bound on the time a handshake (including all recipe/endpoint fallbacks of a
+/// single attempt) may hold the refresh lock. Without it a hung upstream would park
+/// every concurrent caller behind the `refresh_lock` indefinitely.
+const STALKER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cap on the initial `BytesMut` allocation when reading a body. A hostile portal can
+/// advertise a huge `Content-Length` without sending data; we never pre-allocate more
+/// than this, growing on demand instead.
+const INITIAL_BODY_ALLOC_CAP: u64 = 256 * 1024;
 
 /// Per-action cap on the response body in bytes. Configurable at construction time so
 /// the user can dial it down for adversarial portals and up for friendly ones.
@@ -128,7 +140,12 @@ impl StalkerApiClient {
             *self.handshake.lock() = None;
             self.cookies.clear();
         }
-        let handshake = auth::handshake(self).await?;
+        let handshake = tokio::time::timeout(STALKER_HANDSHAKE_TIMEOUT, auth::handshake(self))
+            .await
+            .map_err(|_| StalkerError::HandshakeFailed {
+                message: format!("handshake timed out after {}s", STALKER_HANDSHAKE_TIMEOUT.as_secs()),
+                url: None,
+            })??;
         *self.handshake.lock() = Some(handshake.clone());
         Ok(handshake)
     }
@@ -239,8 +256,10 @@ impl StalkerApiClient {
 
     /// Build the common header set for a Stalker API request. We always send the
     /// `User-Agent`, `X-User-Agent` and `Referer` headers; the `Authorization` header
-    /// is added when a bearer token is present, and the `Cookie` header is added
-    /// whenever the jar has any active cookies.
+    /// is added when a bearer token is present. The `Cookie` header carries the MAG
+    /// identity cookies (`mac`, `stb_lang`, `timezone`) merged with whatever the portal
+    /// set in the jar — many portals authorize against the cookie identity, not the
+    /// query string.
     pub(crate) fn common_headers(&self, load_url: &StalkerLoadUrl) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let preset = stalker_mag_preset_spec(self.config.mag_preset);
@@ -260,26 +279,52 @@ impl StalkerApiClient {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(preset.x_user_agent);
-        if let Ok(v) = HeaderValue::from_str(ua) {
-            headers.insert(USER_AGENT, v);
+        match HeaderValue::from_str(ua) {
+            Ok(v) => {
+                headers.insert(USER_AGENT, v);
+            }
+            Err(err) => warn!("Stalker: dropping invalid User-Agent header value: {err}"),
         }
-        if let Ok(v) = HeaderValue::from_str(xua) {
-            headers.insert(&X_USER_AGENT_NAME, v);
+        match HeaderValue::from_str(xua) {
+            Ok(v) => {
+                headers.insert(&X_USER_AGENT_NAME, v);
+            }
+            Err(err) => warn!("Stalker: dropping invalid X-User-Agent header value: {err}"),
         }
-        if let Ok(v) = HeaderValue::from_str(&load_url.referer) {
-            headers.insert(REFERER, v);
+        match HeaderValue::from_str(&load_url.referer) {
+            Ok(v) => {
+                headers.insert(REFERER, v);
+            }
+            Err(err) => warn!("Stalker: dropping invalid Referer header value: {err}"),
         }
-        let cookie = self.cookies.active_cookie_header(crate::utils::network::stalker::cookie_jar::now_epoch_secs());
+        let now = crate::utils::network::stalker::cookie_jar::now_epoch_secs();
+        let mut cookie_pairs = identity_cookie_pairs(&self.config);
+        for (name, value) in self.cookies.active_cookies(now) {
+            // Server-set cookies win over our synthesized identity values.
+            if let Some(existing) = cookie_pairs.iter_mut().find(|(n, _)| *n == name) {
+                existing.1 = value;
+            } else {
+                cookie_pairs.push((name, value));
+            }
+        }
+        let cookie = cookie_pairs
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
         if !cookie.is_empty() {
-            if let Ok(v) = HeaderValue::from_str(&cookie) {
-                headers.insert(COOKIE, v);
+            match HeaderValue::from_str(&cookie) {
+                Ok(v) => {
+                    headers.insert(COOKIE, v);
+                }
+                Err(err) => warn!("Stalker: dropping invalid Cookie header value: {err}"),
             }
         }
         headers
     }
 
-    /// Apply the bearer token to the request builder when we have a session.
-    #[allow(clippy::unused_self)]
+    /// Apply the bearer token to the request builder when we have a session. The
+    /// authorization scheme name comes from the active MAG preset (`token_header`).
     pub(crate) fn apply_bearer(&self, builder: RequestBuilder, session: Option<&StalkerSession>, token_in_query: bool) -> RequestBuilder {
         let Some(session) = session else {
             return builder;
@@ -288,7 +333,8 @@ impl StalkerApiClient {
             let token = session.token.clone();
             builder.query(&[("token", token.as_str())])
         } else {
-            builder.header(AUTHORIZATION, format!("Bearer {}", session.token))
+            let preset = stalker_mag_preset_spec(self.config.mag_preset);
+            builder.header(AUTHORIZATION, format!("{} {}", preset.token_header, session.token))
         }
     }
 
@@ -418,7 +464,10 @@ impl StalkerApiClient {
             }
         }
         if response.status().is_success() {
-            debug!("Stalker {action} response {cap} bytes (cap {cap})");
+            let advertised = response
+                .content_length()
+                .map_or_else(|| "unknown".to_string(), |len| len.to_string());
+            debug!("Stalker {action} response {advertised} bytes (cap {cap})");
         } else {
             warn!("Stalker {action} response status {}", response.status());
         }
@@ -431,8 +480,14 @@ impl StalkerApiClient {
         action: &'static str,
         cap: u64,
     ) -> StalkerResult<Bytes> {
-        let initial_capacity = usize::try_from(response.content_length().unwrap_or(0).min(cap))
-            .unwrap_or_default();
+        let initial_capacity = usize::try_from(
+            response
+                .content_length()
+                .unwrap_or(0)
+                .min(cap)
+                .min(INITIAL_BODY_ALLOC_CAP),
+        )
+        .unwrap_or_default();
         let mut body = BytesMut::with_capacity(initial_capacity);
         let mut received = 0_u64;
         while let Some(chunk) = response.chunk().await.map_err(StalkerError::from)? {
@@ -523,18 +578,6 @@ fn looks_like_jsonp_wrapper(value: &str) -> bool {
     false
 }
 
-/// Convert a `StalkerApiClient` into a tuple of `(Arc<Client>, portal_url, config)` for
-/// callers that want to issue raw requests without going through the high-level helpers.
-pub fn parts(client: &StalkerApiClient) -> (Client, String, StalkerInputConfig) {
-    (client.http.clone(), client.portal_url.clone(), client.config.clone())
-}
-
-/// Helper used by the auth and playback submodules to know which load URL the active
-/// session is bound to. Returns `None` if no session is active.
-pub fn active_load_url(client: &StalkerApiClient) -> Option<String> {
-    client.active_handshake().map(|h| h.session.load_url.clone())
-}
-
 /// Validate that the URL the portal handed back in `create_link` is one we know how to
 /// reverse-proxy. Returns the scheme on success.
 pub(crate) fn validate_playable_scheme(url: &str) -> StalkerResult<&'static str> {
@@ -551,15 +594,62 @@ pub(crate) fn validate_playable_scheme(url: &str) -> StalkerResult<&'static str>
     }
 }
 
-fn persist_stalker_debug_body(portal_url: &str, action: &str, body: &[u8]) {
+/// The MAG identity cookies every Stalker request should carry. Portals key the device
+/// identity off these cookies (notably `mac`), not only the query string. Values are
+/// percent-encoded because MAC addresses contain `:` which is not a valid cookie-value
+/// octet.
+fn identity_cookie_pairs(config: &StalkerInputConfig) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let Some(device) = config.device.as_ref() else {
+        return pairs;
+    };
+    if let Some(mac) = device.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        pairs.push(("mac".to_string(), percent_encode_cookie_value(mac)));
+    }
+    if let Some(locale) = device.locale.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        pairs.push(("stb_lang".to_string(), percent_encode_cookie_value(locale)));
+    }
+    if let Some(timezone) = device.timezone.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        pairs.push(("timezone".to_string(), percent_encode_cookie_value(timezone)));
+    }
+    pairs
+}
+
+/// Percent-encode a cookie value, keeping only RFC 3986 unreserved characters. This is
+/// what real MAG firmware does for the `mac`/`timezone` cookies (e.g. `:` → `%3A`,
+/// `/` → `%2F`).
+fn percent_encode_cookie_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(char::from(byte)),
+            other => {
+                out.push('%');
+                let _ = write!(out, "{other:02X}");
+            }
+        }
+    }
+    out
+}
+
+fn persist_stalker_debug_body(portal_url: &str, action: &'static str, body: &Bytes) {
     let Ok(dir) = std::env::var("TULIPROX_STALKER_DEBUG_DIR") else {
         return;
     };
     if dir.trim().is_empty() {
         return;
     }
+    // Fire-and-forget: this runs on the async path, so the sync filesystem writes are
+    // offloaded to the blocking pool. `Bytes` clones are cheap (refcount bump).
+    let portal_url = portal_url.to_string();
+    let body = body.clone();
+    tokio::task::spawn_blocking(move || {
+        write_stalker_debug_body(&dir, &portal_url, action, &body);
+    });
+}
 
-    let dump_dir = Path::new(&dir);
+fn write_stalker_debug_body(dir: &str, portal_url: &str, action: &str, body: &[u8]) {
+    let dump_dir = Path::new(dir);
     if let Err(err) = std::fs::create_dir_all(dump_dir) {
         warn!("Stalker debug dump: could not create {}: {err}", dump_dir.display());
         return;
@@ -595,9 +685,6 @@ fn sanitize_dump_component(value: &str) -> String {
         })
         .collect()
 }
-
-// Bring the cookie jar's `now_epoch_secs` helper into scope so we don't need to import
-// the inner module path everywhere.
 
 #[cfg(test)]
 mod tests {
@@ -745,5 +832,36 @@ mod tests {
             body_snippet: String::new(),
         }
         .is_token_rejected());
+    }
+
+    #[test]
+    fn percent_encode_cookie_value_escapes_mac_colons() {
+        assert_eq!(percent_encode_cookie_value("00:1A:79:DE:AD:BE"), "00%3A1A%3A79%3ADE%3AAD%3ABE");
+        assert_eq!(percent_encode_cookie_value("Europe/Berlin"), "Europe%2FBerlin");
+        assert_eq!(percent_encode_cookie_value("en_US.utf8"), "en_US.utf8");
+    }
+
+    #[test]
+    fn identity_cookie_pairs_includes_mac_lang_and_timezone() {
+        let config = StalkerInputConfig {
+            device: Some(crate::model::StalkerDeviceProfile {
+                mac_address: Some("00:1A:79:DE:AD:BE".to_string()),
+                locale: Some("en".to_string()),
+                timezone: Some("Europe/Berlin".to_string()),
+                ..crate::model::StalkerDeviceProfile::default()
+            }),
+            ..StalkerInputConfig::default()
+        };
+        let pairs = identity_cookie_pairs(&config);
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[0], ("mac".to_string(), "00%3A1A%3A79%3ADE%3AAD%3ABE".to_string()));
+        assert_eq!(pairs[1], ("stb_lang".to_string(), "en".to_string()));
+        assert_eq!(pairs[2], ("timezone".to_string(), "Europe%2FBerlin".to_string()));
+    }
+
+    #[test]
+    fn identity_cookie_pairs_empty_without_device() {
+        let config = StalkerInputConfig::default();
+        assert!(identity_cookie_pairs(&config).is_empty());
     }
 }

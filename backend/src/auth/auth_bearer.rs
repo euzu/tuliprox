@@ -2,7 +2,6 @@ use axum::extract::FromRequestParts;
 use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
-use std::future::{ready, Future};
 use crate::auth::Rejection;
 
 #[derive(Debug, PartialEq, Eq, Clone)]

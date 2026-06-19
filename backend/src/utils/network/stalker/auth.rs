@@ -1,7 +1,7 @@
 use log::{debug, info, warn};
 use serde::Deserialize;
 use serde_json::Value;
-use shared::model::stalker::{StalkerBootstrapRecipe, StalkerPortalCapabilitiesDto};
+use shared::model::stalker::{StalkerAuthMode, StalkerBootstrapRecipe, StalkerPortalCapabilitiesDto};
 
 use crate::utils::network::stalker::client::StalkerApiClient;
 use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
@@ -79,7 +79,7 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         match perform_handshake_against(client, &load_url, &spec).await {
-            Ok(mut session) => {
+            Ok((mut session, handshake_status)) => {
                 if spec.emit_handshake_extra {
                     if let Err(err) = perform_handshake_extra(client, &mut session, &load_url, &spec).await {
                         warn!("Stalker handshake-extra failed: {err}");
@@ -94,8 +94,25 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
                         continue;
                     }
                 }
-                let raw_profile = fetch_profile(client, &session, &load_url, &spec).await?;
-                let fingerprint = detect_fingerprint(200, &session.fingerprint_evidence, client.config().mag_preset);
+                if let Some((login, password)) = account_credentials(client) {
+                    if let Err(err) = perform_do_auth(client, &session, &load_url, &spec, &login, &password).await {
+                        warn!("Stalker do_auth failed: {err}");
+                        last_err = Some(err);
+                        continue;
+                    }
+                }
+                // A profile failure on this endpoint should not abort the whole recipe:
+                // fall through to the next load-url candidate instead.
+                let raw_profile = match fetch_profile(client, &session, &load_url, &spec).await {
+                    Ok(profile) => profile,
+                    Err(err) => {
+                        warn!("Stalker get_profile failed: {err}");
+                        last_err = Some(err);
+                        continue;
+                    }
+                };
+                let fingerprint =
+                    detect_fingerprint(handshake_status, &session.fingerprint_evidence, client.config().mag_preset);
                 debug!("Stalker portal fingerprint for {}: {fingerprint:?}", load_url.load_url);
                 let capabilities = fetch_capabilities(client, &session, &load_url, &spec).await.unwrap_or_default();
                 let size_caps = client
@@ -109,8 +126,8 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
                     fallback_recipes_for(client.config().auth_mode, client.config().mag_preset),
                     capabilities,
                     size_caps,
-                    None,
-                    None,
+                    client.config().username.clone(),
+                    client.config().password.clone(),
                 );
                 return Ok(StalkerHandshake { session, profile });
             }
@@ -129,7 +146,7 @@ async fn perform_handshake_against(
     client: &StalkerApiClient,
     load_url: &StalkerLoadUrl,
     spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
-) -> StalkerResult<StalkerSession> {
+) -> StalkerResult<(StalkerSession, u16)> {
     let config = client.config();
     let preset_spec = stalker_mag_preset_spec(config.mag_preset);
     let mut builder = client
@@ -200,9 +217,56 @@ async fn perform_handshake_against(
             keys
         })
         .unwrap_or_default();
-    let mut session = StalkerSession::new(token, load_url.referer.clone(), load_url.load_url.clone());
-    session.cookies = crate::utils::network::stalker::cookie_jar::StalkerCookieJar::new();
-    Ok(session.with_evidence(evidence))
+    let session = StalkerSession::new(token, load_url.referer.clone(), load_url.load_url.clone());
+    Ok((session.with_evidence(evidence), status.as_u16()))
+}
+
+/// The account credentials to authenticate with, when the auth mode wants them. `MacOnly`
+/// explicitly opts out; every other mode forwards configured non-blank credentials.
+fn account_credentials(client: &StalkerApiClient) -> Option<(String, String)> {
+    let config = client.config();
+    if matches!(config.auth_mode, StalkerAuthMode::MacOnly) {
+        return None;
+    }
+    let username = config.username.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    let password = config.password.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    Some((username.to_string(), password.to_string()))
+}
+
+/// Authenticate the account on the portal (`action=do_auth`). Stalker portals that pair
+/// MAC identities with account credentials reject all catalog calls until this step has
+/// been performed once per session.
+async fn perform_do_auth(
+    client: &StalkerApiClient,
+    session: &StalkerSession,
+    load_url: &StalkerLoadUrl,
+    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    login: &str,
+    password: &str,
+) -> StalkerResult<()> {
+    let mut builder = client
+        .http()
+        .get(&load_url.load_url)
+        .headers(client.common_headers(load_url))
+        .query(&[
+            ("type", "stb"),
+            ("action", "do_auth"),
+            ("login", login),
+            ("password", password),
+            ("JsHttpRequest", "1-xml"),
+        ]);
+    builder = client.apply_mac_query(builder);
+    builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
+    let value: Value = client.send_json(builder, "do_auth").await?;
+    // Portals answer `{"js": true}` on success and `{"js": false}` on bad credentials;
+    // anything else (object payloads, missing key) is treated as success.
+    if matches!(value.get("js"), Some(Value::Bool(false))) {
+        return Err(StalkerError::HandshakeFailed {
+            message: "portal rejected do_auth credentials".to_string(),
+            url: load_url.load_url.parse().ok(),
+        });
+    }
+    Ok(())
 }
 
 async fn perform_handshake_extra(

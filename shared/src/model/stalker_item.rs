@@ -9,8 +9,13 @@ use std::sync::Arc;
 /// Mirrors the StreamVault `StalkerPlaylistItem` Kotlin data class — all
 /// Stalker-specific fields are captured so the runtime can decide between
 /// pre-resolved and on-demand `create_link` calls.
+///
+/// IMPORTANT: this struct is persisted via positional MessagePack
+/// (`rmp_serde::to_vec` in `binary_serialize`). Fields are encoded by
+/// position, not name — `skip_serializing_if` would shift every following
+/// field on read and corrupt the record. Optional fields use `#[serde(default)]`
+/// only, and new fields may only be APPENDED (never inserted/reordered).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct StalkerPlaylistItem {
     pub stream_id: u32,
     #[serde(with = "arc_str_serde")]
@@ -19,9 +24,9 @@ pub struct StalkerPlaylistItem {
     #[serde(with = "arc_str_serde")]
     pub category_name: Arc<str>,
     pub number: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub logo_url: Option<Arc<str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub epg_channel_id: Option<Arc<str>>,
     /// Resolved stream URL. Empty until playback is materialized, then filled
     /// with the real upstream http/https URL.
@@ -32,66 +37,64 @@ pub struct StalkerPlaylistItem {
     /// Raw `cmd` string returned by the portal (`ffmpeg <url> <ext>`).
     #[serde(with = "arc_str_serde")]
     pub cmd: Arc<str>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub container_extension: Option<Arc<str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub plot: Option<Arc<str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cast: Option<Arc<str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub director: Option<Arc<str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub genre: Option<Arc<str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub release_date: Option<Arc<str>>,
     #[serde(default)]
     pub rating: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tmdb_id: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub backdrop_url: Option<Arc<str>>,
     /// Unix timestamp in seconds when the item was first persisted.
     #[serde(default)]
     pub added_at: i64,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub is_adult: bool,
     /// `true` for series root items; episodes are persisted under
     /// `stalker_episode.db` and reference their parent `series_id`.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub is_series: bool,
     /// Playback descriptor (primary mode + ordered cmd candidates + capabilities).
     /// When `None`, the runtime treats the item as a plain direct URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub playback_descriptor: Option<StalkerPlaybackDescriptorDto>,
     /// Per-item capability flags lifted from the portal — let the runtime
     /// skip `create_link` retries when the portal clearly does not support
     /// timeshift or temp-link playback.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub archive_available: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub allow_local_timeshift: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub allow_local_pvr: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub allow_remote_pvr: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub nginx_secure_link: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub flussonic_tmp_link: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub wowza_tmp_link: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub use_http_tmp_link: bool,
     /// Series linkage (only set for episode items).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub series_id: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub season_id: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub episode_id: Option<i64>,
+    #[serde(default)]
+    pub series_id: Option<u32>,
+    #[serde(default)]
+    pub season_id: Option<u32>,
+    #[serde(default)]
+    pub episode_id: Option<u32>,
 }
-
-fn is_false(v: &bool) -> bool { !*v }
 
 impl Default for StalkerPlaylistItem {
     fn default() -> Self {
@@ -150,14 +153,16 @@ impl StalkerPlaylistItem {
 }
 
 /// A season entry that groups a list of episodes. Persisted alongside series items.
+///
+/// NOTE: persisted via positional MessagePack — no `skip_serializing_if`
+/// (see `StalkerPlaylistItem`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
 pub struct StalkerSeasonItem {
     pub series_id: u32,
     pub season_number: i32,
     #[serde(with = "arc_str_serde")]
     pub name: Arc<str>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cover_url: Option<Arc<str>>,
     #[serde(with = "arc_str_vec_serde", default)]
     pub episodes: Vec<Arc<str>>,
@@ -165,8 +170,10 @@ pub struct StalkerSeasonItem {
 
 /// Lightweight episode record that keeps the actual `StalkerPlaylistItem`
 /// in the live/episode store and only embeds the season-level summary here.
+///
+/// NOTE: persisted via positional MessagePack — no `skip_serializing_if`
+/// (see `StalkerPlaylistItem`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StalkerEpisodeIndex {
     pub episode_id: u64,
     pub series_id: u32,
@@ -174,7 +181,7 @@ pub struct StalkerEpisodeIndex {
     pub episode_number: i32,
     #[serde(with = "arc_str_serde")]
     pub title: Arc<str>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub container_extension: Option<Arc<str>>,
     #[serde(default)]
     pub added_at: i64,

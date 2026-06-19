@@ -62,7 +62,7 @@ use std::{
     io::SeekFrom,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
@@ -70,6 +70,11 @@ use tokio_util::io::ReaderStream;
 use url::Url;
 
 const RECENT_EVICTION_REENTRY_TTL_SECS: u64 = 3;
+
+/// Per-`(input id, provider id)` single-flight guards so concurrent client requests
+/// for the same dead stalker stream trigger only one portal re-resolve at a time.
+static STALKER_RE_RESOLVE_GUARDS: LazyLock<tokio::sync::Mutex<HashMap<(u16, u32), Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[derive(Clone, Copy)]
 pub(crate) enum EvictionReentryGuard<'a> {
@@ -2042,15 +2047,36 @@ async fn create_stream_response_details(
                         XtreamCluster::Series => StalkerStreamKind::Episode,
                     };
                     let stalker_http_client = app_state.http_client.load().as_ref().clone();
-                    match re_resolve_stalker_url(
-                        &app_state.app_config,
-                        &stalker_http_client,
-                        input,
-                        stream_channel.provider_id,
-                        kind,
-                    )
-                    .await
+                    // Single-flight: serialize portal re-resolves per (input, provider stream),
+                    // so N concurrent clients don't hammer an already failing portal.
+                    let guard_key = (input.id, stream_channel.provider_id);
+                    let resolve_result = {
+                        let entry_lock = {
+                            let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
+                            Arc::clone(
+                                guards
+                                    .entry(guard_key)
+                                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+                            )
+                        };
+                        let _flight = entry_lock.lock().await;
+                        re_resolve_stalker_url(
+                            &app_state.app_config,
+                            &stalker_http_client,
+                            input,
+                            stream_channel.provider_id,
+                            kind,
+                        )
+                        .await
+                    };
+                    // Drop the map entry once no other task is waiting on it, to avoid unbounded growth.
                     {
+                        let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
+                        if guards.get(&guard_key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+                            guards.remove(&guard_key);
+                        }
+                    }
+                    match resolve_result {
                         Ok(Some(refreshed_url)) => {
                             if let Ok(url) = Url::parse(&refreshed_url) {
                                 let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
@@ -2064,6 +2090,7 @@ async fn create_stream_response_details(
                                         stream_url: &url,
                                         req_headers,
                                         input_headers: streaming_strategy.input_headers.as_ref(),
+                                        session_headers,
                                         disabled_headers: disabled_headers.as_ref(),
                                         default_user_agent: default_user_agent.as_deref(),
                                         username: Some(username),
@@ -2086,13 +2113,16 @@ async fn create_stream_response_details(
                                     reconnect_flag = Some(retry_reconnect_flag);
                                     request_url = refreshed_url;
                                 } else {
-                                    stream = None;
-                                    stream_info = None;
+                                    // Keep the original stream/stream_info: the upstream response
+                                    // might still be serveable, and its status is needed for reporting.
+                                    debug!("Stalker re-resolve retry could not open a stream, keeping original provider response");
                                 }
                             }
                         }
                         Ok(None) => {}
-                        Err(err) => warn!("Failed to refresh Stalker playback URL: {err}"),
+                        Err(err) => {
+                            warn!("Failed to refresh Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
+                        }
                     }
                 }
                 (stream, stream_info, reconnect_flag)

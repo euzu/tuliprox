@@ -21,8 +21,6 @@ pub struct StalkerRecipeSpec {
     /// Whether `create_link` calls should send the bearer token only as `Authorization`
     /// (true) or also as a `token` query parameter (false).
     pub token_in_query: bool,
-    /// Whether `Referer` must include the `/portal.php` form rather than `/server/load.php`.
-    pub portal_referer_override: bool,
 }
 
 /// Default recipes per `(auth_mode, preset)` tuple. The table is intentionally small —
@@ -35,21 +33,18 @@ pub fn default_recipe_for(auth_mode: StalkerAuthMode, preset: StalkerMagPreset) 
             emit_handshake_extra: false,
             require_portal_handshake: false,
             token_in_query: false,
-            portal_referer_override: false,
         },
         StalkerAuthMode::CredentialsOnly => StalkerRecipeSpec {
             recipe: StalkerBootstrapRecipe::AuthOnly,
             emit_handshake_extra: false,
             require_portal_handshake: false,
             token_in_query: false,
-            portal_referer_override: false,
         },
         StalkerAuthMode::MacPlusCredentials => StalkerRecipeSpec {
             recipe: StalkerBootstrapRecipe::AuthStrictMag,
             emit_handshake_extra: true,
             require_portal_handshake: true,
             token_in_query: true,
-            portal_referer_override: false,
         },
     }
 }
@@ -93,42 +88,30 @@ pub fn recipe_spec_for(recipe: StalkerBootstrapRecipe) -> StalkerRecipeSpec {
             emit_handshake_extra: false,
             require_portal_handshake: false,
             token_in_query: false,
-            portal_referer_override: false,
         },
         StalkerBootstrapRecipe::LegacyMag => StalkerRecipeSpec {
             recipe,
             emit_handshake_extra: false,
             require_portal_handshake: true,
             token_in_query: true,
-            portal_referer_override: false,
         },
-        StalkerBootstrapRecipe::StrictMag | StalkerBootstrapRecipe::AuthStrictMag => StalkerRecipeSpec {
+        StalkerBootstrapRecipe::ModuleGated| StalkerBootstrapRecipe::StrictMag | StalkerBootstrapRecipe::AuthStrictMag => StalkerRecipeSpec {
             recipe,
             emit_handshake_extra: true,
             require_portal_handshake: true,
             token_in_query: true,
-            portal_referer_override: false,
         },
         StalkerBootstrapRecipe::PortalPreferred => StalkerRecipeSpec {
             recipe,
             emit_handshake_extra: false,
             require_portal_handshake: true,
             token_in_query: false,
-            portal_referer_override: true,
         },
         StalkerBootstrapRecipe::LocalizationStrict => StalkerRecipeSpec {
             recipe,
             emit_handshake_extra: true,
             require_portal_handshake: false,
             token_in_query: false,
-            portal_referer_override: true,
-        },
-        StalkerBootstrapRecipe::ModuleGated => StalkerRecipeSpec {
-            recipe,
-            emit_handshake_extra: true,
-            require_portal_handshake: true,
-            token_in_query: true,
-            portal_referer_override: true,
         },
     }
 }

@@ -59,9 +59,6 @@ fn build_m3u_url(
 }
 
 fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: InputType) {
-    if input_type == InputType::StalkerBatch {
-        alias.stalker.get_or_insert_with(Default::default);
-    }
     if !alias.url.is_empty() {
         let mut provider_scheme = false;
         if alias.url.starts_with(PROVIDER_SCHEME_PREFIX) {
@@ -650,7 +647,9 @@ input_2;de566567;de2345f43g5;http://provider_2.tv:8080;1;2028-12-23 13:12:34
         let reader = file_reader(Cursor::new(XTREAM_BATCH));
         let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, reader).expect("stalker batch aliases");
         assert_eq!(aliases.len(), 2);
-        assert!(aliases.iter().all(|alias| alias.stalker.is_some()));
+        // Aliases must NOT materialize a stalker block of their own — they
+        // inherit the parent input's stalker configuration in `as_input`.
+        assert!(aliases.iter().all(|alias| alias.stalker.is_none()));
         assert!(aliases.iter().all(|alias| !alias.url.contains("username")));
     }
 }

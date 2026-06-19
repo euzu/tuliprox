@@ -12,12 +12,13 @@
 
 #![allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 
-use log::warn;
+use log::{info, warn};
 use shared::model::stalker::{
     StalkerCommandVariantDto, StalkerPlaybackDescriptorDto, StalkerPlaybackMode, StalkerStreamKind,
 };
 use shared::model::stalker_item::StalkerPlaylistItem;
 use shared::utils::Internable;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::utils::network::stalker::catalog::{
@@ -47,8 +48,6 @@ impl StalkerTempLinkFlags {
     fn has_flussonic_tmp_link(self) -> bool { self.0 & Self::FLUSSONIC_TMP_LINK != 0 }
 
     fn has_wowza_tmp_link(self) -> bool { self.0 & Self::WOWZA_TMP_LINK != 0 }
-
-    fn uses_http_tmp_link(self) -> bool { self.0 & Self::USE_HTTP_TMP_LINK != 0 }
 }
 
 impl From<&StalkerRawItem> for StalkerTempLinkFlags {
@@ -108,7 +107,7 @@ pub fn map_stalker_to_playlist_item(
     let cmd = raw.cmd.clone().unwrap_or_default();
 
     let info = raw.info.clone();
-    let item = StalkerPlaylistItem {
+    StalkerPlaylistItem {
         stream_id,
         name: Internable::intern(name.to_string()),
         category_id,
@@ -151,11 +150,10 @@ pub fn map_stalker_to_playlist_item(
         flussonic_tmp_link: raw.flussonic_tmp_link.unwrap_or(false),
         wowza_tmp_link: raw.wowza_tmp_link.unwrap_or(false),
         use_http_tmp_link: raw.use_http_tmp_link.unwrap_or(false),
-        series_id: raw.series_id.as_ref().and_then(|s| s.parse::<i64>().ok()),
+        series_id: raw.series_id.as_ref().and_then(|s| s.parse::<u32>().ok()),
         season_id: None,
         episode_id: None,
-    };
-    item
+    }
 }
 
 fn extract_info_text<F>(info: Option<&StalkerRawItemInfo>, field: F) -> Option<Arc<str>>
@@ -200,9 +198,7 @@ pub(crate) fn playback_mode_from_flags(flags: StalkerTempLinkFlags) -> StalkerPl
         StalkerPlaybackMode::TempLinkWowza
     } else {
         // use_http_tmp_link resolves to a direct http(s) URL — it does not need a
-        // distinct adapter, but we record the choice (DirectUrl) to keep the mode
-        // explicit at the descriptor level.
-        let _ = flags.uses_http_tmp_link();
+        // distinct adapter, so it maps to DirectUrl like the unflagged case.
         StalkerPlaybackMode::DirectUrl
     }
 }
@@ -230,12 +226,12 @@ pub fn map_stalker_series_root(
     let series_id = raw
         .id_string()
         .as_deref()
-        .and_then(|s| s.parse::<i64>().ok())
+        .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
     let logo = raw.logo.clone().or_else(|| raw.cover.clone());
 
     StalkerPlaylistItem {
-        stream_id: u32::try_from(series_id.max(0)).unwrap_or(u32::MAX),
+        stream_id: series_id,
         name: Internable::intern(name.to_string()),
         category_id,
         category_name: Internable::intern(category_name),
@@ -279,53 +275,65 @@ pub fn map_stalker_series_root(
 
 /// Walk a series-details response and produce a list of episode `StalkerPlaylistItem`s
 /// (one per episode across all seasons). The `series_id` is taken from the parent row.
+///
+/// `used_episode_ids` is the set of storage ids already assigned within the current
+/// snapshot batch — pass one set for the whole refresh so storage-id collisions are
+/// detected and re-salted deterministically across all series.
 pub fn map_stalker_series_details(
     details: &StalkerRawSeriesDetails,
     parent: &StalkerPlaylistItem,
     added_at: i64,
+    used_episode_ids: &mut HashSet<u32>,
 ) -> Vec<StalkerPlaylistItem> {
     let mut out = Vec::new();
     let series_id_value = details
         .id
         .as_deref()
-        .and_then(|s| s.parse::<i64>().ok())
+        .and_then(|s| s.parse::<u32>().ok())
         .or(parent.series_id)
         .unwrap_or(0);
     for season in &details.seasons {
-        out.extend(map_stalker_season_episodes(season, series_id_value, parent, added_at));
+        out.extend(map_stalker_season_episodes(
+            season,
+            series_id_value,
+            parent,
+            added_at,
+            used_episode_ids,
+        ));
     }
     out
 }
 
 fn map_stalker_season_episodes(
     season: &StalkerRawSeriesSeason,
-    series_id_value: i64,
+    series_id_value: u32,
     parent: &StalkerPlaylistItem,
     added_at: i64,
+    used_episode_ids: &mut HashSet<u32>,
 ) -> Vec<StalkerPlaylistItem> {
     season
         .episodes
         .iter()
-        .map(|episode| map_stalker_episode(episode, season, series_id_value, parent, added_at))
+        .map(|episode| map_stalker_episode(episode, season, series_id_value, parent, added_at, used_episode_ids))
         .collect()
 }
 
 fn map_stalker_episode(
     episode: &StalkerRawSeriesEpisode,
     season: &StalkerRawSeriesSeason,
-    series_id_value: i64,
+    series_id_value: u32,
     parent: &StalkerPlaylistItem,
     added_at: i64,
+    used_episode_ids: &mut HashSet<u32>,
 ) -> StalkerPlaylistItem {
     let name = episode.display_name();
-    let episode_id = episode.id.as_deref().and_then(|s| s.parse::<i64>().ok());
+    let episode_id = episode.id.as_deref().and_then(|s| s.parse::<u32>().ok());
     let season_number = episode.season_number.or(season.number).unwrap_or(0);
     let cmd = episode.cmd.clone().unwrap_or_default();
     let info = episode.info.clone();
     let container_extension = episode
         .container_extension
         .clone()
-        .or(info.as_ref().and_then(|i| i.releasedate.clone()))
         .filter(|s| !s.is_empty());
     let logo = info
         .as_ref()
@@ -356,13 +364,14 @@ fn map_stalker_episode(
         })
     };
 
-    let episode_number_u32 = i32_to_u32(episode.number.unwrap_or(0));
+    let episode_number_u32 = episode.number.unwrap_or(0);
 
-    let episode_storage_id = stable_episode_storage_id(
+    let episode_storage_id = collision_free_episode_storage_id(
         series_id_value,
         season_number,
         episode.id.as_deref().unwrap_or_default(),
         episode_number_u32,
+        used_episode_ids,
     );
 
     StalkerPlaylistItem {
@@ -411,27 +420,40 @@ fn map_stalker_episode(
     }
 }
 
-fn stable_episode_storage_id(series_id: i64, season_number: i32, episode_id: &str, episode_number: u32) -> u32 {
+fn stable_episode_storage_id(series_id: u32, season_number: u32, episode_id: &str, episode_number: u32) -> u32 {
     let key = format!("{series_id}:{season_number}:{episode_id}:{episode_number}");
+    fnv1a_32(&key)
+}
+
+fn fnv1a_32(key: &str) -> u32 {
     let hash = key.bytes().fold(2_166_136_261_u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
     });
     hash.max(1)
 }
 
-// fn i64_to_u32(value: i64) -> u32 { u32::try_from(value.max(0)).unwrap_or(u32::MAX) }
-
-fn i32_to_u32(value: i32) -> u32 { u32::try_from(value.max(0)).unwrap_or(0) }
-
-/// Resolve a `StalkerPlaylistItem` to its final stream URL. Unresolved Stalker items keep
-/// an empty playlist URL; the original `cmd` remains available only via the playback
-/// descriptor for runtime re-resolve.
-pub fn create_stalker_stream_url(resolved_url: &str) -> Arc<str> {
-    if resolved_url.is_empty() {
-        Internable::intern(String::new())
-    } else {
-        Internable::intern(resolved_url.to_string())
+/// Collision-safe variant of [`stable_episode_storage_id`]: when the hashed id is
+/// already taken within the current snapshot batch, the key string is deterministically
+/// re-salted (`<key>:<counter>`) and re-hashed until a free slot is found. The snapshot
+/// is fully rebuilt on each refresh, so within-batch determinism is all that is needed.
+fn collision_free_episode_storage_id(
+    series_id: u32,
+    season_number: u32,
+    episode_id: &str,
+    episode_number: u32,
+    used_ids: &mut HashSet<u32>,
+) -> u32 {
+    let base_key = format!("{series_id}:{season_number}:{episode_id}:{episode_number}");
+    let mut id = stable_episode_storage_id(series_id, season_number, episode_id, episode_number);
+    let mut salt = 0_u32;
+    while !used_ids.insert(id) {
+        salt = salt.saturating_add(1);
+        warn!(
+            "Stalker episode storage id collision for key '{base_key}' (id {id}), re-salting with counter {salt}"
+        );
+        id = fnv1a_32(&format!("{base_key}:{salt}"));
     }
+    id
 }
 
 /// Log a single-line summary of a Stalker download for the given input.
@@ -441,7 +463,7 @@ pub fn log_stalker_download_summary(
     vod_count: usize,
     series_count: usize,
 ) {
-    warn!(
+    info!(
         "Stalker input '{input_name}' catalog: live={live_count}, vod={vod_count}, series={series_count}"
     );
 }
@@ -545,7 +567,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let episodes = map_stalker_series_details(&details, &parent, 0);
+        let episodes = map_stalker_series_details(&details, &parent, 0, &mut HashSet::new());
         assert_eq!(episodes.len(), 2);
         assert_eq!(episodes[0].episode_id, Some(10));
         assert_eq!(episodes[0].series_id, Some(1));
@@ -574,16 +596,50 @@ mod tests {
             None,
             0,
         );
-        let first = map_stalker_episode(&episode, &season, 1, &first_parent, 0);
-        let second = map_stalker_episode(&episode, &season, 2, &second_parent, 0);
+        let first = map_stalker_episode(&episode, &season, 1, &first_parent, 0, &mut HashSet::new());
+        let second = map_stalker_episode(&episode, &season, 2, &second_parent, 0, &mut HashSet::new());
         assert_ne!(first.stream_id, second.stream_id);
         assert_eq!(first.episode_id, Some(10));
     }
 
     #[test]
-    fn create_stalker_stream_url_is_empty_until_materialized() {
-        assert_eq!(&*create_stalker_stream_url("http://x"), "http://x");
-        assert_eq!(&*create_stalker_stream_url(""), "");
+    fn episode_storage_id_collisions_are_resalted_within_a_batch() {
+        let mut used = HashSet::new();
+        let first = collision_free_episode_storage_id(1, 1, "10", 1, &mut used);
+        // Same key again within the same batch: the hash collides with itself and
+        // must be re-salted deterministically to a different, free id.
+        let second = collision_free_episode_storage_id(1, 1, "10", 1, &mut used);
+        assert_ne!(first, second);
+        assert_eq!(first, stable_episode_storage_id(1, 1, "10", 1));
+        assert_eq!(second, fnv1a_32("1:1:10:1:1"));
+        // Determinism: a fresh batch produces the same sequence.
+        let mut used_again = HashSet::new();
+        assert_eq!(collision_free_episode_storage_id(1, 1, "10", 1, &mut used_again), first);
+        assert_eq!(collision_free_episode_storage_id(1, 1, "10", 1, &mut used_again), second);
+    }
+
+    #[test]
+    fn episode_container_extension_does_not_fall_back_to_release_date() {
+        let episode = StalkerRawSeriesEpisode {
+            id: Some("10".to_string()),
+            number: Some(1),
+            name: Some("Pilot".to_string()),
+            cmd: Some("ffmpeg http://stream/1".to_string()),
+            info: Some(StalkerRawItemInfo {
+                releasedate: Some("2021-05-03".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let season = StalkerRawSeriesSeason { number: Some(1), episodes: vec![episode.clone()], ..Default::default() };
+        let parent = map_stalker_series_root(
+            &StalkerRawSeriesItem { id: Some("1".to_string()), name: Some("Show".to_string()), ..Default::default() },
+            None,
+            0,
+        );
+        let item = map_stalker_episode(&episode, &season, 1, &parent, 0, &mut HashSet::new());
+        assert_eq!(item.container_extension, None);
+        assert_eq!(item.release_date.as_deref(), Some("2021-05-03"));
     }
 
     #[test]

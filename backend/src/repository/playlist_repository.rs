@@ -650,7 +650,7 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
             }
             (playlist, None)
         }
-        InputType::Stalker | InputType::StalkerBatch => {
+        InputPersistence::Stalker => {
             // The Stalker processor (`processor::stalker::download_stalker_playlist`)
             // is the single writer of the per-cluster B+Tree. Re-encoding the
             // `PlaylistItem` runtime projection back into `StalkerPlaylistItem`
@@ -717,16 +717,17 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
-        InputType::Stalker | InputType::StalkerBatch => {
+        InputPersistence::Stalker => {
             let clusters_to_load = clusters.unwrap_or(&XTREAM_CLUSTER);
             if disk_based_processing {
                 let stalker_path = get_stalker_storage_path(&storage_path);
                 let source = PlaylistSource::stalker_disk(
-                    StalkerDiskPlaylistSource::new(app_config, &stalker_path).await,
+                    StalkerDiskPlaylistSource::new(app_config, &stalker_path, Arc::clone(&input.name)).await,
                 );
                 Ok(PlaylistSource::filtered(source, skipped_clusters(clusters_to_load)))
             } else {
-                let groups = load_input_stalker_playlist(app_config, &storage_path, clusters_to_load).await?;
+                let groups =
+                    load_input_stalker_playlist(app_config, &storage_path, &input.name, clusters_to_load).await?;
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
@@ -764,10 +765,13 @@ pub fn get_input_media_server_playlist_file_path(storage_path: &Path, input_name
 
 /// Load a Stalker input's playlist into memory. The on-disk B+Tree is the
 /// source of truth; we stream every per-cluster tree and bucket the items
-/// by cluster to build the runtime `PlaylistGroup`s.
+/// by cluster to build the runtime `PlaylistGroup`s. `input_name` seeds the
+/// canonical `PlaylistItem::from_stalker` conversion so item identity matches
+/// the download path.
 pub async fn load_input_stalker_playlist(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
+    input_name: &str,
     clusters: &[XtreamCluster],
 ) -> Result<Vec<PlaylistGroup>, TuliproxError> {
     use futures::StreamExt;
@@ -792,16 +796,17 @@ pub async fn load_input_stalker_playlist(
         for mut stream in streams {
             while let Some(item) = stream.next().await {
                 let category_id = item.category_id;
+                let playlist_item = PlaylistItem::from_stalker(&item, input_name);
                 groups_map
                     .entry((cluster, category_id))
                     .or_insert_with(|| PlaylistGroup {
                         id: category_id,
-                        title: Arc::clone(&item.category_name),
+                        title: Arc::clone(&playlist_item.header.group),
                         channels: Vec::new(),
                         xtream_cluster: cluster,
                     })
                     .channels
-                    .push(PlaylistItem::from(&item));
+                    .push(playlist_item);
             }
         }
     }
@@ -819,16 +824,6 @@ pub async fn load_input_stalker_playlist(
     });
     Ok(groups)
 }
-
-/// Build a `StalkerPlaylistItem` from a runtime `PlaylistItem`. The fields that
-/// are not part of the runtime projection (`cmd`, `playback_descriptor`,
-/// `archive_available`, …) are left at their default values; the reverse-proxy
-/// re-resolves the playback URL on demand. Currently unused: the Stalker
-/// processor writes the canonical rows directly via `persist_stalker_items`,
-/// and the disk layout is owned by the processor. Kept as `#[allow(dead_code)]`
-/// to document the public surface for any future callers.
-#[allow(dead_code)]
-fn _stalker_playlist_item_from_doc_marker() {}
 
 pub async fn persist_input_media_server_playlist(
     app_config: &Arc<AppConfig>,

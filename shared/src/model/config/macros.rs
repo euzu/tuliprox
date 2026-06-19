@@ -75,22 +75,15 @@ macro_rules! check_input_credentials {
                 }
             }
             InputType::Stalker => {
-                // Stalker portals accept MAC-only or credentials or both. We require a
-                // non-empty URL plus *some* identifier (mac in `stalker.device.mac_address`
-                // OR username/password on the input itself). Detailed validation of
-                // derived fields happens in ConfigInputDto/ConfigInput prepare.
+                // Stalker portals accept MAC-only or credentials or both. We only require
+                // a non-empty URL here; the identity check (MAC in
+                // `stalker.device.mac_address` OR username/password) happens in
+                // `prepare_stalker_config`, which can see both the credentials and the
+                // stalker block.
                 if $this.url.trim().is_empty() {
                     return Err($crate::error::TuliproxError::ConfigInput(format!(
                         "for input type stalker: url is mandatory{input_name_suffix}",
                     )));
-                }
-                let has_credentials =
-                    $this.username.is_some() || $this.password.is_some();
-                if !has_credentials {
-                    log::warn!(
-                        "Stalker input '{input_name}' has no username/password; \
-                         MAC-only authentication will be attempted (set stalker.device.mac_address or username/password)"
-                    );
                 }
             }
             InputType::StalkerBatch => {

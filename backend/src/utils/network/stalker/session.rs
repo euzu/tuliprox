@@ -1,16 +1,13 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::utils::network::stalker::cookie_jar::StalkerCookieJar;
-
 /// A successful Stalker handshake. The token is sent as `Authorization: Bearer <token>` on
-/// every subsequent API call; the cookie jar stores everything the portal set on the
-/// handshake response; the referer is the `Referer` header the portal expects; the
-/// `fingerprint_evidence` is a list of `js.*` keys the portal echoed back so that callers
-/// can decide which `StalkerPortalFingerprint` the portal matches.
+/// every subsequent API call; portal cookies live in the client's shared cookie jar; the
+/// referer is the `Referer` header the portal expects; the `fingerprint_evidence` is a
+/// list of `js.*` keys the portal echoed back so that callers can decide which
+/// `StalkerPortalFingerprint` the portal matches.
 #[derive(Debug, Clone)]
 pub struct StalkerSession {
     pub token: String,
-    pub cookies: StalkerCookieJar,
     pub referer: String,
     pub load_url: String,
     pub fingerprint_evidence: Vec<String>,
@@ -23,7 +20,6 @@ impl StalkerSession {
     pub fn new(token: String, referer: String, load_url: String) -> Self {
         Self {
             token,
-            cookies: StalkerCookieJar::new(),
             referer,
             load_url,
             fingerprint_evidence: Vec::new(),

@@ -1,4 +1,4 @@
-use crate::utils::{is_blank_optional_string, is_false};
+use crate::utils::is_blank_optional_string;
 use serde::{Deserialize, Serialize};
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 
@@ -150,9 +150,7 @@ impl StalkerStreamKind {
             Self::Episode => "episode",
         }
     }
-}
 
-impl StalkerStreamKind {
     pub fn parse_path_segment(segment: &str) -> Option<Self> {
         match segment.to_ascii_lowercase().as_str() {
             "live" => Some(Self::Live),
@@ -166,32 +164,42 @@ impl StalkerStreamKind {
 
 /// Optional body cap per HTTP action. Stored inside the runtime config so the
 /// caps can be tuned without recompiling.
+///
+/// The per-field serde defaults MUST match `Default::default()` — otherwise a
+/// partially-specified YAML block (`size_caps: { create_link_kb: 96 }`) would
+/// silently zero out the remaining caps and break every capped request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StalkerActionSizeCapDto {
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(default = "default_create_link_kb")]
     pub create_link_kb: u32,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(default = "default_ordered_list_mb")]
     pub ordered_list_mb: u32,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(default = "default_get_epg_mb")]
     pub get_epg_mb: u32,
 }
 
+const fn default_create_link_kb() -> u32 { 64 }
+const fn default_ordered_list_mb() -> u32 { 8 }
+const fn default_get_epg_mb() -> u32 { 64 }
+
 impl Default for StalkerActionSizeCapDto {
-    fn default() -> Self { Self { create_link_kb: 64, ordered_list_mb: 8, get_epg_mb: 64 } }
-}
-
-impl StalkerActionSizeCapDto {
-    pub fn is_default(&self) -> bool { self.create_link_kb == 64 && self.ordered_list_mb == 8 && self.get_epg_mb == 64 }
-
-    pub fn clean(&mut self) {
-        self.create_link_kb = 64;
-        self.ordered_list_mb = 8;
-        self.get_epg_mb = 64;
+    fn default() -> Self {
+        Self {
+            create_link_kb: default_create_link_kb(),
+            ordered_list_mb: default_ordered_list_mb(),
+            get_epg_mb: default_get_epg_mb(),
+        }
     }
 }
 
-const fn is_zero_u32(v: &u32) -> bool { *v == 0 }
+impl StalkerActionSizeCapDto {
+    pub fn is_default(&self) -> bool { *self == Self::default() }
+
+    pub fn clean(&mut self) {
+        *self = Self::default();
+    }
+}
 
 /// Stalker device identity (MAC + derived hashes). When the user does not
 /// override the derived fields, the library fills them during `prepare`.
@@ -283,23 +291,13 @@ impl StalkerInputConfigDto {
     }
 
     pub fn clean(&mut self) {
-        if let Some(device) = self.device.as_mut() {
-            if device.is_empty() {
-                self.device = None;
-            } else {
-                device.clean();
-            }
-        }
+        // Normalize to `None` — a `Some(empty)` block would be re-serialized
+        // as a noise `device: {}` entry on the next config save.
+        self.device = None;
         self.auth_mode = StalkerAuthMode::default();
         self.mag_preset = StalkerMagPreset::default();
         self.endpoint_preference = StalkerEndpointPreference::default();
-        if let Some(caps) = self.size_caps.as_mut() {
-            if caps.is_default() {
-                self.size_caps = None;
-            } else {
-                caps.clean();
-            }
-        }
+        self.size_caps = None;
         if self.catalog_max_pages == Some(0) {
             self.catalog_max_pages = None;
         }
@@ -308,14 +306,18 @@ impl StalkerInputConfigDto {
 
 /// Per-channel command variant — supports the `cmd`/`cmd_1`/`cmd_2`/`cmds[]`/`mc_cmd`
 /// fallback chain observed in real-world Stalker portals.
+///
+/// NOTE: this struct is embedded in [`crate::model::stalker_item::StalkerPlaylistItem`],
+/// which is persisted via positional MessagePack (`rmp_serde::to_vec`). Optional
+/// fields must therefore NEVER use `skip_serializing_if` — a skipped field shifts
+/// every subsequent value one slot left on read and corrupts the record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StalkerCommandVariantDto {
     pub cmd: String,
     pub playback_mode: StalkerPlaybackMode,
-    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    #[serde(default)]
     pub source_key: Option<String>,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(default)]
     pub priority: u32,
 }
 
@@ -326,32 +328,35 @@ impl Default for StalkerCommandVariantDto {
 }
 
 /// Decoded portal capabilities detected from `get_profile` + `get_genres`.
+///
+/// NOTE: embedded in the B+Tree-persisted `StalkerPlaylistItem` (positional
+/// MessagePack) — fields must NOT use `skip_serializing_if` (see
+/// `StalkerCommandVariantDto`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
 pub struct StalkerPortalCapabilitiesDto {
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub use_http_temporary_link: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub nginx_secure_link: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub flussonic_temporary_link: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub wowza_temporary_link: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub use_load_balancing: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub allow_local_timeshift: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub allow_local_pvr: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub allow_remote_pvr: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub archive_available: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub module_restricted: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub ambiguous_account_state: bool,
-    #[serde(default, skip_serializing_if = "is_default_bootstrap_strategy")]
+    #[serde(default)]
     pub bootstrap_strategy: StalkerBootstrapStrategy,
 }
 
@@ -392,12 +397,15 @@ fn is_default_bootstrap_strategy(value: &StalkerBootstrapStrategy) -> bool {
 }
 
 /// Aggregated playback descriptor (primary mode + ordered candidates + capabilities).
+///
+/// NOTE: embedded in the B+Tree-persisted `StalkerPlaylistItem` (positional
+/// MessagePack) — fields must NOT use `skip_serializing_if` (see
+/// `StalkerCommandVariantDto`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
 pub struct StalkerPlaybackDescriptorDto {
     pub primary_mode: StalkerPlaybackMode,
     pub candidates: Vec<StalkerCommandVariantDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub capabilities: Option<StalkerPortalCapabilitiesDto>,
 }
 

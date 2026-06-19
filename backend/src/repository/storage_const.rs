@@ -19,14 +19,12 @@ pub(in crate::repository) const USER_VOD_BOUQUET: &str = "vod_bouquet.json";
 pub(in crate::repository) const USER_SERIES_BOUQUET: &str = "series_bouquet.json";
 pub(in crate::repository) const API_USER_DB_FILE: &str = "api_user.db";
 pub(in crate::repository) const PATH_XTREAM: &str = "xtream";
-#[allow(dead_code)]
 pub(in crate::repository) const PATH_STALKER: &str = "stalker";
-#[allow(dead_code)]
-pub(in crate::repository) const STALKER_LIVE_FILE: &str = "stalker_live.db";
-#[allow(dead_code)]
-pub(in crate::repository) const STALKER_VOD_FILE: &str = "stalker_vod.db";
-#[allow(dead_code)]
-pub(in crate::repository) const STALKER_SERIES_FILE: &str = "stalker_series.db";
-#[allow(dead_code)]
-pub(in crate::repository) const STALKER_EPISODE_FILE: &str = "stalker_episode.db";
+// Stalker B+Tree store base names; `stalker_file_path_for_name` appends `.{FILE_SUFFIX_DB}`.
+pub(in crate::repository) const STALKER_LIVE_FILE: &str = "stalker_live";
+pub(in crate::repository) const STALKER_VOD_FILE: &str = "stalker_vod";
+pub(in crate::repository) const STALKER_EPISODE_FILE: &str = "stalker_episode";
+pub(in crate::repository) const STALKER_SEASONS_FILE: &str = "stalker_seasons";
+pub(in crate::repository) const STALKER_SERIES_ROOTS_FILE: &str = "stalker_series_roots";
+pub(in crate::repository) const STALKER_EPG_FILE: &str = "stalker_epg";
 

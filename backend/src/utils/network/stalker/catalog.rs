@@ -18,7 +18,7 @@ pub struct StalkerCategory {
     #[serde(default)]
     pub alias: Option<String>,
     #[serde(default)]
-    pub number: Option<i32>,
+    pub number: i32,
 }
 
 impl StalkerCategory {
@@ -28,12 +28,11 @@ impl StalkerCategory {
             id: obj.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
             title: obj.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
             alias: obj.get("alias").and_then(Value::as_str).map(String::from),
-            number: Some(
-                obj.get("number")
-                    .and_then(Value::as_i64)
-                    .and_then(|n| i32::try_from(n).ok())
-                    .unwrap_or(0),
-            ),
+            number: obj
+                .get("number")
+                .and_then(Value::as_i64)
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(0),
         })
     }
 }
@@ -240,7 +239,7 @@ pub struct StalkerRawSeriesSeason {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
-    pub number: Option<i32>,
+    pub number: Option<u32>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -254,13 +253,13 @@ pub struct StalkerRawSeriesEpisode {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
-    pub number: Option<i32>,
+    pub number: Option<u32>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
-    pub season_number: Option<i32>,
+    pub season_number: Option<u32>,
     #[serde(default)]
     pub cmd: Option<String>,
     #[serde(default)]
@@ -356,21 +355,22 @@ async fn get_paginated_items<T>(
     handshake: &StalkerHandshake,
     portal_type: &'static str,
     action: &'static str,
-    parse_page: impl Fn(&Value) -> (Vec<T>, Option<u32>, Option<u32>),
+    parse_page: impl Fn(&Value) -> (Vec<T>, Option<u32>, Option<u32>, Option<u32>),
 ) -> StalkerResult<Vec<T>>
 where
     T: for<'de> Deserialize<'de> + Clone,
 {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
-    let mut page: u32 = 1;
-    let mut all: Vec<T> = Vec::new();
     let page_limit = client.catalog_max_pages();
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
-    for load_url in candidates {
+    'candidates: for load_url in candidates {
+        // Pagination state is per-candidate: a mid-pagination failure must not leak a
+        // truncated catalog from one endpoint into the attempt against the next one.
+        let mut page: u32 = 1;
         let mut pages_fetched: u32 = 0;
-        while page <= page_limit {
-            let current_page = page;
+        let mut all: Vec<T> = Vec::new();
+        loop {
             let mut builder = client
                 .http()
                 .get(&load_url.load_url)
@@ -380,18 +380,20 @@ where
                     ("action", action),
                     ("JsHttpRequest", "1-xml"),
                     ("HttpRequest", "1-xml"),
-                    ("p", current_page.to_string().as_str()),
+                    ("p", page.to_string().as_str()),
                 ]);
             builder = client.apply_mac_query(builder);
             builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
             let value: Value = match client.send_json::<Value>(builder, action).await {
                 Ok(v) => v,
                 Err(err) => {
+                    // Never return a truncated catalog as Ok — retry from scratch on
+                    // the next endpoint candidate instead.
                     last_err = Some(err);
-                    break;
+                    continue 'candidates;
                 }
             };
-            let (mut items, total_items, max_page_items) = parse_page(&value);
+            let (mut items, total_items, max_page_items, max_page) = parse_page(&value);
             let page_len = items.len();
             if items.is_empty() {
                 break;
@@ -399,48 +401,32 @@ where
             pages_fetched = pages_fetched.saturating_add(1);
             all.append(&mut items);
             if total_items.is_some_and(|total| all.len() >= usize::try_from(total).unwrap_or(usize::MAX)) {
-                info!(
-                    "Stalker {portal_type}/{action} fetched {}/{} items across {} pages",
-                    all.len(),
-                    total_items.unwrap_or_default(),
-                    pages_fetched
-                );
-                return Ok(all);
+                break;
             }
+            // A short page (fewer rows than the advertised page size) is the last page.
             if max_page_items.is_some_and(|max_items| page_len < usize::try_from(max_items).unwrap_or(usize::MAX)) {
-                info!(
-                    "Stalker {portal_type}/{action} fetched {}{} items across {} pages",
-                    all.len(),
-                    total_items
-                        .map(|total| format!("/{total}"))
-                        .unwrap_or_default(),
-                    pages_fetched
+                break;
+            }
+            if max_page.is_some_and(|count| page >= count) {
+                break;
+            }
+            if page >= page_limit {
+                warn!(
+                    "Stalker {portal_type}/{action} stopped at configured page limit {page_limit} with {} items fetched",
+                    all.len()
                 );
-                return Ok(all);
+                break;
             }
             page += 1;
         }
-        if !all.is_empty() {
-            if page > page_limit {
-                warn!(
-                    "Stalker {portal_type}/{action} aborted after reaching page limit {} with {} items fetched",
-                    page_limit,
-                    all.len()
-                );
-            }
-            info!(
-                "Stalker {portal_type}/{action} fetched {} items across {} pages",
-                all.len(),
-                pages_fetched
-            );
-            return Ok(all);
-        }
-        page = 1;
+        // An empty result from a healthy endpoint is a legitimate empty catalog.
+        info!(
+            "Stalker {portal_type}/{action} fetched {} items across {pages_fetched} pages",
+            all.len()
+        );
+        return Ok(all);
     }
-    if all.is_empty() {
-        return Err(last_err.unwrap_or_else(|| StalkerError::EmptyBody { action: action.to_string() }));
-    }
-    Ok(all)
+    Err(last_err.unwrap_or_else(|| StalkerError::EmptyBody { action: action.to_string() }))
 }
 
 fn extract_items_array(value: &Value) -> &Value {
@@ -469,19 +455,25 @@ fn extract_max_page_items(value: &Value) -> Option<u32> {
         Value::Object(map) => map.get("js").cloned().unwrap_or_else(|| value.clone()),
         other => other.clone(),
     };
-    if let Some(obj) = js.as_object() {
-        if let Some(max_items) = obj
-            .get("max_page_items")
+    js.as_object().and_then(|obj| {
+        obj.get("max_page_items")
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
-        {
-            return Some(max_items);
-        }
-        if let Some(max_page) = obj.get("max_page").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()) {
-            return Some(max_page);
-        }
-    }
-    None
+    })
+}
+
+/// `max_page` is the total page count, not the page size — keep it strictly separate
+/// from `max_page_items`.
+fn extract_max_page(value: &Value) -> Option<u32> {
+    let js = match value {
+        Value::Object(map) => map.get("js").cloned().unwrap_or_else(|| value.clone()),
+        other => other.clone(),
+    };
+    js.as_object().and_then(|obj| {
+        obj.get("max_page")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    })
 }
 
 pub async fn get_live_categories(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerCategory>> {
@@ -595,9 +587,9 @@ async fn hydrate_series_details(
     }
 
     for (season_id, row) in season_rows {
-        let season_number = value_i32(&row, "season_number")
-            .or_else(|| value_i32(&row, "season_id"))
-            .or_else(|| season_id.parse::<i32>().ok())
+        let season_number = value_u32(&row, "season_number")
+            .or_else(|| value_u32(&row, "season_id"))
+            .or_else(|| season_id.parse::<u32>().ok())
             .unwrap_or(1);
         let page = fetch_series_page(client, handshake, load_url, token_in_query, series_id, &season_id).await?;
         let episode_entries = series_entry_values(page.get("js").unwrap_or(&page));
@@ -643,7 +635,7 @@ fn value_string(value: &Value, key: &str) -> Option<String> {
     }
 }
 
-fn value_i32(value: &Value, key: &str) -> Option<i32> { value_string(value, key)?.parse().ok() }
+fn value_u32(value: &Value, key: &str) -> Option<u32> { value_string(value, key)?.parse().ok() }
 
 fn series_details_metadata(series_id: u32, entries: &[Value]) -> StalkerRawSeriesDetails {
     entries.iter().find(|entry| !looks_like_season_row(entry)).map_or_else(
@@ -691,23 +683,23 @@ fn looks_like_season_row(value: &Value) -> bool {
             .is_some_and(|name| name.to_ascii_lowercase().starts_with("season "))
 }
 
-fn parse_series_episode(value: &Value, fallback_number: usize, fallback_season: i32) -> Option<StalkerRawSeriesEpisode> {
-    if looks_like_season_row(value) && value_i32(value, "episode_number").is_none() && value_i32(value, "series_number").is_none() {
+fn parse_series_episode(value: &Value, fallback_number: usize, fallback_season: u32) -> Option<StalkerRawSeriesEpisode> {
+    if looks_like_season_row(value) && value_u32(value, "episode_number").is_none() && value_u32(value, "series_number").is_none() {
         return None;
     }
     let id = value_string(value, "id")
         .or_else(|| value_string(value, "video_id"))
         .or_else(|| value_string(value, "series_id"))?;
-    let number = value_i32(value, "series_number")
-        .or_else(|| value_i32(value, "episode_number"))
-        .or_else(|| i32::try_from(fallback_number).ok());
+    let number = value_u32(value, "series_number")
+        .or_else(|| value_u32(value, "episode_number"))
+        .or_else(|| u32::try_from(fallback_number).ok());
     Some(StalkerRawSeriesEpisode {
         id: Some(id),
         number,
         name: value_string(value, "name"),
         title: value_string(value, "title").or_else(|| number.map(|number| format!("Episode {number}"))),
-        season_number: value_i32(value, "season_number")
-            .or_else(|| value_i32(value, "season_id"))
+        season_number: value_u32(value, "season_number")
+            .or_else(|| value_u32(value, "season_id"))
             .or(Some(fallback_season)),
         cmd: value_string(value, "cmd"),
         info: value.get("info").cloned().and_then(|info| serde_json::from_value(info).ok()),
@@ -715,7 +707,7 @@ fn parse_series_episode(value: &Value, fallback_number: usize, fallback_season: 
     })
 }
 
-fn shell_episodes(value: &Value, season_number: i32) -> Vec<StalkerRawSeriesEpisode> {
+fn shell_episodes(value: &Value, season_number: u32) -> Vec<StalkerRawSeriesEpisode> {
     value
         .get("series")
         .and_then(Value::as_array)
@@ -726,9 +718,9 @@ fn shell_episodes(value: &Value, season_number: i32) -> Vec<StalkerRawSeriesEpis
                 .map(|(index, entry)| {
                     let number = entry
                         .as_i64()
-                        .and_then(|number| i32::try_from(number).ok())
-                        .or_else(|| value_i32(entry, "series_number"))
-                        .or_else(|| i32::try_from(index + 1).ok())
+                        .and_then(|number| u32::try_from(number).ok())
+                        .or_else(|| value_u32(entry, "series_number"))
+                        .or_else(|| u32::try_from(index + 1).ok())
                         .unwrap_or(1);
                     StalkerRawSeriesEpisode {
                         id: Some(format!("{}:{number}", value_string(value, "id").unwrap_or_else(|| season_number.to_string()))),
@@ -744,7 +736,7 @@ fn shell_episodes(value: &Value, season_number: i32) -> Vec<StalkerRawSeriesEpis
         .unwrap_or_default()
 }
 
-fn parse_items_page(value: &Value) -> (Vec<StalkerRawItem>, Option<u32>, Option<u32>) {
+fn parse_items_page(value: &Value) -> (Vec<StalkerRawItem>, Option<u32>, Option<u32>, Option<u32>) {
     let arr = extract_items_array(value);
     let items: Vec<StalkerRawItem> = match arr {
         Value::Array(a) => a
@@ -785,10 +777,10 @@ fn parse_items_page(value: &Value) -> (Vec<StalkerRawItem>, Option<u32>, Option<
     };
     let total = extract_total_items(value);
     let max_page_items = extract_max_page_items(value);
-    (items, total, max_page_items)
+    (items, total, max_page_items, extract_max_page(value))
 }
 
-fn parse_series_page(value: &Value) -> (Vec<StalkerRawSeriesItem>, Option<u32>, Option<u32>) {
+fn parse_series_page(value: &Value) -> (Vec<StalkerRawSeriesItem>, Option<u32>, Option<u32>, Option<u32>) {
     let arr = extract_items_array(value);
     let items: Vec<StalkerRawSeriesItem> = match arr {
         Value::Array(a) => a
@@ -828,7 +820,7 @@ fn parse_series_page(value: &Value) -> (Vec<StalkerRawSeriesItem>, Option<u32>, 
     };
     let total = extract_total_items(value);
     let max_page_items = extract_max_page_items(value);
-    (items, total, max_page_items)
+    (items, total, max_page_items, extract_max_page(value))
 }
 
 #[cfg(test)]
@@ -842,6 +834,7 @@ mod tests {
         assert_eq!(cat.id, "42");
         assert_eq!(cat.title, "Movies");
         assert_eq!(cat.alias.as_deref(), Some("movies"));
+        assert_eq!(cat.number, 1);
     }
 
     #[test]
@@ -859,16 +852,18 @@ mod tests {
             r#"{"js":{"total_items":2,"max_page":1,"data":{"100":{"id":"100","name":"Channel 100"},"101":{"id":"101","name":"Channel 101"}}}}"#,
         )
         .unwrap();
-        let (items, total, _max) = parse_items_page(&v);
+        let (items, total, max_page_items, max_page) = parse_items_page(&v);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].display_name(), "Channel 100");
         assert_eq!(total, Some(2));
+        assert_eq!(max_page_items, None);
+        assert_eq!(max_page, Some(1));
     }
 
     #[test]
     fn parse_items_page_handles_array_form() {
         let v: Value = serde_json::from_str(r#"{"js":[{"id":"1","name":"A"}]}"#).unwrap();
-        let (items, _, _) = parse_items_page(&v);
+        let (items, _, _, _) = parse_items_page(&v);
         assert_eq!(items.len(), 1);
     }
 
@@ -897,9 +892,9 @@ mod tests {
             v.get("js").and_then(|js| js.get("data")).and_then(Value::as_array).and_then(|arr| arr.first()).cloned().unwrap()
         );
         assert!(single.is_ok(), "single item decode failed: {single:?}");
-        let (items, total, max_page) = parse_items_page(&v);
+        let (items, total, max_page_items, _max_page) = parse_items_page(&v);
         assert_eq!(total, Some(1));
-        assert_eq!(max_page, Some(14));
+        assert_eq!(max_page_items, Some(14));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id.as_deref(), Some("686148"));
         assert_eq!(items[0].allow_local_timeshift, Some(true));
@@ -913,6 +908,21 @@ mod tests {
         let v: Value = serde_json::from_str(r#"{"id":"123","name":"x"}"#).unwrap();
         let item: StalkerRawItem = serde_json::from_value(v).unwrap();
         assert_eq!(item.stream_id(), Some(123));
+    }
+
+    #[test]
+    fn max_page_is_not_misread_as_page_size() {
+        // `max_page` is a page COUNT, not a page size — it must surface in the fourth
+        // tuple slot only.
+        let v: Value = serde_json::from_str(
+            r#"{"js":{"max_page":50,"data":[{"id":"1","name":"A"}]}}"#,
+        )
+        .unwrap();
+        let (items, total, max_page_items, max_page) = parse_items_page(&v);
+        assert_eq!(items.len(), 1);
+        assert_eq!(total, None);
+        assert_eq!(max_page_items, None);
+        assert_eq!(max_page, Some(50));
     }
 
     #[test]

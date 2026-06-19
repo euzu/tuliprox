@@ -1,13 +1,12 @@
 use crate::{
     app::{
         components::{
-            build_options,
             config::{
                 config_page::{ConfigForm, LABEL_WEB_UI_CONFIG},
                 config_view_context::ConfigViewContext,
                 use_emit_mapped, HasFormData,
             },
-            selection_parse_first, AppIcon, Card, Chip, DropDownSelection, Select,
+            AppIcon, Card, Chip, DropDownSelection, Select,
         },
         context::ConfigContext,
     },
@@ -22,6 +21,7 @@ use shared::model::{
 };
 use strum::IntoEnumIterator;
 use yew::prelude::*;
+use crate::app::components::DropDownOption;
 
 // Labels
 const LABEL_AUTH: &str = "LABEL.AUTH";
@@ -123,14 +123,16 @@ pub fn WebUiConfigView() -> Html {
         use_default_form_reducer!(StreamInfoConfigFormState { form: StreamInfoConfigDto::default() });
 
     let view_types = use_memo(webui_state.data().landing_page, |landing_page| {
-        let mut options = build_options(ViewType::iter(), landing_page, |view_type| {
-            html! { translate.t(&format!("LABEL.VIEW_TYPE_{}", view_type.to_string().to_uppercase())) }
-        })
-        options.insert(0, DropDownOption {
+        let mut options = vec![DropDownOption {
             id: LANDING_PAGE_LAST_PAGE.to_string(),
             label: html! { translate.t("LABEL.LAST_PAGE") },
             selected: landing_page.is_none(),
-        });
+        }];
+        options.extend(ViewType::iter().map(|view_type| DropDownOption {
+            id: view_type.to_string(),
+            label: html! { translate.t(&format!("LABEL.VIEW_TYPE_{}", view_type.to_string().to_uppercase()))},
+            selected: *landing_page == Some(view_type),
+        }));
         options
     });
 

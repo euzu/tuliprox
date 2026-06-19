@@ -741,6 +741,9 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
 pub struct StalkerDiskPlaylistSource {
     app_config: Arc<AppConfig>,
     storage_path: PathBuf,
+    /// Name of the owning input — seeds the canonical `PlaylistItem::from_stalker`
+    /// conversion so disk-loaded items carry the same identity as the download path.
+    input_name: Arc<str>,
     live: Option<StalkerQueryHandle>,
     vod: Option<StalkerQueryHandle>,
     series_roots: Option<StalkerQueryHandle>,
@@ -748,10 +751,11 @@ pub struct StalkerDiskPlaylistSource {
 }
 
 impl StalkerDiskPlaylistSource {
-    pub(crate) async fn new(app_config: &Arc<AppConfig>, storage_path: &Path) -> Self {
+    pub(crate) async fn new(app_config: &Arc<AppConfig>, storage_path: &Path, input_name: Arc<str>) -> Self {
         let mut source = StalkerDiskPlaylistSource {
             app_config: Arc::clone(app_config),
             storage_path: storage_path.to_path_buf(),
+            input_name,
             live: None,
             vod: None,
             series_roots: None,
@@ -864,18 +868,26 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
     }
 
     fn into_items(&mut self) -> Box<dyn Iterator<Item = PlaylistItem> + Send + '_> {
-        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
-        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
-        let series_roots = self.series_roots.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
-        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let input_live = Arc::clone(&self.input_name);
+        let input_vod = Arc::clone(&self.input_name);
+        let input_roots = Arc::clone(&self.input_name);
+        let input_series = Arc::clone(&self.input_name);
+        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| PlaylistItem::from_stalker(&item, &input_live));
+        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| PlaylistItem::from_stalker(&item, &input_vod));
+        let series_roots = self.series_roots.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| PlaylistItem::from_stalker(&item, &input_roots));
+        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| PlaylistItem::from_stalker(&item, &input_series));
         Box::new(live.chain(vod).chain(series_roots).chain(series))
     }
 
     fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item = Cow<'a, PlaylistItem>> + Send + 'a> {
-        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
-        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
-        let series_roots = self.series_roots.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
-        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let input_live = Arc::clone(&self.input_name);
+        let input_vod = Arc::clone(&self.input_name);
+        let input_roots = Arc::clone(&self.input_name);
+        let input_series = Arc::clone(&self.input_name);
+        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| Cow::Owned(PlaylistItem::from_stalker(&item, &input_live)));
+        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| Cow::Owned(PlaylistItem::from_stalker(&item, &input_vod)));
+        let series_roots = self.series_roots.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| Cow::Owned(PlaylistItem::from_stalker(&item, &input_roots)));
+        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(move |(_, item)| Cow::Owned(PlaylistItem::from_stalker(&item, &input_series)));
         Box::new(live.chain(vod).chain(series_roots).chain(series))
     }
 
@@ -918,6 +930,7 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
     }
 
     fn take_groups(&mut self) -> Vec<PlaylistGroup> {
+        let input_name = Arc::clone(&self.input_name);
         let mut groups_map: IndexMap<(XtreamCluster, u32), PlaylistGroup> = IndexMap::new();
         let mut iters: Vec<(XtreamCluster, Box<dyn Iterator<Item = StalkerPlaylistItem> + Send>)> = vec![];
         if let Some((q, _)) = self.live.as_mut() {
@@ -935,14 +948,16 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
 
         for (cluster, iter) in iters {
             for item in iter {
-                groups_map.entry((cluster, item.category_id))
+                let category_id = item.category_id;
+                let playlist_item = PlaylistItem::from_stalker(&item, &input_name);
+                groups_map.entry((cluster, category_id))
                     .or_insert_with(|| PlaylistGroup {
-                        id: item.category_id,
-                        title: Arc::clone(&item.category_name),
+                        id: category_id,
+                        title: Arc::clone(&playlist_item.header.group),
                         channels: vec![],
                         xtream_cluster: cluster,
                     })
-                    .channels.push(PlaylistItem::from(&item));
+                    .channels.push(playlist_item);
             }
         }
 
@@ -966,6 +981,7 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
         Ok(PlaylistSource::stalker_disk(Self {
             app_config: Arc::clone(&self.app_config),
             storage_path: self.storage_path.clone(),
+            input_name: Arc::clone(&self.input_name),
             live,
             vod,
             series_roots,

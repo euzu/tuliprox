@@ -17,10 +17,10 @@ use parking_lot::Mutex;
 use shared::error::TuliproxError;
 use shared::model::stalker::StalkerStreamKind;
 use shared::model::stalker_item::StalkerPlaylistItem;
-use shared::model::{PlaylistGroup, PlaylistItem, PlaylistItemType};
-use shared::utils::{generate_provider_playlist_uuid, Internable};
+use shared::model::{PlaylistGroup, PlaylistItem};
+use shared::utils::{short_hash, Internable};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Weak};
 
 use crate::model::{AppConfig, ConfigInput, ConfigInputFlags, StalkerInputConfig};
@@ -32,6 +32,11 @@ use crate::utils::network::stalker::catalog::StalkerCategory;
 use crate::utils::network::stalker::client::StalkerApiClient;
 use crate::utils::network::stalker::error::StalkerError;
 use crate::utils::network::stalker::profile::StalkerHandshake;
+
+// Bounded fan-out: Stalker/Ministra portals are typically small installations
+// that throttle or ban clients hammering create_link.
+const STALKER_PRE_RESOLVE_CONCURRENCY: usize = 8;
+
 
 /// Cluster selector used by the Stalker processor. Mirrors the Xtream cluster split
 /// (Live/Video/Series) but uses Stalker-native kind names.
@@ -147,28 +152,53 @@ pub async fn download_stalker_playlist(
 
     let mut groups: Vec<PlaylistGroup> = Vec::new();
     let mut errors: Vec<TuliproxError> = Vec::new();
+    let mut live_count = 0_usize;
+    let mut vod_count = 0_usize;
+    let mut series_count = 0_usize;
 
     for cluster in &resolved_clusters {
         let cluster_result = match cluster {
-            StalkerCluster::Live => process_stalker_live(&api_client, &handshake, input, &stalker_cfg).await,
-            StalkerCluster::Vod => process_stalker_vod(&api_client, &handshake, input, &stalker_cfg).await,
-            StalkerCluster::Series => {
-                process_stalker_series(&api_client, &handshake, input, &stalker_cfg).await
-            }
+            StalkerCluster::Live => process_stalker_live(&api_client, &handshake, input).await,
+            StalkerCluster::Vod => process_stalker_vod(&api_client, &handshake, input).await,
+            StalkerCluster::Series => process_stalker_series(&api_client, &handshake, input).await,
         };
 
         match cluster_result {
             Ok(items) => {
-                if let Err(err) = persist_stalker_items(app_config, &storage_path, &items).await {
-                    errors.push(err);
+                // Count before any group post-processing so the download summary
+                // reflects what was actually fetched, not the cleared remnants.
+                match cluster {
+                    StalkerCluster::Live => live_count = items.len(),
+                    StalkerCluster::Vod => vod_count = items.len(),
+                    StalkerCluster::Series => series_count = items.len(),
                 }
-                let mut group = group_for_cluster(items, *cluster, &input.name);
-                if use_disk_based_processing {
-                    // Drop the in-memory items when disk-based processing is enabled —
-                    // the runtime will re-read them via `StalkerDiskPlaylistSource`.
-                    group.channels.clear();
+                match persist_stalker_items(app_config, &storage_path, cluster.as_stream_kind(), &items).await {
+                    Ok(_) => {
+                        let mut cluster_groups = groups_for_cluster(items, *cluster, &input.name);
+                        if use_disk_based_processing {
+                            // Drop the in-memory items when disk-based processing is enabled —
+                            // the runtime will re-read them via `StalkerDiskPlaylistSource`.
+                            for group in &mut cluster_groups {
+                                group.channels.clear();
+                            }
+                        }
+                        groups.extend(cluster_groups);
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Stalker input '{}': persisting {cluster:?} items failed: {err}",
+                            input.name
+                        );
+                        errors.push(err);
+                        if !use_disk_based_processing {
+                            // In-memory mode still has the full channel list, so the groups
+                            // remain valid despite the persist failure. In disk-based mode
+                            // the cleared groups would be phantom-empty (nothing on disk to
+                            // re-read), so the cluster is skipped entirely.
+                            groups.extend(groups_for_cluster(items, *cluster, &input.name));
+                        }
+                    }
                 }
-                groups.push(group);
             }
             Err(err) => {
                 errors.push(err);
@@ -176,100 +206,46 @@ pub async fn download_stalker_playlist(
         }
     }
 
-    // EPG bulk fetch. The Stalker/Ministra portal can return very large
-    // programme sets, so records are streamed through a bounded channel and
-    // persisted in small batches instead of buffering the whole response body
-    // or the whole record set in memory.
-    if input.has_flag(ConfigInputFlags::StalkerPreResolvePlayback) {
+    // EPG bulk fetch. The whole fetch is collected in memory and persisted as a
+    // single snapshot once the stream completes. The `on_program` callback runs
+    // on the async consumer side, so it must never block — calling
+    // `blocking_send` from it would panic inside the tokio runtime.
+    if input.has_flag(ConfigInputFlags::StalkerBulkEpg) {
         const BULK_EPG_PERIOD_HOURS: u32 = 24;
-        const BULK_EPG_BATCH_SIZE: usize = 512;
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::utils::network::stalker::epg::StalkerProgramRecord>(256);
-        let persist_app_config = Arc::clone(app_config);
-        let persist_storage_path = storage_path.clone();
-        let persist_task = tokio::spawn(async move {
-            let mut batch: Vec<crate::utils::network::stalker::epg::StalkerProgramRecord> =
-                Vec::with_capacity(BULK_EPG_BATCH_SIZE);
-            let mut received = 0_u64;
-            let mut inserted = 0_u64;
-            while let Some(record) = rx.recv().await {
-                received = received.saturating_add(1);
-                batch.push(record);
-                if batch.len() >= BULK_EPG_BATCH_SIZE {
-                    inserted = inserted.saturating_add(
-                        crate::repository::stalker_repository::persist_stalker_epg_programs(
-                            &persist_app_config,
-                            &persist_storage_path,
-                            &batch,
-                        )
-                        .await?,
-                    );
-                    batch.clear();
-                }
-            }
-            if !batch.is_empty() {
-                inserted = inserted.saturating_add(
-                    crate::repository::stalker_repository::persist_stalker_epg_programs(
-                        &persist_app_config,
-                        &persist_storage_path,
-                        &batch,
-                    )
-                    .await?,
-                );
-            }
-            Ok::<(u64, u64), TuliproxError>((received, inserted))
-        });
+        let mut records: Vec<crate::utils::network::stalker::epg::StalkerProgramRecord> = Vec::new();
         let bulk_result = api_client
-            .stream_bulk_epg(
-                &handshake,
-                BULK_EPG_PERIOD_HOURS,
-                |record| {
-                    let _ = tx.blocking_send(record);
-                },
-            )
+            .stream_bulk_epg(&handshake, BULK_EPG_PERIOD_HOURS, |record| records.push(record))
             .await;
-        drop(tx);
-        let persisted = persist_task.await;
         match bulk_result {
             Ok(()) => {
-                let persist_summary = match persisted {
-                    Ok(Ok(summary)) => summary,
-                    Ok(Err(err)) => {
-                        warn!("Stalker input '{}': bulk EPG persist failed: {err}", input.name);
-                        (0, 0)
-                    }
-                    Err(err) => {
-                        warn!("Stalker input '{}': bulk EPG persist task failed: {err}", input.name);
-                        (0, 0)
-                    }
-                };
-                let (received, inserted) = persist_summary;
+                let received = records.len();
                 if received == 0 {
                     info!("Stalker input '{}': bulk EPG returned no programs", input.name);
                 } else {
-                    info!(
-                        "Stalker input '{}': persisted {inserted} EPG program records (received {received})",
-                        input.name
-                    );
+                    match crate::repository::stalker_repository::persist_stalker_epg_programs(
+                        app_config,
+                        &storage_path,
+                        &records,
+                    )
+                    .await
+                    {
+                        Ok(inserted) => info!(
+                            "Stalker input '{}': persisted {inserted} EPG program records (received {received})",
+                            input.name
+                        ),
+                        Err(err) => {
+                            warn!("Stalker input '{}': bulk EPG persist failed: {err}", input.name);
+                        }
+                    }
                 }
             }
             Err(err) => {
-                if let Ok(Err(persist_err)) = persisted {
-                    warn!("Stalker input '{}': bulk EPG persist failed after fetch error: {persist_err}", input.name);
-                }
-                warn!(
-                    "Stalker input '{}': bulk EPG fetch failed: {err}",
-                    input.name
-                );
+                warn!("Stalker input '{}': bulk EPG fetch failed: {err}", input.name);
             }
         }
     }
 
-    parser::log_stalker_download_summary(
-        &input.name,
-        count_channels_in(&groups, StalkerCluster::Live),
-        count_channels_in(&groups, StalkerCluster::Vod),
-        count_channels_in(&groups, StalkerCluster::Series),
-    );
+    parser::log_stalker_download_summary(&input.name, live_count, vod_count, series_count);
 
     (groups, errors, use_disk_based_processing)
 }
@@ -277,12 +253,10 @@ pub async fn download_stalker_playlist(
 /// Fetch the live cluster: categories + channels (paginated). The pre-resolve pass is
 /// driven by the `StalkerPreResolvePlayback` flag — when set we call `create_link` for
 /// every item and persist the resolved URL.
-#[allow(clippy::too_many_arguments)]
 pub async fn process_stalker_live(
     api_client: &StalkerApiClient,
     handshake: &StalkerHandshake,
     input: &ConfigInput,
-    _stalker_cfg: &crate::model::StalkerInputConfig,
 ) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
     let raw_items = api_client.get_live_streams(handshake).await.map_err(stalker_err_to_repo)?;
     let categories = match api_client.get_live_categories(handshake).await {
@@ -319,7 +293,6 @@ pub async fn process_stalker_vod(
     api_client: &StalkerApiClient,
     handshake: &StalkerHandshake,
     input: &ConfigInput,
-    _stalker_cfg: &crate::model::StalkerInputConfig,
 ) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
     let raw_items = api_client.get_vod_streams(handshake).await.map_err(stalker_err_to_repo)?;
     let categories = match api_client.get_vod_categories(handshake).await {
@@ -358,8 +331,10 @@ pub async fn process_stalker_series(
     api_client: &StalkerApiClient,
     handshake: &StalkerHandshake,
     input: &ConfigInput,
-    _stalker_cfg: &crate::model::StalkerInputConfig,
 ) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
+    // Bounded fan-out for per-series detail fetches — enough to hide latency
+    // without hammering fragile Ministra portals.
+    const STALKER_SERIES_DETAILS_CONCURRENCY: usize = 4;
     let raw_series = api_client.get_series_list(handshake).await.map_err(stalker_err_to_repo)?;
     let categories = match api_client.get_series_categories(handshake).await {
         Ok(categories) => categories,
@@ -373,28 +348,60 @@ pub async fn process_stalker_series(
     };
     let category_map = build_category_map(categories);
     let added_at = chrono::Utc::now().timestamp();
+    let roots: Vec<StalkerPlaylistItem> = raw_series
+        .iter()
+        .map(|raw| {
+            let category = raw
+                .category_id
+                .as_deref()
+                .and_then(|s| s.parse::<u32>().ok())
+                .and_then(|id| category_map.get(&id));
+            parser::map_stalker_series_root(raw, category, added_at)
+        })
+        .collect();
+
+    // Fetch per-series details with bounded concurrency. Results are collected
+    // and restored to the original catalog order before episode mapping so the
+    // collision-safe storage-id assignment stays deterministic regardless of
+    // response arrival order. The original i64 series id is used for the portal
+    // call (the narrowed u32 `stream_id` is only a storage key).
+    //
+    // The `(index, series_id)` tuples are collected into an owned `Vec` *before*
+    // the futures are built. This mirrors the pattern used by
+    // `pre_resolve_playback_urls` below: without it, the `.map` closure would
+    // receive a `&StalkerPlaylistItem` tied to `roots.iter()`'s lifetime, and
+    // `stream::iter(...).buffer_unordered(...)` would reject the closure for
+    // not being HRTB (it must work for *any* reference lifetime, not just the
+    // one from this iterator).
+    let detail_requests: Vec<(usize, u32)> = roots
+        .iter()
+        .enumerate()
+        .map(|(index, root)| (index, root.series_id.unwrap_or(root.stream_id)))
+        .collect();
+    let detail_futures = detail_requests.into_iter().map(|(index, series_id)| async move {
+        let result = api_client.get_series_details(handshake, series_id).await;
+        (index, result)
+    });
+    let mut detail_results = stream::iter(detail_futures)
+        .buffer_unordered(STALKER_SERIES_DETAILS_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    detail_results.sort_by_key(|(index, _)| *index);
+
+    let mut used_episode_ids: HashSet<u32> = HashSet::new();
     let mut items: Vec<StalkerPlaylistItem> = Vec::new();
-    for raw in &raw_series {
-        let category = raw
-            .category_id
-            .as_deref()
-            .and_then(|s| s.parse::<u32>().ok())
-            .and_then(|id| category_map.get(&id));
-        let root = parser::map_stalker_series_root(raw, category, added_at);
-        // Episodes: pull details for each series root. We do this synchronously here to
-        // match the existing Xtream pattern; the per-series cost is acceptable for the
-        // size of typical Stalker portals.
-        let series_id = root.stream_id;
-        match api_client.get_series_details(handshake, series_id).await {
+    for (root, (_, result)) in roots.into_iter().zip(detail_results) {
+        match result {
             Ok(details) => {
-                let episodes = parser::map_stalker_series_details(&details, &root, added_at);
+                let episodes =
+                    parser::map_stalker_series_details(&details, &root, added_at, &mut used_episode_ids);
                 items.push(root);
                 items.extend(episodes);
             }
             Err(err) => {
                 warn!(
-                    "Stalker get_series_details failed for series_id={series_id} on input '{}': {err}",
-                    input.name
+                    "Stalker get_series_details failed for series_id={} on input '{}': {err}",
+                    root.stream_id, input.name
                 );
                 items.push(root);
             }
@@ -444,7 +451,10 @@ pub async fn pre_resolve_playback_urls(
             (index, result)
     });
 
-    let results = stream::iter(requests).buffer_unordered(32).collect::<Vec<_>>().await;
+    let results = stream::iter(requests)
+        .buffer_unordered(STALKER_PRE_RESOLVE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
     for (index, result) in results {
         match result {
             Ok(resolved) => {
@@ -486,98 +496,84 @@ fn skip_clusters_for(input: &ConfigInput) -> Vec<StalkerCluster> {
     out
 }
 
-fn group_for_cluster(
+/// Convert the items of one cluster into per-category `PlaylistGroup`s,
+/// mirroring the Xtream pipeline and the disk-based source: items are grouped
+/// by their portal category id (falling back to a cluster default title for
+/// items without a category) instead of collapsing the whole cluster into a
+/// single group.
+fn groups_for_cluster(
     items: Vec<StalkerPlaylistItem>,
     cluster: StalkerCluster,
     input_name: &str,
-) -> PlaylistGroup {
+) -> Vec<PlaylistGroup> {
     use shared::model::XtreamCluster;
-    let (xtream_cluster, default_group) = match cluster {
-        StalkerCluster::Live => (XtreamCluster::Live, "Live"),
-        StalkerCluster::Vod => (XtreamCluster::Video, "Movies"),
-        StalkerCluster::Series => (XtreamCluster::Series, "Series"),
+    let xtream_cluster = match cluster {
+        StalkerCluster::Live => XtreamCluster::Live,
+        StalkerCluster::Vod => XtreamCluster::Video,
+        StalkerCluster::Series => XtreamCluster::Series,
     };
-    let group_title: Arc<str> = Internable::intern(default_group.to_string());
-    let channels: Vec<PlaylistItem> = items
-        .into_iter()
-        .map(|item| playlist_item_from_stalker(&item, cluster, &group_title, input_name))
-        .collect();
-    PlaylistGroup {
-        id: 0,
-        title: group_title,
-        channels,
-        xtream_cluster,
+    let mut groups_map: indexmap::IndexMap<u32, PlaylistGroup> = indexmap::IndexMap::new();
+    for item in items {
+        let category_id = item.category_id;
+        let pli = PlaylistItem::from_stalker(&item, input_name);
+        let group = groups_map.entry(category_id).or_insert_with(|| PlaylistGroup {
+            id: category_id,
+            title: Arc::clone(&pli.header.group),
+            channels: Vec::new(),
+            xtream_cluster,
+        });
+        group.channels.push(pli);
     }
-}
-
-fn playlist_item_from_stalker(
-    item: &StalkerPlaylistItem,
-    cluster: StalkerCluster,
-    group_title: &Arc<str>,
-    input_name: &str,
-) -> PlaylistItem {
-    let item_type = match cluster {
-        StalkerCluster::Live => PlaylistItemType::Live,
-        StalkerCluster::Vod => PlaylistItemType::Video,
-        StalkerCluster::Series => {
-            if item.is_series_root() {
-                PlaylistItemType::SeriesInfo
-            } else {
-                PlaylistItemType::Series
-            }
-        }
-    };
-    let stream_id_str: Arc<str> = Internable::intern(item.stream_id.to_string());
-    let url = parser::create_stalker_stream_url(item.stream_url.as_ref());
-    PlaylistItem {
-        header: shared::model::PlaylistItemHeader {
-            id: Arc::clone(&stream_id_str),
-            uuid: generate_provider_playlist_uuid(input_name, &stream_id_str, item_type),
-            virtual_id: item.stream_id,
-            name: Arc::clone(&item.name),
-            logo: item.logo_url.clone().unwrap_or_else(|| Internable::intern(String::new())),
-            logo_small: Internable::intern(String::new()),
-            group: Arc::clone(group_title),
-            title: Arc::clone(&item.name),
-            parent_code: Internable::intern(String::new()),
-            audio_track: Internable::intern(String::new()),
-            time_shift: Internable::intern(String::new()),
-            rec: Internable::intern(String::new()),
-            url,
-            epg_channel_id: item.epg_channel_id.clone(),
-            item_type,
-            xtream_cluster: match cluster {
-                StalkerCluster::Live => shared::model::XtreamCluster::Live,
-                StalkerCluster::Vod => shared::model::XtreamCluster::Video,
-                StalkerCluster::Series => shared::model::XtreamCluster::Series,
-            },
-            additional_properties: None,
-            input_name: Internable::intern(input_name.to_string()),
-            chno: item.number,
-            category_id: item.category_id,
-            source_ordinal: 0,
-        },
-    }
-}
-
-fn count_channels_in(groups: &[PlaylistGroup], cluster: StalkerCluster) -> usize {
-    groups
-        .iter()
-        .filter(|g| match cluster {
-            StalkerCluster::Live => g.xtream_cluster == shared::model::XtreamCluster::Live,
-            StalkerCluster::Vod => g.xtream_cluster == shared::model::XtreamCluster::Video,
-            StalkerCluster::Series => g.xtream_cluster == shared::model::XtreamCluster::Series,
-        })
-        .map(|g| g.channels.len())
-        .sum()
+    groups_map.into_values().collect()
 }
 
 fn stalker_err_to_repo(err: StalkerError) -> TuliproxError {
     TuliproxError::ProviderConnection(format!("Stalker client error: {err}"))
 }
 
+/// Cache key for the runtime client map. Built from explicit, non-secret
+/// fields — `StalkerInputConfig` carries the portal account credentials, so
+/// formatting the whole config with `{:?}` would leak username and password
+/// into a long-lived in-memory map key. Credentials still differentiate the
+/// key, but only as a non-reversible short hash.
 fn runtime_client_cache_key(portal_url: &str, cfg: &StalkerInputConfig) -> String {
-    format!("{portal_url}|{cfg:?}")
+    use std::fmt::Write;
+    let mut key = String::with_capacity(192);
+    let _ = write!(
+        key,
+        "{portal_url}|auth={:?}|preset={:?}|endpoint={:?}|pages={:?}",
+        cfg.auth_mode, cfg.mag_preset, cfg.endpoint_preference, cfg.catalog_max_pages
+    );
+    if let Some(caps) = cfg.size_caps.as_ref() {
+        let _ = write!(
+            key,
+            "|caps={}:{}:{}",
+            caps.create_link_kb, caps.ordered_list_mb, caps.get_epg_mb
+        );
+    }
+    if let Some(device) = cfg.device.as_ref() {
+        let _ = write!(
+            key,
+            "|dev={}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            device.mac_address.as_deref().unwrap_or_default(),
+            device.device_profile.as_deref().unwrap_or_default(),
+            device.serial_number.as_deref().unwrap_or_default(),
+            device.device_id.as_deref().unwrap_or_default(),
+            device.device_id2.as_deref().unwrap_or_default(),
+            device.signature.as_deref().unwrap_or_default(),
+            device.timezone.as_deref().unwrap_or_default(),
+            device.locale.as_deref().unwrap_or_default(),
+            device.user_agent.as_deref().unwrap_or_default(),
+            device.x_user_agent.as_deref().unwrap_or_default(),
+        );
+    }
+    let credentials = format!(
+        "{}\n{}",
+        cfg.username.as_deref().unwrap_or_default(),
+        cfg.password.as_deref().unwrap_or_default()
+    );
+    let _ = write!(key, "|cred={}", short_hash(&credentials));
+    key
 }
 
 fn cached_runtime_stalker_client(
@@ -723,5 +719,21 @@ mod tests {
         });
         let key_b = runtime_client_cache_key("http://portal.example", &cfg);
         assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn runtime_client_cache_key_does_not_leak_credentials() {
+        let mut cfg = runtime_cfg();
+        cfg.username = Some("secret_user".to_string());
+        cfg.password = Some("secret_pass".to_string());
+        let key = runtime_client_cache_key("http://portal.example", &cfg);
+        assert!(!key.contains("secret_user"));
+        assert!(!key.contains("secret_pass"));
+        // Different credentials must still produce a different cache key so two
+        // inputs against the same portal never share a client.
+        let mut other = cfg.clone();
+        other.password = Some("other_pass".to_string());
+        let other_key = runtime_client_cache_key("http://portal.example", &other);
+        assert_ne!(key, other_key);
     }
 }

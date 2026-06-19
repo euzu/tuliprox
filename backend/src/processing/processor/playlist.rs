@@ -620,7 +620,7 @@ async fn playlist_download_from_input(
 #[allow(clippy::too_many_lines)]
 async fn process_source(
     source_idx: usize,
-    ctx: &PlaylistProcessingContext,
+    ctx: Arc<PlaylistProcessingContext>,
 ) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
     log_memory_snapshot(format!("source[{source_idx}] start").as_str());
     let sources = ctx.config.sources.load();
@@ -648,7 +648,7 @@ async fn process_source(
                 let (mut playlist_groups, mut error_list) = {
                     broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
 
-                    let (mut download_err, playlist, error) = download_input(ctx, input).await;
+                    let (mut download_err, playlist, error) = download_input(&ctx, input).await;
 
                     if let Some(err) = error {
                         broadcast_step(
@@ -665,7 +665,7 @@ async fn process_source(
                 let tvguide = if effective_input_type == InputType::Library {
                     None
                 } else {
-                    download_input_epg(ctx, input, &mut error_list).await
+                    download_input_epg(&ctx, input, &mut error_list).await
                 };
                 log_memory_snapshot(format!("source[{source_idx}] input '{}' after_epg_download", input.name).as_str());
 
@@ -723,7 +723,7 @@ async fn process_source(
                         format!("source[{source_idx}] target '{}' before_process", target.name).as_str(),
                     );
                     match process_playlist_for_target(
-                        ctx,
+                        &ctx,
                         &mut source_playlists,
                         target,
                         &mut input_stats,
@@ -994,14 +994,22 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
 
         let shared_errors = errors.clone();
         let shared_stats = stats.clone();
-        let ctx = processing_ctx.clone();
+        // Wrap the context in an `Arc` once per source. The inner future spawned
+        // by `JoinSet::spawn` is required to be `Send` for *any* lifetime
+        // (HRTB), but a plain `&PlaylistProcessingContext` would tie the future's
+        // `Send` impl to a concrete lifetime and break the bound. `Arc<T>` is
+        // unconditionally `Send + Sync` for every lifetime, so the nested
+        // future from `process_source` is `Send` regardless of how the caller
+        // obtained the reference.
+        let ctx = Arc::new(processing_ctx.clone());
 
         processed_any = true;
         if process_parallel {
             async_tasks.spawn(async move {
                 // Hold the per-source lock for the full duration of this update.
                 let current_update_lock = update_lock;
-                let (input_stats, target_stats, mut res_errors) = process_source(index, &ctx).await;
+                let (input_stats, target_stats, mut res_errors) =
+                    process_source(index, ctx.clone()).await;
                 shared_errors.lock().await.append(&mut res_errors);
                 if let Some(process_stats) = SourceStats::try_new(input_stats, target_stats) {
                     shared_stats.lock().await.push(process_stats);
@@ -1009,7 +1017,7 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
                 drop(current_update_lock);
             });
         } else {
-            let (input_stats, target_stats, mut res_errors) = process_source(index, &ctx).await;
+            let (input_stats, target_stats, mut res_errors) = process_source(index, ctx).await;
             shared_errors.lock().await.append(&mut res_errors);
             if let Some(process_stats) = SourceStats::try_new(input_stats, target_stats) {
                 shared_stats.lock().await.push(process_stats);

@@ -7,7 +7,7 @@
 //! * [`catalog`] — live / VOD / series paginated fetch
 //! * [`epg`] — short EPG, per-channel EPG, bulk streaming EPG
 //! * [`playback`] — `create_link` (single command, archive window, batch)
-//! * [`session`] — bearer token + cookie jar
+//! * [`session`] — bearer token holder
 //! * [`profile`] — portal account + capabilities snapshot
 //! * [`presets`] — MAG device fingerprints
 //! * [`recipes`] — handshake fallback chain
@@ -16,9 +16,8 @@
 //! * [`cmd_parser`] — `cmd` base64 + URL recovery
 //! * [`error`] — typed error variants
 //!
-//! Tests in this module use a deterministic in-memory `reqwest::Client` substitute
-//! (`MockHttp`) when they need to drive the full request/response cycle. The simple
-//! `cmd_parser` and `url_factory` helpers are tested without HTTP.
+//! Tests in this module exercise the parsing and URL-derivation helpers directly with
+//! canned payloads; no HTTP requests are issued from unit tests.
 
 pub mod auth;
 pub mod catalog;

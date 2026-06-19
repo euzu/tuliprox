@@ -66,13 +66,20 @@ impl StalkerCookieJar {
     /// Return the cookies that are still valid at `now`. Cookies with no `Expires` attribute
     /// are treated as session cookies and emitted until the jar is cleared.
     pub fn active_cookie_header(&self, now_epoch: u64) -> String {
+        let pairs = self.active_cookies(now_epoch);
+        let active: Vec<String> = pairs.iter().map(|(name, value)| format!("{name}={value}")).collect();
+        active.join("; ")
+    }
+
+    /// Return the still-valid cookies as `(name, value)` pairs so callers can merge them
+    /// with other cookie sources before serializing a `Cookie` header.
+    pub fn active_cookies(&self, now_epoch: u64) -> Vec<(String, String)> {
         let guard = self.inner.read();
-        let active: Vec<String> = guard
+        guard
             .values()
             .filter(|c| !c.is_expired(now_epoch))
-            .map(|c| format!("{}={}", c.name, c.value))
-            .collect();
-        active.join("; ")
+            .map(|c| (c.name.clone(), c.value.clone()))
+            .collect()
     }
 }
 
@@ -88,21 +95,39 @@ fn parse_set_cookie(raw: &str) -> Option<StalkerCookie> {
     if name.is_empty() {
         return None;
     }
-    let mut expires_at: Option<u64> = None;
+    let mut max_age: Option<u64> = None;
+    let mut expires: Option<u64> = None;
     for attr in parts {
         let attr = attr.trim();
-        if let Some(rest) = attr.strip_prefix("Max-Age=") {
-            if let Ok(secs) = rest.trim().parse::<i64>() {
+        let (key, val) = attr.split_once('=').map_or((attr, ""), |(k, v)| (k.trim(), v.trim()));
+        if key.eq_ignore_ascii_case("max-age") {
+            if let Ok(secs) = val.parse::<i64>() {
                 if secs <= 0 {
-                    expires_at = Some(0);
+                    max_age = Some(0);
                 } else if let Ok(delta) = u64::try_from(secs) {
-                    let now = now_epoch_secs();
-                    expires_at = Some(now.saturating_add(delta));
+                    max_age = Some(now_epoch_secs().saturating_add(delta));
                 }
             }
+        } else if key.eq_ignore_ascii_case("expires") {
+            expires = parse_cookie_expires(val);
         }
     }
+    // RFC 6265: `Max-Age` wins over `Expires` when both are present.
+    let expires_at = max_age.or(expires);
     Some(StalkerCookie { name, value, expires_at_epoch: expires_at })
+}
+
+/// Parse an HTTP `Expires` cookie attribute (RFC 1123 date, e.g.
+/// `Tue, 01 Jul 2025 10:00:00 GMT`). Dates before the Unix epoch collapse to `0`
+/// (immediately expired). Unparseable dates yield `None` (session cookie).
+fn parse_cookie_expires(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.replace("GMT", "+0000");
+    let epoch = chrono::DateTime::parse_from_rfc2822(&normalized).ok()?.timestamp();
+    Some(u64::try_from(epoch).unwrap_or(0))
 }
 
 pub fn now_epoch_secs() -> u64 {
@@ -121,10 +146,6 @@ pub fn apply_set_cookie_headers_unchecked(jar: &StalkerCookieJar, headers: &reqw
         }
     }
     Ok(())
-}
-
-pub fn cached_cookie_header(jar: &StalkerCookieJar) -> String {
-    jar.active_cookie_header(now_epoch_secs())
 }
 
 
@@ -194,6 +215,54 @@ mod tests {
     fn max_age_zero_yields_immediate_expiry() {
         let cookie = parse_set_cookie("kill=1; Max-Age=0").expect("ok");
         assert_eq!(cookie.expires_at_epoch, Some(0));
+    }
+
+    #[test]
+    fn max_age_is_case_insensitive() {
+        let cookie = parse_set_cookie("mac=00:1A:79:DE:AD:BE; max-age=3600; path=/").expect("ok");
+        let exp = cookie.expires_at_epoch.expect("lowercase max-age should produce expiry");
+        assert!(exp > now_epoch_secs());
+    }
+
+    #[test]
+    fn parses_expires_attribute() {
+        let cookie =
+            parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Path=/").expect("ok");
+        let exp = cookie.expires_at_epoch.expect("expires should produce expiry");
+        assert!(exp > now_epoch_secs());
+    }
+
+    #[test]
+    fn past_expires_marks_cookie_expired() {
+        let cookie = parse_set_cookie("sid=abc; expires=Thu, 01 Jan 2004 00:00:00 GMT").expect("ok");
+        let exp = cookie.expires_at_epoch.expect("expires should parse");
+        assert!(cookie.is_expired(now_epoch_secs()));
+        assert!(exp > 0);
+    }
+
+    #[test]
+    fn max_age_wins_over_expires() {
+        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Max-Age=0")
+            .expect("ok");
+        assert_eq!(cookie.expires_at_epoch, Some(0));
+    }
+
+    #[test]
+    fn active_cookies_skips_expired_pairs() {
+        let jar = StalkerCookieJar::new();
+        jar.insert(StalkerCookie {
+            name: "dead".to_string(),
+            value: "beef".to_string(),
+            expires_at_epoch: Some(1),
+        });
+        jar.insert(StalkerCookie {
+            name: "alive".to_string(),
+            value: "feed".to_string(),
+            expires_at_epoch: None,
+        });
+        let pairs = jar.active_cookies(now_epoch_secs());
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ("alive".to_string(), "feed".to_string()));
     }
 
     #[test]

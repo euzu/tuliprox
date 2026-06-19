@@ -117,14 +117,8 @@ fn resolve_response(
 ) -> StalkerResult<StalkerResolvedStream> {
     if let Some(err) = &resp.error {
         if !err.is_empty() {
-            let err_clone = err.clone();
-            return Err(StalkerError::PlayableUrlMissing {
-                cmd: resp.cmd.clone().unwrap_or_default(),
-                status: 400,
-            })
-            .inspect_err(move |_| {
-                warn!("Stalker create_link error: {err_clone}");
-            });
+            warn!("Stalker create_link error: {err}");
+            return Err(StalkerError::PortalRefusedCmd { reason: err.clone() });
         }
     }
     let raw_cmd = resp
@@ -134,9 +128,8 @@ fn resolve_response(
         .or_else(|| resp.text.as_ref().and_then(|t| serde_json::from_str::<Value>(t).ok().and_then(|v| v.get("cmd").and_then(Value::as_str).map(String::from))))
         .or(resp.cmd);
     let Some(raw_cmd) = raw_cmd else {
-        return Err(StalkerError::PlayableUrlMissing {
-            cmd: String::new(),
-            status: 404,
+        return Err(StalkerError::PortalRefusedCmd {
+            reason: "create_link response contained no cmd".to_string(),
         });
     };
     let url = crate::utils::network::stalker::cmd_parser::extract_url_from_cmd(&raw_cmd)?;
@@ -177,7 +170,7 @@ mod tests {
         let body = serde_json::to_string(&serde_json::json!({"js": {}})).unwrap();
         let parsed: StalkerCreateLinkResponse = serde_json::from_str(&body).unwrap();
         let err = resolve_response_test(parsed, StalkerStreamKind::Live).expect_err("err");
-        assert!(matches!(err, StalkerError::PlayableUrlMissing { .. }));
+        assert!(matches!(err, StalkerError::PortalRefusedCmd { .. }));
     }
 
     #[test]
@@ -213,7 +206,7 @@ mod tests {
             .and_then(|js| js.get("cmd").and_then(Value::as_str).map(String::from))
             .or(resp.cmd);
         let Some(raw_cmd) = raw_cmd else {
-            return Err(StalkerError::PlayableUrlMissing { cmd: String::new(), status: 404 });
+            return Err(StalkerError::PortalRefusedCmd { reason: "create_link response contained no cmd".to_string() });
         };
         let url = extract_url_from_cmd(&raw_cmd)?;
         let scheme = validate_playable_scheme(&url)?;

@@ -12,12 +12,19 @@ use crate::{
 use axum::response::IntoResponse;
 use log::warn;
 use serde_json::json;
-use shared::utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable};
-use shared::model::{
-    InputPersistence, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem,
-};
+use shared::utils::{concat_path, concat_path_leading_slash, interner_gc, obfuscate_text, Internable};
+use shared::model::{InputPersistence, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
+use crate::api::api_utils::json_or_bin_response;
+
+fn stalker_cluster(cluster: XtreamCluster) -> StalkerCluster {
+    match cluster {
+        XtreamCluster::Live => StalkerCluster::Live,
+        XtreamCluster::Video => StalkerCluster::Vod,
+        XtreamCluster::Series => StalkerCluster::Series,
+    }
+}
 
 pub(in crate::api::endpoints) async fn get_playlist_for_target(
     cfg_target: Option<&ConfigTarget>,
@@ -115,12 +122,9 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 }
             });
             return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
-        } else if matches!(input.input_type, InputType::Stalker | InputType::StalkerBatch) {
-            let stalker_cluster = match cluster {
-                XtreamCluster::Live => StalkerCluster::Live,
-                XtreamCluster::Video => StalkerCluster::Vod,
-                XtreamCluster::Series => StalkerCluster::Series,
-            };
+        } else if input.input_type.is_stalker() {
+            // TODO refactor
+            let stalker_cluster = stalker_cluster(cluster);
             let client = app_state.http_client.load();
             let (groups, errors, _) =
                 download_stalker_playlist(&app_state.app_config, client.as_ref(), input, Some(&[stalker_cluster])).await;
@@ -171,12 +175,8 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                     )
                         .into_response();
                 }
-                InputType::Stalker | InputType::StalkerBatch => {
-                    let stalker_cluster = match cluster {
-                        XtreamCluster::Live => StalkerCluster::Live,
-                        XtreamCluster::Video => StalkerCluster::Vod,
-                        XtreamCluster::Series => StalkerCluster::Series,
-                    };
+                InputPersistence::Stalker => {
+                    let stalker_cluster = stalker_cluster(cluster);
                     // The Stalker processor mirrors the M3U/Xtream path: it returns
                     // `PlaylistGroup`s for the requested cluster only. The third
                     // tuple element (`use_disk_based_processing`) is irrelevant for

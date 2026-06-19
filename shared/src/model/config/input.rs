@@ -5,7 +5,7 @@ use crate::{
     foundation::{get_filter, Filter},
     model::{
         config::media_server_catalog::MediaServerInputConfigDto, EpgConfigDto, PatternTemplate,
-        StalkerDeviceProfileDto, StalkerInputConfigDto,
+        StalkerInputConfigDto,
     },
     utils::{
         arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
@@ -146,6 +146,11 @@ impl InputType {
                 requires_provider_connection_for_probe: true,
                 served_on_custom_provider_endpoint: true,
             },
+            Self::Stalker | Self::StalkerBatch => InputCapabilities {
+                persistence: InputPersistence::Stalker,
+                requires_provider_connection_for_probe: true,
+                served_on_custom_provider_endpoint: true,
+            },
             Self::Library => InputCapabilities {
                 persistence: InputPersistence::Library,
                 requires_provider_connection_for_probe: false,
@@ -175,6 +180,7 @@ pub enum InputPersistence {
     Xtream,
     Library,
     MediaServer,
+    Stalker,
 }
 
 /// Categorical capabilities of an [`InputType`], declared once in
@@ -266,6 +272,9 @@ pub struct ConfigInputOptionsDto {
     pub stalker_pre_resolve_playback: bool,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub stalker_runtime_resolve_playback: bool,
+    /// Bulk-fetch EPG for live channels during playlist processing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stalker_bulk_epg: bool,
 }
 
 impl Default for ConfigInputOptionsDto {
@@ -292,6 +301,7 @@ impl Default for ConfigInputOptionsDto {
             t_probe_filter: None,
             stalker_pre_resolve_playback: default_as_true(),
             stalker_runtime_resolve_playback: default_as_true(),
+            stalker_bulk_epg: false,
         }
     }
 }
@@ -317,6 +327,7 @@ impl ConfigInputOptionsDto {
             && self.probe_filter.as_ref().is_none_or(|s| s.trim().is_empty())
             && self.stalker_pre_resolve_playback
             && self.stalker_runtime_resolve_playback
+            && !self.stalker_bulk_epg
     }
 
     pub fn clean(&mut self) {
@@ -341,6 +352,7 @@ impl ConfigInputOptionsDto {
         self.t_probe_filter = None;
         self.stalker_pre_resolve_playback = default_as_true();
         self.stalker_runtime_resolve_playback = default_as_true();
+        self.stalker_bulk_epg = false;
     }
 
     pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
@@ -508,7 +520,14 @@ impl ConfigInputAliasDto {
         }
         check_input_credentials!(self, input_type, true, true);
         check_input_connections!(self, input_type, true);
-        prepare_stalker_config(&self.name, input_type, &mut self.stalker)?;
+        prepare_stalker_config(
+            &self.name,
+            input_type,
+            &mut self.stalker,
+            true,
+            self.username.as_deref(),
+            self.password.as_deref(),
+        )?;
 
         Ok(self.id)
     }
@@ -610,14 +629,44 @@ impl ConfigInputDto {
     /// `device_id2`) are filled by the network layer at runtime; we only
     /// verify the user-supplied inputs here.
     pub fn prepare_stalker_input(&mut self) -> Result<(), TuliproxError> {
-        prepare_stalker_config(&self.name, &self.input_type, &mut self.stalker)
+        prepare_stalker_config(
+            &self.name,
+            &self.input_type,
+            &mut self.stalker,
+            false,
+            self.username.as_deref(),
+            self.password.as_deref(),
+        )
     }
+}
+
+/// Normalize a user-supplied MAC address into the canonical lowercase
+/// `xx:xx:xx:xx:xx:xx` form. Accepts colon-, dash- and bare-hex formats
+/// (all three are common in portal provisioning exports). Returns `None`
+/// when the value is not a valid 6-octet MAC.
+fn normalize_mac_address(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let octets: Vec<String> = if trimmed.contains(':') || trimmed.contains('-') {
+        trimmed.split(['-', ':']).map(str::to_string).collect()
+    } else if trimmed.len() == 12 {
+        trimmed.as_bytes().chunks(2).map(|c| String::from_utf8_lossy(c).to_string()).collect()
+    } else {
+        return None;
+    };
+    let valid = octets.len() == 6 && octets.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()));
+    if !valid {
+        return None;
+    }
+    Some(octets.join(":").to_ascii_lowercase())
 }
 
 fn prepare_stalker_config(
     input_name: &str,
     input_type: &InputType,
     stalker: &mut Option<StalkerInputConfigDto>,
+    is_alias: bool,
+    username: Option<&str>,
+    password: Option<&str>,
 ) -> Result<(), TuliproxError> {
     if !input_type.is_stalker() {
         if stalker.is_some() {
@@ -628,51 +677,73 @@ fn prepare_stalker_config(
         return Ok(());
     }
 
-    let config = stalker.get_or_insert_with(StalkerInputConfigDto::default);
-    let device = config.device.get_or_insert_with(StalkerDeviceProfileDto::default);
+    // Aliases inherit the parent's stalker block when they define none of
+    // their own — never materialize a default here, otherwise the inherited
+    // config would be shadowed by an empty one in `as_input`.
+    let config = if is_alias {
+        match stalker.as_mut() {
+            Some(config) => config,
+            None => return Ok(()),
+        }
+    } else {
+        stalker.get_or_insert_with(StalkerInputConfigDto::default)
+    };
 
-    // MAC validation — accept XX:XX:XX:XX:XX:XX (case-insensitive). Empty
-    // MAC is allowed at this point (auth mode might be credentials-only);
-    // the network layer surfaces a clearer error if no identity is derivable.
-    if let Some(mac) = device.mac_address.as_ref() {
-        let normalized = mac.trim();
-        if !normalized.is_empty() {
-            let parts: Vec<&str> = normalized.split(':').collect();
-            let valid =
-                parts.len() == 6 && parts.iter().all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()));
-            if !valid {
-                return Err(TuliproxError::ConfigInput(format!(
-                    "stalker.device.mac_address must be in XX:XX:XX:XX:XX:XX format (input: {input_name})"
-                )));
+    let mut has_mac = false;
+    // Only normalize an existing device block — do not materialize an empty
+    // one (it would be re-serialized as a noise `device: {}` block).
+    if let Some(device) = config.device.as_mut() {
+        // MAC validation — accept colon-, dash- and bare-hex formats and
+        // normalize to lowercase `xx:xx:xx:xx:xx:xx`. Empty MAC is allowed
+        // at this point (auth mode might be credentials-only).
+        if let Some(mac) = device.mac_address.as_ref() {
+            let trimmed = mac.trim();
+            if !trimmed.is_empty() {
+                let Some(normalized) = normalize_mac_address(trimmed) else {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "stalker.device.mac_address must be a MAC address in XX:XX:XX:XX:XX:XX, XX-XX-XX-XX-XX-XX or bare-hex format (input: {input_name})"
+                    )));
+                };
+                let first_octet = u8::from_str_radix(&normalized[..2], 16).unwrap_or_default();
+                if first_octet & 1 != 0 {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "stalker.device.mac_address must be a unicast MAC address (input: {input_name})"
+                    )));
+                }
+                device.mac_address = Some(normalized);
+                has_mac = true;
             }
-            let first_octet = u8::from_str_radix(parts[0], 16).unwrap_or_default();
-            if first_octet & 1 != 0 {
-                return Err(TuliproxError::ConfigInput(format!(
-                    "stalker.device.mac_address must be a unicast MAC address (input: {input_name})"
-                )));
+        }
+
+        // Trim locale/timezone if the user supplied them.
+        if let Some(timezone) = device.timezone.as_mut() {
+            *timezone = timezone.trim().to_string();
+            if timezone.is_empty() {
+                device.timezone = None;
             }
-            device.mac_address = Some(normalized.to_ascii_lowercase());
+        }
+        if let Some(locale) = device.locale.as_mut() {
+            *locale = locale.trim().to_string();
+            if locale.is_empty() {
+                device.locale = None;
+            }
+        }
+        if let Some(profile) = device.device_profile.as_mut() {
+            *profile = profile.trim().to_string();
+            if profile.is_empty() {
+                device.device_profile = None;
+            }
         }
     }
 
-    // Trim locale/timezone if the user supplied them.
-    if let Some(timezone) = device.timezone.as_mut() {
-        *timezone = timezone.trim().to_string();
-        if timezone.is_empty() {
-            device.timezone = None;
-        }
-    }
-    if let Some(locale) = device.locale.as_mut() {
-        *locale = locale.trim().to_string();
-        if locale.is_empty() {
-            device.locale = None;
-        }
-    }
-    if let Some(profile) = device.device_profile.as_mut() {
-        *profile = profile.trim().to_string();
-        if profile.is_empty() {
-            device.device_profile = None;
-        }
+    // Identity check: a Stalker portal needs *some* identity anchor —
+    // a MAC address or account credentials. Aliases may inherit the
+    // parent's identity, so only main inputs are checked.
+    if !is_alias && !has_mac && username.is_none() && password.is_none() {
+        log::warn!(
+            "Stalker input '{input_name}' has neither stalker.device.mac_address nor username/password; \
+             the portal handshake will likely be rejected"
+        );
     }
 
     Ok(())
@@ -852,9 +923,10 @@ impl ConfigInputDto {
 
         check_input_credentials!(self, self.input_type, true, false);
         check_input_connections!(self, self.input_type, false);
-        if self.enabled && self.input_type.is_stalker() {
-            self.prepare_stalker_input()?;
-        }
+        // Always run stalker validation: it rejects a stray `stalker` block on
+        // non-stalker inputs and surfaces a malformed MAC at config load even
+        // when the input is currently disabled (consistent with aliases).
+        self.prepare_stalker_input()?;
         if let Some(staged_input) = self.staged.as_mut() {
             if staged_input.enabled {
                 check_input_credentials!(staged_input, staged_input.input_type, true, true);
@@ -1271,6 +1343,7 @@ impl ProviderDnsDto {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::StalkerDeviceProfileDto;
     use super::*;
 
     fn create_test_dto() -> ConfigInputDto {

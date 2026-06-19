@@ -824,7 +824,6 @@ mod tests {
                     }
                 }
             }),
-            //("itv", "get_ordered_list", _) => json!({"js": []}),
             _ => json!({"js": []}),
         };
         Json(response)
@@ -1248,6 +1247,7 @@ mod tests {
                 endpoint_preference: shared::model::StalkerEndpointPreference::ServerLoad,
                 size_caps: None,
                 catalog_max_pages: None,
+                ..Default::default()
             }),
             ..Default::default()
         });

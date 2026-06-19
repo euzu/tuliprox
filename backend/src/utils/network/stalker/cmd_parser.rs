@@ -3,12 +3,17 @@ use url::Url;
 
 use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
 
-/// A Stalker `cmd` field is a space-prefixed command + base64-encoded URL pair, e.g.
-/// `"ffmpeg http://portal.example/stream/123"`. Some portals embed a placeholder command
-/// like `"auto"` or `"localhost"` instead of `ffmpeg`. The helpers below recover the
-/// underlying URL and validate that the scheme is one we can reverse-proxy.
+/// A Stalker `cmd` field is usually a plain-text space-prefixed command + URL pair, e.g.
+/// `"ffmpeg http://portal.example/stream/123"` or a bare URL. Some portals embed a
+/// placeholder command like `"auto"` or `"localhost"` instead of `ffmpeg`, and a few
+/// legacy middlewares base64-encode the whole pair. The helpers below recover the
+/// underlying URL — plain text first, base64 as a fallback — and validate that the
+/// scheme is one we can reverse-proxy.
 pub fn extract_url_from_cmd(raw_cmd: &str) -> StalkerResult<String> {
     let trimmed = raw_cmd.trim();
+    if let Some(result) = extract_plain(trimmed) {
+        return result;
+    }
     let bytes = BASE64
         .decode(trimmed.as_bytes())
         .map_err(|err| StalkerError::BodyDecode {
@@ -17,17 +22,34 @@ pub fn extract_url_from_cmd(raw_cmd: &str) -> StalkerResult<String> {
     let decoded = String::from_utf8(bytes).map_err(|err| StalkerError::BodyDecode {
         message: format!("cmd utf-8 decode failed: {err}"),
     })?;
-    let after_space = decoded.split_once(' ').map_or(decoded.as_str(), |(_, rest)| rest);
-    let candidate = after_space.trim();
-    Url::parse(candidate).map_err(|err| StalkerError::BodyDecode {
-        message: format!("cmd url parse failed: {err}"),
-    })?;
-    Ok(candidate.to_string())
+    extract_plain(decoded.trim()).unwrap_or_else(|| {
+        Err(StalkerError::BodyDecode {
+            message: "cmd contains no parseable url".to_string(),
+        })
+    })
 }
 
-/// Probe whether a raw `cmd` decodes cleanly. Used to skip URLs that the portal will not
-/// be able to play (placeholder commands, broken base64, etc.).
-pub fn cmd_is_decodable(raw_cmd: &str) -> bool { extract_url_from_cmd(raw_cmd).is_ok() }
+/// Try to recover a URL from a plain-text cmd. Returns `None` when no URL-shaped token is
+/// present (the caller then falls back to base64 decoding); returns
+/// `Some(Err(UnsupportedScheme))` when a URL parses but uses a scheme we cannot proxy.
+fn extract_plain(cmd: &str) -> Option<StalkerResult<String>> {
+    let whole = cmd.trim();
+    if let Ok(url) = Url::parse(whole) {
+        return Some(check_playable(whole, &url));
+    }
+    let (_, rest) = whole.split_once(' ')?;
+    let candidate = rest.trim();
+    let url = Url::parse(candidate).ok()?;
+    Some(check_playable(candidate, &url))
+}
+
+fn check_playable(candidate: &str, url: &Url) -> StalkerResult<String> {
+    if scheme_is_playable(url.scheme()) {
+        Ok(candidate.to_string())
+    } else {
+        Err(StalkerError::UnsupportedScheme { scheme: url.scheme().to_string() })
+    }
+}
 
 /// The supported playable schemes — anything else is rejected at `create_link` time.
 ///
@@ -52,6 +74,37 @@ mod tests {
         let cmd = b64("ffmpeg http://portal.example/stream/123");
         let url = extract_url_from_cmd(&cmd).expect("decode should succeed");
         assert_eq!(url, "http://portal.example/stream/123");
+    }
+
+    #[test]
+    fn extracts_plain_text_ffmpeg_cmd() {
+        let url = extract_url_from_cmd("ffmpeg http://line.example/live.ts").expect("plain cmd");
+        assert_eq!(url, "http://line.example/live.ts");
+    }
+
+    #[test]
+    fn extracts_plain_text_auto_cmd() {
+        let url = extract_url_from_cmd("auto http://portal.example/stream/9").expect("plain cmd");
+        assert_eq!(url, "http://portal.example/stream/9");
+    }
+
+    #[test]
+    fn extracts_bare_url_cmd() {
+        let url = extract_url_from_cmd("https://portal.example/stream/77?token=x").expect("bare url");
+        assert_eq!(url, "https://portal.example/stream/77?token=x");
+    }
+
+    #[test]
+    fn rejects_plain_cmd_with_unplayable_scheme() {
+        let err = extract_url_from_cmd("ffmpeg rtmp://portal.example/live").expect_err("should fail");
+        assert!(matches!(err, StalkerError::UnsupportedScheme { .. }));
+    }
+
+    #[test]
+    fn rejects_base64_cmd_with_unplayable_scheme() {
+        let cmd = b64("ffmpeg file:///etc/passwd");
+        let err = extract_url_from_cmd(&cmd).expect_err("should fail");
+        assert!(matches!(err, StalkerError::UnsupportedScheme { .. }));
     }
 
     #[test]

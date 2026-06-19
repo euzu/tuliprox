@@ -40,7 +40,8 @@ create_bitset!(
     ProbeVod,
     ProbeLive,
     StalkerPreResolvePlayback,
-    StalkerRuntimeResolvePlayback
+    StalkerRuntimeResolvePlayback,
+    StalkerBulkEpg
 );
 
 #[derive(Debug, Clone)]
@@ -92,6 +93,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             (probe_live, ProbeLive),
             (stalker_pre_resolve_playback, StalkerPreResolvePlayback),
             (stalker_runtime_resolve_playback, StalkerRuntimeResolvePlayback),
+            (stalker_bulk_epg, StalkerBulkEpg),
         );
 
         Self {
@@ -235,7 +237,9 @@ impl From<&StalkerDeviceProfileDto> for StalkerDeviceProfile {
 }
 
 /// Resolved Stalker input configuration. Holds the device profile, the
-/// negotiated auth mode, the preferred MAG preset and the body-size caps.
+/// negotiated auth mode, the preferred MAG preset, the body-size caps and
+/// the portal account credentials (copied from the owning input/alias so
+/// the network layer never has to reach back into `ConfigInput`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StalkerInputConfig {
     pub device: Option<StalkerDeviceProfile>,
@@ -244,6 +248,20 @@ pub struct StalkerInputConfig {
     pub endpoint_preference: StalkerEndpointPreference,
     pub size_caps: Option<StalkerSizeCaps>,
     pub catalog_max_pages: Option<u32>,
+    /// Portal account username (from the input/alias `username` field).
+    pub username: Option<String>,
+    /// Portal account password (from the input/alias `password` field).
+    pub password: Option<String>,
+}
+
+impl StalkerInputConfig {
+    /// Copy account credentials from the owning input/alias onto the
+    /// stalker config so the network layer can authenticate with them.
+    fn with_credentials(mut self, username: Option<&String>, password: Option<&String>) -> Self {
+        self.username = username.cloned();
+        self.password = password.cloned();
+        self
+    }
 }
 
 /// Simple body-size cap struct used at runtime (DTO has the same fields but
@@ -274,6 +292,11 @@ impl From<&StalkerInputConfigDto> for StalkerInputConfig {
                 get_epg_mb: caps.get_epg_mb,
             }),
             catalog_max_pages: dto.catalog_max_pages.filter(|value| *value > 0),
+            // Credentials live on the input/alias DTO, not on the stalker
+            // block — they are filled by the owning conversion via
+            // `with_credentials`.
+            username: None,
+            password: None,
         }
     }
 }
@@ -384,7 +407,10 @@ impl From<&ConfigInputAliasDto> for ConfigInputAlias {
             max_connections: dto.max_connections,
             exp_date: dto.exp_date,
             enabled: dto.enabled,
-            stalker: dto.stalker.as_ref().map(StalkerInputConfig::from),
+            stalker: dto
+                .stalker
+                .as_ref()
+                .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
         }
     }
 }
@@ -849,7 +875,17 @@ impl ConfigInput {
             panel_api: self.panel_api.clone(),
             cache_duration_seconds: self.cache_duration_seconds,
             provider_configs: self.provider_configs.clone(),
-            stalker: alias.stalker.clone().or_else(|| self.stalker.clone()),
+            stalker: alias
+                .stalker
+                .clone()
+                .or_else(|| self.stalker.clone())
+                .map(|cfg| {
+                    // The alias' own credentials take precedence; fall back to
+                    // whatever the inherited config already carries.
+                    let username = alias.username.clone().or_else(|| cfg.username.clone());
+                    let password = alias.password.clone().or_else(|| cfg.password.clone());
+                    StalkerInputConfig { username, password, ..cfg }
+                }),
         }
     }
 
@@ -938,7 +974,10 @@ impl From<&ConfigInputDto> for ConfigInput {
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
             provider_configs: None,
-            stalker: dto.stalker.as_ref().map(StalkerInputConfig::from),
+            stalker: dto
+                .stalker
+                .as_ref()
+                .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
         }
     }
 }
@@ -1739,5 +1778,38 @@ mod tests {
             parent.as_input(&alias).stalker.expect("stalker config").auth_mode,
             StalkerAuthMode::CredentialsOnly
         );
+    }
+
+    #[test]
+    fn stalker_alias_inherits_parent_config_and_carries_alias_credentials() {
+        let parent = ConfigInput {
+            input_type: InputType::StalkerBatch,
+            username: Some("parent_user".to_string()),
+            password: Some("parent_pass".to_string()),
+            stalker: Some(StalkerInputConfig {
+                auth_mode: StalkerAuthMode::MacPlusCredentials,
+                username: Some("parent_user".to_string()),
+                password: Some("parent_pass".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let alias = ConfigInputAlias {
+            id: 1,
+            name: "alias".into(),
+            url: "http://portal.example".to_string(),
+            username: Some("alias_user".to_string()),
+            password: Some("alias_pass".to_string()),
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        };
+
+        let merged = parent.as_input(&alias).stalker.expect("inherited stalker config");
+        assert_eq!(merged.auth_mode, StalkerAuthMode::MacPlusCredentials);
+        assert_eq!(merged.username.as_deref(), Some("alias_user"));
+        assert_eq!(merged.password.as_deref(), Some("alias_pass"));
     }
 }

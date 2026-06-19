@@ -20,8 +20,8 @@ pub enum StalkerError {
     #[error("stalker portal response exceeded {action} body cap of {cap_bytes} bytes")]
     ResponseTooLarge { action: String, cap_bytes: u64 },
 
-    #[error("stalker portal returned no playable url for cmd {cmd:?} (status {status})")]
-    PlayableUrlMissing { cmd: String, status: u16 },
+    #[error("stalker portal refused the cmd: {reason}")]
+    PortalRefusedCmd { reason: String },
 
     #[error("stalker portal returned an unsupported url scheme: {scheme}")]
     UnsupportedScheme { scheme: String },
@@ -47,11 +47,20 @@ pub enum StalkerError {
     #[error("stalker device profile is invalid: {message}")]
     InvalidProfile { message: String },
 
-    #[error("stalker portal request build failure: {0}")]
-    RequestBuild(#[from] reqwest::Error),
+    #[error("stalker portal request failure: {0}")]
+    RequestBuild(reqwest::Error),
 
     #[error("stalker portal I/O error: {0}")]
     Io(#[from] io::Error),
+}
+
+impl From<reqwest::Error> for StalkerError {
+    fn from(err: reqwest::Error) -> Self {
+        // Strip the URL before wrapping: `reqwest::Error`'s `Display` includes the full
+        // request URL, which may carry `token=`/`mac=` query parameters that must not
+        // leak into logs.
+        Self::RequestBuild(err.without_url())
+    }
 }
 
 impl StalkerError {
