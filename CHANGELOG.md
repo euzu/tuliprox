@@ -33,6 +33,15 @@
   - MVP supports `movies/shows` with `trending` and `popular`.
   - User-owned Trakt lists remain configured separately under `trakt.lists[]`.
 
+- **Update Log In Playlist Update View**:
+  - The Playlists → Update view now shows a terminal-style log that accumulates `PlaylistUpdateProgress` and
+    `LibraryScanProgress` events in real time, prefixed with `[playlist]` / `[library]` and a local `HH:MM:SS`
+    timestamp, with auto-scroll to the latest line and a FIFO cap of 500 entries.
+  - The log is cleared synchronously when the user clicks either the playlist Update or the library Update button,
+    so each run starts with a fresh view.
+  - Styled to match the dark monospace look of a console (uses existing theme CSS variables for background, border,
+    and text color) and honors the same touch / overflow behavior as the rest of the view.
+
 - **Session Expiry Handling**:
   - The Web UI now schedules a client-side logout when the JWT expires, showing a notification and returning the
     user to the login screen instead of silently failing with 401 errors.
@@ -339,6 +348,10 @@
 
 ## 🐛 Fixes
 
+- **Playlist Cache Load Failures No Longer Silent**: Xtream and M3U storage loads that fail due to corruption,
+  version mismatch, or task panics now log an error before falling back to an empty playlist, instead of silently
+  serving empty data. A genuinely missing storage file (first run) is logged at debug only, so normal startup stays
+  quiet.
 - **EPG Output Selection In Mixed Targets**: Fixed ambiguous EPG file selection when a target exposes both Xtream and M3U outputs.
   - Web UI playlist EPG and stream EPG APIs now explicitly prefer M3U EPG data and fall back to Xtream when M3U EPG is unavailable.
   - Xtream short-EPG now explicitly resolves Xtream EPG data.
@@ -456,6 +469,84 @@
     - `allowed_networks`: CIDR ranges such as `192.168.0.0/16` or `10.0.0.1/32`.
     - `allowed_countries`: ISO-style country codes resolved through GeoIP.
   - The rules use OR semantics: any matching CIDR or country allows the request.
+
+## 🚀 Performance
+
+- **EPG Programme Lookup**: `EpgChannel::get_programme_with_limit` now binary-searches the sorted programme list
+  for the current window boundary instead of scanning linearly, reducing per-channel EPG lookup from `O(p)` to
+  `O(log p)` on large guides. The selected programmes are unchanged.
+- **Item Type Field Access**: Reading the `Type` field during sorting and filtering no longer re-interns the
+  type label on every access. The five fixed type labels are now interned once and cached, so `Type`-keyed
+  rules return a cheap `Arc` clone instead of performing an interner hash-map lookup per item.
+- **EPG XML Parsing**: The Web UI XMLTV parser no longer allocates an owned `String` for every XML element. It now
+  borrows the element name (via `from_utf8_lossy` without `to_string`) and tracks the active text element with a
+  small enum, removing one to two heap allocations per element on large EPG guides.
+- **VOD/Recording Download Loop**: The per-chunk download-control check is now throttled to at most every 200ms
+  instead of running on every chunk. Pause/cancel/restart still take effect immediately via the existing
+  `control_notify` wakeups in the `select!` loop; the throttled poll only covers the rare race where a control
+  change fires mid-write, removing an unthrottled per-chunk lock read from multi-GB downloads.
+- **Playlist Filtering**: `apply_filter_to_playlist` now pre-sizes each surviving-channel buffer to the source
+  group length instead of growing from a fixed small capacity, removing repeated reallocations while collecting
+  survivors for permissive filters (the common case where most channels pass).
+- **Remote File Download**: `get_remote_content_as_file` no longer drains the response stream twice. It previously
+  consumed the whole body in an initial loop with no idle protection and then re-entered an idle-timeout `select!`
+  loop on an already-exhausted stream (dead code). The redundant first loop is removed, so the download runs through
+  a single loop and the idle timeout now actually guards the transfer.
+- **Client Stream Keep-Alive Handling**: After a run of empty keep-alive chunks, `ClientStream` now backs off with a
+  short timer instead of immediately re-waking the task. A provider that streams an endless sequence of empty chunks
+  can no longer keep the task hot with back-to-back `Poll::Pending` re-wakes.
+- **Library Orphan Cleanup**: `cleanup_orphaned` no longer reloads the entire metadata library for every orphaned
+  entry (and again for each thumbnail reference check). It now reads the library once, partitions entries into
+  orphaned and surviving, and deletes unreferenced thumbnails against a precomputed surviving-thumbnail set, turning
+  an O(orphans × library) scan into a single linear pass.
+- **Series Expansion Merge**: Applying resolved series groups back into the in-memory playlist no longer re-scans
+  (and re-normalizes the title of) every existing group for each incoming group. A new batched `merge_groups`/
+  `extend_playlist` path builds `(cluster, normalized_title)` and `(cluster, id)` indexes once and merges the whole
+  batch in a single linear pass, replacing the previous O(groups²) behavior on series-heavy inputs while moving
+  channels instead of cloning them.
+- **Group Flatten Pre-Sizing**: `flatten_groups` now pre-allocates its merge buffer and category index to the
+  incoming group count instead of growing them from empty, reducing reallocation churn when assembling large target
+  playlists.
+- **Custom Provider Playlist Streaming**: The custom provider playlist endpoint now streams its UI items lazily via
+  `stream_json_or_bin_response_stream` (like the target and input endpoints) instead of collecting every channel into
+  a second `Vec<UiPlaylistItem>` and serializing the whole body at once, lowering peak memory and latency for large
+  provider imports.
+
+## 🧹 Maintainability
+
+- **Output Capability Descriptor**: Introduced `TargetType::capabilities()` — a single exhaustive table describing
+  whether each output format supports playlist filtering, EPG, and the in-memory cache. The EPG write/path sites now
+  derive "this format has no EPG" from the table instead of silent empty match arms, and a new `TargetOutput::filter()`
+  accessor co-locates the per-format filter lookup so the playlist writer no longer re-matches every variant. Adding an
+  output format now centers on one descriptor entry plus the format-specific writer.
+- **Input Capability Descriptor**: Introduced `InputType::capabilities()` — a single exhaustive table describing each
+  input type's persistence family (`InputPersistence`), whether generic probing needs a provider connection, and
+  whether the custom-provider endpoint can serve it. Backend persist/load routing, the stream-probe requirement check,
+  and the custom-provider endpoint now derive from this table instead of re-listing `InputType` variants in parallel
+  `match` arms, so most new input variants only need a single descriptor entry and the dependent sites stay in sync.
+- **ItemField Single-Source Binding**: The directly-bound `ItemField` variants (`Group`/`Name`/`Title`/`Url`/`Input`)
+  are now listed once and both `get_field_value` and `set_field_value` are generated from that single list via a
+  callback macro, so a new simple field can no longer be wired into the read half but forgotten in the write half (or
+  vice versa). The asymmetric `Genre`/`Type`/`Caption` cases stay explicit because their read/write behavior differs.
+- **Resolver Stage Summaries**: The background VOD and series resolve-queueing loops now emit a single concise
+  debug summary (total / queued / expanded / skipped-by-filter / skipped-by-resolve-filter / elapsed) per stage in
+  addition to the existing detailed per-item logs, making operational analysis of the hot resolver paths easier
+  without raising the default log level.
+- **InputType Family Helpers**: Added `InputType::is_batch()` and routed the scattered
+  `matches!(input_type, M3uBatch | XtreamBatch)` / `Xtream | XtreamBatch` / `M3u | M3uBatch` checks across the backend
+  and frontend through the centralized `is_batch()` / `is_xtream()` / `is_m3u()` methods, so the batch/family rules
+  live on the enum instead of being re-encoded (and risking silent drift) at every call site.
+- **PlaylistItemType Classification Helpers**: Added `PlaylistItemType::is_video()` / `is_series()` and routed the
+  repeated `matches!(item_type, Video | LocalVideo)` and `matches!(item_type, Series | LocalSeries)` boolean checks
+  (filter evaluation, stream probing, trakt matching, playlist persistence, custom-provider filtering, metadata probe
+  routing) through them, so the family classification is defined once on the enum instead of re-encoded per call site.
+- **XtreamCluster Behavior Centralization**: Added `XtreamCluster::info_action_and_id_field()` (and a backend
+  `xtream_cluster_category_collection()` helper) so the per-cluster `player_api` action / id-field and the
+  `cat_live`/`cat_vod`/`cat_series` collection names are derived once instead of being re-matched at each storage and
+  network call site, reducing the chance of a forgotten or inconsistent cluster arm.
+- **Derived GeoIP Error Display**: `GeoIpUpdateError` now derives its `Display`/`Error` implementation via `thiserror`
+  instead of a hand-written `match self` formatter, so adding a variant only requires an `#[error(...)]` attribute next
+  to it rather than remembering to extend a separate formatting block (a classic source of stale or missing messages).
 
 ## 3.3.0 (2026-04-02)
 

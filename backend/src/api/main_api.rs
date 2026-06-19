@@ -21,7 +21,7 @@ use crate::{
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns,
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue,
-            EventManager, EventMessage, HdHomerunAppState, MetadataUpdateManager, PlaylistStorageState,
+            EventManager, EventMessage, HdHomerunAppState, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState,
             SharedStreamManager, UpdateGuard, exec_qos_aggregation,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
@@ -258,7 +258,7 @@ async fn healthcheck() -> impl axum::response::IntoResponse { axum::Json(create_
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
-) -> Result<(AppState, mpsc::Receiver<Arc<ProcessTargets>>), TuliproxError> {
+) -> Result<(AppState, mpsc::Receiver<ManualPlaylistUpdateRequest>), TuliproxError> {
     let config = app_config.config.load();
     let downloads_state_file = std::path::PathBuf::from(&config.storage_dir).join("downloads_state.json");
 
@@ -304,7 +304,7 @@ async fn create_shared_data(
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
     let cancel_tokens = Arc::new(ArcSwap::from_pointee(tokens));
 
-    let (manual_update_sender, manual_update_rx) = mpsc::channel::<Arc<ProcessTargets>>(1);
+    let (manual_update_sender, manual_update_rx) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
 
     let app_state = AppState {
             forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
@@ -334,13 +334,13 @@ async fn create_shared_data(
 async fn run_manual_update_worker(
     client: reqwest::Client,
     app_state: Arc<AppState>,
-    mut rx: mpsc::Receiver<Arc<ProcessTargets>>,
+    mut rx: mpsc::Receiver<ManualPlaylistUpdateRequest>,
 ) {
-    while let Some(targets) = rx.recv().await {
+    while let Some(request) = rx.recv().await {
         exec_processing(
             &client,
             Arc::clone(&app_state.app_config),
-            targets,
+            request.targets,
             Some(Arc::clone(&app_state.event_manager)),
             Some(Arc::clone(&app_state)),
             Some(Arc::clone(&app_state.playlists)),

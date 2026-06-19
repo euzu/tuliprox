@@ -507,7 +507,7 @@ pub(crate) fn mark_response_as_uncompressed<B>(response: &mut Response<B>) {
     response.extensions_mut().insert(DisableResponseCompression);
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn should_compress_response<B>(response: &Response<B>) -> bool {
     should_compress_response_extensions(response.extensions())
 }
@@ -725,6 +725,7 @@ struct StreamingAcquireOptions<'a> {
     user_priority: i8,
     connection_kind: crate::api::model::ConnectionKind,
     session_owner: Option<&'a str>,
+    accept_requested_stream_url: bool,
 }
 
 pub(crate) fn connection_priority_for_kind(user: &ProxyUserCredentials, kind: crate::api::model::ConnectionKind) -> i8 {
@@ -785,9 +786,9 @@ pub(crate) struct GraceResolutionContext {
     /// The original `ConnectionKind` from the admission decision that led to this grace.
     /// Preserved so that the remaining-strategy fallback can return the correct kind
     /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.
-    #[allow(dead_code)]
     // Stored so the original admission kind remains available when follow-up
     // grace fallback reconstruction starts using it again.
+    #[allow(dead_code)]
     pub(crate) kind: Option<crate::api::model::ConnectionKind>,
 }
 
@@ -968,6 +969,8 @@ pub(in crate::api) async fn resolve_admission_with_strategies(
         kind: admission.kind,
     };
 
+    let _admission_guard = app_state.active_users.acquire_user_admission(username).await;
+
     if let Some(resolution) = evaluate_admission_strategy_loop(
         app_state,
         username,
@@ -1049,6 +1052,8 @@ pub(in crate::api) async fn evaluate_remaining_strategies_after_grace(
         kind: original_kind,
     };
 
+    let _admission_guard = app_state.active_users.acquire_user_admission(username).await;
+
     if let Some(resolution) = evaluate_admission_strategy_loop(
         app_state,
         username,
@@ -1126,10 +1131,11 @@ async fn activate_session_before_stream_open(
     // If caller passes FollowUp, verify the session is still counted under the guard.
     // A stale FollowUp would bypass admission — reclassify to catch this.
     let effective_request_class = if let Some(request_class) = request_class {
-        if request_class == PlaybackRequestClass::FollowUp {
-            // Re-read session under the guard to ensure the counted lease is still held.
+        if matches!(request_class, PlaybackRequestClass::FollowUp | PlaybackRequestClass::Activate) {
+            // Re-read session under the guard to ensure the counted lease is still held or acquired.
             // If it is no longer counted, classify it from the current lifecycle so
             // stale FollowUp requests cannot bypass admission.
+            // If it became counted, classify it so stale Activate requests don't double count.
             let current_session = app_state
                 .active_users
                 .get_and_update_user_session(&user.username, session_token)
@@ -1194,8 +1200,13 @@ async fn activate_session_before_stream_open(
                 }, Some(crate::api::model::GraceMode::Hold))
             }
             Some(crate::api::model::PlaybackLifecycle::GraceActive) => {
-                // Already in GraceActive — nothing to refresh.
-                (crate::api::model::PlaybackLifecycle::GraceActive, Some(crate::api::model::GraceMode::Instant))
+                // Already in GraceActive — infer mode from item_type.
+                let mode = if item_type.is_live() || item_type.is_live_adaptive() {
+                    crate::api::model::GraceMode::Hold
+                } else {
+                    crate::api::model::GraceMode::Instant
+                };
+                (crate::api::model::PlaybackLifecycle::GraceActive, Some(mode))
             }
             _ => {
                 // Session not yet in grace state — infer from item_type defaults.
@@ -1350,10 +1361,10 @@ fn get_stream_alternative_url_m3u(
     input: &ConfigInput,
     alias_input: &Arc<ProviderConfig>,
 ) -> Option<String> {
+    let alt_input_user_info = alias_input.get_user_info()?;
     if let Some((source_base_url, source_username, source_password)) =
         find_input_account_by_signature(stream_url, input)
     {
-        let alt_input_user_info = alias_input.get_user_info()?;
         let modified = stream_url.replacen(&source_base_url, &alt_input_user_info.base_url, 1);
         let mut url = Url::parse(&modified).ok()?;
 
@@ -1372,7 +1383,7 @@ fn get_stream_alternative_url_m3u(
 
         return Some(url.to_string());
     }
-    if stream_url_has_account_signature(stream_url) {
+    if stream_url_has_account_signature(stream_url, &alt_input_user_info) {
         return None;
     }
     Some(stream_url.to_string())
@@ -1462,6 +1473,18 @@ fn rewrite_query_auth_fields(url: &mut Url, new_username: &str, new_password: &s
     true
 }
 
+fn collect_path_segments(url: &Url) -> Option<Vec<String>> {
+    url.path_segments()
+        .map(|segments| segments.map(ToOwned::to_owned).collect::<Vec<_>>())
+}
+
+fn find_path_auth_segment_index(segments: &[String], username: &str, password: &str) -> Option<usize> {
+    segments.windows(2).position(|pair| {
+        pair.first().is_some_and(|segment| segment == username)
+            && pair.get(1).is_some_and(|segment| segment == password)
+    })
+}
+
 fn rewrite_path_auth_fields(
     url: &mut Url,
     old_username: &str,
@@ -1469,28 +1492,11 @@ fn rewrite_path_auth_fields(
     new_username: &str,
     new_password: &str,
 ) -> bool {
-    let Some(mut segments) = url
-        .path_segments()
-        .map(|segments| segments.map(ToOwned::to_owned).collect::<Vec<_>>())
-    else {
+    let Some(mut segments) = collect_path_segments(url) else {
         return false;
     };
 
-    let credential_index = if segments.len() >= 3
-        && matches!(segments.first().map(String::as_str), Some("live" | "movie" | "series"))
-        && segments.get(1).is_some_and(|segment| segment == old_username)
-        && segments.get(2).is_some_and(|segment| segment == old_password)
-    {
-        Some(1)
-    } else if segments.len() >= 2
-        && segments.first().is_some_and(|segment| segment == old_username)
-        && segments.get(1).is_some_and(|segment| segment == old_password)
-    {
-        Some(0)
-    } else {
-        None
-    };
-
+    let credential_index = find_path_auth_segment_index(&segments, old_username, old_password);
     let Some(credential_index) = credential_index else {
         return false;
     };
@@ -1519,7 +1525,7 @@ fn stream_url_matches_provider(stream_url: &str, provider_cfg: &ProviderConfig) 
     // For M3U inputs, the stored playlist entry itself is the trust anchor.
     // Open external URLs are therefore allowed, but external URLs that carry
     // explicit account markers must still match the selected provider account.
-    if stream_url_has_account_signature(stream_url) {
+    if stream_url_has_account_signature(stream_url, &user_info) {
         return stream_url_account_matches(stream_url, &user_info);
     }
     true
@@ -1554,18 +1560,14 @@ fn stream_url_account_matches(stream_url: &str, user_info: &crate::model::InputU
         return has_query_username && has_query_password;
     }
 
-    let mut segments = url.path_segments().into_iter().flatten();
-    let first = segments.next();
-    let (username, password) = match first {
-        Some("live" | "movie" | "series") => (segments.next(), segments.next()),
-        Some(username) => (Some(username), segments.next()),
-        None => return false,
+    let Some(segments) = collect_path_segments(&url) else {
+        return false;
     };
 
-    username == Some(user_info.username.as_str()) && password == Some(user_info.password.as_str())
+    find_path_auth_segment_index(&segments, &user_info.username, &user_info.password).is_some()
 }
 
-fn stream_url_has_account_signature(stream_url: &str) -> bool {
+fn stream_url_has_account_signature(stream_url: &str, user_info: &crate::model::InputUserInfo) -> bool {
     let Ok(url) = Url::parse(stream_url) else {
         return false;
     };
@@ -1587,6 +1589,17 @@ fn stream_url_has_account_signature(stream_url: &str) -> bool {
     if has_query_username || has_query_password {
         return has_query_username && has_query_password;
     }
+
+    // Path-based credentials: some Xtream endpoints embed the account in the URL
+    // path (e.g. /live/<user>/<pass>/...). Only flag a signature when the
+    // consecutive segments actually match the configured user/pass — arbitrary
+    // open paths must not be treated as account signatures.
+    if let Some(segments) = collect_path_segments(&url) {
+        if find_path_auth_segment_index(&segments, &user_info.username, &user_info.password).is_some() {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -1594,7 +1607,11 @@ fn select_provider_stream_url(
     stream_url: &str,
     input: &ConfigInput,
     provider_cfg: &Arc<ProviderConfig>,
+    accept_requested_stream_url: bool,
 ) -> Option<(Arc<str>, String)> {
+    if accept_requested_stream_url {
+        return Some((provider_cfg.name.clone(), stream_url.to_string()));
+    }
     if stream_url_matches_provider(stream_url, provider_cfg) {
         Some((provider_cfg.name.clone(), stream_url.to_string()))
     } else {
@@ -1730,6 +1747,7 @@ async fn resolve_streaming_strategy(
     options: StreamingAcquireOptions<'_>,
 ) -> StreamingStrategy {
     // allocate a provider connection
+    let accept_requested_stream_url = options.accept_requested_stream_url;
     let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, options).await;
 
     // panel_api provisioning/loading is handled later in the stream creation flow
@@ -1745,7 +1763,12 @@ async fn resolve_streaming_strategy(
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
                 // alias URLs in persisted playlists until the next processing run.
-                if let Some((selected_provider_name, url)) = select_provider_stream_url(stream_url, input, provider_cfg) {
+                if let Some((selected_provider_name, url)) = select_provider_stream_url(
+                    stream_url,
+                    input,
+                    provider_cfg,
+                    accept_requested_stream_url,
+                ) {
                     debug_if_enabled!(
                         "provider session: input={} provider_cfg={} user={} allocation={} stream_url={}",
                         sanitize_sensitive_info(&input.name),
@@ -1783,7 +1806,10 @@ async fn resolve_streaming_strategy(
 
     if release_failed_mapping {
         if let Some(handle) = provider_connection_handle.take() {
-            app_state.connection_manager.release_provider_handle(Some(handle)).await;
+            let connection_manager = Arc::clone(&app_state.connection_manager);
+            tokio::spawn(async move {
+                connection_manager.release_provider_handle(Some(handle)).await;
+            });
         }
     }
 
@@ -1851,6 +1877,8 @@ async fn create_stream_response_details(
     connection_kind: crate::api::model::ConnectionKind,
     is_reopen: bool,
     session_owner: Option<&str>,
+    session_headers: Option<&HashMap<String, String>>,
+    accept_requested_stream_url: bool,
     grace_hold_override: Option<bool>,
     grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
 ) -> Result<StreamDetails, TuliproxError> {
@@ -1866,6 +1894,7 @@ async fn create_stream_response_details(
             user_priority,
             connection_kind,
             session_owner,
+            accept_requested_stream_url,
         },
     )
         .await;
@@ -1916,6 +1945,7 @@ async fn create_stream_response_details(
                 stream_info,
                 provider_name: Some(provider_name),
                 request_url: None,
+                session_headers: session_headers.cloned(),
                 grace_period: grace_period_options,
                 provider_grace_active: false,
                 disable_provider_grace: false,
@@ -1974,6 +2004,7 @@ async fn create_stream_response_details(
                             stream_url: &url,
                             req_headers,
                             input_headers: streaming_strategy.input_headers.as_ref(),
+                            session_headers,
                             disabled_headers: disabled_headers.as_ref(),
                             default_user_agent: default_user_agent.as_deref(),
                             username: Some(username),
@@ -2078,12 +2109,15 @@ async fn create_stream_response_details(
                 }
             }
 
-            // If no upstream stream is ready, release the provider unless provider grace
-            // intentionally deferred the open until the grace check resolves.
-            let provider_handle = if stream.is_none() && !defer_provider_stream_until_grace_check {
+            // If no upstream stream is ready, release the provider.
+            // Even if provider grace intentionally deferred the open, we must release the handle
+            // here because the deferred open context will acquire a fresh slot when it resumes.
+            let provider_handle = if stream.is_none() {
                 let provider_handle = streaming_strategy.provider_handle.take();
                 app_state.connection_manager.release_provider_handle(provider_handle).await;
-                error!("Can't open stream {}", sanitize_sensitive_info(&request_url));
+                if !defer_provider_stream_until_grace_check {
+                    error!("Can't open stream {}", sanitize_sensitive_info(&request_url));
+                }
                 None
             } else {
                 streaming_strategy.provider_handle.take()
@@ -2094,6 +2128,7 @@ async fn create_stream_response_details(
                 stream_info,
                 provider_name: guard_provider_name.clone(),
                 request_url: Some(request_url.clone()),
+                session_headers: session_headers.cloned(),
                 grace_period: grace_period_options,
                 provider_grace_active,
                 disable_provider_grace: false,
@@ -2419,6 +2454,8 @@ pub async fn force_provider_stream_response(
         connection_kind,
         true,
         Some(user_session.token.as_str()),
+        Some(&user_session.provider_session_headers),
+        true,
         grace_mode.map(|mode| matches!(mode, crate::api::model::GraceMode::Hold)),
         None,
     )
@@ -2649,6 +2686,10 @@ pub(crate) async fn stream_response(
     }
 
     let stream_options = get_stream_options(app_state);
+    let session_state = app_state
+        .active_users
+        .get_and_update_user_session(&user.username, session_token)
+        .await;
     let mut stream_details = match create_stream_response_details(
         app_state,
         &stream_options,
@@ -2669,6 +2710,8 @@ pub(crate) async fn stream_response(
         connection_kind,
         false,
         Some(session_token),
+        session_state.as_ref().map(|session| &session.provider_session_headers),
+        pinned_provider.is_some(),
         grace_mode.map(|m| matches!(m, crate::api::model::GraceMode::Hold)),
         activation.grace_context.clone(),
     )
@@ -2727,6 +2770,11 @@ pub(crate) async fn stream_response(
             stream_details.has_deferred_provider_open(),
         )
             .await;
+
+        // Captured before `stream_details` is moved into `create_active_client_stream`.
+        // The pinning rule is centralized in `should_pin_provider_for_session` so it stays
+        // testable in isolation and in sync with the call site below.
+        let should_pin_provider = should_pin_provider_for_session(&stream_details, app_state, item_type);
 
         let mut is_stream_shared = share_stream && !stream_details.has_deferred_provider_open();
         if let Some((_header, _status_code, _url, Some(_custom_video))) = stream_details.stream_info.as_ref() {
@@ -2869,12 +2917,14 @@ pub(crate) async fn stream_response(
                             socket_bound,
                         })
                         .await;
-                    let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
-                    if reservation_ttl_secs > 0 {
-                        app_state
-                            .active_provider
-                            .refresh_provider_reservation(&provider, session_token, reservation_ttl_secs)
-                            .await;
+                    if should_pin_provider {
+                        let reservation_ttl_secs = get_session_reservation_ttl_secs(app_state, item_type);
+                        if reservation_ttl_secs > 0 {
+                            app_state
+                                .active_provider
+                                .refresh_provider_reservation(&provider, session_token, reservation_ttl_secs)
+                                .await;
+                        }
                     }
                 }
             }
@@ -2934,18 +2984,17 @@ async fn prepare_stream_metering(
         return StreamMeteringConfig::default();
     }
 
-    if share_stream && !has_stream && !has_deferred_provider_open {
+    if share_stream {
+        let meter_uid = app_state
+            .shared_stream_manager
+            .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
+            .await;
         return StreamMeteringConfig {
-            meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
-            meter_stream: false,
+            meter_uid,
+            meter_stream: has_stream || has_deferred_provider_open,
         };
-    }
-
-    if has_stream || has_deferred_provider_open {
+    } else if has_stream || has_deferred_provider_open {
         let meter_uid = app_state.connection_manager.next_stream_uid();
-        if share_stream {
-            app_state.shared_stream_manager.register_meter_uid(stream_url, meter_uid).await;
-        }
         return StreamMeteringConfig { meter_uid, meter_stream: true };
     }
 
@@ -3000,6 +3049,29 @@ pub(crate) fn get_session_reservation_ttl_secs(app_state: &Arc<AppState>, item_t
     }
 }
 
+/// Whether the session should pin the provider account via `refresh_provider_reservation`.
+///
+/// A non-Provisioning custom video (`ChannelUnavailable`, `ProviderConnectionsExhausted`, …) means
+/// the upstream open already failed. The provider connection slot was released by
+/// `create_provider_stream`, and the custom video is a local fallback served to the client.
+/// Pinning the provider via `refresh_provider_reservation` would hold the provider account for
+/// the configured session TTL (e.g. `catchup_session_ttl_secs`), blocking other sessions of
+/// the same family from using it even though the slot is already free.
+///
+/// Only `Provisioning` custom videos represent a real provider handoff that benefits from
+/// keeping the same provider pinned, and real provider streams (`stream_info` carries no
+/// `CustomVideoStreamType`) obviously qualify.
+pub(crate) fn should_pin_provider_for_session(
+    stream_details: &StreamDetails,
+    _app_state: &Arc<AppState>,
+    _item_type: PlaylistItemType,
+) -> bool {
+    !matches!(
+        stream_details.stream_info.as_ref(),
+        Some((_, _, _, Some(cv))) if *cv != CustomVideoStreamType::Provisioning
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn try_shared_stream_response_if_any(
     app_state: &Arc<AppState>,
@@ -3012,10 +3084,6 @@ async fn try_shared_stream_response_if_any(
     session_token: &str,
     req_headers: &HeaderMap,
 ) -> Option<impl IntoResponse> {
-    if connect_permission == UserConnectionPermission::GracePeriod {
-        return None;
-    }
-
     if let Some((stream, provider)) = SharedStreamManager::subscribe_shared_stream(
         app_state,
         stream_url,
@@ -3055,10 +3123,13 @@ async fn try_shared_stream_response_if_any(
             }
             stream_channel.shared = true;
             stream_channel.shared_joined_existing = Some(true);
-            stream_channel.shared_stream_id =
-                app_state.shared_stream_manager.get_meter_uid(stream_url).await.map(u64::from);
+            let meter_uid = app_state
+                .shared_stream_manager
+                .get_or_register_meter_uid(stream_url, || app_state.connection_manager.next_stream_uid())
+                .await;
+            stream_channel.shared_stream_id = Some(u64::from(meter_uid));
             let metering = StreamMeteringConfig {
-                meter_uid: app_state.shared_stream_manager.get_meter_uid(stream_url).await.unwrap_or(0),
+                meter_uid,
                 meter_stream: false,
             };
             let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
@@ -3159,8 +3230,11 @@ pub(crate) async fn local_stream_response(
 
     let path = PathBuf::from(pli.url.strip_prefix("file://").unwrap_or(&pli.url));
 
+    let Ok(mut file) = tokio::fs::File::open(&path).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Ok(opened_metadata) = file.metadata().await else { return internal_server_error!() };
+
     // Canonicalize and validate the path
-    let path = match tokio::fs::canonicalize(&path).await {
+    let canonical = match tokio::fs::canonicalize(&path).await {
         Ok(canonical) => canonical,
         Err(err) => {
             error!("Local file path is corrupt {}: {err}", path.display());
@@ -3169,6 +3243,17 @@ pub(crate) async fn local_stream_response(
     };
 
     if check_path {
+        let Ok(canonical_metadata) = tokio::fs::metadata(&canonical).await else { return internal_server_error!() };
+        
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if opened_metadata.dev() != canonical_metadata.dev() || opened_metadata.ino() != canonical_metadata.ino() {
+                error!("TOCTOU race detected: file swapped during local_stream_response");
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+
         let Some(library_paths) = app_state
             .app_config
             .config
@@ -3182,14 +3267,12 @@ pub(crate) async fn local_stream_response(
 
         // Verify path is within allowed media directories
         // (requires configuration of allowed base paths)
-        if !is_path_within_allowed_directories(&path, &library_paths) {
+        if !is_path_within_allowed_directories(&canonical, &library_paths) {
             return StatusCode::FORBIDDEN.into_response();
         }
     }
 
-    let Ok(mut file) = tokio::fs::File::open(&path).await else { return StatusCode::NOT_FOUND.into_response() };
-    let Ok(metadata) = file.metadata().await else { return internal_server_error!() };
-    let file_size = metadata.len();
+    let file_size = opened_metadata.len();
 
     let range = req_headers.get("range").and_then(|v| v.to_str().ok()).and_then(parse_range);
 
@@ -3794,8 +3877,8 @@ pub(crate) fn create_playback_session_fingerprint(
     // Adaptive playlist starts need a per-initial-socket token so two players behind
     // the same IP/UA can watch the same HLS/DASH stream independently. The created
     // UserSession itself can still be non-socket-bound.
-    let socket_bound =
-        is_socket_bound_playback_session(item_type, extension) || is_session_based_playback(item_type, extension);
+    let session_bound = is_session_based_playback(item_type, extension);
+    let socket_bound = !session_bound && is_socket_bound_playback_session(item_type, extension);
     create_session_fingerprint(fingerprint, username, virtual_id, socket_bound)
 }
 
@@ -4023,7 +4106,7 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::StreamHistoryConfig;
+    use crate::model::{GracePeriodOptions, StreamHistoryConfig};
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, EventManager,
@@ -4175,8 +4258,24 @@ mod tests {
             "http://same.example/live/selected-user/selected-pass/123.ts",
             &provider
         ));
+        assert!(stream_url_matches_provider(
+            "http://same.example/timeshift/selected-user/selected-pass/30/2026-06-15:20-00/123.ts",
+            &provider
+        ));
+        assert!(stream_url_matches_provider(
+            "http://same.example/future-route/selected-user/selected-pass/opaque/123.ts",
+            &provider
+        ));
         assert!(!stream_url_matches_provider(
             "http://same.example/live/other-user/other-pass/123.ts",
+            &provider
+        ));
+        assert!(!stream_url_matches_provider(
+            "http://same.example/timeshift/other-user/other-pass/30/2026-06-15:20-00/123.ts",
+            &provider
+        ));
+        assert!(!stream_url_matches_provider(
+            "http://same.example/future-route/other-user/other-pass/opaque/123.ts",
             &provider
         ));
     }
@@ -4225,6 +4324,25 @@ mod tests {
 
         assert!(!stream_url_matches_provider(
             "http://cdn.example/segment.ts?username=other-user&password=other-pass",
+            &provider
+        ));
+    }
+
+    #[test]
+    fn stream_url_matches_provider_detects_m3u_path_credentials_against_alias_account() {
+        // Regression: a cross-host M3U URL whose path embeds the alias's
+        // account credentials must be detected as an account signature and
+        // validated, not silently allowed as an open URL.
+        let provider = test_runtime_provider_with_type(
+            "http://provider.example",
+            "selected-user",
+            "selected-pass",
+            InputType::M3u,
+        );
+
+        // Matching path credentials -> allowed (account matches).
+        assert!(stream_url_matches_provider(
+            "http://cdn.example/live/selected-user/selected-pass/123.ts",
             &provider
         ));
     }
@@ -4324,6 +4442,46 @@ mod tests {
         assert_eq!(
             rewritten,
             Some("http://cdn.example/live/alias-user/alias-pass/123.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn get_stream_alternative_url_rewrites_timeshift_path_credentials_for_alias_account() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider("http://alias.example", "alias-user", "alias-pass");
+        let stream_url = "http://provider.example/timeshift/source-user/source-pass/30/2026-06-15:20-00/123.ts";
+
+        let rewritten = get_stream_alternative_url(stream_url, &input, &alias);
+        assert_eq!(
+            rewritten,
+            Some("http://alias.example/timeshift/alias-user/alias-pass/30/2026-06-15:20-00/123.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn get_stream_alternative_url_rewrites_future_route_path_credentials_for_alias_account() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example".to_string(),
+            username: Some("source-user".to_string()),
+            password: Some("source-pass".to_string()),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let alias = test_runtime_provider("http://alias.example", "alias-user", "alias-pass");
+        let stream_url = "http://provider.example/future-route/source-user/source-pass/opaque/123.ts";
+
+        let rewritten = get_stream_alternative_url(stream_url, &input, &alias);
+        assert_eq!(
+            rewritten,
+            Some("http://alias.example/future-route/alias-user/alias-pass/opaque/123.ts".to_string())
         );
     }
 
@@ -4562,6 +4720,7 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("vod-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
@@ -4583,6 +4742,7 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("live-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
@@ -4623,6 +4783,7 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("live-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
@@ -4661,12 +4822,52 @@ mod tests {
                 user_priority: 0,
                 connection_kind: crate::api::model::ConnectionKind::Normal,
                 session_owner: Some("live-session"),
+                accept_requested_stream_url: false,
             },
         )
             .await;
 
         assert!(strategy.provider_handle.is_none());
         assert!(matches!(strategy.provider_stream_state, ProviderStreamState::Custom(_)));
+
+        app_state.active_provider.release_connection(&addr).await;
+    }
+
+    #[tokio::test]
+    async fn resolve_streaming_strategy_accepts_session_requested_stream_url() {
+        let app_state = create_test_dual_provider_app_state();
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .sources
+            .load()
+            .get_input_by_name(&input_name)
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        let addr: SocketAddr = "127.0.0.1:55306".parse().unwrap_or_else(|_| unreachable!());
+        let trusted_url = "http://unmapped.example/live/user1/pass1/100.ts";
+        let strategy = resolve_streaming_strategy(
+            &app_state,
+            trusted_url,
+            &create_test_fingerprint(addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: None,
+                allow_forced_provider_fallback: false,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("live-session"),
+                accept_requested_stream_url: true,
+            },
+        )
+        .await;
+
+        let ProviderStreamState::Available(Some(provider), url) = strategy.provider_stream_state else {
+            panic!("session-requested URL should be accepted for the pinned provider")
+        };
+        assert_eq!(provider.as_ref(), "provider_1");
+        assert_eq!(url.as_ref(), trusted_url);
 
         app_state.active_provider.release_connection(&addr).await;
     }
@@ -4680,6 +4881,7 @@ mod tests {
             virtual_id: 282,
             provider: Arc::<str>::from("provider"),
             stream_url: Arc::<str>::from("http://provider/live/449924.ts"),
+            provider_session_headers: HashMap::new(),
             addr: "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!()),
             socket_bound: false,
             active_addrs: vec!["127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!())],
@@ -4875,7 +5077,7 @@ mod tests {
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<Arc<ProcessTargets>>(1);
+        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
             forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
@@ -4988,6 +5190,7 @@ mod tests {
                 PlaylistItemType::LiveHls => "http://provider-1.example/live/42.m3u8",
                 _ => "http://provider-1.example/live/42.ts",
             }),
+            provider_session_headers: HashMap::new(),
             addr: "127.0.0.1:55555".parse().unwrap_or_else(|_| unreachable!()),
             socket_bound: item_type.uses_socket_bound_session(),
             active_addrs: Vec::new(),
@@ -7527,6 +7730,85 @@ mod tests {
         );
     }
 
+    /// Regression test for: when a catchup request fails upstream (e.g. provider returns
+    /// 4xx/5xx) the connection-slot is released, but the provider account was being
+    /// pinned via `refresh_provider_reservation` for `catchup_session_ttl_secs`. This
+    /// blocked other sessions of the same family from acquiring the same provider even
+    /// though the slot was already free. The fix delegates the pinning decision to
+    /// `should_pin_provider_for_session` and skips the reservation when the response
+    /// is a non-Provisioning custom video (failure fallback). Provisioning custom videos
+    /// must keep their reservation since they represent a successful provider handoff.
+    #[tokio::test]
+    async fn should_pin_provider_for_session_skips_reservation_on_failure_custom_video() {
+        let app_state = create_test_app_state();
+        let no_video_details = StreamDetails {
+            stream: None,
+            stream_info: Some((Vec::new(), StatusCode::OK, None, None)),
+            provider_name: Some("provider_1".intern()),
+            request_url: None,
+            session_headers: None,
+            grace_period: GracePeriodOptions::default(),
+            provider_grace_active: false,
+            disable_provider_grace: false,
+            reconnect_flag: None,
+            provider_handle: None,
+            grace_resolution_context: None,
+        };
+        assert!(
+            should_pin_provider_for_session(&no_video_details, &app_state, PlaylistItemType::Catchup),
+            "a real provider stream (no CustomVideoStreamType) must pin the provider"
+        );
+
+        let provisioning_details = StreamDetails {
+            stream: None,
+            stream_info: Some((
+                Vec::new(),
+                StatusCode::OK,
+                None,
+                Some(CustomVideoStreamType::Provisioning),
+            )),
+            provider_name: Some("provider_1".intern()),
+            request_url: None,
+            session_headers: None,
+            grace_period: GracePeriodOptions::default(),
+            provider_grace_active: false,
+            disable_provider_grace: false,
+            reconnect_flag: None,
+            provider_handle: None,
+            grace_resolution_context: None,
+        };
+        assert!(
+            should_pin_provider_for_session(&provisioning_details, &app_state, PlaylistItemType::Catchup),
+            "a Provisioning custom video represents a successful provider handoff and must pin"
+        );
+
+        for failure_type in [
+            CustomVideoStreamType::ChannelUnavailable,
+            CustomVideoStreamType::ProviderConnectionsExhausted,
+            CustomVideoStreamType::UserConnectionsExhausted,
+            CustomVideoStreamType::UserAccountExpired,
+            CustomVideoStreamType::LowPriorityPreempted,
+        ] {
+            let failure_details = StreamDetails {
+                stream: None,
+                stream_info: Some((Vec::new(), StatusCode::BAD_REQUEST, None, Some(failure_type))),
+                provider_name: Some("provider_1".intern()),
+                request_url: None,
+                session_headers: None,
+                grace_period: GracePeriodOptions::default(),
+                provider_grace_active: false,
+                disable_provider_grace: false,
+                reconnect_flag: None,
+                provider_handle: None,
+                grace_resolution_context: None,
+            };
+            assert!(
+                !should_pin_provider_for_session(&failure_details, &app_state, PlaylistItemType::Catchup),
+                "{failure_type:?} is a failure fallback — must NOT pin the provider"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn local_stream_response_disables_response_compression() {
         let app_state = create_test_app_state();
@@ -8182,7 +8464,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_playback_session_fingerprint_is_unique_per_initial_socket() {
+    fn adaptive_playback_session_fingerprint_is_logical_across_initial_sockets() {
         let Some(first_addr) = "127.0.0.1:55177".parse().ok() else {
             return;
         };
@@ -8195,9 +8477,10 @@ mod tests {
         let first_token = create_playback_session_fingerprint(&first, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
         let second_token = create_playback_session_fingerprint(&second, "user1", 7002, PlaylistItemType::Live, Some(HLS_EXT));
 
-        assert_ne!(first_token, second_token);
-        assert!(first_token.contains(&first.addr.to_string()));
-        assert!(second_token.contains(&second.addr.to_string()));
+        assert_eq!(first_token, second_token);
+        assert!(first_token.contains(&first.key));
+        assert!(!first_token.contains(&first.addr.to_string()));
+        assert!(!second_token.contains(&second.addr.to_string()));
     }
 
     #[test]
@@ -8435,6 +8718,7 @@ mod tests {
             virtual_id: 9001,
             provider: "provider-a".intern(),
             stream_url: "http://localhost/movie.mkv".intern(),
+            provider_session_headers: HashMap::new(),
             addr: seek,
             socket_bound: false,
             active_addrs: vec![primary, overlap, seek, overlap],

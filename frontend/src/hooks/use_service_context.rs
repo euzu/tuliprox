@@ -29,7 +29,7 @@ pub struct Services {
 impl Services {
     pub fn new(web_config: &WebConfig, flags_service: FlagsService) -> Self {
         let event = Rc::new(EventService::new());
-        let auth = Rc::new(AuthService::new());
+        let auth = Rc::new(AuthService::new(web_config));
         let config = Rc::new(ConfigService::new(web_config, Rc::clone(&auth), Rc::clone(&event)));
         let status = Rc::new(StatusService::new());
         let stream_history = Rc::new(StreamHistoryService::new());

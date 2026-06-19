@@ -8,7 +8,7 @@ use crate::{
     i18n::use_translation,
 };
 use shared::{
-    model::{ConfigInputAliasDto, ConfigInputDto, InputType, SortOrder},
+    model::{ConfigInputAliasDto, ConfigInputDto, SortOrder},
     utils::unix_ts_to_str,
 };
 use std::rc::Rc;
@@ -59,7 +59,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                      /> },
                     1 => html! { dto.name.as_ref() },
                     2 => html! { <InputTypeView input_type={dto.input_type}/> },
-                    3 => html! { if matches!(dto.input_type, InputType::XtreamBatch | InputType::M3uBatch) {
+                    3 => html! { if dto.input_type.is_batch() {
                         <RevealContent preview={html!{dto.url.as_str()}}><BatchInputContentView input={ dto.clone() } /></RevealContent>
                         } else {
                           {dto.url.as_str()}

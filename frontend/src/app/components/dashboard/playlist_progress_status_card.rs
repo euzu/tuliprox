@@ -14,8 +14,12 @@ pub fn PlaylistProgressStatusCard() -> Html {
             let services_ctx = services_ctx.clone();
             let data_clone = data_clone.clone();
             let subid = services_ctx.event.subscribe(move |msg| {
-                if let EventMessage::PlaylistUpdateProgress(_target, msg) = msg {
-                    data_clone.set(format!("[{}] {msg}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+                if let EventMessage::PlaylistUpdateProgress(progress) = msg {
+                    data_clone.set(format!(
+                        "[{}] {}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                        progress.message
+                    ));
                 }
             });
             move || services_ctx.event.unsubscribe(subid)

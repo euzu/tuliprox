@@ -718,7 +718,7 @@ impl ConfigInput {
         }
 
         // For batch definitions, validate root URL/credentials before alias promotion in prepare_batch().
-        if self.enabled && matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch) {
+        if self.enabled && self.input_type.is_batch() {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
         }
@@ -777,7 +777,7 @@ impl ConfigInput {
     }
 
     fn prepare_batch(&mut self) -> Option<PathBuf> {
-        if matches!(self.input_type, InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch) {
+        if self.input_type.is_batch() {
             let input_type = if self.input_type == InputType::M3uBatch {
                 InputType::M3u
             } else if self.input_type == InputType::XtreamBatch {

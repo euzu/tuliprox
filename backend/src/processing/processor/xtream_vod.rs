@@ -447,8 +447,15 @@ fn queue_background_vod_info(
     let input = fpl.input;
     // Extract filter before iterating to avoid borrow conflict
     let resolve_filter = fpl.input.options.as_ref().and_then(|o| o.resolve_filter.as_ref());
+    let stage_started = std::time::Instant::now();
+    let mut total = 0usize;
+    let mut skipped_filter = 0usize;
+    let mut skipped_resolve_filter = 0usize;
+    let mut queued = 0usize;
     for pli in fpl.items_mut() {
+        total += 1;
         if !filter(pli) {
+            skipped_filter += 1;
             continue;
         }
 
@@ -456,6 +463,7 @@ fn queue_background_vod_info(
         if let Some(r_filter) = resolve_filter {
             let provider = ValueProvider { pli, match_as_ascii: false };
             if !r_filter.filter(&provider) {
+                skipped_resolve_filter += 1;
                 continue;
             }
         }
@@ -500,7 +508,16 @@ fn queue_background_vod_info(
                 );
             }
             mgr.queue_task_background(input.name.clone(), task);
+            queued += 1;
         }
+    }
+
+    if log_enabled!(Level::Debug) {
+        debug!(
+            "[Task] VOD resolve queueing summary for input {}: total={total}, queued={queued}, skipped_filter={skipped_filter}, skipped_resolve_filter={skipped_resolve_filter}, elapsed_ms={}",
+            input.name,
+            stage_started.elapsed().as_millis()
+        );
     }
 }
 
@@ -859,9 +876,8 @@ pub async fn update_vod_metadata(
                         temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
                         active_handle,
                     );
-                    let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
-                        .ok()
-                        .is_some_and(|u| matches!(u.scheme(), "http" | "https"));
+                    let is_remote_probe =
+                        reqwest::Url::parse(probe_url.as_ref()).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
                     let probe_params = crate::utils::ffmpeg::ProbeParams {
                         url: probe_url.as_ref(),
                         user_agent: user_agent.as_deref(),

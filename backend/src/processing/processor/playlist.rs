@@ -44,8 +44,8 @@ use shared::{
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
         ClusterSource, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
-        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats, StreamProperties,
-        TargetStats, UUIDType, XtreamCluster,
+        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateProgressEvent, PlaylistStats, ProcessingOrder,
+        SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
     utils::{
         create_alias_uuid, default_as_default, default_probe_delay_secs, default_probe_live_interval, interner_gc,
@@ -115,10 +115,15 @@ fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option
 }
 
 pub fn apply_filter_to_playlist(playlist: &mut [PlaylistGroup], filter: &Filter) -> Option<Vec<PlaylistGroup>> {
-    let mut new_playlist = Vec::with_capacity(128);
-    for pg in playlist.iter_mut() {
-        let channels =
-            pg.channels.iter().filter(|&pli| is_valid(pli, filter, false)).cloned().collect::<Vec<PlaylistItem>>();
+    // NOTE: the source `playlist` is intentionally cloned (not drained) here because
+    // the caller reuses the same slice for every target output and for the no-filter
+    // fallback path, so the survivors cannot be moved out of it. Cap the initial
+    // allocation so selective filters do not retain capacity for every source item.
+    const INITIAL_FILTERED_GROUP_CAPACITY: usize = 256;
+    let mut new_playlist = Vec::with_capacity(playlist.len());
+    for pg in playlist.iter() {
+        let mut channels = Vec::with_capacity(pg.channels.len().min(INITIAL_FILTERED_GROUP_CAPACITY));
+        channels.extend(pg.channels.iter().filter(|&pli| is_valid(pli, filter, false)).cloned());
         if !channels.is_empty() {
             new_playlist.push(PlaylistGroup {
                 id: pg.id,
@@ -888,7 +893,10 @@ fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepM
     if let Some(event_mgr) = event_manager {
         let events = event_mgr.clone();
         Box::new(move |context: &str, msg: &str| {
-            events.send_event(EventMessage::PlaylistUpdateProgress(context.to_owned(), msg.to_owned()));
+            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                target: context.to_owned(),
+                message: msg.to_owned(),
+            }));
         })
     } else {
         Box::new(move |_context: &str, _msg: &str| { /* noop */ })
@@ -1079,9 +1087,10 @@ fn execute_pipe<'a>(
 // This method is needed, because of duplicate group names in different inputs.
 // We merge the same group names considering cluster together.
 fn flatten_groups(playlistgroups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
-    let mut sort_order: Vec<PlaylistGroup> = vec![];
+    let upper_bound = playlistgroups.len();
+    let mut sort_order: Vec<PlaylistGroup> = Vec::with_capacity(upper_bound);
     let mut idx: usize = 0;
-    let mut group_map: HashMap<CategoryKey, usize> = HashMap::new();
+    let mut group_map: HashMap<CategoryKey, usize> = HashMap::with_capacity(upper_bound);
     for group in playlistgroups {
         let normalized_title: Arc<str> = shared::utils::deunicode_string(&group.title).to_lowercase().intern();
         let key = (group.xtream_cluster, normalized_title);
@@ -1663,10 +1672,10 @@ pub async fn exec_processing(
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
     if let Some(events) = event_manager.as_deref() {
-        events.send_event(EventMessage::PlaylistUpdateProgress(
-            "Playlist Update".to_string(),
-            update_finished_message.clone(),
-        ));
+        events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+            target: "Playlist Update".to_string(),
+            message: update_finished_message.clone(),
+        }));
     }
     log_memory_snapshot("exec_processing before_interner_gc");
     debug!("StringInterner GC removed {} strings", interner_gc());

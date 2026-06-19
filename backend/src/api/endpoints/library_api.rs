@@ -1,11 +1,13 @@
 use crate::{api::{
     library_scan::{spawn_library_scan, LibraryScanTaskOptions},
-    model::{AppState, EventMessage},
+    model::AppState,
 }, auth::permission_layer, library::{resolve_metadata_storage_path, LibraryProcessor, MetadataStorage}};
 use axum::response::IntoResponse;
 use log::{debug, warn};
 use serde_json::json;
-use shared::model::{permission::Permission, LibraryScanRequest, LibraryScanSummary, LibraryScanSummaryStatus, LibraryStatus};
+use shared::model::{
+    permission::Permission, LibraryScanRequest, LibraryStatus, OperationRunAccepted,
+};
 use std::sync::Arc;
 
 // Triggers a library scan
@@ -17,12 +19,6 @@ async fn scan_library(
 
     let Some(permit) = app_state.update_guard.try_library() else {
         warn!("Library update already in progress; update skipped.");
-        let response = LibraryScanSummary {
-            status: LibraryScanSummaryStatus::Error,
-            message: "Library update already in progress.".to_string(),
-            result: None,
-        };
-        let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
         return (
             axum::http::StatusCode::BAD_REQUEST,
             axum::Json(json!({"error": "Library update already in progress.".to_string()})),
@@ -36,12 +32,6 @@ async fn scan_library(
         match config.library.as_ref() {
             Some(lib) if lib.enabled => (lib.clone(), config.metadata_update.clone(), config.storage_dir.clone()),
             _ => {
-                let response = LibraryScanSummary {
-                    status: LibraryScanSummaryStatus::Error,
-                    message: "Library is not enabled".to_string(),
-                    result: None,
-                };
-                let _ = app_state.event_manager.send_event(EventMessage::LibraryScanProgress(response));
                 return (
                     axum::http::StatusCode::BAD_REQUEST,
                     axum::Json(json!({"error": "Library is not enabled".to_string()})),
@@ -61,7 +51,7 @@ async fn scan_library(
         permit,
     );
 
-    axum::http::StatusCode::ACCEPTED.into_response()
+    (axum::http::StatusCode::ACCEPTED, axum::Json(OperationRunAccepted {})).into_response()
 }
 
 /// Gets Library status

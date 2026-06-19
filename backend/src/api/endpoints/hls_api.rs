@@ -24,7 +24,7 @@ use shared::{
     model::{PlaylistItemType, StreamChannel, TargetType, UserConnectionPermission, XtreamCluster},
     utils::{is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable, CUSTOM_VIDEO_PREFIX, HLS_EXT},
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use url::Url;
 use shared::model::ConnectFailureReason;
 use crate::auth::check_network_access_only;
@@ -98,6 +98,22 @@ fn hls_response(hls_content: String) -> impl IntoResponse + Send {
         .status(axum::http::StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "application/x-mpegurl")
         .body(hls_content))
+}
+
+fn extract_hls_provider_session_headers(headers: &HeaderMap) -> HashMap<String, String> {
+    let cookies = headers
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut session_headers = HashMap::new();
+    if !cookies.is_empty() {
+        session_headers.insert(String::from("cookie"), cookies.join("; "));
+    }
+    session_headers
 }
 
 async fn release_prepared_hls_manifest_session(
@@ -321,29 +337,27 @@ pub(in crate::api) async fn handle_hls_stream_request(
     let input_source = InputSource::from(input).with_url(request_url);
     let use_manual_redirects = app_state.should_use_manual_redirects();
     let download_result = if use_manual_redirects {
-        request::download_text_content_with_manual_redirects(
+        request::download_text_content_with_manual_redirects_and_headers(
             &app_state.app_config,
             &app_state.http_client_no_redirect.load(),
             &input_source,
             Some(&headers),
-            None,
             false,
             MAX_MANUAL_REDIRECTS,
         )
         .await
     } else {
-        request::download_text_content(
+        request::download_text_content_with_headers(
             &app_state.app_config,
             &app_state.http_client.load(),
             &input_source,
             Some(&headers),
-            None,
             false,
         )
         .await
     };
     match download_result {
-        Ok((content, response_url)) => {
+        Ok((content, response_url, response_headers)) => {
             let encrypt_secret = app_state.get_encrypt_secret();
             let base_url = server_info.get_base_url();
             let rewrite_hls_props = RewriteHlsProps {
@@ -358,6 +372,13 @@ pub(in crate::api) async fn handle_hls_stream_request(
             };
             let hls_content = rewrite_hls(user, &rewrite_hls_props);
             if let Some(session_token) = session_token.as_deref() {
+                let session_headers = extract_hls_provider_session_headers(&response_headers);
+                if !session_headers.is_empty() {
+                    app_state
+                        .active_users
+                        .update_session_provider_headers(&user.username, session_token, &session_headers)
+                        .await;
+                }
                 release_prepared_hls_manifest_session(app_state, &user.username, session_token, &fingerprint.addr).await;
             }
             hls_response(hls_content).into_response()
@@ -714,7 +735,8 @@ pub fn hls_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod tests {
-    use super::m3u_archive_epg_reference_ts;
+    use super::{extract_hls_provider_session_headers, m3u_archive_epg_reference_ts};
+    use axum::http::HeaderMap;
 
     #[test]
     fn archive_epg_reference_supports_query_and_path_formats() {
@@ -739,5 +761,16 @@ mod tests {
     #[test]
     fn archive_epg_reference_rejects_plain_start_queries() {
         assert_eq!(m3u_archive_epg_reference_ts("http://provider/live/42.m3u8?start=1700000000"), None);
+    }
+
+    #[test]
+    fn extract_hls_provider_session_headers_converts_set_cookie_to_cookie_header() {
+        let mut headers = HeaderMap::new();
+        headers.append("set-cookie", "sid=abc; Path=/; HttpOnly".parse().expect("valid cookie"));
+        headers.append("set-cookie", "pref=1; Secure".parse().expect("valid cookie"));
+
+        let session_headers = extract_hls_provider_session_headers(&headers);
+
+        assert_eq!(session_headers.get("cookie").map(String::as_str), Some("sid=abc; pref=1"));
     }
 }

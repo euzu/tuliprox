@@ -52,11 +52,7 @@ pub fn get_xtream_player_api_action_url(input: &ConfigInput, action: &str) -> Op
 }
 
 pub fn get_xtream_player_api_info_url(input: &ConfigInput, cluster: XtreamCluster, stream_id: u32) -> Option<String> {
-    let (action, stream_id_field) = match cluster {
-        XtreamCluster::Live => (crate::model::XC_ACTION_GET_LIVE_INFO, crate::model::XC_LIVE_ID),
-        XtreamCluster::Video => (crate::model::XC_ACTION_GET_VOD_INFO, crate::model::XC_VOO_ID),
-        XtreamCluster::Series => (crate::model::XC_ACTION_GET_SERIES_INFO, crate::model::XC_SERIES_ID),
-    };
+    let (action, stream_id_field) = cluster.info_action_and_id_field();
     get_xtream_player_api_action_url(input, action).map(|action_url| format!("{action_url}&{stream_id_field}={stream_id}"))
 }
 
@@ -409,7 +405,7 @@ async fn download_xtream_from_source(
     } else {
         match input.resolve_url(&input_source.url) {
             Ok(url) => url.into_owned(),
-            Err(err) => return (Vec::with_capacity(0), vec![err], false),
+            Err(err) => return (Vec::new(), vec![err], false),
         }
     };
 
@@ -418,15 +414,14 @@ async fn download_xtream_from_source(
 
     if let Err(err) = xtream_login(app_config, client, &input_source_login, username).await {
         error!("Could not log in with xtream user {username} for provider {}. {err}", input.name);
-        return (Vec::with_capacity(0), vec![err], false);
+        return (Vec::new(), vec![err], false);
     }
 
     let mut playlist_groups: Vec<PlaylistGroup> = Vec::with_capacity(128);
 
     let cfg = app_config.config.load();
     let storage_dir = &cfg.storage_dir;
-    let use_disk_based_processing =
-        cfg.disk_based_processing && matches!(source_input_type, InputType::Xtream | InputType::XtreamBatch);
+    let use_disk_based_processing = cfg.disk_based_processing && source_input_type.is_xtream();
 
     let mut errors = vec![];
     for (xtream_cluster, category, stream) in &ACTIONS {

@@ -1,7 +1,7 @@
 use crate::model::XtreamCluster;
 
 pub const XC_LIVE_ID: &str = "live_id";
-pub const XC_VOO_ID: &str = "vod_id";
+pub const XC_VOD_ID: &str = "vod_id";
 pub const XC_SERIES_ID: &str = "series_id";
 
 pub const XC_ACTION_GET_SERIES_INFO: &str = "get_series_info";

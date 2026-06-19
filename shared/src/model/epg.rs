@@ -58,16 +58,60 @@ impl EpgChannel {
 
     pub fn get_programme_with_limit(&self, limit: u32) -> Vec<&EpgProgramme> {
         let now = Utc::now().timestamp();
+        self.get_programme_with_limit_at(limit, now)
+    }
 
-        // find index for first relevant entry
-        let start_idx = self
-            .programmes
-            .iter()
-            .position(|p| (p.start <= now && now <= p.stop) || (p.start >= now))
-            .unwrap_or(self.programmes.len()); // nothing found, empty response
+    fn get_programme_with_limit_at(&self, limit: u32, now: i64) -> Vec<&EpgProgramme> {
+        // Programmes are sorted by start, not by stop. Use binary search only
+        // for the first future entry, then scan the earlier prefix for an
+        // overlapping programme whose stop time has not passed.
+        let first_future = self.programmes.partition_point(|programme| programme.start < now);
+        let start_idx =
+            self.programmes[..first_future].iter().position(|programme| programme.stop >= now).unwrap_or(first_future);
+        self.programmes.iter().skip(start_idx).filter(|programme| programme.stop >= now).take(limit as usize).collect()
+    }
+}
 
-        // slice from start_idx, max. limit
-        self.programmes.iter().skip(start_idx).take(limit as usize).collect()
+#[cfg(test)]
+mod tests {
+    use super::{EpgChannel, EpgProgramme};
+    use crate::utils::Internable;
+
+    #[test]
+    fn programme_limit_handles_non_monotonic_stop_times() {
+        let channel = EpgChannel {
+            id: "channel".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(0, 100, "channel".intern()),
+                EpgProgramme::new(10, 20, "channel".intern()),
+                EpgProgramme::new(30, 40, "channel".intern()),
+            ],
+        };
+
+        let programmes = channel.get_programme_with_limit_at(1, 50);
+        assert_eq!(programmes.len(), 1);
+        assert_eq!(programmes[0].start, 0);
+    }
+
+    #[test]
+    fn programme_limit_excludes_expired_entries_after_current_programme() {
+        let channel = EpgChannel {
+            id: "channel".intern(),
+            title: None,
+            icon: None,
+            programmes: vec![
+                EpgProgramme::new(0, 100, "channel".intern()),
+                EpgProgramme::new(10, 20, "channel".intern()),
+                EpgProgramme::new(60, 80, "channel".intern()),
+            ],
+        };
+
+        let programmes = channel.get_programme_with_limit_at(2, 50);
+        assert_eq!(programmes.len(), 2);
+        assert_eq!(programmes[0].start, 0);
+        assert_eq!(programmes[1].start, 60);
     }
 }
 

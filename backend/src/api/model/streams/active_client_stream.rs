@@ -462,6 +462,7 @@ fn create_deferred_provider_open_future(
             stream_url: &stream_url,
             req_headers,
             input_headers: Some(&input.headers),
+            session_headers: stream_details.session_headers.as_ref(),
             disabled_headers: disabled_headers.as_ref(),
             default_user_agent: default_user_agent.as_deref(),
             username: None,
@@ -1370,7 +1371,7 @@ mod tests {
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<Arc<ProcessTargets>>(1);
+        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
             forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
@@ -1437,7 +1438,7 @@ mod tests {
 
         let tokens = CancelTokens::default();
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
-        let (manual_update_sender, _) = mpsc::channel::<Arc<ProcessTargets>>(1);
+        let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
 
         Arc::new(AppState {
             forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
@@ -1511,6 +1512,7 @@ mod tests {
             stream_info: None,
             provider_name: Some(Arc::clone(provider_name)),
             request_url: Some("http://provider-1.example/live/1".intern()),
+            session_headers: None,
             grace_period: GracePeriodOptions {
                 period_millis: 100,
                 timeout_secs: 0,
@@ -2361,6 +2363,7 @@ mod tests {
             stream_info: None,
             provider_name: Some(provider_name),
             request_url: Some("http://provider-1.example/live/2.ts".intern()),
+            session_headers: None,
             grace_period: GracePeriodOptions {
                 period_millis: 100,
                 timeout_secs: 0,

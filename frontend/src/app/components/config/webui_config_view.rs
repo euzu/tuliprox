@@ -39,6 +39,7 @@ const LABEL_CONTENT_SECURITY_POLICY_CUSTOM_ATTRIBUTES: &str = "LABEL.CUSTOM_ATTR
 const LABEL_PATH: &str = "LABEL.PATH";
 const LABEL_COMBINE_VIEWS_STATS_STREAMS: &str = "LABEL.COMBINE_VIEWS_STATS_STREAMS";
 const LABEL_LANDING_PAGE: &str = "LABEL.LANDING_PAGE";
+const LANDING_PAGE_LAST_PAGE: &str = "last_page";
 const LABEL_STREAM_INFO: &str = "LABEL.STREAM_INFO";
 const LABEL_HIDE_GROUP: &str = "LABEL.HIDE_GROUP";
 const LABEL_HIDE_IP: &str = "LABEL.HIDE_IP";
@@ -62,7 +63,7 @@ generate_form_reducer!(
         PlayerServer => player_server: Option<String>,
         KickSecs => kick_secs: u64,
         CombineViewsStatsStreams => combine_views_stats_streams: bool,
-        LandingPage => landing_page: shared::model::view_type::ViewType,
+        LandingPage => landing_page: Option<shared::model::view_type::ViewType>,
     }
 );
 
@@ -122,9 +123,15 @@ pub fn WebUiConfigView() -> Html {
         use_default_form_reducer!(StreamInfoConfigFormState { form: StreamInfoConfigDto::default() });
 
     let view_types = use_memo(webui_state.data().landing_page, |landing_page| {
-        build_options(ViewType::iter(), landing_page, |view_type| {
+        let mut options = build_options(ViewType::iter(), landing_page, |view_type| {
             html! { translate.t(&format!("LABEL.VIEW_TYPE_{}", view_type.to_string().to_uppercase())) }
         })
+        options.insert(0, DropDownOption {
+            id: LANDING_PAGE_LAST_PAGE.to_string(),
+            label: html! { translate.t("LABEL.LAST_PAGE") },
+            selected: landing_page.is_none(),
+        });
+        options
     });
 
     // Notify parent when form changes
@@ -204,7 +211,13 @@ pub fn WebUiConfigView() -> Html {
         <>
             <Card class="tp__config-view__card">
             { config_field_bool!(webui_state.form, translate.t(LABEL_ENABLED), enabled) }
-            { config_field_custom!(translate.t(LABEL_LANDING_PAGE),  translate.t(&format!("LABEL.VIEW_TYPE_{}", webui_state.form.landing_page.to_string().to_uppercase()))) }
+            { config_field_custom!(translate.t(LABEL_LANDING_PAGE), {
+                if let Some(landing_page) = webui_state.form.landing_page {
+                    translate.t(&format!("LABEL.VIEW_TYPE_{}", landing_page.to_string().to_uppercase()))
+                } else {
+                    translate.t("LABEL.LAST_PAGE")
+                }
+            }) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_USER_UI_ENABLED), user_ui_enabled) }
             { config_field_bool!(webui_state.form, translate.t(LABEL_COMBINE_VIEWS_STATS_STREAMS), combine_views_stats_streams) }
             { config_field_optional!(webui_state.form, translate.t(LABEL_PATH), path) }
@@ -266,8 +279,24 @@ pub fn WebUiConfigView() -> Html {
                    html! { <Select name="landing_page"
                     multi_select={false}
                     on_select={Callback::from(move |(_name, selections):(String, DropDownSelection)| {
-                        let view_type = selection_parse_first::<ViewType>(&selections);
-                        webui_state_clone.dispatch(WebUiConfigFormAction::LandingPage(view_type.unwrap_or_default()));
+                        let landing_page = match selections {
+                            DropDownSelection::Empty => None,
+                            DropDownSelection::Single(option) => {
+                                if option == LANDING_PAGE_LAST_PAGE {
+                                    None
+                                } else {
+                                    option.parse::<ViewType>().ok()
+                                }
+                            }
+                            DropDownSelection::Multi(options) => options.first().and_then(|option| {
+                                if option == LANDING_PAGE_LAST_PAGE {
+                                    None
+                                } else {
+                                    option.parse::<ViewType>().ok()
+                                }
+                            })
+                        };
+                        webui_state_clone.dispatch(WebUiConfigFormAction::LandingPage(landing_page));
                     })}
                     options={view_types.clone()}
                     />

@@ -1,15 +1,12 @@
 use crate::api::model::streams::{MeterReading, StreamMeterHandle};
 use log::trace;
 use shared::model::{
-    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanSummary, PlaylistUpdateState,
-    StreamMeterEntry, SystemInfo,
+    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent,
+    PlaylistUpdateProgressEvent, PlaylistUpdateState, StreamMeterEntry, SystemInfo,
 };
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
     time::Duration,
 };
 use tokio::sync::RwLock;
@@ -26,9 +23,9 @@ pub enum EventMessage {
     ActiveProvider(Arc<str>, usize),
     ConfigChange(ConfigType),
     PlaylistUpdate(PlaylistUpdateState),
-    PlaylistUpdateProgress(String, String),
+    PlaylistUpdateProgress(PlaylistUpdateProgressEvent),
     SystemInfoUpdate(SystemInfo),
-    LibraryScanProgress(LibraryScanSummary),
+    LibraryScanProgress(LibraryScanProgressEvent),
     DownloadsUpdate(DownloadsResponse),
     DownloadsDeltaUpdate(DownloadsDelta),
     InputMetadataUpdatesCompleted(Arc<str>),

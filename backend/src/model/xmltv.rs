@@ -23,6 +23,12 @@ pub const EPG_ATTRIB_ID: &str = "id";
 pub const EPG_ATTRIB_CHANNEL: &str = "channel";
 pub const EPG_TAG_DISPLAY_NAME: &str = "display-name";
 pub const EPG_TAG_ICON: &str = "icon";
+pub const EPG_TAG_TITLE: &str = "title";
+pub const EPG_TAG_DESC: &str = "desc";
+pub const EPG_ATTRIB_START: &str = "start";
+pub const EPG_ATTRIB_STOP: &str = "stop";
+pub const EPG_ATTRIB_CATCHUP_ID: &str = "catchup-id";
+pub const EPG_ATTRIB_SRC: &str = "src";
 
 // https://github.com/XMLTV/xmltv/blob/master/xmltv.dtd
 
@@ -171,6 +177,16 @@ pub fn get_attr_value(attr: &quick_xml::events::attributes::Attribute) -> Option
 // This function filters a timeslot starting from yesterday.
 #[allow(clippy::too_many_lines)]
 async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Result<Vec<EpgChannel>, TuliproxError> {
+    // Tracks which text-bearing element we are currently inside, without allocating
+    // a String per XML event just to compare against a few known tag names.
+    #[derive(Clone, Copy, PartialEq)]
+    enum TextTag {
+        DisplayName,
+        Title,
+        Desc,
+        Other,
+    }
+
     let mut reader = quick_xml::reader::Reader::from_reader(async_file_reader(reader));
     let mut buf = Vec::new();
 
@@ -180,7 +196,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
     let mut current_channel: Option<EpgChannel> = None;
     let mut current_programme: Option<EpgProgramme> = None;
 
-    let mut current_tag = String::new();
+    let mut current_tag = TextTag::Other;
 
     // only 1 day old epg
     let now = Utc::now();
@@ -192,14 +208,22 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
     loop {
         match reader.read_event_into_async(&mut buf).await {
             Ok(Event::Empty(e) | Event::Start(e)) => {
-                let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                current_tag.clone_from(&tag);
+                let name = e.name();
+                // `from_utf8_lossy` borrows for valid UTF-8 (the common case), so no
+                // allocation happens per element here.
+                let tag = String::from_utf8_lossy(name.as_ref());
+                current_tag = match tag.as_ref() {
+                    EPG_TAG_DISPLAY_NAME => TextTag::DisplayName,
+                    EPG_TAG_TITLE => TextTag::Title,
+                    EPG_TAG_DESC => TextTag::Desc,
+                    _ => TextTag::Other,
+                };
 
-                match tag.as_str() {
+                match tag.as_ref() {
                     EPG_TAG_CHANNEL => {
                         let mut id = None;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"id" {
+                            if attr.key.as_ref() == EPG_ATTRIB_ID.as_bytes() {
                                 if let Some(value) = get_attr_value(&attr) {
                                     id = Some(value);
                                     break;
@@ -219,12 +243,15 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                         let mut catchup_id = None;
                         current_programme = None;
                         for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
-                                b"start" => start = get_attr_value(&attr),
-                                b"stop" => stop = get_attr_value(&attr),
-                                b"channel" => channel = get_attr_value(&attr),
-                                b"catchup-id" => catchup_id = get_attr_value(&attr),
-                                _ => {}
+                            let key = attr.key.as_ref();
+                            if key == EPG_ATTRIB_START.as_bytes() {
+                                start = get_attr_value(&attr);
+                            } else if key == EPG_ATTRIB_STOP.as_bytes() {
+                                stop = get_attr_value(&attr);
+                            } else if key == EPG_ATTRIB_CHANNEL.as_bytes() {
+                                channel = get_attr_value(&attr);
+                            } else if key == EPG_ATTRIB_CATCHUP_ID.as_bytes() {
+                                catchup_id = get_attr_value(&attr);
                             }
                         }
                         if let (Some(pstart), Some(pstop), Some(pchannel)) = (start, stop, channel) {
@@ -240,7 +267,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     EPG_TAG_ICON => {
                         if let Some(channel) = &mut current_channel {
                             for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"src" {
+                                if attr.key.as_ref() == EPG_ATTRIB_SRC.as_bytes() {
                                     if let Some(icon) = get_attr_value(&attr) {
                                         if !icon.is_empty() {
                                             channel.icon = Some(icon);
@@ -258,15 +285,15 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     let text = decoded.trim();
                     if !text.is_empty() {
                         if let Some(channel) = &mut current_channel {
-                            if current_tag == EPG_TAG_DISPLAY_NAME {
+                            if current_tag == TextTag::DisplayName {
                                 channel.title = Some(concat_text(channel.title.as_ref(), text));
                             }
                         }
 
                         if let Some(program) = &mut current_programme {
-                            if current_tag == "title" {
+                            if current_tag == TextTag::Title {
                                 program.title = Some(concat_text(program.title.as_ref(), text));
-                            } else if current_tag == "desc" {
+                            } else if current_tag == TextTag::Desc {
                                 program.desc = Some(concat_text(program.desc.as_ref(), text));
                             }
                         }
@@ -274,8 +301,8 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                 }
             }
             Ok(Event::End(e)) => {
-                let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                match tag.as_str() {
+                let name = e.name();
+                match String::from_utf8_lossy(name.as_ref()).as_ref() {
                     EPG_TAG_CHANNEL => {
                         if let Some(channel) = current_channel.take() {
                             channels.push(channel);
@@ -288,7 +315,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     }
                     _ => {}
                 }
-                current_tag.clear();
+                current_tag = TextTag::Other;
             }
             Ok(Event::Eof) => break,
             Err(err) => return Err(TuliproxError::Parse(err.to_string())),

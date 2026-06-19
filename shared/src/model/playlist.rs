@@ -47,6 +47,18 @@ impl XtreamCluster {
             Self::Series => "series",
         }
     }
+
+    /// Returns the xtream `player_api` info action and the stream-id query field for this cluster.
+    ///
+    /// Keeps the per-cluster `(action, id_field)` mapping attached to the enum so call sites read a
+    /// single property instead of re-deriving it with a local `match`.
+    pub fn info_action_and_id_field(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Live => (xtream_const::XC_ACTION_GET_LIVE_INFO, xtream_const::XC_LIVE_ID),
+            Self::Video => (xtream_const::XC_ACTION_GET_VOD_INFO, xtream_const::XC_VOD_ID),
+            Self::Series => (xtream_const::XC_ACTION_GET_SERIES_INFO, xtream_const::XC_SERIES_ID),
+        }
+    }
 }
 
 impl TryFrom<PlaylistItemType> for XtreamCluster {
@@ -148,6 +160,12 @@ impl PlaylistItemType {
 
     pub fn is_live_adaptive(&self) -> bool { matches!(self, PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) }
 
+    /// True for VOD item types (`Video` or `LocalVideo`).
+    pub fn is_video(&self) -> bool { matches!(self, PlaylistItemType::Video | PlaylistItemType::LocalVideo) }
+
+    /// True for concrete series item types (`Series` or `LocalSeries`); excludes the `SeriesInfo` containers.
+    pub fn is_series(&self) -> bool { matches!(self, PlaylistItemType::Series | PlaylistItemType::LocalSeries) }
+
     /// Controls address tracking only.
     /// Do not use this to decide whether a playback request should use session-based admission
     /// or whether a logical playback must stay on the same provider account.
@@ -183,6 +201,24 @@ impl PlaylistItemType {
             Self::SeriesInfo | Self::LocalSeriesInfo => Self::SERIES_INFO,
             Self::Catchup => Self::CATCHUP,
         }
+    }
+
+    /// Returns a cached interned `Arc<str>` of this type's label.
+    ///
+    /// `intern()` performs an interner hash-map lookup on every call. Because the
+    /// label is one of only five fixed values, this caches the interned `Arc` per
+    /// label in a `OnceLock` and returns a cheap `Arc::clone`, avoiding repeated
+    /// interner lookups on hot sort/filter paths.
+    pub fn interned_label(&self) -> Arc<str> {
+        static CACHE: [std::sync::OnceLock<Arc<str>>; 5] = [const { std::sync::OnceLock::new() }; 5];
+        let idx = match self {
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => 0,
+            Self::Video | Self::LocalVideo => 1,
+            Self::Series | Self::LocalSeries => 2,
+            Self::SeriesInfo | Self::LocalSeriesInfo => 3,
+            Self::Catchup => 4,
+        };
+        Arc::clone(CACHE[idx].get_or_init(|| self.as_str().intern()))
     }
 
     pub fn is_cluster(&self, cluster: XtreamCluster) -> bool {

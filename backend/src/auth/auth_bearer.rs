@@ -14,8 +14,11 @@ where
 {
     type Rejection = Rejection;
 
-    fn from_request_parts(req: &mut Parts, _: &B) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        ready(Self::decode_request_parts(req))
+    fn from_request_parts(
+        req: &mut Parts,
+        _: &B,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Self::decode_request_parts(req))
     }
 }
 
