@@ -196,9 +196,7 @@ impl Default for StalkerActionSizeCapDto {
 impl StalkerActionSizeCapDto {
     pub fn is_default(&self) -> bool { *self == Self::default() }
 
-    pub fn clean(&mut self) {
-        *self = Self::default();
-    }
+    pub fn clean(&mut self) { *self = Self::default(); }
 }
 
 /// Stalker device identity (MAC + derived hashes). When the user does not

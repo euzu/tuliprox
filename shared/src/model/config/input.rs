@@ -4,8 +4,7 @@ use crate::{
     error::TuliproxError,
     foundation::{get_filter, Filter},
     model::{
-        config::media_server_catalog::MediaServerInputConfigDto, EpgConfigDto, PatternTemplate,
-        StalkerInputConfigDto,
+        config::media_server_catalog::MediaServerInputConfigDto, EpgConfigDto, PatternTemplate, StalkerInputConfigDto,
     },
     utils::{
         arc_str_serde, arc_str_vec_serde, default_as_true, default_probe_delay_secs, default_probe_live_interval,
@@ -1343,8 +1342,8 @@ impl ProviderDnsDto {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::StalkerDeviceProfileDto;
     use super::*;
+    use crate::model::StalkerDeviceProfileDto;
 
     fn create_test_dto() -> ConfigInputDto {
         ConfigInputDto { name: "test_input".intern(), ..ConfigInputDto::default() }

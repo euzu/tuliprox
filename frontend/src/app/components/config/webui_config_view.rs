@@ -6,7 +6,7 @@ use crate::{
                 config_view_context::ConfigViewContext,
                 use_emit_mapped, HasFormData,
             },
-            AppIcon, Card, Chip, DropDownSelection, Select,
+            AppIcon, Card, Chip, DropDownOption, DropDownSelection, Select,
         },
         context::ConfigContext,
     },
@@ -21,7 +21,6 @@ use shared::model::{
 };
 use strum::IntoEnumIterator;
 use yew::prelude::*;
-use crate::app::components::DropDownOption;
 
 // Labels
 const LABEL_AUTH: &str = "LABEL.AUTH";

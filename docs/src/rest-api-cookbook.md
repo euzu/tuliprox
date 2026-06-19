@@ -247,10 +247,14 @@ Typical use:
 Notes:
 
 - Replace `"stalker"` with the configured input name.
-- The preview endpoint returns catalog items. Actual playback can still require Stalker `create_link` resolution later, depending on your `stalker_pre_resolve_playback` / `stalker_runtime_resolve_playback` settings.
-- If a Stalker item has not been materialized yet, Tuliprox no longer exposes the raw portal `cmd` as the playlist URL. Runtime playback resolves a real media URL later through the reverse-proxy path.
-- Expired temp links are refreshed automatically when `stalker_runtime_resolve_playback` is enabled. Only portal-specific extra header/cookie requirements remain a possible follow-up.
-- Runtime refresh only produces `http`/`https` playback URLs; Stalker `rtmp://` / `rtsp://` commands are rejected explicitly rather than proxied half-supported.
+- The preview endpoint returns catalog items. Actual playback can still require Stalker `create_link` resolution later, depending  
+  on your `stalker_pre_resolve_playback` / `stalker_runtime_resolve_playback` settings.
+- If a Stalker item has not been materialized yet, Tuliprox no longer exposes the raw portal `cmd` as the playlist URL. Runtime  
+  playback resolves a real media URL later through the reverse-proxy path.
+- Expired temp links are refreshed automatically when `stalker_runtime_resolve_playback` is enabled. Only portal-specific extra  
+  header/cookie requirements remain a possible follow-up.
+- Runtime refresh only produces `http`/`https` playback URLs; Stalker `rtmp://` / `rtsp://` commands are rejected explicitly rather  
+  than proxied half-supported.
 
 ## Available `/api/v1` Endpoints
 
