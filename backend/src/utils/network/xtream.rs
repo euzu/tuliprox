@@ -3,7 +3,6 @@ use crate::messaging::send_message;
 use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
                    ConfigInput, ConfigInputFlags, ConfigTarget, MessageContent, XtreamTargetOutput};
 use crate::model::{InputSource, ProxyUserCredentials};
-use shared::model::ClusterSource;
 use crate::processing::parser::xtream;
 use crate::processing::parser::xtream::parse_xtream_series_info;
 use crate::repository::VirtualIdRecord;
@@ -349,40 +348,20 @@ pub async fn notify_account_expire(exp_date: Option<i64>, app_config: &Arc<AppCo
     }
 }
 
-/// Partitions the requested clusters into staged and main groups based on
-/// skip flags and per-cluster source configuration.
-pub(crate) fn partition_clusters_by_source(
-    input: &ConfigInput,
+/// Returns the requested clusters that are not skipped. Staged inputs are resolved into
+/// standalone inputs upstream, so this no longer performs per-cluster source partitioning.
+pub(crate) fn requested_clusters(
     requested: Option<&[XtreamCluster]>,
     skip_cluster: &[XtreamCluster],
-) -> (Vec<XtreamCluster>, Vec<XtreamCluster>) {
-    let mut staged_clusters = Vec::new();
-    let mut main_clusters = Vec::new();
-
+) -> Vec<XtreamCluster> {
     let all_clusters = [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series];
-    for cluster in &all_clusters {
-        let is_requested = requested.is_none_or(|c| c.contains(cluster));
-        if !is_requested || skip_cluster.contains(cluster) {
-            continue;
-        }
-
-        if let Some(staged) = input.staged.as_ref().filter(|s| s.enabled) {
-            match staged.get_cluster_source(*cluster) {
-                ClusterSource::Staged => {
-                    // M3U staged inputs are handled by the M3U download path, never by Xtream API calls.
-                    if staged.input_type.is_xtream() {
-                        staged_clusters.push(*cluster);
-                    }
-                }
-                ClusterSource::Input => main_clusters.push(*cluster),
-                ClusterSource::Skip => {} // excluded
-            }
-        } else {
-            main_clusters.push(*cluster);
-        }
-    }
-
-    (staged_clusters, main_clusters)
+    all_clusters
+        .into_iter()
+        .filter(|cluster| {
+            let is_requested = requested.is_none_or(|c| c.contains(cluster));
+            is_requested && !skip_cluster.contains(cluster)
+        })
+        .collect()
 }
 
 /// Downloads xtream clusters from a single source (either main input or staged input).
@@ -475,23 +454,11 @@ async fn download_xtream_from_source(
 pub async fn download_xtream_playlist(app_config: &Arc<AppConfig>, client: &reqwest::Client, input: &ConfigInput, clusters: Option<&[XtreamCluster]>)
                                       -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
     let skip_cluster = get_skip_cluster(input);
-    let (staged_clusters, main_clusters) = partition_clusters_by_source(input, clusters, &skip_cluster);
+    let main_clusters = requested_clusters(clusters, &skip_cluster);
 
     let mut all_groups = Vec::with_capacity(128);
     let mut all_errors = Vec::new();
     let mut any_disk = false;
-
-    if !staged_clusters.is_empty() {
-        if let Some(staged) = input.staged.as_ref().filter(|s| s.enabled) {
-            let source: InputSource = staged.into();
-            let (g, e, d) =
-                download_xtream_from_source(app_config, client, input, &source, staged.input_type, &staged_clusters)
-                    .await;
-            all_groups.extend(g);
-            all_errors.extend(e);
-            any_disk |= d;
-        }
-    }
 
     if !main_clusters.is_empty() {
         check_alias_user_state(app_config, client, input).await;
@@ -586,22 +553,13 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_vod_info_from_item, partition_clusters_by_source};
-    use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials, StagedInput};
+    use super::{create_vod_info_from_item, requested_clusters};
+    use crate::model::{ConfigInput, ConfigInputFlags, ConfigInputFlagsSet, ConfigInputOptions, ProxyUserCredentials};
     use serde_json::Value;
     use shared::model::{
-        ClusterSource, InputType, PlaylistItemType, ProxyType, XtreamCluster, XtreamPlaylistItem,
+        InputType, PlaylistItemType, ProxyType, XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
-
-    fn test_input_with_staged(staged: StagedInput) -> ConfigInput {
-        ConfigInput {
-            name: "test".intern(),
-            input_type: InputType::Xtream,
-            staged: Some(staged),
-            ..ConfigInput::default()
-        }
-    }
 
     fn options_with_flags(flags: &[ConfigInputFlags]) -> ConfigInputOptions {
         let mut set = ConfigInputFlagsSet::new();
@@ -612,63 +570,32 @@ mod tests {
     }
 
     #[test]
-    fn partition_respects_skip_flags_before_cluster_source() {
-        let staged = StagedInput {
-            enabled: true,
+    fn requested_clusters_respects_skip_flags() {
+        let input = ConfigInput {
+            name: "test".intern(),
             input_type: InputType::Xtream,
-            live_source: ClusterSource::Staged,
-            vod_source: ClusterSource::Input,
-            series_source: ClusterSource::Skip,
-            ..StagedInput::default()
+            options: Some(options_with_flags(&[ConfigInputFlags::XtreamSkipLive])),
+            ..ConfigInput::default()
         };
-        let mut input = test_input_with_staged(staged);
-        input.options = Some(options_with_flags(&[ConfigInputFlags::XtreamSkipLive]));
 
         let skip_cluster = super::get_skip_cluster(&input);
-        let (staged_clusters, main_clusters) = partition_clusters_by_source(&input, None, &skip_cluster);
+        let clusters = requested_clusters(None, &skip_cluster);
 
-        assert!(staged_clusters.is_empty());
-        assert_eq!(main_clusters, vec![XtreamCluster::Video]);
+        assert!(!clusters.contains(&XtreamCluster::Live));
+        assert!(clusters.contains(&XtreamCluster::Video));
+        assert!(clusters.contains(&XtreamCluster::Series));
     }
 
     #[test]
-    fn partition_excludes_staged_clusters_for_m3u_staged_inputs() {
-        let staged = StagedInput {
-            enabled: true,
-            input_type: InputType::M3u,
-            live_source: ClusterSource::Staged,
-            vod_source: ClusterSource::Input,
-            series_source: ClusterSource::Input,
-            ..StagedInput::default()
-        };
-        let input = test_input_with_staged(staged);
-
-        let (staged_clusters, main_clusters) = partition_clusters_by_source(
-            &input,
-            Some(&[XtreamCluster::Live, XtreamCluster::Video]),
-            &[],
-        );
-
-        assert!(staged_clusters.is_empty());
-        assert_eq!(main_clusters, vec![XtreamCluster::Video]);
+    fn requested_clusters_filters_by_requested_set() {
+        let clusters = requested_clusters(Some(&[XtreamCluster::Live, XtreamCluster::Video]), &[]);
+        assert_eq!(clusters, vec![XtreamCluster::Live, XtreamCluster::Video]);
     }
 
     #[test]
-    fn partition_routes_clusters_by_staged_xtream_cluster_sources() {
-        let staged = StagedInput {
-            enabled: true,
-            input_type: InputType::Xtream,
-            live_source: ClusterSource::Staged,
-            vod_source: ClusterSource::Input,
-            series_source: ClusterSource::Skip,
-            ..StagedInput::default()
-        };
-        let input = test_input_with_staged(staged);
-
-        let (staged_clusters, main_clusters) = partition_clusters_by_source(&input, None, &[]);
-
-        assert_eq!(staged_clusters, vec![XtreamCluster::Live]);
-        assert_eq!(main_clusters, vec![XtreamCluster::Video]);
+    fn requested_clusters_excludes_skip_clusters() {
+        let clusters = requested_clusters(None, &[XtreamCluster::Series]);
+        assert_eq!(clusters, vec![XtreamCluster::Live, XtreamCluster::Video]);
     }
 
     fn test_vod_item() -> XtreamPlaylistItem {

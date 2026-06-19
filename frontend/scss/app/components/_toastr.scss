@@ -54,6 +54,7 @@
   from {
     transform: scaleX(1);
   }
+
   to {
     transform: scaleX(0);
   }
@@ -71,6 +72,7 @@
 .tp__toast.error {
   background-color: var(--toastr-error-background-color);
   color: var(--toastr-error-color);
+
   .tp__icon-button {
     fill: var(--toastr-error-color);
   }
@@ -79,6 +81,7 @@
 .tp__toast.info {
   background-color: var(--toastr-info-background-color);
   color: var(--toastr-info-color);
+
   .tp__icon-button {
     fill: var(--toastr-info-color);
   }
@@ -87,6 +90,7 @@
 .tp__toast.warning {
   background-color: var(--toastr-warning-background-color);
   color: var(--toastr-warning-color);
+
   .tp__icon-button {
     fill: var(--toastr-warning-color);
   }
@@ -97,6 +101,7 @@
     opacity: 0;
     transform: translateY(-10px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);

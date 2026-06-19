@@ -30,7 +30,7 @@ impl TryFrom<InputType> for MediaServerKind {
             InputType::Emby => Ok(Self::Emby),
             InputType::Jellyfin => Ok(Self::Jellyfin),
             InputType::Plex => Ok(Self::Plex),
-            InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+            InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library | InputType::Staged => {
                 Err("input type is not a media-server input")
             }
         }

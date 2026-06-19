@@ -1,8 +1,7 @@
 use crate::{
     app::components::{
         convert_bool_to_chip_style, make_translated_header_callback, AppIcon, BatchInputContentView, Chip,
-        EpgConfigView, HideContent, InputHeaders, InputOptions, InputTypeView, RevealContent, StagedInputView, Table,
-        TableDefinition,
+        EpgConfigView, HideContent, InputHeaders, InputOptions, InputTypeView, RevealContent, Table, TableDefinition,
     },
     html_if,
     i18n::use_translation,
@@ -28,7 +27,7 @@ const HEADERS: [&str; 15] = [
     "LABEL.METHOD",
     "LABEL.EPG",
     "LABEL.HEADERS",
-    "LABEL.STAGED",
+    "LABEL.CHILD",
     "LABEL.EXP_DATE",
 ];
 
@@ -90,10 +89,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                             <InputHeaders headers={dto.headers.clone()} />
                         </RevealContent> }
                     }
-                    13 => html_if!(dto.staged.is_some(),
-                                 { <RevealContent preview={ html!{ dto.staged.as_ref().map_or_else(String::new, |s| s.url.clone())} }>
-                                      <StagedInputView input={ dto.staged.clone() } />
-                                   </RevealContent> }),
+                    13 => dto.child.as_ref().map_or_else(|| html! {}, |c| html! { c.as_ref() }),
                     14 => dto
                         .exp_date
                         .as_ref()

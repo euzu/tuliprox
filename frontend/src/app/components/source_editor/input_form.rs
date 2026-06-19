@@ -1,10 +1,9 @@
 use crate::{
     app::{
         components::{
-            config::HasFormData, key_value_editor::KeyValueEditor, select::Select, AliasItemForm, BlockId,
-            BlockInstance, Card, DropDownOption, DropDownSelection, EditMode, EpgSmartMatchForm, EpgSourceItemForm,
-            FilterInput, IconButton, Panel, ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton,
-            TitledCard, ToolAction,
+            config::HasFormData, key_value_editor::KeyValueEditor, AliasItemForm, BlockId, BlockInstance, Card,
+            EditMode, EpgSmartMatchForm, EpgSourceItemForm, FilterInput, IconButton, Panel, ProviderItemForm,
+            RadioButtonGroup, SourceEditorContext, TextButton, TitledCard, ToolAction,
         },
         ConfigContext,
     },
@@ -19,9 +18,8 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto,
-        EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, OnConnectErrorPolicy,
-        ProviderUrlSelectionPolicy, StagedInputDto, XtreamLoginRequest,
+        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, EpgSmartMatchConfigDto,
+        EpgSourceDto, InputFetchMethod, OnConnectErrorPolicy, ProviderUrlSelectionPolicy, XtreamLoginRequest,
     },
     utils::{Internable, BATCH_SCHEME_PREFIX},
 };
@@ -39,7 +37,6 @@ use yew::{
 };
 
 const LABEL_NAME: &str = "LABEL.NAME";
-const LABEL_INPUT_TYPE: &str = "LABEL.INPUT_TYPE";
 const LABEL_FETCH_METHOD: &str = "LABEL.METHOD";
 const LABEL_HEADERS: &str = "LABEL.HEADERS";
 const LABEL_URL: &str = "LABEL.URL";
@@ -84,10 +81,7 @@ const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
-const LABEL_STAGED: &str = "LABEL.STAGED";
-const LABEL_LIVE_SOURCE: &str = "LABEL.LIVE_SOURCE";
-const LABEL_VOD_SOURCE: &str = "LABEL.VOD_SOURCE";
-const LABEL_SERIES_SOURCE: &str = "LABEL.SERIES_SOURCE";
+const LABEL_CHILD: &str = "LABEL.CHILD";
 const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
 
@@ -125,7 +119,7 @@ const LABEL_EDIT_EPG_SMART_MATCH: &str = "LABEL.EDIT_EPG_SMART_MATCH";
 enum InputFormPage {
     Main,
     Options,
-    Staged,
+    Child,
     Epg,
     Alias,
     Provider,
@@ -134,7 +128,7 @@ enum InputFormPage {
 impl InputFormPage {
     const MAIN: &str = "Main";
     const OPTIONS: &str = "Options";
-    const STAGED: &str = "Staged";
+    const CHILD: &str = "Child";
     const EPG: &str = "Epg";
     const ALIAS: &str = "Alias";
     const PROVIDER: &str = "Provider";
@@ -147,7 +141,7 @@ impl FromStr for InputFormPage {
         match s {
             Self::MAIN => Ok(InputFormPage::Main),
             Self::OPTIONS => Ok(InputFormPage::Options),
-            Self::STAGED => Ok(InputFormPage::Staged),
+            Self::CHILD => Ok(InputFormPage::Child),
             Self::EPG => Ok(InputFormPage::Epg),
             Self::ALIAS => Ok(InputFormPage::Alias),
             Self::PROVIDER => Ok(InputFormPage::Provider),
@@ -164,7 +158,7 @@ impl Display for InputFormPage {
             match *self {
                 InputFormPage::Main => Self::MAIN,
                 InputFormPage::Options => Self::OPTIONS,
-                InputFormPage::Staged => Self::STAGED,
+                InputFormPage::Child => Self::CHILD,
                 InputFormPage::Epg => Self::EPG,
                 InputFormPage::Alias => Self::ALIAS,
                 InputFormPage::Provider => Self::PROVIDER,
@@ -178,7 +172,7 @@ impl Internable for InputFormPage {
         match self {
             Self::Main => Self::MAIN,
             Self::Options => Self::OPTIONS,
-            Self::Staged => Self::STAGED,
+            Self::Child => Self::CHILD,
             Self::Epg => Self::EPG,
             Self::Alias => Self::ALIAS,
             Self::Provider => Self::PROVIDER,
@@ -212,23 +206,6 @@ generate_form_reducer!(
 );
 
 generate_form_reducer!(
-    state: StagedInputDtoFormState { form: StagedInputDto },
-    action_name: StagedInputFormAction,
-    fields {
-        Enabled => enabled: bool,
-        Url => url: String,
-        Username => username: Option<String>,
-        Password => password: Option<String>,
-        Method => method: InputFetchMethod,
-        InputType => input_type: InputType,
-        LiveSource => live_source: Option<ClusterSource>,
-        VodSource => vod_source: Option<ClusterSource>,
-        SeriesSource => series_source: Option<ClusterSource>,
-        // Headers => headers: HashMap<String, String>,
-    }
-);
-
-generate_form_reducer!(
     state: ConfigInputFormState { form: ConfigInputDto },
     action_name: ConfigInputFormAction,
     fields {
@@ -245,37 +222,6 @@ generate_form_reducer!(
         CacheDuration => cache_duration: Option<String>,
     }
 );
-fn cluster_source_options(current: Option<ClusterSource>) -> Rc<Vec<DropDownOption>> {
-    let options: [(Option<ClusterSource>, &str); 3] = [
-        (Some(ClusterSource::Staged), "staged"),
-        (Some(ClusterSource::Input), "input"),
-        (Some(ClusterSource::Skip), "skip"),
-    ];
-    Rc::new(
-        options
-            .iter()
-            .map(|(val, label)| DropDownOption {
-                id: label.to_string(),
-                label: html! { label.to_string() },
-                selected: *val == current,
-            })
-            .collect(),
-    )
-}
-
-fn apply_parsed_input_type(staged_input_state: &UseReducerHandle<StagedInputDtoFormState>, selected: Option<&str>) {
-    let input_type =
-        selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_state.form.input_type);
-    if staged_input_state.form.input_type != input_type {
-        staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
-        // Clear Xtream-specific credentials when switching to a non-Xtream type
-        // so they don't persist invisibly in the DTO.
-        if !input_type.is_xtream() {
-            staged_input_state.dispatch(StagedInputFormAction::Username(None));
-            staged_input_state.dispatch(StagedInputFormAction::Password(None));
-        }
-    }
-}
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct ConfigInputViewProps {
@@ -319,8 +265,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         use_reducer(|| ConfigInputFormState { form: ConfigInputDto::default(), modified: false });
     let input_options_state: UseReducerHandle<ConfigInputOptionsDtoFormState> =
         use_reducer(|| ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto::default(), modified: false });
-    let staged_input_state: UseReducerHandle<StagedInputDtoFormState> =
-        use_reducer(|| StagedInputDtoFormState { form: StagedInputDto::default(), modified: false });
 
     // State for EPG sources, Aliases, Headers, and Providers
     let epg_sources_state = use_state(Vec::<EpgSourceDto>::new);
@@ -343,23 +287,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let exp_date_request_in_flight = use_mut_ref(|| false);
     let exp_date_request_token = use_mut_ref(|| 0_u64);
 
-    let staged_input_types = use_memo(staged_input_state.form.input_type, |input_type| {
-        let default_it = input_type;
-        [
-            InputType::M3u,
-            InputType::Xtream,
-            // InputType::M3uBatch,
-            // InputType::XtreamBatch,
-        ]
-        .iter()
-        .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == default_it })
-        .collect::<Vec<DropDownOption>>()
-    });
-
     {
         let input_form_state = input_form_state.clone();
         let input_options_state = input_options_state.clone();
-        let staged_input_state = staged_input_state.clone();
         let epg_sources_state = epg_sources_state.clone();
         let epg_smart_match_state = epg_smart_match_state.clone();
         let aliases_state = aliases_state.clone();
@@ -375,8 +305,18 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 .and_then(|cfg| cfg.sources.provider.clone())
                 .unwrap_or_default();
             if let Some(input) = cfg {
-                if input.input_type.is_library() && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Epg)
-                {
+                let is_library = input.input_type.is_library();
+                let is_staged = input.input_type.is_staged();
+                let current_page = *view_visible;
+                let page_allowed = match current_page {
+                    InputFormPage::Main => true,
+                    InputFormPage::Child => is_staged,
+                    InputFormPage::Alias | InputFormPage::Options | InputFormPage::Provider => {
+                        !is_library && !is_staged
+                    }
+                    InputFormPage::Epg => !is_library && !is_staged,
+                };
+                if !page_allowed {
                     view_visible.set(InputFormPage::Main);
                 }
 
@@ -384,10 +324,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(
                     input.options.as_ref().map_or_else(ConfigInputOptionsDto::default, |d| d.clone()),
-                ));
-
-                staged_input_state.dispatch(StagedInputFormAction::SetAll(
-                    input.staged.as_ref().map_or_else(StagedInputDto::default, |c| c.clone()),
                 ));
 
                 // Load headers
@@ -425,7 +361,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
-                staged_input_state.dispatch(StagedInputFormAction::SetAll(StagedInputDto::default()));
                 headers_state.set(HashMap::new());
                 epg_sources_state.set(Vec::new());
                 epg_smart_match_state.set(None);
@@ -754,6 +689,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let library_input = input_form_state.form.input_type.is_library();
     let xtream_input = input_form_state.form.input_type.is_xtream();
+    let staged_input = input_form_state.form.input_type.is_staged();
 
     let render_options = || {
         let headers = headers_state.clone();
@@ -897,152 +833,11 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
-    let render_staged = || {
-        let staged_method_selection = Rc::new(vec![staged_input_state.form.method.to_string()]);
-        let staged_input_state_1 = staged_input_state.clone();
-        let staged_input_state_2 = staged_input_state.clone();
-        let staged_input_state_live = staged_input_state.clone();
-        let staged_input_state_vod = staged_input_state.clone();
-        let staged_input_state_series = staged_input_state.clone();
-        let show_cluster_sources = input_form_state.form.input_type.is_xtream();
-        let live_source_options = cluster_source_options(staged_input_state.form.live_source);
-        let vod_source_options = cluster_source_options(staged_input_state.form.vod_source);
-        let series_source_options = cluster_source_options(staged_input_state.form.series_source);
-        let staged_is_xtream = staged_input_state.form.input_type.is_xtream();
-        if !props.allow_write {
-            return html! {
-                <Card class="tp__config-view__card">
-                    { config_field_bool!(staged_input_state.form, translate.t(LABEL_ENABLED), enabled) }
-                    { config_field!(staged_input_state.form, translate.t(LABEL_URL), url) }
-                    { html_if!(staged_is_xtream, {
-                        <div class="tp__config-view__cols-2">
-                        { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
-                        { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
-                        </div>
-                    })}
-                    <div class="tp__config-view__cols-2">
-                    { config_field_custom!(translate.t(LABEL_FETCH_METHOD), staged_input_state.form.method.to_string()) }
-                    { config_field_custom!(translate.t(LABEL_INPUT_TYPE), staged_input_state.form.input_type.to_string()) }
-                    </div>
-                    {
-                        html_if!(show_cluster_sources, {
-                        <div class="tp__config-view__cols-2">
-                        { config_field_custom!(translate.t(LABEL_LIVE_SOURCE), staged_input_state.form.live_source.map_or_else(String::new, |source| source.to_string())) }
-                        { config_field_custom!(translate.t(LABEL_VOD_SOURCE), staged_input_state.form.vod_source.map_or_else(String::new, |source| source.to_string())) }
-                        { config_field_custom!(translate.t(LABEL_SERIES_SOURCE), staged_input_state.form.series_source.map_or_else(String::new, |source| source.to_string())) }
-                        </div>
-                        })
-                    }
-                </Card>
-            };
-        }
+    let render_child = || {
+        let child_value = input_form_state.form.child.as_ref().map_or_else(String::new, |c| c.to_string());
         html! {
             <Card class="tp__config-view__card">
-                { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
-                { edit_field_text!(staged_input_state, translate.t(LABEL_URL),  url, StagedInputFormAction::Url) }
-                { html_if!(staged_is_xtream, {
-                  <div class="tp__config-view__cols-2">
-                  { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
-                  { edit_field_text_option!(staged_input_state, translate.t(LABEL_PASSWORD), password, StagedInputFormAction::Password, true) }
-                  </div>
-                })}
-                <div class="tp__config-view__cols-2">
-                { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
-
-                   html! {
-                       <RadioButtonGroup
-                        multi_select={false} none_allowed={false}
-                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
-                            if let Some(first) = selections.first() {
-                                staged_input_state_1.dispatch(StagedInputFormAction::Method(first.parse::<InputFetchMethod>().unwrap_or(InputFetchMethod::GET)));
-                            }
-                        })}
-                        options={&fetch_methods}
-                        selected={staged_method_selection}
-                    />
-               }})}
-               { config_field_child!(translate.t(LABEL_INPUT_TYPE), "INPUT_FORM.INPUT_TYPE", {
-                   html! {
-                       <Select
-                        name={"staged_input_types"}
-                        multi_select={false}
-                        on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                           match selections {
-                            DropDownSelection::Empty => {}
-                            DropDownSelection::Single(option) => {
-                                apply_parsed_input_type(
-                                    &staged_input_state_2,
-                                    Some(option.as_str()),
-                                );
-                            }
-                            DropDownSelection::Multi(options) => {
-                                apply_parsed_input_type(
-                                    &staged_input_state_2,
-                                    options.first().map(String::as_str),
-                                );
-                             }
-                           }
-                        })}
-                        options={staged_input_types.clone()}
-                    />
-               }})}
-                </div>
-                {
-                    html_if!(show_cluster_sources, {
-                    <div class="tp__config-view__cols-2">
-                    { config_field_child!(translate.t(LABEL_LIVE_SOURCE), "INPUT_FORM.LIVE_SOURCE", {
-                        html! {
-                            <Select
-                                name={"live_source"}
-                                multi_select={false}
-                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    if let DropDownSelection::Single(option) = selections {
-                                        staged_input_state_live.dispatch(StagedInputFormAction::LiveSource(
-                                            ClusterSource::from_str(option.as_str()).ok()
-                                        ));
-                                    }
-                                })}
-                                options={live_source_options}
-                            />
-                        }
-                    })}
-                    { config_field_child!(translate.t(LABEL_VOD_SOURCE), "INPUT_FORM.VOD_SOURCE", {
-                        html! {
-                            <Select
-                                name={"vod_source"}
-                                multi_select={false}
-                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    if let DropDownSelection::Single(option) = selections {
-                                        staged_input_state_vod.dispatch(StagedInputFormAction::VodSource(
-                                            ClusterSource::from_str(option.as_str()).ok()
-                                        ));
-                                    }
-                                })}
-                                options={vod_source_options}
-                            />
-                        }
-                    })}
-                    { config_field_child!(translate.t(LABEL_SERIES_SOURCE), "INPUT_FORM.SERIES_SOURCE", {
-                        html! {
-                            <Select
-                                name={"series_source"}
-                                multi_select={false}
-                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    if let DropDownSelection::Single(option) = selections {
-                                        staged_input_state_series.dispatch(StagedInputFormAction::SeriesSource(
-                                            ClusterSource::from_str(option.as_str()).ok()
-                                        ));
-                                    }
-                                })}
-                                options={series_source_options}
-                            />
-                        }
-                    })}
-                    </div>
-                    })
-                }
-
-                //{ edit_field_list!(staged_input_state, translate.t(LABEL_HEADERS), headers, StagedInputFormAction::Headers, translate.t(LABEL_ADD_HEADER)) }
+                { config_field_custom!(translate.t(LABEL_CHILD), child_value) }
             </Card>
         }
     };
@@ -1154,15 +949,25 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                      })}
                      { html_if!(!is_csv_batch, {
                          <>
-                         { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
-                         { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
-                         { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
+                         { html_if!(!staged_input, {
+                           { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
+                         })}
+                         { html_if!(!staged_input, {
+                           { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
+                         })}
+                         { html_if!(!staged_input, {
+                           { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
+                         })}
                          </>
                      })}
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                     { html_if!(!staged_input, {
+                       { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                     })}
                      { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
                      </div>
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
+                     { html_if!(!staged_input, {
+                       { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
+                     })}
                     </>
                    })}
                 </Card>
@@ -1186,12 +991,20 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                  })}
                  { html_if!(!is_csv_batch, {
                    <>
-                   { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-                   { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                   { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
+                   { html_if!(!staged_input, {
+                     { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
+                   })}
+                   { html_if!(!staged_input, {
+                     { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
+                   })}
+                   { html_if!(!staged_input, {
+                     { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
+                   })}
                    </>
                  })}
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
+                 { html_if!(!staged_input, {
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
+                 })}
                  { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
                    html! {
                        <RadioButtonGroup
@@ -1206,7 +1019,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     />
                  }})}
                  </div>
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
+                 { html_if!(!staged_input, {
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
+                 })}
                 </>
                })}
             </Card>
@@ -1556,7 +1371,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let source_editor_ctx = source_editor_ctx.clone();
         let input_form_state = input_form_state.clone();
         let input_options_state = input_options_state.clone();
-        let staged_input_state = staged_input_state.clone();
         let headers_state = headers_state.clone();
         let epg_sources_state = epg_sources_state.clone();
         let epg_smart_match_state = epg_smart_match_state.clone();
@@ -1570,8 +1384,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             let options = input_options_state.data();
             input.options = if options.is_empty() { None } else { Some(options.clone()) };
 
-            let staged_input = staged_input_state.data();
-            input.staged = if staged_input.is_empty() { None } else { Some(staged_input.clone()) };
+            // Only staged inputs carry a child reference.
+            if !input.input_type.is_staged() {
+                input.child = None;
+            }
 
             // Handle Headers
             input.headers = (*headers_state).clone();
@@ -1629,12 +1445,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
                 {render_input()}
                 </Panel>
-                { html_if!(!library_input, {
+                { html_if!(!library_input && !staged_input, {
                     <Panel value={InputFormPage::Alias.intern()} active={view_visible.intern()}>
                     {render_alias()}
                     </Panel>
                 })}
-                { html_if!(!library_input, {
+                { html_if!(!library_input && !staged_input, {
                  <>
                   <Panel value={InputFormPage::Options.intern()} active={view_visible.intern()}>
                    {render_options()}
@@ -1645,10 +1461,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                   <Panel value={InputFormPage::Epg.intern()} active={view_visible.intern()}>
                    {render_epg()}
                   </Panel>
-                  <Panel value={InputFormPage::Staged.intern()} active={view_visible.intern()}>
-                   {render_staged()}
-                   </Panel>
                     </>
+                })}
+                { html_if!(staged_input, {
+                  <Panel value={InputFormPage::Child.intern()} active={view_visible.intern()}>
+                   {render_child()}
+                   </Panel>
                 })}
             </div>
             </div>
@@ -1662,17 +1480,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         html! {
             <div class={concat_string!("tp__source-editor-form__sidebar", if button_disabled {" disabled"} else {""})}>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Main, if *view_visible == InputFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={InputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
-            {html_if!(!library_input, {
+            {html_if!(!library_input && !staged_input, {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Alias, if *view_visible == InputFormPage::Alias { " active" } else {""})}  icon="Alias" hint={translate.t(LABEL_ALIAS)} name={InputFormPage::Alias.to_string()} onclick={&handle_menu_click}></IconButton>
             })}
-            { html_if!(!library_input, {
+            { html_if!(!library_input && !staged_input, {
                 <>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Epg, if *view_visible == InputFormPage::Epg { " active" } else {""})}  icon="Epg" hint={translate.t(LABEL_EPG)} name={InputFormPage::Epg.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Provider, if *view_visible == InputFormPage::Provider { " active" } else {""})}  icon="Dns" hint={translate.t(LABEL_PROVIDER)} name={InputFormPage::Provider.to_string()} onclick={&handle_menu_click}></IconButton>
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>
                 </>
              })}
+            {html_if!(staged_input, {
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Child, if *view_visible == InputFormPage::Child { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_CHILD)} name={InputFormPage::Child.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
           </div>
         }
     };

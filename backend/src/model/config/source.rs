@@ -414,7 +414,7 @@ macros::try_from_impl!(SourcesConfig);
 impl TryFrom<&SourcesConfigDto> for SourcesConfig {
     type Error = TuliproxError;
     fn try_from(dto: &SourcesConfigDto) -> Result<Self, TuliproxError> {
-        let mut inputs = Vec::<Arc<ConfigInput>>::new();
+        let mut inputs = Vec::<ConfigInput>::new();
         let mut batch_files = Vec::<PathBuf>::new();
         let mut input_names = HashSet::new();
         let provider: Vec<_> = dto.provider.as_ref()
@@ -428,8 +428,32 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
                 batch_files.push(path);
             }
             input_names.insert(input.name.clone());
-            inputs.push(Arc::new(input));
+            inputs.push(input);
         }
+
+        // Resolve staged (derived-source) inputs against their child's connection profile.
+        // Validation (child exists, is non-staged m3u/xtream, max chain depth) already happened
+        // in the DTO prepare passes, so a missing child here is treated defensively.
+        if inputs.iter().any(|input| input.input_type.is_staged()) {
+            let children: std::collections::HashMap<Arc<str>, ConfigInput> = inputs
+                .iter()
+                .filter(|input| !input.input_type.is_staged())
+                .map(|input| (input.name.clone(), input.clone()))
+                .collect();
+            for input in &mut inputs {
+                if !input.input_type.is_staged() {
+                    continue;
+                }
+                let Some(child_name) = input.child.clone() else {
+                    continue;
+                };
+                if let Some(child) = children.get(&child_name) {
+                    input.resolve_staged_from_child(child);
+                }
+            }
+        }
+
+        let inputs: Vec<Arc<ConfigInput>> = inputs.into_iter().map(Arc::new).collect();
 
         let mut sources = Vec::new();
         for source_dto in &dto.sources {

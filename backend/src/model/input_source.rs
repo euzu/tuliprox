@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use shared::model::InputFetchMethod;
-use crate::model::{ConfigInput, ConfigProvider, StagedInput};
+use crate::model::{ConfigInput, ConfigProvider};
 
 /// Represents an input source for fetching content.
 /// 
@@ -52,20 +52,6 @@ impl From<&ConfigInput> for InputSource {
             name: input.name.clone(),
             url: input.url.clone(),
             provider: input.get_resolve_provider(&input.url),
-            username: input.username.clone(),
-            password: input.password.clone(),
-            method: input.method,
-            headers: input.headers.clone(),
-        }
-    }
-}
-
-impl From<&StagedInput> for InputSource {
-    fn from(input: &StagedInput) -> Self {
-        Self {
-            name: input.name.clone(),
-            url: input.url.clone(),
-            provider: input.provider_config.clone(),
             username: input.username.clone(),
             password: input.password.clone(),
             method: input.method,

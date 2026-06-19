@@ -1,7 +1,7 @@
 use crate::app::components::{Block, BlockType, Connection};
 
 /// Determines whether two blocks can be connected based on explicit editor rules.
-/// Allowed: Input -> Target, Target -> Output.
+/// Allowed: Input -> Target, Input -> Staged Input, Target -> Output.
 /// Target can have multiple Inputs.
 /// Output can only have one Target.
 /// Target can connect to:
@@ -17,14 +17,24 @@ pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connecti
 
     // Identify block categories
     let is_input = from_block.block_type.is_input();
+    let from_is_staged = matches!(from_block.block_type, BlockType::InputStaged);
     let is_target = from_block.block_type.is_target();
     let to_is_target = to_block.block_type.is_target();
+    let to_is_child_input = to_block.block_type.is_chainable_input();
     let to_is_output = to_block.block_type.is_output();
 
-    // Only allow Input -> Target OR Target -> Output
-    let valid_direction = (is_input && to_is_target) || (is_target && to_is_output);
+    // Only allow Input -> Target OR Staged Input -> Child Input OR Target -> Output
+    let valid_direction =
+        (is_input && to_is_target) || (from_is_staged && to_is_child_input) || (is_target && to_is_output);
     if !valid_direction {
         return false;
+    }
+    // Child input can have only one Stage connection.
+    if from_is_staged && to_is_child_input {
+        let has_stage_already = connections.iter().any(|c| c.to == to_block.id);
+        if has_stage_already {
+            return false;
+        }
     }
 
     // Prevent duplicate connection

@@ -60,6 +60,7 @@ pub fn ConfirmDialog(props: &ConfirmDialogProps) -> Html {
             open={*is_open}
             class="tp__confirm-dialog"
             modal=true
+            aria_label={Some(props.title.replace('\n', " "))}
             close_on_backdrop_click={props.close_on_backdrop_click}
             on_close={Some(on_close)}
         >

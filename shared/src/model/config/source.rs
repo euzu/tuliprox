@@ -9,6 +9,8 @@ use crate::{
 use log::warn;
 use std::{collections::HashSet, sync::Arc};
 
+const MAX_STAGE_CHAIN_DEPTH: usize = 2;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSourceDto {
@@ -112,6 +114,8 @@ impl SourcesConfigDto {
             }
         }
 
+        self.validate_staged_children()?;
+
         for source in &mut self.sources {
             source_index = source.prepare(source_index, include_computed)?;
 
@@ -125,6 +129,45 @@ impl SourcesConfigDto {
             for target in &mut source.targets {
                 target.prepare(target_index, prepared_templates, hdhr_config)?;
                 target_index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_staged_children(&self) -> Result<(), TuliproxError> {
+        if !self.inputs.iter().any(|input| input.input_type.is_staged()) {
+            return Ok(());
+        }
+
+        let by_name: std::collections::HashMap<&str, &ConfigInputDto> =
+            self.inputs.iter().map(|input| (input.name.as_ref(), input)).collect();
+
+        for input in &self.inputs {
+            if !input.input_type.is_staged() {
+                continue;
+            }
+            let Some(child_name) = input.child.as_ref() else {
+                continue; // R2 already enforced in ConfigInputDto::prepare
+            };
+            let Some(child) = by_name.get(child_name.as_ref()) else {
+                return Err(TuliproxError::ConfigSource(format!(
+                    "staged input '{}' references unknown child input '{child_name}'",
+                    input.name
+                )));
+            };
+            // (max chain depth 2): child must not itself be staged.
+            if child.input_type.is_staged() {
+                return Err(TuliproxError::ConfigSource(format!(
+                    "staged input '{}' cannot use another staged input '{child_name}' as child (max chain depth is {MAX_STAGE_CHAIN_DEPTH})",
+                    input.name
+                )));
+            }
+            // child must be m3u or xtream.
+            if !(child.input_type.is_m3u() || child.input_type.is_xtream()) {
+                return Err(TuliproxError::ConfigSource(format!(
+                    "staged input '{}' child '{child_name}' must be an m3u or xtream input (found: {})",
+                    input.name, child.input_type
+                )));
             }
         }
         Ok(())

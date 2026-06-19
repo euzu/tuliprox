@@ -1050,7 +1050,7 @@ mod tests {
             headers: HashMap::default(),
             options: None,
             method: InputFetchMethod::default(),
-            staged: None,
+            child: None,
             exp_date: None,
             t_batch_url: None,
             panel_api: None,

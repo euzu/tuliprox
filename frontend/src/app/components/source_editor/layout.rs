@@ -1,5 +1,5 @@
 use crate::app::components::{Block, BlockId, BlockInstance, Connection};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 const CANVAS_OFFSET: f32 = 10.0;
 
@@ -57,6 +57,8 @@ type EdgeMap = HashMap<BlockId, Vec<BlockId>>;
 
 struct InputTargetMaps {
     input_to_targets: EdgeMap,
+    /// Parent input -> staged child inputs (input -> input edges).
+    input_to_child_inputs: EdgeMap,
     adjacency: EdgeMap,
 }
 
@@ -83,28 +85,61 @@ fn push_unique(map: &mut EdgeMap, key: BlockId, value: BlockId) {
 
 fn build_input_target_maps(blocks: &[Block], connections: &[Connection]) -> InputTargetMaps {
     let mut input_to_targets: EdgeMap = HashMap::new();
+    let mut input_to_child_inputs: EdgeMap = HashMap::new();
     let mut adjacency: EdgeMap = HashMap::new();
 
     for con in connections {
         let from = &blocks[con.from as usize - 1];
         let to = &blocks[con.to as usize - 1];
 
-        let edge = if from.block_type.is_input() && to.block_type.is_target() {
-            Some((con.from, con.to))
+        if from.block_type.is_input() && to.block_type.is_target() {
+            push_unique(&mut input_to_targets, con.from, con.to);
+            push_unique(&mut adjacency, con.from, con.to);
+            push_unique(&mut adjacency, con.to, con.from);
         } else if from.block_type.is_target() && to.block_type.is_input() {
-            Some((con.to, con.from))
-        } else {
-            None
-        };
-
-        if let Some((input_id, target_id)) = edge {
-            push_unique(&mut input_to_targets, input_id, target_id);
-            push_unique(&mut adjacency, input_id, target_id);
-            push_unique(&mut adjacency, target_id, input_id);
+            push_unique(&mut input_to_targets, con.to, con.from);
+            push_unique(&mut adjacency, con.from, con.to);
+            push_unique(&mut adjacency, con.to, con.from);
+        } else if from.block_type.is_input() && to.block_type.is_input() {
+            // Staged input chain: parent input feeds a child (staged) input.
+            push_unique(&mut input_to_child_inputs, con.from, con.to);
+            push_unique(&mut adjacency, con.from, con.to);
+            push_unique(&mut adjacency, con.to, con.from);
         }
     }
 
-    InputTargetMaps { input_to_targets, adjacency }
+    InputTargetMaps { input_to_targets, input_to_child_inputs, adjacency }
+}
+
+fn compute_input_columns(input_ids: &[BlockId], input_to_child_inputs: &EdgeMap) -> HashMap<BlockId, usize> {
+    let input_set: HashSet<BlockId> = input_ids.iter().copied().collect();
+    let mut columns: HashMap<BlockId, usize> = input_ids.iter().map(|&id| (id, 0usize)).collect();
+
+    let max_iterations = input_ids.len() + 1;
+    for _ in 0..max_iterations {
+        let mut changed = false;
+        for (&parent, children) in input_to_child_inputs {
+            if !input_set.contains(&parent) {
+                continue;
+            }
+            let parent_column = columns.get(&parent).copied().unwrap_or(0);
+            for &child in children {
+                if !input_set.contains(&child) {
+                    continue;
+                }
+                let candidate = parent_column + 1;
+                if candidate > columns.get(&child).copied().unwrap_or(0) {
+                    columns.insert(child, candidate);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    columns
 }
 
 fn build_connected_components(
@@ -196,11 +231,14 @@ fn component_sort_key(
     (min_input_rank.min(min_target_rank), min_target_rank, min_input_rank)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_component(
     component: &LayoutComponent,
     input_rank: &HashMap<BlockId, usize>,
     target_rank: &HashMap<BlockId, usize>,
     input_to_targets: &HashMap<BlockId, Vec<BlockId>>,
+    input_to_child_inputs: &HashMap<BlockId, Vec<BlockId>>,
+    input_columns: &HashMap<BlockId, usize>,
     target_heights: &HashMap<BlockId, f32>,
     input_steps: &HashMap<BlockId, f32>,
     input_visual_heights: &HashMap<BlockId, f32>,
@@ -219,14 +257,55 @@ fn layout_component(
         current_top += height + Y_GAP;
     }
 
-    let mut input_y: HashMap<BlockId, f32> = HashMap::new();
-    let mut next_input_y = 0.0;
+    // Desired y per input. Inputs wired to targets align to those targets; staged
+    // inputs without a direct target align to their child inputs. Process deepest
+    // columns first so a parent can read its already-resolved children's y.
+    let mut by_column_desc = input_ids.clone();
+    by_column_desc.sort_by(|a, b| {
+        let column_a = input_columns.get(a).copied().unwrap_or(0);
+        let column_b = input_columns.get(b).copied().unwrap_or(0);
+        column_b.cmp(&column_a)
+    });
+    let mut input_desired: HashMap<BlockId, f32> = HashMap::new();
+    for input_id in &by_column_desc {
+        let desired = average_connected_targets(*input_id, input_to_targets, &target_centers)
+            .or_else(|| {
+                let children = input_to_child_inputs.get(input_id)?;
+                let mut sum = 0.0;
+                let mut count = 0;
+                for child in children {
+                    if let Some(&child_y) = input_desired.get(child) {
+                        sum += child_y;
+                        count += 1;
+                    }
+                }
+                if count == 0 {
+                    None
+                } else {
+                    Some(sum / count as f32)
+                }
+            })
+            .unwrap_or(0.0);
+        input_desired.insert(*input_id, desired);
+    }
+
+    // Stack inputs per column so siblings in the same column never overlap while
+    // still honoring their desired y.
+    let mut columns: BTreeMap<usize, Vec<BlockId>> = BTreeMap::new();
     for input_id in &input_ids {
-        let desired = average_connected_targets(*input_id, input_to_targets, &target_centers).unwrap_or(next_input_y);
-        let aligned = desired.max(next_input_y);
-        input_y.insert(*input_id, aligned);
-        let step = input_steps.get(input_id).copied().unwrap_or(INPUT_VERTICAL_STEP_BASE);
-        next_input_y = aligned + step;
+        columns.entry(input_columns.get(input_id).copied().unwrap_or(0)).or_default().push(*input_id);
+    }
+    let mut input_y: HashMap<BlockId, f32> = HashMap::new();
+    for column_ids in columns.values_mut() {
+        column_ids.sort_by_key(|id| input_rank.get(id).copied().unwrap_or(usize::MAX));
+        let mut next_input_y = 0.0;
+        for input_id in column_ids.iter() {
+            let desired = input_desired.get(input_id).copied().unwrap_or(next_input_y);
+            let aligned = desired.max(next_input_y);
+            input_y.insert(*input_id, aligned);
+            let step = input_steps.get(input_id).copied().unwrap_or(INPUT_VERTICAL_STEP_BASE);
+            next_input_y = aligned + step;
+        }
     }
 
     let mut target_tops: HashMap<BlockId, f32> = HashMap::new();
@@ -414,10 +493,13 @@ pub fn layout(blocks: &mut [Block], connections: &[Connection]) {
         input_ids.iter().map(|&id| (id, BLOCK_HEIGHT + input_extra_heights.get(&id).copied().unwrap_or(0.0))).collect();
 
     let maps = build_input_target_maps(blocks, connections);
+    let input_columns = compute_input_columns(&input_ids, &maps.input_to_child_inputs);
+    let max_input_column = input_columns.values().copied().max().unwrap_or(0);
+    let column_stride = BLOCK_WIDTH + X_GAP;
     let mut components = build_connected_components(&input_ids, &target_ids, &maps.adjacency);
     components.sort_by_key(|component| component_sort_key(component, &input_rank, &target_rank));
 
-    let start_x = CANVAS_OFFSET + BLOCK_WIDTH + X_GAP;
+    let start_x = CANVAS_OFFSET + (max_input_column as f32 + 1.0) * column_stride;
     let mut start_y = CANVAS_OFFSET;
 
     for component in components {
@@ -426,6 +508,8 @@ pub fn layout(blocks: &mut [Block], connections: &[Connection]) {
             &input_rank,
             &target_rank,
             &maps.input_to_targets,
+            &maps.input_to_child_inputs,
+            &input_columns,
             &target_heights,
             &input_steps,
             &input_visual_heights,
@@ -445,7 +529,9 @@ pub fn layout(blocks: &mut [Block], connections: &[Connection]) {
         sorted_inputs.sort_by_key(|id| input_rank.get(id).copied().unwrap_or(usize::MAX));
         for input_id in sorted_inputs {
             if let Some(local_y) = component_input_y.get(&input_id) {
-                blocks[input_id as usize - 1].position = (CANVAS_OFFSET, start_y + local_y);
+                let column = input_columns.get(&input_id).copied().unwrap_or(0);
+                let x = CANVAS_OFFSET + column as f32 * column_stride;
+                blocks[input_id as usize - 1].position = (x, start_y + local_y);
             }
         }
 

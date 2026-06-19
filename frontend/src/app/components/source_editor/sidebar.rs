@@ -4,10 +4,11 @@ use crate::{
 };
 use yew::prelude::*;
 
-pub const BLOCK_TYPES_INPUT: [BlockType; 3] = [
+pub const BLOCK_TYPES_INPUT: [BlockType; 4] = [
     BlockType::InputXtream,
     BlockType::InputM3u,
     BlockType::InputLibrary,
+    BlockType::InputStaged,
     // Enable when media_server feature fully implemented
     // BlockType::InputJellyfin,
     // BlockType::InputEmby,
