@@ -385,7 +385,7 @@ fn is_stable_session_stream(stream: &StreamInfo) -> bool {
     stream.channel.item_type == PlaylistItemType::Catchup
         || stream.channel.item_type.is_live_adaptive()
         || matches!(
-            extract_extension_from_url(stream.channel.url.as_ref()).as_deref(),
+            extract_extension_from_url(stream.channel.url.as_ref()),
             Some(ext) if ext == HLS_EXT || ext == DASH_EXT
         )
 }
@@ -393,7 +393,7 @@ fn is_stable_session_stream(stream: &StreamInfo) -> bool {
 fn uses_session_reentry_guard(stream: &StreamInfo) -> bool {
     stream.channel.item_type.requires_provider_affinity()
         || matches!(
-            extract_extension_from_url(stream.channel.url.as_ref()).as_deref(),
+            extract_extension_from_url(stream.channel.url.as_ref()),
             Some(ext) if ext == HLS_EXT || ext == DASH_EXT
         )
 }

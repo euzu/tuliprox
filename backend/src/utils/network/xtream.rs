@@ -568,7 +568,7 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
         .get_container_extension()
         .filter(|ce| !ce.is_empty())
         .map(|s| s.to_string())
-        .or_else(|| extract_extension_from_url(&pli.url))
+        .or_else(|| extract_extension_from_url(&pli.url).map(ToString::to_string))
         .unwrap_or_default();
 
     let mut doc = XtreamVideoInfoDoc::default();

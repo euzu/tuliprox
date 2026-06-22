@@ -1360,10 +1360,12 @@ fn get_stream_alternative_url_m3u(
     input: &ConfigInput,
     alias_input: &Arc<ProviderConfig>,
 ) -> Option<String> {
-    let alt_input_user_info = alias_input.get_user_info()?;
     if let Some((source_base_url, source_username, source_password)) =
         find_input_account_by_signature(stream_url, input)
     {
+        let Some(alt_input_user_info) = alias_input.get_user_info() else {
+            return Some(stream_url.to_string());
+        };
         let modified = stream_url.replacen(&source_base_url, &alt_input_user_info.base_url, 1);
         let mut url = Url::parse(&modified).ok()?;
 
@@ -1382,10 +1384,27 @@ fn get_stream_alternative_url_m3u(
 
         return Some(url.to_string());
     }
+    let Some(alt_input_user_info) = alias_input.get_user_info() else {
+        let Ok(url) = Url::parse(stream_url) else {
+            return None;
+        };
+        if providerless_m3u_url_has_explicit_credentials(&url) {
+            return None;
+        }
+        return Some(stream_url.to_string());
+    };
     if stream_url_has_account_signature(stream_url, &alt_input_user_info) {
         return None;
     }
     Some(stream_url.to_string())
+}
+
+fn providerless_m3u_url_has_explicit_credentials(url: &Url) -> bool {
+    !url.username().is_empty()
+        || url.password().is_some()
+        || url
+        .query_pairs()
+        .any(|(key, _)| key.eq_ignore_ascii_case("username") || key.eq_ignore_ascii_case("password"))
 }
 
 /// Look for an account signature in the stream URL that matches the input
@@ -2095,8 +2114,9 @@ where
     P: PlaylistEntry,
 {
     pub fn get_query_path(&self, provider_id: u32, url: &str) -> String {
-        let extension =
-            self.stream_ext.map_or_else(|| extract_extension_from_url(url).unwrap_or_default(), ToString::to_string);
+        let extension = self
+            .stream_ext
+            .map_or_else(|| extract_extension_from_url(url).map_or_else(String::new, ToString::to_string), ToString::to_string);
 
         // if there is an action_path (like for timeshift duration/start), it will be added in front of the stream_id
         if self.action_path.is_empty() {
@@ -2512,7 +2532,7 @@ pub(crate) async fn stream_response(
     let virtual_id = stream_channel.virtual_id;
     let item_type = stream_channel.item_type;
     let playback_extension = extract_extension_from_url(stream_url);
-    let socket_bound = is_socket_bound_playback_session(item_type, playback_extension.as_deref());
+    let socket_bound = is_socket_bound_playback_session(item_type, playback_extension);
     let mut connection_permission = connection_permission;
     let mut connection_kind = connection_kind;
     let activation = activate_session_before_stream_open(
@@ -3031,8 +3051,7 @@ async fn try_shared_stream_response_if_any(
             let mut stream_details = StreamDetails::from_stream(stream, grace_period_options);
 
             stream_details.provider_name = provider;
-            let socket_bound =
-                is_socket_bound_playback_session(stream_channel.item_type, extract_extension_from_url(stream_url).as_deref());
+            let socket_bound = is_socket_bound_playback_session(stream_channel.item_type, extract_extension_from_url(stream_url));
             if let Some(provider_name) = stream_details.provider_name.as_deref() {
                 let _ = app_state
                     .active_users
@@ -3250,7 +3269,7 @@ pub(crate) async fn local_stream_response(
     } else {
         stream
     };
-    let socket_bound = is_socket_bound_playback_session(pli.item_type, extract_extension_from_url(&pli.url).as_deref());
+    let socket_bound = is_socket_bound_playback_session(pli.item_type, extract_extension_from_url(&pli.url));
     let mut connection_kind = connection_kind;
     if let Some(session_token) = playback_session_token {
         let activation = activate_session_before_stream_open(
@@ -4087,6 +4106,20 @@ mod tests {
         ))
     }
 
+    fn test_runtime_provider_without_credentials(url: &str, input_type: InputType) -> Arc<RuntimeProviderConfig> {
+        let input = ConfigInput {
+            name: "provider".intern(),
+            url: url.to_string(),
+            input_type,
+            ..ConfigInput::default()
+        };
+        Arc::new(RuntimeProviderConfig::new(
+            &input,
+            Arc::new(RwLock::new(ProviderConfigConnection::default())),
+            Arc::new(|_, _| {}),
+        ))
+    }
+
     #[tokio::test]
     async fn test_is_seek_request() {
         let mut headers = HeaderMap::new();
@@ -4436,6 +4469,53 @@ mod tests {
         let stream_url = "https://hnpsechtsc.turknet.ercdn.net/xpnvudnlsv/cnbc-e/cnbc-e.m3u8";
 
         assert_eq!(get_stream_alternative_url(stream_url, &input, &alias), Some(stream_url.to_string()));
+    }
+
+    #[test]
+    fn get_stream_alternative_url_keeps_open_external_m3u_url_for_provider_without_credentials() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example/playlist.m3u8".to_string(),
+            input_type: InputType::M3u,
+            ..ConfigInput::default()
+        };
+        let provider = test_runtime_provider_without_credentials("http://provider.example/playlist.m3u8", InputType::M3u);
+        let stream_url = "http://s.only4.tv/17113/video.m3u8?token=abc";
+
+        assert_eq!(get_stream_alternative_url(stream_url, &input, &provider), Some(stream_url.to_string()));
+    }
+
+    #[test]
+    fn get_stream_alternative_url_rejects_query_credentials_for_provider_without_credentials() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example/playlist.m3u8".to_string(),
+            input_type: InputType::M3u,
+            ..ConfigInput::default()
+        };
+        let provider = test_runtime_provider_without_credentials("http://provider.example/playlist.m3u8", InputType::M3u);
+
+        assert_eq!(
+            get_stream_alternative_url(
+                "http://cdn.example/segment.ts?username=other-user&password=other-pass",
+                &input,
+                &provider
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn get_stream_alternative_url_rejects_basic_auth_credentials_for_provider_without_credentials() {
+        let input = ConfigInput {
+            name: "source".intern(),
+            url: "http://provider.example/playlist.m3u8".to_string(),
+            input_type: InputType::M3u,
+            ..ConfigInput::default()
+        };
+        let provider = test_runtime_provider_without_credentials("http://provider.example/playlist.m3u8", InputType::M3u);
+
+        assert_eq!(get_stream_alternative_url("http://user:pass@cdn.example/segment.ts", &input, &provider), None);
     }
 
     #[test]
