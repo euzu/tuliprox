@@ -196,7 +196,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         pli.item_type
     );
     let extracted_ext = extract_extension_from_url(&pli.url).unwrap_or_default();
-    let extension = stream_ext.unwrap_or(extracted_ext.as_str());
+    let extension = stream_ext.unwrap_or(extracted_ext);
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
         create_m3u_catchup_session_key(
             fingerprint,

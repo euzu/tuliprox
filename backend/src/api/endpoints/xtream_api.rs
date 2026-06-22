@@ -575,7 +575,7 @@ pub(crate) fn get_query_path(
     } else if let Some(ext) = stream_ext {
         ext.into()
     } else {
-        extract_extension_from_url(&pli.url).unwrap_or_default()
+        extract_extension_from_url(&pli.url).map_or_else(String::new, ToString::to_string)
     };
 
     let provider_id = pli.provider_id.to_string();
@@ -595,7 +595,7 @@ fn resolve_xtream_playback_extension(stream_ext: Option<&str>, pli: &XtreamPlayl
         .get_container_extension()
         .filter(|ext| !ext.is_empty())
         .map(|ext| concat_string!(".", ext.as_ref()))
-        .or_else(|| extract_extension_from_url(&pli.url).and_then(|ext| (!ext.is_empty()).then_some(ext)));
+        .or_else(|| extract_extension_from_url(&pli.url).map(ToString::to_string));
 
     if pli.item_type.is_live() {
         requested_extension.or(canonical_extension)

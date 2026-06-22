@@ -38,37 +38,27 @@ pub fn sanitize_sensitive_info(query: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-/// Extracts the file extension from a URL path (fragment stripped).
+/// Extracts the file extension from a URL path (query and fragment stripped).
 /// Returns the extension **prefixed with a dot** (e.g., ".m3u8").
-pub fn extract_extension_from_url(input: &str) -> Option<String> {
-    // 1. Remove fragment (#)
-    let base = input.split('#').next()?;
+pub fn extract_extension_from_url(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    let end = bytes.iter().position(|b| matches!(*b, b'?' | b'#')).unwrap_or(bytes.len());
 
-    // 2. Get last path segment (after last '/')
-    let last_segment = base.rsplit('/').next().filter(|s| !s.is_empty())?;
-
-    // 3. Define the search area (last 6 characters to include the dot + 5 extension chars)
-    // We use char_indices to handle UTF-8 safely
-    let len = last_segment.len();
-    let search_start = len.saturating_sub(6);
-    let search_area = &last_segment[search_start..];
-
-    // 4. Find the dot in the restricted search area
-    if let Some(dot_index) = search_area.rfind('.') {
-        // Slice INCLUDING the dot
-        let extension_with_dot = &search_area[dot_index..];
-
-        // Validation (Note: length is now +1 because of the dot)
-        if extension_with_dot.len() > 1
-            && extension_with_dot.len() <= 5
-            && !extension_with_dot.contains('?')
-            && !extension_with_dot.eq_ignore_ascii_case(".php")
-        {
-            return Some(extension_with_dot.to_string());
-        }
+    let segment_start = bytes[..end].iter().rposition(|b| *b == b'/').map_or(0, |idx| idx + 1);
+    if segment_start >= end {
+        return None;
     }
 
-    None
+    let segment = &bytes[segment_start..end];
+    let dot = segment.iter().rposition(|b| *b == b'.')?;
+    let extension_start = segment_start + dot + 1;
+    let extension = &input[extension_start..end];
+
+    if extension.is_empty() || extension.len() > 4 || extension.eq_ignore_ascii_case("php") {
+        return None;
+    }
+
+    Some(&input[extension_start - 1..end])
 }
 
 pub fn is_hls_url(url: &str) -> bool {
@@ -182,7 +172,22 @@ pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str),
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_sensitive_info, set_sanitize_sensitive_info};
+    use super::{extract_extension_from_url, sanitize_sensitive_info, set_sanitize_sensitive_info};
+
+    #[test]
+    fn extract_extension_from_url_ignores_query_and_fragment() {
+        let cases = [
+            ("http://provider.example/live/video.m3u8?token=abc", Some(".m3u8")),
+            ("http://provider.example/live/video.m3u8?token=abc#frag", Some(".m3u8")),
+            ("http://provider.example/live/video.m3u8?next=http://cdn.example/segment.ts", Some(".m3u8")),
+            ("http://provider.example/live/video.ts?token=abc", Some(".ts")),
+            ("http://provider.example/live/video.pHp?token=abc", None),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(extract_extension_from_url(input), expected, "input: {input}");
+        }
+    }
 
     #[test]
     fn sanitize_sensitive_info_masks_xtream_path_credentials_for_all_supported_schemes() {
